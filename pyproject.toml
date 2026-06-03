@@ -1,0 +1,98 @@
+[project]
+name = "better-video-reconstruction"
+version = "0.1.0"
+description = "Video human motion + contact-force reconstruction (SAM3 track → MoGe2 camera → SAM-3D-Body → MHR→SMPL → kinematic + dynamics optimisation)"
+requires-python = ">=3.12"
+dependencies = [
+    "better-robot",
+    "better-human",
+    # MHR (Momentum Human Rig) — submodule
+    "mhr",
+    "pymomentum-gpu",
+    # pypose: SE3/SO3 tangent ops used by tools/robot_motion (motion packing).
+    "pypose",
+    # Force torch/torchvision to match pymomentum-gpu's cu129 ABI (see uv.sources below).
+    "torch>=2.8,<2.9",
+    "torchvision",
+    # sam3 (video human tracker)
+    "sam3",
+    "decord",
+    "psutil",
+    # Sapiens2 (Meta) — pose / pointmap / normal heads. Distribution name is ``sapiens``;
+    # the path source below points at the submodule.
+    "sapiens",
+    # sam-3d-body deps (no pyproject.toml in repo)
+    "pytorch-lightning",
+    "pyrender",
+    "opencv-python",
+    "yacs",
+    "scikit-image",
+    "einops",
+    "timm",
+    "dill",
+    "pandas",
+    "rich",
+    "hydra-core",
+    "hydra-submitit-launcher",
+    "hydra-colorlog",
+    "pyrootutils",
+    "webdataset",
+    "networkx==3.2.1",
+    "roma",
+    "joblib",
+    "seaborn",
+    "wandb",
+    "appdirs",
+    "cython",
+    "jsonlines",
+    "xtcocotools",
+    "loguru",
+    "optree",
+    "fvcore",
+    "pycocotools",
+    "tensorboard",
+    "huggingface_hub",
+    # MoGe2 (metric depth + camera intrinsics) — submodule.
+    "moge",
+    # VGGT-Omega (multi-view camera/geometry) — submodule. Placeholder stage today;
+    # vendored + installed so the env is complete (deps are already satisfied above).
+    "vggt-omega",
+    "scikit-learn>=1.4",
+    # Gemma 4 VLM (placeholder stage tools/adapters/gemma_vlm.py): transformers +
+    # accelerate (device_map="auto") + bitsandbytes (4-bit / 8-bit quantization).
+    "transformers>=4.50",
+    "accelerate>=0.30",
+    "bitsandbytes>=0.46",
+    "trimesh>=4.0",
+    # sam3 still uses pkg_resources, which setuptools 80+ no longer ships by
+    # default; pin below that cutoff so ``import pkg_resources`` keeps working.
+    "setuptools<80",
+]
+
+[[tool.uv.index]]
+name = "pytorch-cu129"
+url = "https://download.pytorch.org/whl/cu129"
+explicit = true
+
+[tool.uv.sources]
+better-robot = { path = "../BetterRobot", editable = true }
+better-human = { path = "../better_human", editable = true }
+mhr = { path = "third_party/MHR", editable = true }
+sam3 = { path = "third_party/sam3", editable = true }
+sapiens = { path = "third_party/sapiens2", editable = true }
+# MoGe and VGGT-Omega are not on PyPI — install editable from the submodules.
+moge = { path = "third_party/moge", editable = true }
+vggt-omega = { path = "third_party/vggt-omega", editable = true }
+# pymomentum-gpu wheels are built against PyTorch cu129 — force torch/torchvision
+# to the matching CUDA 12.9 build to avoid ABI segfaults (momentum issue #939).
+torch = { index = "pytorch-cu129" }
+torchvision = { index = "pytorch-cu129" }
+
+[tool.uv]
+override-dependencies = [
+    # sam3 and vggt-omega pin numpy<2 but work fine with numpy 2.x; better-robot requires >=2.0
+    "numpy>=2.0",
+]
+
+[tool.uv.extra-build-dependencies]
+xtcocotools = ["numpy", "cython"]

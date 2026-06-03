@@ -1,0 +1,36 @@
+# Kinematic human-motion trajectory optimisation.
+#
+# Pass this file via ``--config configs/kinematic.toml`` to
+# ``scripts/optimize_motion.py``. Every field has an inline default in the
+# script, so a config need only override what you care about.
+
+[stage]
+# Output index in ``<clip>/results/<index>.npz``. Stage 0 is the raw motion
+# produced by build_robot_motion.py; stage 1 is this kinematic pass; future
+# dynamics work will claim stage 2, etc.
+output_index = 1
+input_index = 0
+
+[optimizer]
+max_iter = 100
+history_size = 20
+lr = 1.0
+tolerance_grad = 1e-6
+tolerance_change = 1e-9
+
+[weights]
+acceleration = 0.1
+reference = 1.0
+contact = 10.0
+# Placeholder — forward-dynamics residual is a future stage. Passing a
+# non-zero value here will raise NotImplementedError to prevent silent noops.
+dynamics = 0.0
+
+[contact]
+# SMPL joint names (from better_robot.io.builders.JOINT_NAMES) whose
+# cartesian velocity is penalised on frames where the contact mask is
+# active. Any subset of the 24 joints is valid.
+joints = ["left_foot", "right_foot", "left_hand", "right_hand"]
+
+[runtime]
+device = "cpu"

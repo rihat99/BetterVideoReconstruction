@@ -1,0 +1,43 @@
+# Stage-2 dynamics optimisation: contact-force inference via RNEA.
+#
+# Pass this file via ``--config configs/dynamics.toml`` to
+# ``scripts/optimize_dynamics.py``. Reads ``results/<input_index>.npz``
+# (kinematic solution, default stage 1) and writes a per-frame /
+# per-contact-joint linear-force trajectory to
+# ``results/<output_index>.npz`` (stage 2).
+
+[stage]
+input_index = 1
+output_index = 2
+
+[optimizer]
+max_iter = 100
+history_size = 20
+lr = 1.0
+tolerance_grad = 1e-8
+tolerance_change = 1e-11
+
+[weights]
+# Primary residual: the 6-vector base wrench from RNEA (``tau[..., :6]``)
+# — linear + angular force at the free-flyer root — should be zero when
+# all real external forces are accounted for.
+base_wrench = 1.0
+# Secondary regulariser: prefer minimum-norm forces among solutions that
+# zero the base wrench. Small weight keeps it from swamping the main term.
+force_magnitude = 0.01
+# Temporary stand-in for a proper friction cone: penalise the portion of
+# each contact force that points *into* the support surface (world −Z).
+# Applied as ``w · relu(−f_z)`` so compliance costs nothing and violations
+# are quadratic in magnitude. Set to 0 to disable.
+upward_only = 10.0
+
+[contact]
+# Joints at which contact forces may be nonzero. On any frame where the
+# stored ``joint_contact`` probability is below ``threshold``, that
+# joint's force is masked to zero (never contributes to RNEA, never
+# accumulates gradient).
+joints = ["left_foot", "right_foot", "left_hand", "right_hand"]
+threshold = 0.5
+
+[runtime]
+device = "cpu"

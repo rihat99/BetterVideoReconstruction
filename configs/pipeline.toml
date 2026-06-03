@@ -1,0 +1,53 @@
+# Orchestrator config for scripts/pipeline.py (file-based, small-batch).
+# Per-stage knobs + step selection. Each stage is also runnable standalone
+# (see scripts/stages/); those CLIs carry the full set of flags.
+
+[steps]
+# Active stages, in order. "gemma" (Gemma 4 triage) is a registered placeholder —
+# add it here once implemented.
+run = ["sam3", "vggt", "moge2", "sapiens", "fuse", "body", "smpl", "motion", "optimize_motion", "optimize_dynamics"]
+
+[runtime]
+device = "cuda"             # GPU device for the model stages (sam3/vggt/moge2/sapiens/body/smpl)
+
+[sam3]                      # SAM 3 video tracker → sam3/ (per-object masks + bboxes.npz)
+text = "person"             # grounding prompt for frame-0 detection
+
+[vggt]                      # VGGT-Omega multi-view camera + depth → vggt/camera.npz
+max_frames = 500            # cap per clip; longer clips are uniformly subsampled (multi-view = one forward)
+image_resolution = 512      # VGGT input resolution (512 model; use 256 for the text-aligned model)
+mode = "balanced"           # load_and_preprocess_images sizing: balanced | max_size
+save_depth = true           # also dump per-frame depth + confidence at the VGGT resolution (heavy)
+checkpoint = ""             # local .pt path or HF repo id; empty → download facebook/VGGT-Omega (access-gated)
+# Note: VGGT depth/translation are UP-TO-SCALE (not metric) — one arbitrary per-clip scale shared with the cameras.
+
+[moge2]                     # MoGe2 per-frame intrinsics → moge2/camera.npz
+save_depth = true           # also dump per-frame depth/points (heavy)
+
+[sapiens]                   # Sapiens2 pose + pointmap → sapiens/
+tasks = "pose,pointmap"     # subset of {pose, pointmap, normal}
+overlay = true              # render pose skeleton overlay
+
+[fuse]                      # metric-align VGGT to MoGe2 + split point clouds → geometry/
+voxel_scene = 0.05          # scene merge voxel size, metres
+conf_drop_q = 0.3           # drop this lowest-confidence fraction of VGGT depth (scene only; human keeps all)
+edge_rtol = 0.04            # depth-edge (flying-pixel) filter tolerance; 0 disables
+human_dilate = 8            # grow the human mask N px before subtracting from the scene (cleaner scene); 0 disables
+person_obj_ids = ""         # restrict SAM3 ids treated as people, e.g. "0,1"; empty → all
+
+[body]                      # SAM-3D-Body MHR fit → body_params.npz
+obj_id = 0                  # tracked object to fit (primary person)
+inference_type = "full"     # "full" (body+hands) or "body"
+
+[smpl]                      # MHR → better_human SMPL → smpl_params.npz
+iters = 300                 # fine-stage Adam iterations
+
+[motion]                    # build_robot_motion → results/0.npz
+fps = 30.0
+smooth = "gaussian"         # gaussian | average | none
+
+[optimize_motion]           # Stage 1 kinematic L-BFGS → results/1.npz
+config = "configs/kinematic.toml"
+
+[optimize_dynamics]         # Stage 2 RNEA contact forces → results/2.npz
+config = "configs/dynamics.toml"
