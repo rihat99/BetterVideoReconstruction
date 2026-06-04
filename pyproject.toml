@@ -64,6 +64,10 @@ dependencies = [
     "accelerate>=0.30",
     "bitsandbytes>=0.46",
     "trimesh>=4.0",
+    # SMPL-X body model (pip package) — backs convert_mhr_to_smplx.py. better_human's
+    # native SMPLX has no jaw/eye/face deformation yet, so the MHR→SMPL-X fitter uses
+    # the standard smplx package (loads better_human/models/smplx/SMPLX_*.npz).
+    "smplx>=0.1.28",
     # sam3 still uses pkg_resources, which setuptools 80+ no longer ships by
     # default; pin below that cutoff so ``import pkg_resources`` keeps working.
     "setuptools<80",

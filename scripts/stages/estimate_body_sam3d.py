@@ -1,28 +1,36 @@
-"""SAM-3D-Body MHR fit over tracked video frames (single person).
+"""SAM-3D-Body MHR fit over tracked video frames (all tracked people).
 
-For each frame, runs SAM-3D-Body on the tracked person's bbox + mask using
-**per-frame camera intrinsics from the MoGe2 camera stage**
-(``moge2/camera.npz``). Camera estimation is therefore decoupled from body
-fitting; if ``moge2/camera.npz`` is absent the stage falls back to running
-MoGe2 once on frame 0 (run ``estimate_camera_moge2.py`` first for proper
-per-frame intrinsics).
+For each frame, runs SAM-3D-Body on **every** tracked person's bbox + mask
+(``--obj-ids`` defaults to all SAM 3 objects) using **per-frame camera
+intrinsics from VGGT-Omega** at the original frame resolution. These come from
+the fuse stage's ``geometry/transform.npz`` (``intrinsics_px_orig`` — VGGT
+intrinsics denormalized to the native resolution); the stage falls back to
+``vggt/camera.npz`` (denormalized on the fly), then ``moge2/camera.npz``, then
+a one-off MoGe2 frame-0 estimate. Camera estimation is therefore decoupled from
+body fitting — run the camera + fuse stages first for proper per-frame
+intrinsics.
 
 Run from CLI::
 
     uv run python scripts/stages/estimate_body_sam3d.py \\
         --source path/to/{video.mp4|frames_folder|photo.jpg} \\
         --predictions out/video/ \\
-        [--obj-id 0] [--hf-repo facebook/sam-3d-body-dinov3] \\
-        [--device cuda] [--inference-type full] [--render-video]
+        [--obj-ids 0,1] [--hf-repo facebook/sam-3d-body-dinov3] \\
+        [--device cuda] [--inference-type full] [--no-overlay]
 
-Inputs (under ``--predictions``, written by the sam3 + moge2 stages):
-    sam3/bboxes.npz       tracked bboxes (bboxes_per_obj / legacy bboxes)
-    sam3/<obj_id:02d>/    per-frame person masks
-    moge2/camera.npz      per-frame intrinsics (optional; see fallback above)
+Inputs (under ``--predictions``, written by upstream stages):
+    sam3/bboxes.npz          tracked bboxes (bboxes_per_obj / legacy bboxes)
+    sam3/<obj_id:02d>/       per-frame person masks (one dir per tracked person)
+    geometry/transform.npz   VGGT per-frame intrinsics at orig res (preferred)
+    vggt/camera.npz          VGGT intrinsics (fallback)
+    moge2/camera.npz         MoGe2 per-frame intrinsics (fallback)
 
-Outputs (into ``--predictions``):
-    body_params.npz       per-frame MHR pose/shape params (single person)
-    <source-stem>_mesh.mp4   mesh overlay video (only with --render-video)
+Outputs (into ``--predictions/sam3d/``):
+    sam3d/params.npz      per-frame MHR pose/shape params for every tracked
+                          person, stacked along a leading axis ``(P, N, ...)``
+                          (``object_ids (P,)`` records which SAM 3 id each row is)
+    sam3d/overlay.mp4     combined mesh overlay — all people composited per
+                          frame, one colour each (on by default; --no-overlay)
 """
 
 from __future__ import annotations
@@ -78,12 +86,22 @@ _SAVE_KEYS = (
     "mhr_model_params",
 )
 
-_MESH_COLOR = (0.65098039, 0.74117647, 0.85882353)  # light blue (sam-3d-body default)
+# Per-person overlay colours (RGB) so people are distinguishable in the combined
+# overlay; cycles if there are more people than colours. Index 0 is the
+# sam-3d-body default light blue.
+_MESH_COLORS = (
+    (0.65098039, 0.74117647, 0.85882353),  # light blue
+    (0.95, 0.60, 0.40),                    # salmon
+    (0.60, 0.85, 0.55),                    # light green
+    (0.80, 0.65, 0.88),                    # lilac
+    (0.95, 0.85, 0.45),                    # gold
+)
 
 
 @dataclass
 class BodyEstimateResult:
     num_frames: int
+    num_people: int
     height: int
     width: int
     output_path: Path
@@ -92,7 +110,7 @@ class BodyEstimateResult:
 
 
 class Sam3dBodyEstimator:
-    """SAM-3D-Body estimator wrapper for per-frame single-person body fit."""
+    """SAM-3D-Body estimator wrapper for per-frame multi-person body fit."""
 
     def __init__(
         self,
@@ -137,18 +155,55 @@ class Sam3dBodyEstimator:
                 torch.cuda.empty_cache()
 
     def _resolve_cam_intrinsics(
-        self, predictions_dir: Path, frame_paths: list[Path], *, H: int, W: int, N: int
+        self, predictions_dir: Path, frame_paths: list[Path], *,
+        H: int, W: int, N: int, frame_indices: np.ndarray,
     ) -> tuple[list[torch.Tensor], np.ndarray, str]:
         """Per-frame pixel-unit ``(1, 3, 3)`` intrinsics for the whole clip.
 
-        Prefers ``moge2/camera.npz`` (the MoGe2 camera stage, per-frame).
-        Falls back to running MoGe2 once on frame 0 if that file is absent.
-        Returns ``(cam_int_per_frame, frame0_K_np, source_str)``.
+        Prefers **VGGT-Omega** intrinsics at the original resolution: the fuse
+        stage's ``geometry/transform.npz`` (``intrinsics_px_orig``), else
+        ``vggt/camera.npz`` denormalized on the fly. Falls back to the MoGe2
+        camera stage (``moge2/camera.npz``), then a one-off MoGe2 frame-0
+        estimate. Returns ``(cam_int_per_frame, frame0_K_np, source_str)``.
         """
+        from tools.adapters.moge2 import denormalize_K
+
+        def _from_idx_map(idx2k: dict[int, np.ndarray]) -> list[torch.Tensor] | None:
+            """Build the per-frame list iff every tracked frame is covered."""
+            if not all(int(fi) in idx2k for fi in frame_indices):
+                return None
+            return [
+                torch.from_numpy(idx2k[int(fi)].astype(np.float32)).unsqueeze(0).to(self.device)
+                for fi in frame_indices
+            ]
+
+        # Priority 1: VGGT intrinsics at original resolution (fuse stage output).
+        geo = predictions_dir / "geometry" / "transform.npz"
+        if geo.exists():
+            gd = np.load(geo)
+            K_orig = np.asarray(gd["intrinsics_px_orig"], dtype=np.float32)  # (M,3,3) px @ orig res
+            gi = np.asarray(gd["frame_indices"], dtype=np.int64)
+            cam_int_list = _from_idx_map({int(f): K_orig[j] for j, f in enumerate(gi)})
+            if cam_int_list is not None:
+                frame0 = cam_int_list[0].squeeze(0).cpu().numpy().astype(np.float32)
+                return cam_int_list, frame0, "geometry/transform.npz (VGGT, per-frame @ orig res)"
+            print("  [body] geometry/transform.npz doesn't cover all tracked frames — falling back")
+
+        # Priority 2: VGGT camera (normalized) → denormalize to (H, W).
+        vggt = predictions_dir / "vggt" / "camera.npz"
+        if vggt.exists():
+            vd = np.load(vggt)
+            Kn = np.asarray(vd["intrinsics"], dtype=np.float32)             # (M,3,3) normalized
+            vi = np.asarray(vd["frame_indices"], dtype=np.int64)
+            cam_int_list = _from_idx_map({int(f): denormalize_K(Kn[j], H, W) for j, f in enumerate(vi)})
+            if cam_int_list is not None:
+                frame0 = cam_int_list[0].squeeze(0).cpu().numpy().astype(np.float32)
+                return cam_int_list, frame0, "vggt/camera.npz (VGGT, denormalized to orig res)"
+            print("  [body] vggt/camera.npz doesn't cover all tracked frames — falling back")
+
+        # Priority 3: MoGe2 camera stage (per-frame).
         cam_npz = predictions_dir / "moge2" / "camera.npz"
         if cam_npz.exists():
-            from tools.adapters.moge2 import denormalize_K
-
             cd = np.load(cam_npz)
             intr_norm = np.asarray(cd["intrinsics"], dtype=np.float32)  # (N, 3, 3) normalized
             if intr_norm.shape[0] != N:
@@ -156,13 +211,13 @@ class Sam3dBodyEstimator:
                     f"{cam_npz} has {intr_norm.shape[0]} frames but bboxes.npz says {N}"
                 )
             cam_int_list = [
-                torch.from_numpy(denormalize_K(intr_norm[i], H, W)).unsqueeze(0).to(self.device)
+                torch.from_numpy(denormalize_K(intr_norm[i], H, W).astype(np.float32)).unsqueeze(0).to(self.device)
                 for i in range(N)
             ]
             frame0 = cam_int_list[0].squeeze(0).cpu().numpy().astype(np.float32)
-            return cam_int_list, frame0, "moge2/camera.npz (per-frame)"
+            return cam_int_list, frame0, "moge2/camera.npz (per-frame fallback)"
 
-        # Fallback: estimate FOV once on frame 0 and reuse it for every frame.
+        # Priority 4: estimate FOV once on frame 0 and reuse it for every frame.
         fov_est = self._load_fov_estimator()
         img0_bgr = cv2.imread(str(frame_paths[0]))
         if img0_bgr is None:
@@ -171,7 +226,37 @@ class Sam3dBodyEstimator:
         cam_int = fov_est.get_cam_intrinsics(img0_rgb).to(self.device)  # (1, 3, 3)
         self._release_fov_estimator()
         frame0 = cam_int.squeeze(0).cpu().numpy().astype(np.float32)
-        return [cam_int] * N, frame0, "MoGe2 frame-0 (fallback; run estimate_camera_moge2 for per-frame K)"
+        return [cam_int] * N, frame0, "MoGe2 frame-0 (last-resort fallback; run camera+fuse for per-frame K)"
+
+    def _resolve_people(
+        self, data, masks_dir: Path, obj_ids: list[int] | None,
+    ) -> list[tuple[int, np.ndarray, Path]]:
+        """Resolve which tracked people to fit.
+
+        Returns ``[(object_id, bboxes (N,4), mask_subdir), ...]`` — one entry per
+        person. ``obj_ids=None`` selects **all** tracked objects (the default);
+        pass a list to restrict. Falls back to the legacy flat ``bboxes`` layout
+        (a single object in ``sam3/``) when ``bboxes_per_obj`` is absent.
+        """
+        if "bboxes_per_obj" in data.files:
+            all_ids = [int(o) for o in data["object_ids"]]
+            per_obj = data["bboxes_per_obj"]  # (P_all, N, 4)
+            if obj_ids:
+                missing = [o for o in obj_ids if o not in all_ids]
+                if missing:
+                    raise RuntimeError(
+                        f"requested --obj-ids {missing} not tracked (have {all_ids})"
+                    )
+                sel = [o for o in obj_ids if o in all_ids]
+            else:
+                sel = all_ids
+            return [(o, per_obj[all_ids.index(o)], masks_dir / f"{o:02d}") for o in sel]
+        if "bboxes" not in data.files:
+            raise RuntimeError(
+                f"{masks_dir.parent / 'sam3' / 'bboxes.npz'} has neither "
+                "'bboxes_per_obj' nor a legacy 'bboxes' field"
+            )
+        return [(0, data["bboxes"], masks_dir)]
 
     def estimate(
         self,
@@ -179,11 +264,18 @@ class Sam3dBodyEstimator:
         predictions_dir: str | Path,
         render_video: bool = False,
         video_fps: float | None = None,
-        obj_id: int | None = 0,
+        obj_ids: list[int] | None = None,
     ) -> BodyEstimateResult:
-        """Run SAM-3D-Body per-frame for one tracked person; save body_params.npz."""
+        """Run SAM-3D-Body per-frame for every tracked person; save sam3d/params.npz.
+
+        All requested people (``obj_ids=None`` → all tracked) are fit and stacked
+        along a leading person axis ``(P, N, ...)``. When ``render_video`` is on,
+        a single combined overlay is written with every person composited onto
+        each frame (one mesh colour per person).
+        """
         source = Path(source)
         predictions_dir = Path(predictions_dir)
+        sam3d_dir = predictions_dir / "sam3d"
 
         bboxes_path = predictions_dir / "sam3" / "bboxes.npz"
         masks_dir = predictions_dir / "sam3"
@@ -194,20 +286,14 @@ class Sam3dBodyEstimator:
 
         data = np.load(bboxes_path, allow_pickle=True)
         frame_indices = data["frame_indices"]  # (N,) int32
-        if obj_id is None:
-            if "bboxes" not in data.files:
-                raise RuntimeError(
-                    f"{bboxes_path} has no legacy 'bboxes' field "
-                    f"(num_objects={int(data.get('num_objects', 0))}); pass --obj-id"
-                )
-            bboxes = data["bboxes"]  # (N, 4) int32 xyxy
-            masks_subdir = masks_dir
-        else:
-            bboxes = data["bboxes_per_obj"][obj_id]  # (N, 4)
-            masks_subdir = masks_dir / f"{obj_id:02d}"
         H = int(data["video_height"])
         W = int(data["video_width"])
         N = int(data["num_frames"])
+
+        people = self._resolve_people(data, masks_dir, obj_ids)
+        P = len(people)
+        obj_ids_arr = np.array([o for o, _, _ in people], dtype=np.int32)
+        print(f"  fitting {P} person(s): obj_ids={obj_ids_arr.tolist()}")
 
         with tempfile.TemporaryDirectory(prefix="sam3d_body_") as tmp_root:
             tmp_root = Path(tmp_root)
@@ -220,23 +306,26 @@ class Sam3dBodyEstimator:
 
             estimator = self._load_model()
             cam_int_list, cam_int_np, cam_source = self._resolve_cam_intrinsics(
-                predictions_dir, frame_paths, H=H, W=W, N=N
+                predictions_dir, frame_paths, H=H, W=W, N=N, frame_indices=frame_indices
             )
             print(f"  camera intrinsics: {cam_source}")
 
-            # ---- optional video / png writer ----
+            # ---- optional combined overlay (all people) writer ----
             single_image_render = render_video and N == 1 and src_fps is None
             writer: cv2.VideoWriter | None = None
             rendered_video_path: Path | None = None
             faces = None
+            Renderer = None
             if render_video:
-                from sam_3d_body.visualization.renderer import Renderer
+                from sam_3d_body.visualization.renderer import Renderer as _Renderer
 
+                Renderer = _Renderer
+                sam3d_dir.mkdir(parents=True, exist_ok=True)
                 faces = estimator.faces  # (F, 3) int array
                 if single_image_render:
-                    rendered_video_path = predictions_dir / f"{source.stem}_mesh.png"
+                    rendered_video_path = sam3d_dir / "overlay.png"
                 else:
-                    rendered_video_path = predictions_dir / f"{source.stem}_mesh.mp4"
+                    rendered_video_path = sam3d_dir / "overlay.mp4"
                     fps_out = float(video_fps or src_fps or 30.0)
                     fourcc = cv2.VideoWriter_fourcc(*"mp4v")
                     writer = cv2.VideoWriter(str(rendered_video_path), fourcc, fps_out, (W, H))
@@ -244,81 +333,88 @@ class Sam3dBodyEstimator:
                         raise RuntimeError(f"cannot open video writer at {rendered_video_path}")
 
             results: dict[str, np.ndarray] | None = None
-            valid_mask = np.zeros(N, dtype=bool)
-
-            def _write_plain_frame(idx: int) -> None:
-                if writer is None:
-                    return
-                bgr = cv2.imread(str(frame_paths[idx]))
-                if bgr is not None:
-                    writer.write(bgr)
+            valid_mask = np.zeros((P, N), dtype=bool)
 
             for i in tqdm(range(N), desc="Estimating body params"):
                 idx = int(frame_indices[i])
-                bbox = bboxes[i]
-                if np.all(bbox == 0):
-                    _write_plain_frame(i)
-                    continue
+                overlay_bgr = None  # lazily read from disk on first render of this frame
 
-                mask_path = find_frame_file(masks_subdir, idx, source=source, suffix=".png")
-                mask_img = cv2.imread(str(mask_path), cv2.IMREAD_GRAYSCALE) if mask_path else None
-                if mask_img is None:
-                    _write_plain_frame(i)
-                    continue
-                mask = mask_img.reshape(1, H, W).astype(np.uint8)  # (1, H, W)
-                bbox_f = bbox.reshape(1, 4).astype(np.float32)
+                for pi, (obj, bseq, msub) in enumerate(people):
+                    bbox = bseq[i]
+                    if np.all(bbox == 0):
+                        continue
+                    mask_path = find_frame_file(msub, idx, source=source, suffix=".png")
+                    mask_img = (
+                        cv2.imread(str(mask_path), cv2.IMREAD_GRAYSCALE) if mask_path else None
+                    )
+                    if mask_img is None:
+                        continue
+                    mask = mask_img.reshape(1, H, W).astype(np.uint8)  # (1, H, W)
+                    bbox_f = bbox.reshape(1, 4).astype(np.float32)
 
-                outputs = estimator.process_one_image(
-                    str(frame_paths[i]),
-                    bboxes=bbox_f,
-                    masks=mask,
-                    cam_int=cam_int_list[i],
-                    inference_type=self.inference_type,
-                )
-                if not outputs:
-                    _write_plain_frame(i)
-                    continue
+                    outputs = estimator.process_one_image(
+                        str(frame_paths[i]),
+                        bboxes=bbox_f,
+                        masks=mask,
+                        cam_int=cam_int_list[i],
+                        inference_type=self.inference_type,
+                    )
+                    if not outputs:
+                        continue
 
-                person = outputs[0]
-                if results is None:
-                    results = {}
+                    person = outputs[0]
+                    if results is None:
+                        results = {}
+                        for key in _SAVE_KEYS:
+                            val = np.asarray(person[key], dtype=np.float32)
+                            results[key] = np.full((P, N, *val.shape), np.nan, dtype=np.float32)
                     for key in _SAVE_KEYS:
-                        val = np.asarray(person[key], dtype=np.float32)
-                        results[key] = np.full((N, *val.shape), np.nan, dtype=np.float32)
-                for key in _SAVE_KEYS:
-                    results[key][i] = np.asarray(person[key], dtype=np.float32)
-                valid_mask[i] = True
+                        results[key][pi, i] = np.asarray(person[key], dtype=np.float32)
+                    valid_mask[pi, i] = True
 
-                if writer is not None or single_image_render:
-                    frame_bgr = cv2.imread(str(frame_paths[i]))
-                    if frame_bgr is not None:
-                        mesh_renderer = Renderer(focal_length=person["focal_length"], faces=faces)
-                        overlay = (
-                            mesh_renderer(
-                                person["pred_vertices"],
-                                person["pred_cam_t"],
-                                frame_bgr,
-                                mesh_base_color=_MESH_COLOR,
-                                scene_bg_color=(1, 1, 1),
+                    if render_video:
+                        if overlay_bgr is None:
+                            overlay_bgr = cv2.imread(str(frame_paths[i]))
+                        if overlay_bgr is not None:
+                            color = _MESH_COLORS[pi % len(_MESH_COLORS)]
+                            mesh_renderer = Renderer(
+                                focal_length=person["focal_length"], faces=faces
                             )
-                            * 255
-                        ).astype(np.uint8)
-                        if writer is not None:
-                            writer.write(overlay)
-                        else:
-                            cv2.imwrite(str(rendered_video_path), overlay)
+                            overlay_bgr = (
+                                mesh_renderer(
+                                    person["pred_vertices"],
+                                    person["pred_cam_t"],
+                                    overlay_bgr,
+                                    mesh_base_color=color,
+                                    scene_bg_color=(1, 1, 1),
+                                )
+                                * 255
+                            ).astype(np.uint8)
+
+                # ---- emit the (possibly multi-person) overlay frame ----
+                if render_video:
+                    if overlay_bgr is None:  # no valid person this frame → plain frame
+                        overlay_bgr = cv2.imread(str(frame_paths[i]))
+                    if single_image_render:
+                        if overlay_bgr is not None:
+                            cv2.imwrite(str(rendered_video_path), overlay_bgr)
+                    elif writer is not None and overlay_bgr is not None:
+                        writer.write(overlay_bgr)
 
             if writer is not None:
                 writer.release()
 
-        # ---- save (flat, so convert_mhr_to_smpl finds it) ----
-        output_path = predictions_dir / "body_params.npz"
+        # ---- save stacked params under sam3d/ (named after the model) ----
+        sam3d_dir.mkdir(parents=True, exist_ok=True)
+        output_path = sam3d_dir / "params.npz"
         save_dict: dict[str, np.ndarray] = {}
         if results is not None:
             save_dict.update(results)
         save_dict.update(
             cam_intrinsics=cam_int_np,
             valid_mask=valid_mask,
+            object_ids=obj_ids_arr,
+            num_people=np.int32(P),
             num_frames=np.int32(N),
             video_height=np.int32(H),
             video_width=np.int32(W),
@@ -327,6 +423,7 @@ class Sam3dBodyEstimator:
 
         return BodyEstimateResult(
             num_frames=N,
+            num_people=P,
             height=H,
             width=W,
             output_path=output_path,
@@ -338,9 +435,17 @@ class Sam3dBodyEstimator:
 # ------------------------------ CLI -------------------------------------------
 
 
+def _parse_obj_ids(s: str) -> list[int] | None:
+    """``""`` → None (all tracked people); ``"0,1"`` → [0, 1]."""
+    s = s.strip()
+    if not s:
+        return None
+    return [int(x) for x in s.split(",") if x.strip()]
+
+
 def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     p = argparse.ArgumentParser(
-        description="Estimate single-person 3D body (MHR) with SAM-3D-Body over tracked frames.",
+        description="Estimate 3D bodies (MHR) for all tracked people with SAM-3D-Body.",
     )
     p.add_argument(
         "--source", required=True,
@@ -351,10 +456,10 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         help="sam3 + moge2 output folder (contains sam3/bboxes.npz, sam3/<obj>/, moge2/camera.npz)",
     )
     p.add_argument(
-        "--obj-id", type=int, default=0,
-        help="tracked object to fit: reads bboxes_per_obj[obj_id] + sam3/<obj_id:02d>/ "
-             "(default: 0, the primary tracked person). Use --obj-id -1 for the legacy "
-             "flat 'bboxes' + sam3/ layout.",
+        "--obj-ids", type=_parse_obj_ids, default=None,
+        help="comma-separated tracked object ids to fit, e.g. --obj-ids 0,1 "
+             "(default: all tracked people). Each fits bboxes_per_obj[id] + "
+             "sam3/<id:02d>/; results are stacked along a leading (P, N, ...) axis.",
     )
     p.add_argument(
         "--hf-repo", default="facebook/sam-3d-body-dinov3",
@@ -366,8 +471,9 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         help="'full' for body+hands, 'body' for body only (default: %(default)s)",
     )
     p.add_argument(
-        "--render-video", action="store_true",
-        help="render mesh overlay into predictions folder as <stem>_mesh.mp4",
+        "--overlay", action=argparse.BooleanOptionalAction, default=True,
+        help="render the SAM-3D-Body mesh overlay to sam3d/overlay.mp4 "
+             "(default: ON; --no-overlay to skip)",
     )
     p.add_argument(
         "--fps", type=float, default=None,
@@ -378,7 +484,6 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
 
 def main(argv: list[str] | None = None) -> int:
     args = _parse_args(argv)
-    obj_id = None if args.obj_id is not None and args.obj_id < 0 else args.obj_id
     est = Sam3dBodyEstimator(
         hf_repo=args.hf_repo,
         device=args.device,
@@ -387,13 +492,13 @@ def main(argv: list[str] | None = None) -> int:
     result = est.estimate(
         source=args.source,
         predictions_dir=args.predictions,
-        render_video=args.render_video,
+        render_video=args.overlay,
         video_fps=args.fps,
-        obj_id=obj_id,
+        obj_ids=args.obj_ids,
     )
     msg = (
-        f"estimated body params for {result.num_frames} frames "
-        f"({result.width}x{result.height}) [{result.camera_source}] -> {result.output_path}"
+        f"estimated body params for {result.num_people} person(s) × {result.num_frames} "
+        f"frames ({result.width}x{result.height}) [{result.camera_source}] -> {result.output_path}"
     )
     if result.rendered_video is not None:
         msg += f"\nrendered mesh overlay -> {result.rendered_video}"

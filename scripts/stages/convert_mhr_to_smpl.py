@@ -16,7 +16,9 @@ Or import:
 
 Inputs:
     source             video file, folder of frames, or single image
-    predictions_dir    folder containing body_params.npz (+ sam3/)
+    predictions_dir    folder containing sam3d/params.npz (+ sam3/). The body
+                       params stack all tracked people on a (P, N, ...) axis;
+                       this single-person path picks one (``--person``, default 0).
 
 Outputs (into <predictions_dir>/):
     smpl_params.npz               per-frame SMPL params (betas, body_pose,
@@ -127,24 +129,38 @@ class MhrToSmplScript:
         predictions_dir: str | Path,
         render_video: bool = False,
         video_fps: float | None = None,
+        person: int = 0,
     ) -> ConvertResult:
         source = Path(source)
         predictions_dir = Path(predictions_dir)
 
-        body_path = predictions_dir / "body_params.npz"
+        body_path = predictions_dir / "sam3d" / "params.npz"
         if not body_path.exists():
             raise FileNotFoundError(body_path)
         bd = np.load(body_path)
 
-        mhr_model_params = bd["mhr_model_params"]  # (N, 204)
-        shape_params = bd["shape_params"]  # (N, 45)
-        pred_cam_t = bd["pred_cam_t"]  # (N, 3)
-        focal_lengths = bd["focal_length"]  # (N,)
-        cam_intrinsics = bd["cam_intrinsics"]  # (3, 3)
-        valid_mask = bd["valid_mask"]  # (N,) bool
+        mhr_model_params = bd["mhr_model_params"]  # (P, N, 204) — legacy: (N, 204)
+        shape_params = bd["shape_params"]  # (P, N, 45)
+        pred_cam_t = bd["pred_cam_t"]  # (P, N, 3)
+        focal_lengths = bd["focal_length"]  # (P, N)
+        cam_intrinsics = bd["cam_intrinsics"]  # (3, 3) — shared camera
+        valid_mask = bd["valid_mask"]  # (P, N) bool
         N = int(bd["num_frames"])
         H = int(bd["video_height"])
         W = int(bd["video_width"])
+
+        # sam3d/params.npz stacks all tracked people on a leading (P, N, ...)
+        # axis; the SMPL motion path is single-person, so select one person
+        # (default index 0 = the primary tracked person).
+        if mhr_model_params.ndim == 3:
+            num_people = mhr_model_params.shape[0]
+            if not 0 <= person < num_people:
+                raise ValueError(f"--person {person} out of range (P={num_people})")
+            mhr_model_params = mhr_model_params[person]
+            shape_params = shape_params[person]
+            pred_cam_t = pred_cam_t[person]
+            focal_lengths = focal_lengths[person]
+            valid_mask = valid_mask[person]
 
         # Some per-frame arrays may be NaN at invalid frames; replace with zeros
         # so torch tensors are safe to construct. Converter skips them anyway.
@@ -337,6 +353,11 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     p.add_argument("--iters", type=int, default=300, help="fine-stage iterations")
     p.add_argument("--batch-size", type=int, default=64)
     p.add_argument(
+        "--person", type=int, default=0,
+        help="which tracked person to convert from the stacked sam3d/params.npz "
+             "(default: 0, the primary tracked person)",
+    )
+    p.add_argument(
         "--render-video", action="store_true",
         help="render SMPL mesh overlay .mp4 into predictions folder as <stem>_smpl.mp4",
     )
@@ -360,6 +381,7 @@ def main(argv: list[str] | None = None) -> int:
         predictions_dir=args.predictions,
         render_video=args.render_video,
         video_fps=args.fps,
+        person=args.person,
     )
     msg = (
         f"converted {result.num_valid}/{result.num_frames} frames "

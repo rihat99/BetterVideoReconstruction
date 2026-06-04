@@ -1,10 +1,14 @@
 # BetterVideoReconstruction — Claude Code Guide
 
-Monocular-video human reconstruction: a video of one person → their **motion
-trajectory + per-contact-joint forces**, expressed on a shape-aware BetterRobot
-SMPL body. Track the person → estimate per-frame camera intrinsics → fit a
-per-frame MHR body → convert to SMPL → pack into a BetterRobot motion
-trajectory → kinematic optimization → dynamics (contact-force) optimization.
+Monocular-video human reconstruction: a video → a per-person **SMPL-X body
+trajectory** for everyone tracked, plus — for one selected person — their
+**motion trajectory + per-contact-joint forces** on a shape-aware BetterRobot
+SMPL body. Track the people → VGGT + MoGe2 cameras → fuse to metric geometry →
+Sapiens keypoints → fit a per-frame MHR body for **every tracked person**
+(SAM-3D-Body, using the VGGT camera) → convert each to **SMPL-X**. The default
+chain ends at the SMPL-X bodies; the SMPL → BetterRobot motion trajectory →
+kinematic → dynamics (contact-force) path is **SMPL-only, single-person** and
+run standalone.
 
 This repo was split off from `../BetterHumanForce` the same way
 `../BetterImageReconstruction` was: keep the video + motion/dynamics parts,
@@ -22,21 +26,24 @@ SQLite/DB dataset is a small diff. Re-processing = re-running a stage (use
 ## The pipeline & `out/<stem>/` contract
 
 Run in this order (the orchestrator does it for you; each stage is also a
-standalone CLI). "ACTIVE" stages are implemented; "PLACEHOLDER" stages parse
-args and raise `NotImplementedError`.
+standalone CLI). The **default chain ends at `smplx`** (rows 1–7); the
+`smpl → motion → optimize_*` rows are the SMPL-only path, off the default chain
+(run via `--steps` or standalone). "ACTIVE" = implemented; "PLACEHOLDER" parses
+args and raises `NotImplementedError`.
 
 | # | Stage (`scripts/stages/…`) | Status | Reads | Writes (under `out/<stem>/`) |
 |---|---|---|---|---|
 | 1 | `track_sam3.py` | ACTIVE | video/frames | `sam3/<obj:02d>/frame_NNNNNN.png`, `sam3/mask_overlay.mp4`, `sam3/bboxes.npz` |
 | 2 | `estimate_camera_vggt.py` | ACTIVE | frames | `vggt/camera.npz` (multi-view: `extrinsics (T,4,4)`, normalized + pixel `intrinsics`, records the VGGT inference resolution; ≤`max_frames`, default 500); `vggt/depth/…` with `--save-depth` |
 | 3 | `estimate_camera_moge2.py` | ACTIVE | frames | `moge2/camera.npz` (`intrinsics (T,3,3)` normalized, `fov_x_deg`, …); `moge2/depth/…` with `--save-depth` |
-| 4 | `estimate_sapiens.py` | ACTIVE | frames, `sam3/bboxes.npz` | `sapiens/pose.npz`, `sapiens/pointmap.npz`, `sapiens/overlay/…` |
-| 5 | `fuse_geometry.py` | ACTIVE | `vggt/`, `moge2/depth`, `sam3/` | `geometry/transform.npz` (metric scale + original-res cameras), `geometry/scene.npz`, `geometry/human.npz` — see `docs/geometry_fusion_plan.md` |
-| 6 | `estimate_body_sam3d.py` | ACTIVE | `sam3/bboxes.npz`, `sam3/`, `moge2/camera.npz`, frames | `body_params.npz` (single person, MHR params) |
-| 7 | `convert_mhr_to_smpl.py` | ACTIVE | `body_params.npz` | `smpl_params.npz` (betas, body_pose, global_orient, transl, `q (N,99)`) |
-| 8 | `build_robot_motion.py` | ACTIVE | `smpl_params.npz`, optional contacts | `results/0.npz` (Stage 0 motion — see `docs/motion_npz_schema.md`) |
-| 9 | `optimize_motion.py` | ACTIVE | `results/0.npz`, `configs/kinematic.toml` | `results/1.npz` (kinematic) |
-| 10 | `optimize_dynamics.py` | ACTIVE | `results/1.npz`, `configs/dynamics.toml` | `results/2.npz` (+ `contact_forces`, `joint_torques`) |
+| 4 | `fuse_geometry.py` | ACTIVE | `vggt/`, `moge2/depth`, `sam3/` | `geometry/transform.npz` (metric scale + original-res VGGT cameras), `geometry/scene.npz`, `geometry/human.npz` — see `docs/geometry_fusion_plan.md` |
+| 5 | `estimate_sapiens.py` | ACTIVE | frames, `sam3/bboxes.npz` | `sapiens/pose.npz`, `sapiens/overlay/…` (keypoints only by default; `pointmap`/`normal` opt-in) |
+| 6 | `estimate_body_sam3d.py` | ACTIVE | `sam3/bboxes.npz`, `sam3/`, `geometry/transform.npz` (VGGT camera @ orig res), frames | `sam3d/params.npz` (**all tracked people**, MHR params stacked `(P,N,…)` + `object_ids (P,)`), `sam3d/overlay.mp4` (combined — every person, one colour each) |
+| 7 | `convert_mhr_to_smplx.py` | ACTIVE | `sam3d/params.npz` | `sam3d/smplx_params.npz` (per-person stacked `(P,N,…)`: betas, body/hand pose, global_orient, transl, jaw/eye/expr), `sam3d/smplx_overlay.mp4` (combined) |
+| – | `convert_mhr_to_smpl.py` | ACTIVE (standalone) | `sam3d/params.npz` (person 0, via `--person`) | `smpl_params.npz` (betas, body_pose, global_orient, transl, `q (N,99)`) |
+| – | `build_robot_motion.py` | ACTIVE (standalone) | `smpl_params.npz`, optional contacts | `results/0.npz` (Stage 0 motion — see `docs/motion_npz_schema.md`) |
+| – | `optimize_motion.py` | ACTIVE (standalone) | `results/0.npz`, `configs/kinematic.toml` | `results/1.npz` (kinematic) |
+| – | `optimize_dynamics.py` | ACTIVE (standalone) | `results/1.npz`, `configs/dynamics.toml` | `results/2.npz` (+ `contact_forces`, `joint_torques`) |
 | – | `classify_gemma.py` | PLACEHOLDER | frames, `sam3/bboxes.npz`, `sam3/` | `gemma/result.json` (triage / contact graph) |
 
 Viewers: `scripts/view_motion.py out/<stem>/results/2.npz` (viser playback with
@@ -67,9 +74,14 @@ uv run python scripts/pipeline.py --source video.mp4 --save-dir out/ --steps sam
 
 # Or run a stage standalone (full flag set lives on each stage CLI):
 uv run python scripts/stages/track_sam3.py --source video.mp4 --save-dir out/ --text person
-uv run python scripts/stages/estimate_camera_moge2.py --source video.mp4 --save-dir out/
-uv run python scripts/stages/fuse_geometry.py --predictions out/video/
+uv run python scripts/stages/estimate_camera_vggt.py --source video.mp4 --save-dir out/ --save-depth
+uv run python scripts/stages/estimate_camera_moge2.py --source video.mp4 --save-dir out/ --save-depth
+uv run python scripts/stages/fuse_geometry.py --source video.mp4 --predictions out/video/
+uv run python scripts/stages/estimate_sapiens.py --source video.mp4 --save-dir out/ --tasks pose
 uv run python scripts/stages/estimate_body_sam3d.py --source video.mp4 --predictions out/video/
+uv run python scripts/stages/convert_mhr_to_smplx.py --source video.mp4 --predictions out/video/
+
+# SMPL → motion/dynamics path (SMPL-only; off the default chain):
 uv run python scripts/stages/convert_mhr_to_smpl.py --source video.mp4 --predictions out/video/
 uv run python scripts/stages/build_robot_motion.py --predictions out/video/ --fps 30
 uv run python scripts/stages/optimize_motion.py   out/video/ --config configs/kinematic.toml
@@ -106,7 +118,8 @@ BetterVideoReconstruction/
 │   │   ├── sapiens2.py            # Sapiens2 pose/pointmap/normal
 │   │   ├── gemma_vlm.py           # Gemma 4 VLM (backs the placeholder)
 │   │   └── vggt_omega.py          # VGGT-Omega multi-view camera + depth
-│   ├── mhr_to_smpl/               # MHR → better_human SMPL fitter
+│   ├── mhr_to_smpl/               # MHR → better_human SMPL fitter (motion path)
+│   ├── mhr_to_smplx/              # MHR → SMPL-X fitter (pip smplx; default body output)
 │   ├── geometry/                  # depth clean/align + backproject + voxel merge (fuse stage)
 │   └── robot_motion/              # motion/dynamics core (+ data/ mass & inertia tables)
 └── third_party/                   # submodules: sam3, sam-3d-body, sapiens2, MHR, moge, vggt-omega
@@ -114,23 +127,37 @@ BetterVideoReconstruction/
 
 ## Conventions & deliberate choices
 
-- **Single person.** SAM 3 can track several, but the body→motion chain fits
-  one (`--obj-id`, default 0 = the primary tracked person). Multi-person is a
-  future extension.
-- **SMPL, not SMPL-X**, on the motion path. The kinematics/dynamics core
-  (`tools/robot_motion`, `smpl_inertia`, the 24-joint tree) is built on SMPL;
-  the MHR→SMPL-X converter is intentionally not ported.
-- **Camera is its own stage.** `estimate_camera_moge2.py` writes per-frame
-  intrinsics to `moge2/camera.npz`; `estimate_body_sam3d.py` reads `K` from
-  there (falling back to a one-off MoGe2 frame-0 estimate if absent).
+- **Body + SMPL-X are multi-person; the motion path is single-person.**
+  `estimate_body_sam3d.py` and `convert_mhr_to_smplx.py` fit **every** person
+  SAM 3 tracked (`--obj-ids`, default = all) and stack the results on a leading
+  `(P, N, …)` axis (with `object_ids (P,)`), rendering one combined overlay with
+  a colour per person. The SMPL → motion/dynamics chain is still single-person
+  (the kinematics/dynamics core assumes one body): `convert_mhr_to_smpl.py`
+  selects one person from the stack (`--person`, default 0 = the primary).
+- **Default body is SMPL-X; the motion path is SMPL.** The default chain ends at
+  `convert_mhr_to_smplx.py` (pip `smplx`, loading `better_human/models/smplx/`) —
+  SMPL-X captures the hands MHR predicts (jaw/eye/face left at zero). Its outputs
+  live **inside `sam3d/`** next to the body params (`sam3d/smplx_params.npz` +
+  `sam3d/smplx_overlay.mp4`), not at the clip root. The kinematics/dynamics core
+  (`tools/robot_motion`, `smpl_inertia`, the 24-joint tree) is built on **SMPL**,
+  so the motion path keeps `convert_mhr_to_smpl.py` (with the BetterRobot
+  `q (N,99)` packing) and runs standalone; SMPL-X has no `q` yet (deferred until
+  a matching BetterRobot chain exists).
+- **Camera is its own stage; the body uses the VGGT camera.**
+  `estimate_camera_vggt.py` + `estimate_camera_moge2.py` write per-frame
+  intrinsics; `fuse_geometry.py` denormalizes VGGT's to the original resolution
+  (`geometry/transform.npz` `intrinsics_px_orig`). `estimate_body_sam3d.py` reads
+  `K` from there (fallbacks: `vggt/camera.npz` denormalized → `moge2/camera.npz`
+  → one-off MoGe2 frame-0). This is why `fuse` runs before the body stage.
 - **VGGT-Omega is additive, runs right after `sam3`.** It is a *multi-view*
   model (one forward over the whole clip), so it caps at `max_frames` (default
   500, uniformly subsampled) and runs at a reduced internal resolution. It writes
   its own `vggt/camera.npz` — cross-frame `extrinsics` + normalized `intrinsics`
   (same convention as `moge2/camera.npz`) **plus the VGGT inference resolution**
-  so depth/point maps can be mapped back to full-res frames. It does *not* yet
-  feed the body stage (that still reads MoGe2's `moge2/camera.npz`); the two
-  camera stages coexist. **VGGT geometry is up-to-scale, not metric** (one
+  so depth/point maps can be mapped back to full-res frames. It **feeds the body
+  stage** via `fuse_geometry.py` (which denormalizes its intrinsics to the
+  original resolution); the two camera stages coexist — MoGe2 supplies the metric
+  depth that scales VGGT. **VGGT geometry is up-to-scale, not metric** (one
   arbitrary per-clip scale shared by depth + camera translations; the npz records
   `scale='up_to_scale'`) — metricized downstream by `fuse_geometry.py`.
 - **`fuse_geometry.py` turns VGGT metric.** After `moge2`, it estimates one

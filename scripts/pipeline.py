@@ -2,20 +2,26 @@
 
 Runs the active stages in order for a video (or a folder of videos):
 
-    sam3 → vggt → moge2 → sapiens → fuse → body → smpl → motion
-          → optimize_motion → optimize_dynamics
+    sam3 → vggt → moge2 → fuse → sapiens → sam3d → smplx
 
 Each stage is invoked as a subprocess of the current interpreter — this
 isolates per-stage model memory (SAM 3, VGGT-Omega, MoGe2, Sapiens2 and
 SAM-3D-Body never co-reside) and lets the pymomentum ``_pym_preload`` re-exec
 happen cleanly in the stages that need it.
 
-The model **precompute** stages (``sam3``, ``vggt``, ``moge2``, ``sapiens``)
-run once over ``--source``; given a *folder* of videos they load each model once
-and sweep the whole batch (``tools/precompute_runner`` semantics). The
-**per-clip** stages (``fuse``, ``body``, ``smpl``, ``motion``,
-``optimize_motion``, ``optimize_dynamics``) then loop over each clip's
-``<save-dir>/<stem>/``.
+Stages run in the **listed order**. The model **precompute** stages (``sam3``,
+``vggt``, ``moge2``, ``sapiens``) run once over ``--source`` — given a *folder*
+of videos they load each model once and sweep the whole batch
+(``tools/precompute_runner`` semantics). The **per-clip** stages (``fuse``,
+``sam3d``, ``smplx``) loop over each clip's ``<save-dir>/<stem>/``. Because list
+order is honoured, a per-clip stage can precede a precompute one — ``fuse`` runs
+before ``sapiens`` (geometry before human keypoints), and ``sam3d`` reads the
+VGGT camera that ``fuse`` writes.
+
+The default run ends at ``smplx``. The SMPL → motion/dynamics path
+(``smpl`` → ``motion`` → ``optimize_motion`` → ``optimize_dynamics``) is
+SMPL-only (it consumes ``smpl_params``, not SMPL-X) and is run standalone or via
+``--steps``.
 
 Per-stage knobs and the step selection live in ``configs/pipeline.toml``; the
 CLI only takes ``--source``, ``--save-dir``, ``--config``, ``--steps``,
@@ -49,13 +55,15 @@ _STAGES_DIR = _HERE.parent / "stages"
 _MEDIA_EXTS = IMAGE_EXTS | VIDEO_EXTS
 
 # Canonical order. "precompute" stages operate on --source / --save-dir;
-# "perclip" stages operate on a single clip's --predictions dir.
-DEFAULT_RUN = [
-    "sam3", "vggt", "moge2", "sapiens",
-    "fuse", "body", "smpl", "motion", "optimize_motion", "optimize_dynamics",
-]
+# "perclip" stages operate on a single clip's --predictions dir. The default
+# chain stops at smplx (the SMPL-X body); see _STANDALONE for the rest.
+DEFAULT_RUN = ["sam3", "vggt", "moge2", "fuse", "sapiens", "sam3d", "smplx"]
 _PRECOMPUTE = {"sam3", "vggt", "moge2", "sapiens", "gemma"}
-_KNOWN = set(DEFAULT_RUN) | {"gemma"}
+# Registered but not in the default run — selectable via --steps. The
+# SMPL → motion/dynamics path is SMPL-only (consumes smpl_params, not SMPL-X);
+# gemma is a placeholder.
+_STANDALONE = {"smpl", "motion", "optimize_motion", "optimize_dynamics", "gemma"}
+_KNOWN = set(DEFAULT_RUN) | _STANDALONE
 
 
 def _default_config() -> dict:
@@ -66,10 +74,11 @@ def _default_config() -> dict:
         "vggt": {"max_frames": 500, "image_resolution": 512, "mode": "balanced",
                  "save_depth": False, "checkpoint": ""},
         "moge2": {"save_depth": False},
-        "sapiens": {"tasks": "pose,pointmap", "overlay": True},
+        "sapiens": {"tasks": "pose", "overlay": True},
         "fuse": {"voxel_scene": 0.05, "conf_drop_q": 0.3, "edge_rtol": 0.04,
                  "human_dilate": 8, "person_obj_ids": ""},
-        "body": {"obj_id": 0, "inference_type": "full"},
+        "sam3d": {"obj_ids": "", "inference_type": "full", "overlay": True},
+        "smplx": {"iters": 300, "gender": "neutral", "overlay": True},
         "smpl": {"iters": 300},
         "motion": {"fps": 30.0, "smooth": "gaussian"},
         "optimize_motion": {"config": "configs/kinematic.toml"},
@@ -135,7 +144,8 @@ def _build_precompute_args(step: str, cfg: dict, source: Path, save_dir: Path,
 def _perclip_output(step: str, clip_dir: Path) -> Path:
     return {
         "fuse": clip_dir / "geometry" / "transform.npz",
-        "body": clip_dir / "body_params.npz",
+        "sam3d": clip_dir / "sam3d" / "params.npz",
+        "smplx": clip_dir / "sam3d" / "smplx_params.npz",
         "smpl": clip_dir / "smpl_params.npz",
         "motion": clip_dir / "results" / "0.npz",
         "optimize_motion": clip_dir / "results" / "1.npz",
@@ -155,11 +165,23 @@ def _build_perclip_args(step: str, cfg: dict, clip: Path, clip_dir: Path,
         if f.get("person_obj_ids"):
             extra += ["--person-obj-ids", str(f["person_obj_ids"])]
         return extra
-    if step == "body":
-        return ["--source", str(clip), "--predictions", str(clip_dir),
-                "--obj-id", str(cfg["body"]["obj_id"]),
-                "--inference-type", str(cfg["body"]["inference_type"]),
-                "--device", device]
+    if step == "sam3d":
+        s = cfg["sam3d"]
+        extra = ["--source", str(clip), "--predictions", str(clip_dir),
+                 "--inference-type", str(s["inference_type"]),
+                 "--device", device]
+        if s.get("obj_ids"):  # empty → fit all tracked people
+            extra += ["--obj-ids", str(s["obj_ids"])]
+        _flag(extra, not s.get("overlay", True), "--no-overlay")
+        return extra
+    if step == "smplx":
+        s = cfg["smplx"]
+        extra = ["--source", str(clip), "--predictions", str(clip_dir),
+                 "--iters", str(s["iters"]),
+                 "--gender", str(s.get("gender", "neutral")),
+                 "--device", device]
+        _flag(extra, not s.get("overlay", True), "--no-overlay")
+        return extra
     if step == "smpl":
         return ["--source", str(clip), "--predictions", str(clip_dir),
                 "--iters", str(cfg["smpl"]["iters"]), "--device", device]
@@ -181,7 +203,8 @@ _SCRIPTS = {
     "vggt": "estimate_camera_vggt.py",
     "gemma": "classify_gemma.py",
     "fuse": "fuse_geometry.py",
-    "body": "estimate_body_sam3d.py",
+    "sam3d": "estimate_body_sam3d.py",
+    "smplx": "convert_mhr_to_smplx.py",
     "smpl": "convert_mhr_to_smpl.py",
     "motion": "build_robot_motion.py",
     "optimize_motion": "optimize_motion.py",
@@ -214,17 +237,15 @@ def run_pipeline(args: argparse.Namespace) -> int:
     clips = _resolve_clips(source)
     print(f"[pipeline] {len(clips)} clip(s); steps: {requested}")
 
-    precompute = [s for s in requested if s in _PRECOMPUTE]
-    perclip = [s for s in requested if s not in _PRECOMPUTE]
-
-    # Heavy model stages once over the whole --source (load-once batch sweep).
-    for step in precompute:
-        _run(step, _build_precompute_args(step, cfg, source, save_dir, device, args.skip_existing))
-
-    # Per-clip chain.
-    for clip in clips:
-        clip_dir = save_dir / clip.stem
-        for step in perclip:
+    # Execute in list order. Precompute stages run once over --source (load-once
+    # sweep across all clips); per-clip stages loop the clips. Honouring the list
+    # order lets a per-clip stage (fuse) run before a precompute one (sapiens).
+    for step in requested:
+        if step in _PRECOMPUTE:
+            _run(step, _build_precompute_args(step, cfg, source, save_dir, device, args.skip_existing))
+            continue
+        for clip in clips:
+            clip_dir = save_dir / clip.stem
             if args.skip_existing and _perclip_output(step, clip_dir).exists():
                 print(f"[pipeline] skip {step} for {clip.stem} (output exists)")
                 continue

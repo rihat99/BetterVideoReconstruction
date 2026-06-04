@@ -1,9 +1,11 @@
-"""Sapiens2 pose + pointmap (+ optional normal) precompute step.
+"""Sapiens2 pose (+ optional pointmap / normal) precompute step.
 
 Reads frames straight from the source video / folder / image and runs
 Meta's Sapiens2-5B model for any subset of {``pose``, ``pointmap``,
-``normal``}. Per-item outputs land under ``<out-dir>/sapiens/`` so they
-don't collide with other precompute artifacts.
+``normal``}. **Default is ``pose`` only** (keypoints) — the dense
+``pointmap``/``normal`` depth-like forwards are opt-in (``--tasks
+pose,pointmap``). Per-item outputs land under ``<out-dir>/sapiens/`` so
+they don't collide with other precompute artifacts.
 
 Pose is top-down — it consumes the bboxes that the ``sam3`` stage
 already wrote (we never run Sapiens2's own DETR-based detector). Pointmap
@@ -396,9 +398,10 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     # 5B is bf16-friendly; bf16 also matches the FSDP training mixed-precision.
     p.set_defaults(dtype="bf16")
     p.add_argument(
-        "--tasks", type=_parse_tasks, default="pose,pointmap",
+        "--tasks", type=_parse_tasks, default="pose",
         help="comma-separated; choices "
-             f"{list(_TASK_CHOICES)} (default: pose,pointmap)",
+             f"{list(_TASK_CHOICES)} (default: pose). pointmap/normal are dense "
+             "depth-like forwards — opt in explicitly, e.g. --tasks pose,pointmap.",
     )
     p.add_argument(
         "--label", default="person",
