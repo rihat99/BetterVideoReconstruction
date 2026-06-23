@@ -217,6 +217,9 @@ __marimo__/
 # Streamlit
 .streamlit/secrets.toml
 
+# Claude Code local session state
+.claude/
+
 # Project outputs / data
 data/
 out/

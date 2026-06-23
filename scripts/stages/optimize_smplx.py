@@ -9,8 +9,10 @@ the image and the metric geometry the pipeline already computed:
   4. **smoothness** — acceleration + jerk of the world trajectory (Lie-exact).
 
 Each tracked person is optimized independently in the **world** frame; the leaf
-variable is ``q (T, 211)`` for ``better_human``'s 52-joint :class:`SMPLXMid`
-(articulated fingers, no face), with autograd L-BFGS (no hand-coded Jacobians).
+variables are ``q (T, 211)`` for ``better_human``'s 52-joint :class:`SMPLXMid`
+(articulated fingers, no face) plus one global body scale, optimized with Adam
+in two coarse-to-fine stages (stage 1 places the body rigidly — root translation
++ scale, pose frozen; stage 2 unfreezes orientation + joints).
 Posed-mesh inference lives in ``better_human``; the BetterRobot robot model
 (``tools.smplx_robot``) supplies only the Lie smoothness term.
 
