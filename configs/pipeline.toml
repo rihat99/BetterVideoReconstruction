@@ -3,12 +3,13 @@
 # (see scripts/stages/); those CLIs carry the full set of flags.
 
 [steps]
-# Active stages, in order (the default chain ends at smplx — the SMPL-X body).
-# List order is honoured: fuse (per-clip) runs before sapiens (precompute), and
-# sam3d reads the VGGT camera that fuse writes. Registered but off the default
-# chain (select via --steps): the SMPL→motion path "smpl, motion,
-# optimize_motion, optimize_dynamics" (SMPL-only) and the "gemma" placeholder.
-run = ["sam3", "vggt", "moge2", "fuse", "sapiens", "sam3d", "smplx"]
+# Active stages, in order (the default chain ends at optimize_smplx — the
+# visually-guided SMPL-X kinematic refinement). List order is honoured: fuse
+# (per-clip) runs before sapiens (precompute), and sam3d reads the VGGT camera
+# that fuse writes. Registered but off the default chain (select via --steps):
+# the SMPL→motion path "smpl, motion, optimize_motion, optimize_dynamics"
+# (SMPL-only) and the "gemma" placeholder.
+run = ["sam3", "vggt", "moge2", "fuse", "sapiens", "sam3d", "smplx", "optimize_smplx"]
 
 [runtime]
 device = "cuda"             # GPU device for the model stages (sam3/vggt/moge2/sapiens/sam3d/smplx)
@@ -43,10 +44,14 @@ obj_ids = ""                # tracked people to fit; empty → ALL tracked, else
 inference_type = "full"     # "full" (body+hands) or "body"
 overlay = true              # render the combined mesh overlay (all people) → sam3d/overlay.mp4
 
-[smplx]                     # MHR → SMPL-X (pip smplx) → sam3d/smplx_params.npz  (end of default chain)
+[smplx]                     # MHR → SMPL-X (pip smplx) → sam3d/smplx_params.npz
 iters = 300                 # fine-stage Adam iterations
 gender = "neutral"          # neutral | male | female
 overlay = true              # render the combined SMPL-X overlay (all people) → sam3d/smplx_overlay.mp4
+
+[optimize_smplx]            # visually-guided SMPL-X kinematics → sam3d/smplx_kinematic.npz (end of default chain)
+config = "configs/smplx_kinematic.toml"  # weights / optimizer / chamfer / keypoints
+overlay = false             # render reprojected-keypoint debug overlay → sam3d/smplx_kinematic_overlay.mp4
 
 [smpl]                      # MHR → better_human SMPL → smpl_params.npz (standalone; feeds motion)
 iters = 300                 # fine-stage Adam iterations

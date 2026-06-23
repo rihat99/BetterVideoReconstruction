@@ -5,10 +5,11 @@ trajectory** for everyone tracked, plus — for one selected person — their
 **motion trajectory + per-contact-joint forces** on a shape-aware BetterRobot
 SMPL body. Track the people → VGGT + MoGe2 cameras → fuse to metric geometry →
 Sapiens keypoints → fit a per-frame MHR body for **every tracked person**
-(SAM-3D-Body, using the VGGT camera) → convert each to **SMPL-X**. The default
-chain ends at the SMPL-X bodies; the SMPL → BetterRobot motion trajectory →
-kinematic → dynamics (contact-force) path is **SMPL-only, single-person** and
-run standalone.
+(SAM-3D-Body, using the VGGT camera) → convert each to **SMPL-X** →
+**visually-guided kinematic refinement** (2D reprojection + depth chamfer + pose
+prior + acceleration/jerk smoothness). The default chain ends at the refined
+SMPL-X bodies; the SMPL → BetterRobot motion trajectory → kinematic → dynamics
+(contact-force) path is **SMPL-only, single-person** and run standalone.
 
 This repo was split off from `../BetterHumanForce` the same way
 `../BetterImageReconstruction` was: keep the video + motion/dynamics parts,
@@ -26,7 +27,7 @@ SQLite/DB dataset is a small diff. Re-processing = re-running a stage (use
 ## The pipeline & `out/<stem>/` contract
 
 Run in this order (the orchestrator does it for you; each stage is also a
-standalone CLI). The **default chain ends at `smplx`** (rows 1–7); the
+standalone CLI). The **default chain ends at `optimize_smplx`** (rows 1–8); the
 `smpl → motion → optimize_*` rows are the SMPL-only path, off the default chain
 (run via `--steps` or standalone). "ACTIVE" = implemented; "PLACEHOLDER" parses
 args and raises `NotImplementedError`.
@@ -40,6 +41,7 @@ args and raises `NotImplementedError`.
 | 5 | `estimate_sapiens.py` | ACTIVE | frames, `sam3/bboxes.npz` | `sapiens/pose.npz`, `sapiens/overlay/…` (keypoints only by default; `pointmap`/`normal` opt-in) |
 | 6 | `estimate_body_sam3d.py` | ACTIVE | `sam3/bboxes.npz`, `sam3/`, `geometry/transform.npz` (VGGT camera @ orig res), frames | `sam3d/params.npz` (**all tracked people**, MHR params stacked `(P,N,…)` + `object_ids (P,)`), `sam3d/overlay.mp4` (combined — every person, one colour each) |
 | 7 | `convert_mhr_to_smplx.py` | ACTIVE | `sam3d/params.npz` | `sam3d/smplx_params.npz` (per-person stacked `(P,N,…)`: betas, body/hand pose, global_orient, transl, jaw/eye/expr), `sam3d/smplx_overlay.mp4` (combined) |
+| 8 | `optimize_smplx.py` | ACTIVE | `sam3d/smplx_params.npz`, `sapiens/pose.npz`, `geometry/human.npz`, `geometry/transform.npz` | `sam3d/smplx_kinematic.npz` (**all tracked people**, refined **world-frame** params stacked `(P,N,…)` + `q (P,N,211)` + `scale (P,)`, 52-joint `SMPLXMid`, `frame='world'`), `sam3d/smplx_kinematic_overlay.mp4` (`--overlay`) |
 | – | `convert_mhr_to_smpl.py` | ACTIVE (standalone) | `sam3d/params.npz` (person 0, via `--person`) | `smpl_params.npz` (betas, body_pose, global_orient, transl, `q (N,99)`) |
 | – | `build_robot_motion.py` | ACTIVE (standalone) | `smpl_params.npz`, optional contacts | `results/0.npz` (Stage 0 motion — see `docs/motion_npz_schema.md`) |
 | – | `optimize_motion.py` | ACTIVE (standalone) | `results/0.npz`, `configs/kinematic.toml` | `results/1.npz` (kinematic) |
@@ -48,7 +50,8 @@ args and raises `NotImplementedError`.
 
 Viewers: `scripts/view_motion.py out/<stem>/results/2.npz` (viser playback with
 contact-force arrows); `scripts/view_3d.py out/<stem>/` (viser: fused `geometry/`
-scene cloud + camera frustums + per-climber human points);
+scene cloud + camera frustums + per-climber human points + the refined SMPL-X
+bodies — prefers `sam3d/smplx_kinematic.npz`, falls back to `smplx_params.npz`);
 `scripts/render_smpl_contact.py --source v.mp4 --predictions out/<stem>/`.
 
 `vggt`, `moge2`, `sapiens`, and the `gemma` placeholder are **precompute_runner
@@ -80,6 +83,7 @@ uv run python scripts/stages/fuse_geometry.py --source video.mp4 --predictions o
 uv run python scripts/stages/estimate_sapiens.py --source video.mp4 --save-dir out/ --tasks pose
 uv run python scripts/stages/estimate_body_sam3d.py --source video.mp4 --predictions out/video/
 uv run python scripts/stages/convert_mhr_to_smplx.py --source video.mp4 --predictions out/video/
+uv run python scripts/stages/optimize_smplx.py --source video.mp4 --predictions out/video/ --overlay
 
 # SMPL → motion/dynamics path (SMPL-only; off the default chain):
 uv run python scripts/stages/convert_mhr_to_smpl.py --source video.mp4 --predictions out/video/
@@ -100,13 +104,15 @@ BetterVideoReconstruction/
 ├── docs/motion_npz_schema.md      # results/*.npz DFS-ordered schema (source of truth)
 ├── configs/
 │   ├── pipeline.toml              # orchestrator: per-stage knobs + [steps]
-│   ├── kinematic.toml             # optimize_motion (Stage 1)
-│   └── dynamics.toml              # optimize_dynamics (Stage 2)
+│   ├── kinematic.toml             # optimize_motion (SMPL Stage 1)
+│   ├── dynamics.toml              # optimize_dynamics (SMPL Stage 2)
+│   └── smplx_kinematic.toml       # optimize_smplx (visually-guided SMPL-X kinematics)
 ├── scripts/
 │   ├── pipeline.py                # load-once subprocess orchestrator
 │   ├── view_motion.py             # viser playback of results/*.npz
 │   ├── view_3d.py                 # viser: geometry/ scene cloud + cameras + human points
 │   ├── render_smpl_contact.py     # SMPL mesh/skeleton + contact overlay
+│   ├── diagnose_smplx.py          # per-frame plots of every optimize_smplx loss term
 │   ├── _pym_preload.py            # libstdc++ LD_PRELOAD shim for pymomentum
 │   └── stages/                    # the per-stage CLIs in the table above
 ├── tools/                         # importable library (repo root added to sys.path by scripts)
@@ -120,6 +126,8 @@ BetterVideoReconstruction/
 │   │   └── vggt_omega.py          # VGGT-Omega multi-view camera + depth
 │   ├── mhr_to_smpl/               # MHR → better_human SMPL fitter (motion path)
 │   ├── mhr_to_smplx/              # MHR → SMPL-X fitter (pip smplx; default body output)
+│   ├── smplx_robot/               # SMPLXMid → BetterRobot 52-joint model + q remap (kinematic)
+│   ├── smplx_optim/               # visually-guided SMPL-X losses (reproject/chamfer/pose/smoothness)
 │   ├── geometry/                  # depth clean/align + backproject + voxel merge (fuse stage)
 │   └── robot_motion/              # motion/dynamics core (+ data/ mass & inertia tables)
 └── third_party/                   # submodules: sam3, sam-3d-body, sapiens2, MHR, moge, vggt-omega
@@ -141,8 +149,56 @@ BetterVideoReconstruction/
   `sam3d/smplx_overlay.mp4`), not at the clip root. The kinematics/dynamics core
   (`tools/robot_motion`, `smpl_inertia`, the 24-joint tree) is built on **SMPL**,
   so the motion path keeps `convert_mhr_to_smpl.py` (with the BetterRobot
-  `q (N,99)` packing) and runs standalone; SMPL-X has no `q` yet (deferred until
-  a matching BetterRobot chain exists).
+  `q (N,99)` packing) and runs standalone. SMPL-X now has a BetterRobot
+  **kinematic** model too — `tools/smplx_robot` builds a 52-joint `SMPLXMid`
+  model used by `optimize_smplx` for Lie-exact smoothness, and the stage writes
+  `q (P,N,211)` — but no dynamics chain yet (dynamics stays SMPL-only).
+- **The SMPL-X kinematic stage is visually-guided, multi-person, world-frame.**
+  `optimize_smplx.py` refines each tracked person's SMPL-X trajectory against the
+  image + geometry: **2D reprojection** to Sapiens keypoints, **chamfer** of
+  visible posed vertices to the metric VGGT human depth (confidence-gated,
+  back-face-culled), a **joints-only pose prior**, and **acceleration + jerk**
+  smoothness (exact Lie `model.difference`, separate root/joint weights). The
+  variable is `q (T,211)` for `better_human`'s `SMPLXMid` (pelvis + 21 body + 30
+  hands; jaw/eyes dropped) **plus one per-person global scale** that scales the
+  body uniformly about the pelvis (skeleton + mesh), optimised directly as the
+  autograd leaf (quaternions renormalised in the forward — no exp-retraction
+  singularity) with **Adam** in **two coarse-to-fine stages** (stage 1 places the
+  body rigidly — root translation + scale, pose frozen; stage 2 unfreezes
+  orientation + joints), robust to the heterogeneous gradient scales that stall
+  L-BFGS here. All posed-mesh inference lives in `better_human`
+  (`SMPLXMid.forward`); BVR only adds the BetterRobot model (`tools/smplx_robot`)
+  + the visual losses (`tools/smplx_optim`). Output is **world-frame**
+  (`frame='world'`) in `sam3d/smplx_kinematic.npz` (with a `scale (P,)` field that
+  consumers — overlay, `view_3d` — re-apply about the pelvis); weights in
+  `configs/smplx_kinematic.toml`.
+  - **Keypoint correspondence is Goliath-308, not COCO-wholebody.** Sapiens here
+    emits the `goliath_308` scheme (`pose.npz` `keypoint_scheme`), whose body block
+    has **no wrists** and so diverges from COCO-wholebody at index 9 (hips 9/10,
+    knees 11/12, ankles 13/14, feet 15–20; wrists live in the hand blocks at
+    41/62). `tools/smplx_optim/keypoints.py` maps SMPL-X-mid joints/landmarks to
+    these indices (verified against `third_party/sapiens2/.../keypoints308.py`).
+    Getting this right is what makes reprojection a reliable signal — init
+    reprojection is ~5px, i.e. the converter's per-frame pose is already good.
+  - **Keeping the motion natural — multi-stage + trust the image.** Single-stage
+    Adam fell into a local minimum where the joints *deform* to chase the depth
+    cloud (off-image **and** contorted), so the optimiser is **coarse-to-fine**:
+    stage 1 places the body **rigidly** (translation + scale, pose frozen at the
+    converter's good per-frame pose — frozen by zeroing the inactive `q.grad`
+    groups, fresh Adam per stage); stage 2 unfreezes orientation + joints and
+    refines locally. The metric human cloud is **wholesale-wrong on some frames**
+    (per-frame depth scale swings ±30% / mask leakage → the image-consistent depth
+    is 1–3 m off the cloud), and good-vs-bad-frame depth error differs ~10×, so no
+    single chamfer weight wins both: **chamfer is deliberately modest** and the
+    image (reprojecting at ~5px) is the trusted signal — the body sits on the cloud
+    where depth is good and follows the image where it isn't (absolute depth there
+    then follows smoothness, the honest monocular answer). Other knobs: a **strong
+    joints-only pose prior**; a **gentle root-orientation prior** (`orient_prior`)
+    that damps the orientation runaway the finite-difference smoothness leaves
+    under-constrained at the clip boundary — root **translation** stays free for
+    depth; a **truncated reprojection** (`robust_px`) outlier guard; and the
+    **global scale**. `scripts/diagnose_smplx.py` plots every loss per frame
+    (+ keypoint/depth availability) to catch these.
 - **Camera is its own stage; the body uses the VGGT camera.**
   `estimate_camera_vggt.py` + `estimate_camera_moge2.py` write per-frame
   intrinsics; `fuse_geometry.py` denormalizes VGGT's to the original resolution

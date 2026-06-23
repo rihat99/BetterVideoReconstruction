@@ -2,7 +2,7 @@
 
 Runs the active stages in order for a video (or a folder of videos):
 
-    sam3 → vggt → moge2 → fuse → sapiens → sam3d → smplx
+    sam3 → vggt → moge2 → fuse → sapiens → sam3d → smplx → optimize_smplx
 
 Each stage is invoked as a subprocess of the current interpreter — this
 isolates per-stage model memory (SAM 3, VGGT-Omega, MoGe2, Sapiens2 and
@@ -13,12 +13,14 @@ Stages run in the **listed order**. The model **precompute** stages (``sam3``,
 ``vggt``, ``moge2``, ``sapiens``) run once over ``--source`` — given a *folder*
 of videos they load each model once and sweep the whole batch
 (``tools/precompute_runner`` semantics). The **per-clip** stages (``fuse``,
-``sam3d``, ``smplx``) loop over each clip's ``<save-dir>/<stem>/``. Because list
-order is honoured, a per-clip stage can precede a precompute one — ``fuse`` runs
-before ``sapiens`` (geometry before human keypoints), and ``sam3d`` reads the
-VGGT camera that ``fuse`` writes.
+``sam3d``, ``smplx``, ``optimize_smplx``) loop over each clip's
+``<save-dir>/<stem>/``. Because list order is honoured, a per-clip stage can
+precede a precompute one — ``fuse`` runs before ``sapiens`` (geometry before
+human keypoints), and ``sam3d`` reads the VGGT camera that ``fuse`` writes.
 
-The default run ends at ``smplx``. The SMPL → motion/dynamics path
+The default run ends at ``optimize_smplx`` — the visually-guided kinematic
+refinement of the SMPL-X bodies (reprojection + chamfer + pose + smoothness;
+``sam3d/smplx_kinematic.npz``). The SMPL → motion/dynamics path
 (``smpl`` → ``motion`` → ``optimize_motion`` → ``optimize_dynamics``) is
 SMPL-only (it consumes ``smpl_params``, not SMPL-X) and is run standalone or via
 ``--steps``.
@@ -56,8 +58,9 @@ _MEDIA_EXTS = IMAGE_EXTS | VIDEO_EXTS
 
 # Canonical order. "precompute" stages operate on --source / --save-dir;
 # "perclip" stages operate on a single clip's --predictions dir. The default
-# chain stops at smplx (the SMPL-X body); see _STANDALONE for the rest.
-DEFAULT_RUN = ["sam3", "vggt", "moge2", "fuse", "sapiens", "sam3d", "smplx"]
+# chain ends at optimize_smplx (visually-guided SMPL-X kinematics); see
+# _STANDALONE for the SMPL-only motion/dynamics path.
+DEFAULT_RUN = ["sam3", "vggt", "moge2", "fuse", "sapiens", "sam3d", "smplx", "optimize_smplx"]
 _PRECOMPUTE = {"sam3", "vggt", "moge2", "sapiens", "gemma"}
 # Registered but not in the default run — selectable via --steps. The
 # SMPL → motion/dynamics path is SMPL-only (consumes smpl_params, not SMPL-X);
@@ -79,6 +82,7 @@ def _default_config() -> dict:
                  "human_dilate": 8, "person_obj_ids": ""},
         "sam3d": {"obj_ids": "", "inference_type": "full", "overlay": True},
         "smplx": {"iters": 300, "gender": "neutral", "overlay": True},
+        "optimize_smplx": {"config": "configs/smplx_kinematic.toml", "overlay": False},
         "smpl": {"iters": 300},
         "motion": {"fps": 30.0, "smooth": "gaussian"},
         "optimize_motion": {"config": "configs/kinematic.toml"},
@@ -146,6 +150,7 @@ def _perclip_output(step: str, clip_dir: Path) -> Path:
         "fuse": clip_dir / "geometry" / "transform.npz",
         "sam3d": clip_dir / "sam3d" / "params.npz",
         "smplx": clip_dir / "sam3d" / "smplx_params.npz",
+        "optimize_smplx": clip_dir / "sam3d" / "smplx_kinematic.npz",
         "smpl": clip_dir / "smpl_params.npz",
         "motion": clip_dir / "results" / "0.npz",
         "optimize_motion": clip_dir / "results" / "1.npz",
@@ -182,6 +187,12 @@ def _build_perclip_args(step: str, cfg: dict, clip: Path, clip_dir: Path,
                  "--device", device]
         _flag(extra, not s.get("overlay", True), "--no-overlay")
         return extra
+    if step == "optimize_smplx":
+        s = cfg["optimize_smplx"]
+        extra = ["--source", str(clip), "--predictions", str(clip_dir),
+                 "--config", str(s["config"]), "--device", device]
+        _flag(extra, s.get("overlay", False), "--overlay")
+        return extra
     if step == "smpl":
         return ["--source", str(clip), "--predictions", str(clip_dir),
                 "--iters", str(cfg["smpl"]["iters"]), "--device", device]
@@ -205,6 +216,7 @@ _SCRIPTS = {
     "fuse": "fuse_geometry.py",
     "sam3d": "estimate_body_sam3d.py",
     "smplx": "convert_mhr_to_smplx.py",
+    "optimize_smplx": "optimize_smplx.py",
     "smpl": "convert_mhr_to_smpl.py",
     "motion": "build_robot_motion.py",
     "optimize_motion": "optimize_motion.py",

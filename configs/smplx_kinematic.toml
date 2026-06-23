@@ -1,0 +1,85 @@
+# Visually-guided SMPL-X kinematic optimization (scripts/stages/optimize_smplx.py).
+#
+# Each tracked person's world-frame SMPL-X trajectory is refined against the
+# image (reprojection), the metric depth cloud (chamfer), the converter's pose
+# (prior), and temporal smoothness (acceleration + jerk). Every field has an
+# inline default in the stage; override only what you care about.
+
+[weights]
+# Gradient-balanced so every term moves the optimizer. reprojection is in
+# pixels (~30 at init, large gradient), chamfer in metres (~1.8 at init),
+# pose_prior is 1-(q·q0)^2 (~0 at init, grows as the pose drifts).
+#
+# pose_prior is high on purpose. Reprojection (to the correctly-mapped Goliath-308
+# keypoints — see tools/smplx_optim/keypoints.py) only constrains the image plane,
+# so chamfer to the noisy front-only depth cloud is free to wrench joints in the
+# **depth** direction (~70° at pp=50) — unnatural in 3D though invisible in 2D. A
+# strong joints-only prior holds the pose natural while the root (translation+
+# orientation, excluded from the prior) stays free, so chamfer+reprojection still
+# place/track the body. (With the keypoint correspondence fixed, init reprojection
+# is ~5px and the optimizer no longer fights the converter's good per-frame pose.)
+#
+# chamfer is deliberately MODEST (reprojection is the trusted signal). The metric
+# human cloud is wholesale-wrong on some frames — the image-consistent depth is
+# 1–3 m from the cloud (per-frame depth scale error / mask leakage) — where strong
+# chamfer drags the body off the (good ~5px) image fit. Because good-frame depth
+# error (~15 cm) is ~10× smaller than bad-frame error, no single chamfer weight
+# both seats the body on the good clouds and ignores the bad ones; we bias toward
+# the image. At chamfer=1.0 the body still sits on the cloud where depth is good
+# (~23 cm) but reprojection wins where it isn't (so the body tracks the image,
+# and absolute depth there follows smoothness — the honest monocular answer).
+reprojection = 0.2
+chamfer = 1.0
+pose_prior = 400.0
+# Gentle pull of the ROOT ORIENTATION toward the converter's per-frame value
+# (1-(q·q0)^2 on q[3:7]). The root SE3 is excluded from pose_prior so the body
+# can be placed/oriented freely, but that leaves orientation undamped at the clip
+# boundary (the smoothness stencil constrains end frames least), where it ran away
+# ~90° and broke the image fit. The converter orientation reprojects at ~5px, so a
+# gentle pull toward it stops the runaway while still allowing few-degree
+# refinement. Root translation stays free (depth placement unaffected).
+orient_prior = 50.0
+# Gentle pull of the global body scale toward 1.0 ((s-1)^2). Deliberately weak:
+# the depth cloud can be ~30% off the body's metric size, so scale must be free
+# to make a large correction — this just regularizes scale when depth is scarce.
+scale_prior = 5.0
+
+[smoothness]
+# Penalize raw frame-to-frame tangent differences (dt folded into the weights).
+# Jerk dominates acceleration; the root moves more freely than the joints.
+accel_root = 3.0
+accel_joint = 6.0
+jerk_root = 15.0
+jerk_joint = 30.0
+
+[optimizer]
+# Adam (not L-BFGS): robust to the heterogeneous gradient scales here.
+# Coarse-to-fine: stage 1 ("placement") moves only root translation + global
+# scale (pose frozen at the converter's per-frame estimate) so the body finds
+# the right depth/size rigidly; stage 2 ("full") unfreezes orientation + joints
+# and refines locally. This avoids the local minimum where the joints deform to
+# chase wrong-depth chamfer (off-image AND contorted).
+lr = 0.01
+iters_stage1 = 150 # stage 1: root translation + scale only
+iters = 300        # stage 2: full (translation + orientation + joints + scale)
+lr_decay = 0.1   # MultiStepLR gamma at 1/2 and 3/4 of each stage's iters
+scale_init = 1.0 # initial global body scale (1.0 = converter size)
+lr_scale = 0.01  # lr for the global scale leaf (its own param group)
+
+[chamfer]
+conf_thresh = 0.1       # keep VGGT human points above this confidence
+max_points = 1500       # cap depth points per frame (uniform subsample)
+vertex_subsample = 1000 # posed-vertex subsample fed to chamfer / visibility
+
+[keypoints]
+score_thresh = 0.3      # ignore Sapiens keypoints below this score
+include_hands = false   # add fingertip keypoints to reprojection (chamfer carries hands)
+# Truncate per-keypoint reprojection error at this many pixels (outlier guard):
+# with the correspondence correct, well-tracked joints reproject at <~12px, so
+# this only zeroes the gradient of gross outliers — occluded / mis-detected
+# keypoints on a bad frame — keeping a single bad detection from yanking the pose.
+# 0 disables truncation.
+robust_px = 40.0
+
+[runtime]
+device = "cuda"
