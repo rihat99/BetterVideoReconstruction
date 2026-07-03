@@ -12,16 +12,16 @@ Two things to know about the geometry it returns:
   ``encoding_to_camera`` builds ``K`` with ``cx = W/2``, ``cy = H/2`` and ``fx,
   fy`` in pixels of the resized image VGGT actually saw (e.g. 624x416 / 512x512),
   *not* the original frame. :func:`infer_sequence` therefore also returns the
-  ``(fx/W, fy/H)`` **normalized** intrinsics (MoGe2's convention, see
-  ``tools.adapters.moge2.denormalize_K``) so the result is resolution-independent
-  and matches the ``moge2/camera.npz`` contract, plus the VGGT resolution itself
-  so depth / point maps can be mapped back to full-res frames later.
+  ``(fx/W, fy/H)`` **normalized** intrinsics (denormalize with
+  ``tools.geometry.intrinsics.denormalize_K``) so the result is
+  resolution-independent, plus the VGGT resolution itself so depth / point maps
+  can be mapped back to full-res frames later.
 * **Extrinsics are camera-from-world, OpenCV convention** (``[R | t]``),
   returned here padded to ``(N, 4, 4)``.
 * **Geometry is up-to-scale, not metric.** Depth (``exp`` of the head logits)
   and camera translations share one coherent but arbitrary per-clip scale; there
-  is no metric anchor in the package. Metricize downstream by aligning to a
-  metric source (e.g. ``median(moge_depth / vggt_depth)`` over co-visible pixels).
+  is no metric anchor in the package. Metricize downstream with the human-anchored
+  ``estimate_scale`` stage.
 * **Cameras are per-frame.** ``pose_enc`` is ``(B, N, 9)`` — each frame gets its
   own extrinsics *and* intrinsics (FOV).
 
@@ -47,6 +47,8 @@ from pathlib import Path
 
 import numpy as np
 import torch
+
+from tools.geometry.intrinsics import normalize_K
 
 DEFAULT_CHECKPOINT_REPO = "facebook/VGGT-Omega"
 DEFAULT_CHECKPOINT_FILE = "vggt_omega_1b_512.pt"
@@ -128,20 +130,6 @@ def _to_homogeneous(extr_34: np.ndarray) -> np.ndarray:
     return out
 
 
-def _normalize_K(K_px: np.ndarray, height: int, width: int) -> np.ndarray:
-    """Pixel-unit ``K`` → MoGe2 normalized convention (``fx/W, fy/H``).
-
-    Inverse of :func:`tools.adapters.moge2.denormalize_K`. Resolution-independent,
-    so the result maps cleanly back onto full-resolution frames.
-    """
-    K = K_px.copy()
-    K[:, 0, 0] /= width
-    K[:, 0, 2] /= width
-    K[:, 1, 1] /= height
-    K[:, 1, 2] /= height
-    return K
-
-
 def _fov_deg(focal_px: np.ndarray, size_px: int) -> np.ndarray:
     return np.degrees(2.0 * np.arctan((size_px / 2.0) / focal_px))
 
@@ -185,7 +173,7 @@ def infer_sequence(
 
     out: dict = {
         "extrinsics": _to_homogeneous(extr_34).astype(np.float32),
-        "intrinsics": _normalize_K(intr_px, vh, vw).astype(np.float32),
+        "intrinsics": normalize_K(intr_px, vh, vw).astype(np.float32),
         "intrinsics_px": intr_px.astype(np.float32),
         "fov_x_deg": _fov_deg(intr_px[:, 0, 0], vw).astype(np.float32),
         "fov_y_deg": _fov_deg(intr_px[:, 1, 1], vh).astype(np.float32),

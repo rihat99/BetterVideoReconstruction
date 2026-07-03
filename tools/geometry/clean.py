@@ -1,7 +1,6 @@
 """Depth-map cleaning: confidence gating + boundary-edge removal.
 
-Reuses MoGe's ``utils3d`` edge filter (the same one MoGe applies to its own
-depth) so VGGT and MoGe2 depth are cleaned identically.
+Uses the ``utils3d`` edge filter to drop flying boundary pixels from VGGT depth.
 """
 from __future__ import annotations
 

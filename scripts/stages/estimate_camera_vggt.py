@@ -2,28 +2,23 @@
 
 Runs right after the tracker. VGGT-Omega is a *multi-view* model: it ingests the
 whole clip in a single forward (cross-frame attention) and predicts per-frame
-camera extrinsics + intrinsics and per-frame depth + confidence. Compared with
-the per-frame MoGe2 camera stage it adds cross-frame-consistent extrinsics; it
-runs at a reduced internal resolution, so we record that resolution next to the
-results for later mapping back to full-resolution frames.
+camera extrinsics + intrinsics and per-frame depth + confidence. It runs at a
+reduced internal resolution, so we record that resolution next to the results
+for later mapping back to full-resolution frames.
 
 Memory scales with frame count (~43 GB peak for 500 frames @ 512 on an A100, per
 the upstream benchmark). Clips longer than ``--max-frames`` (default 500) are
 uniformly subsampled; the selected *original* frame indices are recorded in
 ``frame_indices`` so depth / cameras stay aligned to the source clip.
 
-This stage writes its own ``vggt/`` subtree and does **not** touch the MoGe2
-``moge2/camera.npz`` that the body stage reads — VGGT is additive today.
-
 Per-item I/O (``<save-dir>/<stem>/``)::
 
     reads:  the source video / folder of frames / single image
     writes: vggt/camera.npz
               extrinsics       (T, 4, 4) f32  camera-from-world, OpenCV
-              intrinsics       (T, 3, 3) f32  *normalized* (fx/W, fy/H) — same
-                                              convention as moge2/camera.npz;
+              intrinsics       (T, 3, 3) f32  *normalized* (fx/W, fy/H);
                                               denormalize with
-                                              tools.adapters.moge2.denormalize_K
+                                              tools.geometry.intrinsics.denormalize_K
               intrinsics_px    (T, 3, 3) f32  pixel units at the VGGT resolution
               fov_x_deg / fov_y_deg (T,) f32
               frame_indices    (T,)     i32   original indices of processed frames
@@ -91,7 +86,8 @@ class CameraVggtStep:
                 torch.cuda.empty_cache()
 
     def process(self, item: InputItem) -> None:
-        vggt_dir = item.out_dir / "vggt"
+        subdir = getattr(self.args, "subdir", "vggt") or "vggt"
+        vggt_dir = item.out_dir if subdir in (".", "") else item.out_dir / subdir
         out_npz = vggt_dir / "camera.npz"
         if self.args.skip_existing and out_npz.exists():
             raise SkipItem(f"vggt already done: {out_npz}")
@@ -168,6 +164,9 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     p.add_argument("--checkpoint", default=DEFAULT_CHECKPOINT_REPO,
                    help="local VGGT-Omega .pt path or HF repo id "
                         f"(default: {DEFAULT_CHECKPOINT_REPO})")
+    p.add_argument("--subdir", default="vggt",
+                   help="output subfolder under <save-dir>/<stem>/ ('.' writes "
+                        "directly into it; default: vggt)")
     p.add_argument("--max-frames", type=int, default=DEFAULT_MAX_FRAMES,
                    help="cap on frames per clip; longer clips are uniformly "
                         f"subsampled, <=0 disables (default: {DEFAULT_MAX_FRAMES})")

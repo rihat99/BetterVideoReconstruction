@@ -2,28 +2,26 @@
 
 Runs the active stages in order for a video (or a folder of videos):
 
-    sam3 → vggt → moge2 → fuse → sapiens → sam3d → smplx → optimize_smplx
+    sam3 → vggt → sapiens → sam3d → smplx → scale → fuse → optimize_smplx
 
 Each stage is invoked as a subprocess of the current interpreter — this
-isolates per-stage model memory (SAM 3, VGGT-Omega, MoGe2, Sapiens2 and
-SAM-3D-Body never co-reside) and lets the pymomentum ``_pym_preload`` re-exec
-happen cleanly in the stages that need it.
+isolates per-stage model memory (SAM 3, VGGT-Omega, Sapiens2 and SAM-3D-Body
+never co-reside) and lets the pymomentum ``_pym_preload`` re-exec happen cleanly
+in the stages that need it.
 
 Stages run in the **listed order**. The model **precompute** stages (``sam3``,
-``vggt``, ``moge2``, ``sapiens``) run once over ``--source`` — given a *folder*
-of videos they load each model once and sweep the whole batch
-(``tools/precompute_runner`` semantics). The **per-clip** stages (``fuse``,
-``sam3d``, ``smplx``, ``optimize_smplx``) loop over each clip's
-``<save-dir>/<stem>/``. Because list order is honoured, a per-clip stage can
-precede a precompute one — ``fuse`` runs before ``sapiens`` (geometry before
-human keypoints), and ``sam3d`` reads the VGGT camera that ``fuse`` writes.
+``vggt``, ``sapiens``) run once over ``--source`` — given a *folder* of videos
+they load each model once and sweep the whole batch
+(``tools/precompute_runner`` semantics). The **per-clip** stages (``sam3d``,
+``smplx``, ``scale``, ``fuse``, ``optimize_smplx``) loop over each clip's
+``<save-dir>/<stem>/``. ``scale`` (``estimate_scale``) anchors VGGT's metric
+scale to the SAM-3D-Body human ruler, so it runs **after** the body / SMPL-X
+stages and **before** ``fuse`` (which applies that scale); ``sam3d`` reads the
+VGGT camera from ``vggt/camera.npz`` directly.
 
-The default run ends at ``optimize_smplx`` — the visually-guided kinematic
-refinement of the SMPL-X bodies (reprojection + chamfer + pose + smoothness;
-``sam3d/smplx_kinematic.npz``). The SMPL → motion/dynamics path
-(``smpl`` → ``motion`` → ``optimize_motion`` → ``optimize_dynamics``) is
-SMPL-only (it consumes ``smpl_params``, not SMPL-X) and is run standalone or via
-``--steps``.
+The run ends at ``optimize_smplx`` — the visually-guided kinematic refinement of
+the SMPL-X bodies (reprojection + chamfer + pose + smoothness;
+``sam3d/smplx_kinematic.npz``). ``--steps`` runs any subset of the chain.
 
 Per-stage knobs and the step selection live in ``configs/pipeline.toml``; the
 CLI only takes ``--source``, ``--save-dir``, ``--config``, ``--steps``,
@@ -34,10 +32,7 @@ Usage::
 
     uv run python scripts/pipeline.py --source video.mp4 --save-dir out/
     uv run python scripts/pipeline.py --source clips/ --save-dir out/ --skip-existing
-    uv run python scripts/pipeline.py --source video.mp4 --save-dir out/ --steps sam3,moge2
-
-``gemma`` (Gemma 4 triage) is registered but a **placeholder** — not in the
-default run list; selecting it raises a clear NotImplementedError.
+    uv run python scripts/pipeline.py --source video.mp4 --save-dir out/ --steps sam3,vggt
 """
 from __future__ import annotations
 
@@ -56,17 +51,12 @@ from tools.source import IMAGE_EXTS, VIDEO_EXTS  # noqa: E402
 _STAGES_DIR = _HERE.parent / "stages"
 _MEDIA_EXTS = IMAGE_EXTS | VIDEO_EXTS
 
-# Canonical order. "precompute" stages operate on --source / --save-dir;
-# "perclip" stages operate on a single clip's --predictions dir. The default
-# chain ends at optimize_smplx (visually-guided SMPL-X kinematics); see
-# _STANDALONE for the SMPL-only motion/dynamics path.
-DEFAULT_RUN = ["sam3", "vggt", "moge2", "fuse", "sapiens", "sam3d", "smplx", "optimize_smplx"]
-_PRECOMPUTE = {"sam3", "vggt", "moge2", "sapiens", "gemma"}
-# Registered but not in the default run — selectable via --steps. The
-# SMPL → motion/dynamics path is SMPL-only (consumes smpl_params, not SMPL-X);
-# gemma is a placeholder.
-_STANDALONE = {"smpl", "motion", "optimize_motion", "optimize_dynamics", "gemma"}
-_KNOWN = set(DEFAULT_RUN) | _STANDALONE
+# Canonical order. "precompute" stages operate on --source / --save-dir; "perclip"
+# stages operate on a single clip's --predictions dir. ``--steps`` runs any subset;
+# the chain ends at optimize_smplx (visually-guided SMPL-X kinematics).
+DEFAULT_RUN = ["sam3", "vggt", "sapiens", "sam3d", "smplx", "scale", "fuse", "optimize_smplx"]
+_PRECOMPUTE = {"sam3", "vggt", "sapiens"}
+_KNOWN = set(DEFAULT_RUN)
 
 
 def _default_config() -> dict:
@@ -76,17 +66,13 @@ def _default_config() -> dict:
         "sam3": {"text": "person"},
         "vggt": {"max_frames": 500, "image_resolution": 512, "mode": "balanced",
                  "save_depth": False, "checkpoint": ""},
-        "moge2": {"save_depth": False},
         "sapiens": {"tasks": "pose", "overlay": True},
+        "scale": {"conf_drop_q": 0.3, "min_inlier_verts": 50, "mad_k": 3.0},
         "fuse": {"voxel_scene": 0.05, "conf_drop_q": 0.3, "edge_rtol": 0.04,
                  "human_dilate": 8, "person_obj_ids": ""},
         "sam3d": {"obj_ids": "", "inference_type": "full", "overlay": True},
         "smplx": {"iters": 300, "gender": "neutral", "overlay": True},
         "optimize_smplx": {"config": "configs/smplx_kinematic.toml", "overlay": False},
-        "smpl": {"iters": 300},
-        "motion": {"fps": 30.0, "smooth": "gaussian"},
-        "optimize_motion": {"config": "configs/kinematic.toml"},
-        "optimize_dynamics": {"config": "configs/dynamics.toml"},
     }
 
 
@@ -133,33 +119,31 @@ def _build_precompute_args(step: str, cfg: dict, source: Path, save_dir: Path,
             extra += ["--checkpoint", str(v["checkpoint"])]
         _flag(extra, v.get("save_depth", False), "--save-depth")
         return base + extra
-    if step == "moge2":
-        extra = ["--save-depth"] if cfg["moge2"].get("save_depth") else []
-        return base + extra
     if step == "sapiens":
         extra = ["--tasks", str(cfg["sapiens"]["tasks"])]
         _flag(extra, not cfg["sapiens"].get("overlay", True), "--no-overlay")
         return base + extra
-    if step == "gemma":
-        return base  # placeholder — standard args only
     raise ValueError(step)
 
 
 def _perclip_output(step: str, clip_dir: Path) -> Path:
     return {
+        "scale": clip_dir / "geometry" / "scale.npz",
         "fuse": clip_dir / "geometry" / "transform.npz",
         "sam3d": clip_dir / "sam3d" / "params.npz",
         "smplx": clip_dir / "sam3d" / "smplx_params.npz",
         "optimize_smplx": clip_dir / "sam3d" / "smplx_kinematic.npz",
-        "smpl": clip_dir / "smpl_params.npz",
-        "motion": clip_dir / "results" / "0.npz",
-        "optimize_motion": clip_dir / "results" / "1.npz",
-        "optimize_dynamics": clip_dir / "results" / "2.npz",
     }[step]
 
 
 def _build_perclip_args(step: str, cfg: dict, clip: Path, clip_dir: Path,
                         device: str) -> list[str]:
+    if step == "scale":
+        sc = cfg["scale"]
+        return ["--predictions", str(clip_dir), "--device", device,
+                "--conf-drop-q", str(sc["conf_drop_q"]),
+                "--min-inlier-verts", str(sc["min_inlier_verts"]),
+                "--mad-k", str(sc["mad_k"])]
     if step == "fuse":
         f = cfg["fuse"]
         extra = ["--source", str(clip), "--predictions", str(clip_dir), "--device", device,
@@ -193,34 +177,18 @@ def _build_perclip_args(step: str, cfg: dict, clip: Path, clip_dir: Path,
                  "--config", str(s["config"]), "--device", device]
         _flag(extra, s.get("overlay", False), "--overlay")
         return extra
-    if step == "smpl":
-        return ["--source", str(clip), "--predictions", str(clip_dir),
-                "--iters", str(cfg["smpl"]["iters"]), "--device", device]
-    if step == "motion":
-        return ["--predictions", str(clip_dir),
-                "--fps", str(cfg["motion"]["fps"]),
-                "--smooth", str(cfg["motion"]["smooth"])]
-    if step == "optimize_motion":
-        return [str(clip_dir), "--config", str(cfg["optimize_motion"]["config"])]
-    if step == "optimize_dynamics":
-        return [str(clip_dir), "--config", str(cfg["optimize_dynamics"]["config"])]
     raise ValueError(step)
 
 
 _SCRIPTS = {
     "sam3": "track_sam3.py",
-    "moge2": "estimate_camera_moge2.py",
     "sapiens": "estimate_sapiens.py",
     "vggt": "estimate_camera_vggt.py",
-    "gemma": "classify_gemma.py",
+    "scale": "estimate_scale.py",
     "fuse": "fuse_geometry.py",
     "sam3d": "estimate_body_sam3d.py",
     "smplx": "convert_mhr_to_smplx.py",
     "optimize_smplx": "optimize_smplx.py",
-    "smpl": "convert_mhr_to_smpl.py",
-    "motion": "build_robot_motion.py",
-    "optimize_motion": "optimize_motion.py",
-    "optimize_dynamics": "optimize_dynamics.py",
 }
 
 

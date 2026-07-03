@@ -7,7 +7,9 @@ vs the refined trajectory, alongside the *evidence* each term depends on
   * sudden keypoint dropouts (panel 2) that unconstrain reprojection → pose pops,
   * bad / sparse depth frames (panels 3–4) that let chamfer wrench the pose,
   * where the optimizer actually moved the pose vs init (panel 5),
-  * single-frame jumps in the motion (panels 6–8: root / orient / joint step).
+  * single-frame jumps in the motion (panels 6–8: root / orient / joint step),
+  * which frames the velocity-gated contact loss repels (panel 9: # contacting
+    verts + their mean joint speed — fast contacts are what it pushes off).
 
 It reuses the exact correspondence + projection + visibility code the optimizer
 uses, so the numbers match the stage (no re-derivation, no fresh mismatch).
@@ -40,12 +42,13 @@ import numpy as np  # noqa: E402
 import torch  # noqa: E402
 
 from tools.smplx_optim import (  # noqa: E402
-    build_correspondence, fold_root_to_world, project, subsample_indices,
-    transform_points, world_from_cam,
+    build_correspondence, fold_root_to_world, joint_local_linear_speed, project,
+    subsample_indices, transform_points, vertex_to_joint, world_from_cam,
 )
 from tools.smplx_optim.qmath import normalize_q  # noqa: E402
 from tools.smplx_optim.visibility import front_facing_mask, vertex_normals  # noqa: E402
-from tools.smplx_robot import load_smplx_mid  # noqa: E402
+from tools.smplx_robot import load_smplx_mid, make_smplx_robot_model  # noqa: E402
+from tools.geometry.normals import estimate_point_normals  # noqa: E402
 
 _DEFAULT_CONFIG = _REPO_ROOT / "configs" / "smplx_kinematic.toml"
 _DEFAULT_SMPLX_MODEL = (
@@ -87,7 +90,9 @@ def _quat_geodesic_deg(qa, qb):
 
 @torch.no_grad()
 def per_frame_metrics(mid, betas, q_world, scale, *, extr, K, depth, target_kp,
-                      scores, corr, fvids, sub, score_thresh):
+                      scores, corr, fvids, sub, score_thresh,
+                      scene_pts=None, scene_normals=None, scene_conf=None, pen=None,
+                      model=None, fps=30.0, v2j_sub=None, contact=None):
     """Per-frame reprojection (px), chamfer (cm), and joint-step (deg) for one trajectory."""
     T = q_world.shape[0]
     qn = normalize_q(q_world, mid.num_joints)
@@ -124,8 +129,45 @@ def per_frame_metrics(mid, betas, q_world, scale, *, extr, K, depth, target_kp,
         d = torch.cdist(Vv, D)
         cham[t] = float(d.min(1).values.mean() + d.min(0).values.mean()) * 100.0  # cm
 
-    return dict(reproj=reproj, n_valid=n_valid, matched_score=matched_score,
-                cham=cham, err=err.cpu().numpy(), w=w.cpu().numpy())
+    # penetration into the scene cloud, per frame (cm) — mirrors scene_penetration —
+    # plus the velocity-gated contact diagnostic (# gated contacting verts + their
+    # mean joint speed), mirroring contact_velocity_loss on the same per-frame SDF.
+    pen_cm = np.full(T, np.nan, np.float32)
+    pen_cnt = np.zeros(T, np.float32)
+    ct_cnt = np.zeros(T, np.float32)
+    ct_speed = np.full(T, np.nan, np.float32)
+    have_ct = scene_pts is not None and model is not None and contact is not None
+    vel = (joint_local_linear_speed(model, mid, q_world, fps)[:, v2j_sub]
+           if have_ct else None)                      # (T, Ns) per-subsampled-vertex joint speed
+    if scene_pts is not None:
+        band = float(contact["contact_band_m"]) if have_ct else 0.0
+        mg = float(pen["prune_margin_m"])
+        for tt in range(T):
+            V = vw[tt, sub]
+            lo, hi = V.amin(0) - mg, V.amax(0) + mg
+            m = ((scene_pts >= lo) & (scene_pts <= hi)).all(-1)
+            P = scene_pts[m]
+            if P.shape[0] == 0:
+                pen_cm[tt] = 0.0
+                continue
+            dmin, idx = torch.cdist(V, P).min(1)
+            s = ((V - P[idx]) * scene_normals[m][idx]).sum(-1)
+            c = scene_conf[m][idx]
+            active = ((c > float(pen["conf_thresh"])) & (dmin < float(pen["max_dist_m"]))
+                      & (s > -float(pen["max_pen_m"])))
+            pm = active & (s < 0)
+            pen_cnt[tt] = float(pm.sum())
+            pen_cm[tt] = float((-s[pm]).mean() * 100.0) if bool(pm.any()) else 0.0
+            if have_ct:
+                cm = active & (s < band)               # gated contacting verts (inside or within band)
+                ct_cnt[tt] = float(cm.sum())
+                if bool(cm.any()):
+                    ct_speed[tt] = float(vel[tt][cm].mean())   # mean joint speed at the contacts
+
+    return dict(reproj=reproj, n_valid=n_valid,
+                matched_score=matched_score, cham=cham, pen_cm=pen_cm, pen_cnt=pen_cnt,
+                ct_cnt=ct_cnt, ct_speed=ct_speed,
+                err=err.cpu().numpy(), w=w.cpu().numpy())
 
 
 def per_frame_motion(q_world):
@@ -161,18 +203,19 @@ def _shade_invalid(ax, valid):
 
 
 def plot_person(oid, valid, init, final, motion_i, motion_f, posedev, depth_cnt,
-                max_points, robust_px, out_png):
+                max_points, sap_gm_px, out_png):
     frames = np.arange(len(valid))
     fi = "#bbbbbb"   # init colour (light)
     ff = "#1f77b4"   # final colour
-    fig, axes = plt.subplots(8, 1, figsize=(13, 18), sharex=True)
+    fig, axes = plt.subplots(9, 1, figsize=(13, 20), sharex=True)
 
     ax = axes[0]
-    ax.plot(frames, init["reproj"], color=fi, lw=1, label="init")
-    ax.plot(frames, final["reproj"], color=ff, lw=1.2, label="final")
-    if robust_px > 0:
-        ax.axhline(robust_px, color="r", ls=":", lw=0.8, label=f"robust_px={robust_px:g}")
+    ax.plot(frames, init["reproj"], color=fi, lw=1, label="sap init")
+    ax.plot(frames, final["reproj"], color=ff, lw=1.2, label="sap final")
+    if sap_gm_px > 0:
+        ax.axhline(sap_gm_px, color="r", ls=":", lw=0.8, label=f"sap gm_scale={sap_gm_px:g}")
     ax.set_ylabel("reproj\n(px)")
+    ax.set_ylim(0, max(40.0, sap_gm_px * 1.2))
     ax.legend(loc="upper right", ncol=3, fontsize=8)
     ax.set_title(f"person obj_id={oid} — per-frame loss diagnostics (grey = invalid frame)")
 
@@ -189,7 +232,9 @@ def plot_person(oid, valid, init, final, motion_i, motion_f, posedev, depth_cnt,
     ax = axes[2]
     ax.plot(frames, init["cham"], color=fi, lw=1, label="init")
     ax.plot(frames, final["cham"], color=ff, lw=1.2, label="final")
-    ax.set_ylabel("chamfer\n(cm)")
+    if np.isfinite(final.get("pen_cm", np.array([np.nan]))).any():
+        ax.plot(frames, final["pen_cm"], color="#d62728", lw=1.0, label="penetration")
+    ax.set_ylabel("chamfer /\npen (cm)")
     ax.legend(loc="upper right", fontsize=8)
 
     ax = axes[3]
@@ -214,6 +259,23 @@ def plot_person(oid, valid, init, final, motion_i, motion_f, posedev, depth_cnt,
         ax.plot(fr2, motion_f[key], color=ff, lw=1.2, label="final")
         ax.set_ylabel(f"{lbl}\n({unit})")
         ax.legend(loc="upper right", fontsize=8)
+
+    # velocity-gated contact panel: # gated contacting verts + their mean joint
+    # speed (the contact loss repels the fast ones). NaN speed = no contact frame.
+    ax = axes[8]
+    has_ct = np.any(np.asarray(final.get("ct_cnt", np.zeros(1))) > 0)
+    if has_ct:
+        ax.plot(frames, init["ct_cnt"], color=fi, lw=1, label="# contact init")
+        ax.plot(frames, final["ct_cnt"], color="#d62728", lw=1.2, label="# contact final")
+        ax.set_ylabel("# contact\nverts")
+        ax.legend(loc="upper left", fontsize=8)
+        axc = ax.twinx()
+        axc.plot(frames, final["ct_speed"], color="#17becf", lw=1.0, alpha=0.85)
+        axc.set_ylabel("contact speed\n(m/s)", color="#17becf")
+    else:
+        ax.set_ylabel("# contact\nverts")
+        ax.text(0.5, 0.5, "no contact diagnostic", transform=ax.transAxes,
+                ha="center", va="center", color="0.5")
 
     for ax in axes:
         _shade_invalid(ax, valid)
@@ -243,7 +305,15 @@ def run(predictions_dir, config_path, device):
     max_points = int(chcfg.get("max_points", 1500))
     vsub = int(chcfg.get("vertex_subsample", 1000))
     score_thresh = float(kpcfg.get("score_thresh", 0.3))
-    robust_px = float(kpcfg.get("robust_px", 40.0))
+    sap_gm_px = float(kpcfg.get("gm_scale_px", kpcfg.get("robust_px", 40.0)))
+    pncfg = cfg.get("penetration", {})
+    pen = dict(conf_thresh=float(pncfg.get("conf_thresh", 0.1)),
+               margin_m=float(pncfg.get("margin_m", 0.02)),
+               max_dist_m=float(pncfg.get("max_dist_m", 0.15)),
+               max_pen_m=float(pncfg.get("max_pen_m", 0.10)),
+               prune_margin_m=float(pncfg.get("prune_margin_m", 0.30)),
+               normal_k=int(pncfg.get("normal_k", 16)))
+    contact = dict(contact_band_m=float(cfg.get("contact_velocity", {}).get("contact_band_m", 0.03)))
 
     sp = dict(np.load(sam3d / "smplx_params.npz", allow_pickle=True))
     kin = dict(np.load(sam3d / "smplx_kinematic.npz", allow_pickle=True))
@@ -257,6 +327,15 @@ def run(predictions_dir, config_path, device):
     extr = torch.as_tensor(tr["extrinsics"], dtype=torch.float32, device=device)
     K = torch.as_tensor(tr["intrinsics_px_orig"], dtype=torch.float32, device=device)
     wfc = world_from_cam(extr)
+    fps = float(tr.get("fps", 30.0))
+
+    scene_pts = scene_normals = scene_conf = None
+    scene_path = pred / "geometry" / "scene.npz"
+    if scene_path.exists():
+        scn = dict(np.load(scene_path, allow_pickle=True))
+        scene_pts = torch.as_tensor(scn["points"], dtype=torch.float32, device=device)
+        scene_conf = torch.as_tensor(scn["confidence"], dtype=torch.float32, device=device)
+        scene_normals = estimate_point_normals(scene_pts, wfc[:, :3, 3], k=pen["normal_k"])
 
     mid = load_smplx_mid(_DEFAULT_SMPLX_MODEL, device)
     fvids = torch.as_tensor([int(x) for x in mid.frame_vertex_ids], dtype=torch.long, device=device)
@@ -272,6 +351,14 @@ def run(predictions_dir, config_path, device):
         betas_mean = torch.as_tensor(kin["betas"][pk], dtype=torch.float32, device=device)
         betas_T = betas_mean[None].expand(N, -1)
         scale = float(scales[pk])
+
+        # BetterRobot model + vertex→nearest-joint map for the contact-velocity panel
+        # (only when the scene cloud is present), mirroring the optimizer.
+        model = v2j_sub = None
+        if scene_pts is not None:
+            model = make_smplx_robot_model(mid, betas_mean, device=device, dtype=torch.float32)
+            v_rest, j_rest = mid.forward_shape(betas_mean[None])
+            v2j_sub = vertex_to_joint(v_rest[0], j_rest[0])[sub]
 
         # init: from converter params, folded to world (no scale)
         spi = _sp_idx(sp, oid)
@@ -294,26 +381,30 @@ def run(predictions_dir, config_path, device):
             if not valid[i]:
                 scores[i] = 0.0
 
-        init = per_frame_metrics(mid, betas_T, q_init, 1.0, extr=extr, K=K, depth=depth,
-                                 target_kp=target_kp, scores=scores, corr=corr, fvids=fvids,
-                                 sub=sub, score_thresh=score_thresh)
-        final = per_frame_metrics(mid, betas_T, q_final, scale, extr=extr, K=K, depth=depth,
-                                  target_kp=target_kp, scores=scores, corr=corr, fvids=fvids,
-                                  sub=sub, score_thresh=score_thresh)
+        mkw = dict(extr=extr, K=K, depth=depth, target_kp=target_kp, scores=scores, corr=corr,
+                   fvids=fvids, sub=sub, score_thresh=score_thresh,
+                   scene_pts=scene_pts, scene_normals=scene_normals, scene_conf=scene_conf, pen=pen,
+                   model=model, fps=fps, v2j_sub=v2j_sub, contact=contact)
+        init = per_frame_metrics(mid, betas_T, q_init, 1.0, **mkw)
+        final = per_frame_metrics(mid, betas_T, q_final, scale, **mkw)
         motion_i = per_frame_motion(q_init)
         motion_f = per_frame_motion(q_final)
         posedev = pose_dev_deg(q_final, q_init, mid.num_joints)
 
         out_png = diag_dir / f"loss_person{oid:02d}.png"
         plot_person(oid, valid, init, final, motion_i, motion_f, posedev, depth_cnt,
-                    max_points, robust_px, out_png)
+                    max_points, sap_gm_px, out_png)
         print(f"[diagnose_smplx] wrote {out_png}")
 
         vv = valid.copy()
         vv2 = valid[1:].copy()
         print(f"  person obj_id={oid}  scale={scale:.3f}  ({int(valid.sum())}/{N} valid)")
-        print(_worst("reproj final (px)", final["reproj"], vv, unit="px"))
+        print(_worst("reproj_sap final (px)", final["reproj"], vv, unit="px"))
         print(_worst("chamfer final (cm)", final["cham"], vv, unit="cm"))
+        if np.isfinite(final["pen_cm"]).any():
+            print(_worst("penetration final (cm)", final["pen_cm"], vv, unit="cm"))
+        if np.any(final.get("ct_cnt", np.zeros(1)) > 0):
+            print(_worst("contact speed (m/s)", final["ct_speed"], vv, unit="m/s"))
         print(_worst("pose dev max (deg)", posedev[1], vv, unit="°"))
         print(_worst("joint step final (deg)", motion_f[2], vv2, unit="°"))
         print(_worst("root transl step (m)", motion_f[0], vv2, unit="m"))

@@ -14,9 +14,30 @@ from .camera import (
     transform_points,
     world_from_cam,
 )
+from .contacts import (
+    contact_from_sdf,
+    lift_joint_contact,
+    scene_sdf,
+    vertex_to_joint,
+)
 from .keypoints import Correspondence, build_correspondence
-from .losses import chamfer_loss, pose_prior_loss, reprojection_loss, smoothness_loss
+from .losses import (
+    chamfer_loss,
+    clearance_repulsion,
+    contact_velocity_loss,
+    depth_push_loss,
+    geman_mcclure,
+    init_reprojection_gm,
+    joint_velocity_loss,
+    pose_prior_loss,
+    sapiens_reprojection_gm,
+    scene_attraction,
+    scene_penetration,
+    smoothness_loss,
+    tangent_difference,
+)
 from .qmath import normalize_q
+from .velocity import joint_local_linear_speed
 from .visibility import front_facing_mask, subsample_indices, vertex_normals
 
 __all__ = [
@@ -25,13 +46,27 @@ __all__ = [
     "project",
     "transform_points",
     "world_from_cam",
+    "contact_from_sdf",
+    "lift_joint_contact",
+    "scene_sdf",
+    "vertex_to_joint",
     "Correspondence",
     "build_correspondence",
     "chamfer_loss",
+    "clearance_repulsion",
+    "contact_velocity_loss",
+    "depth_push_loss",
+    "geman_mcclure",
+    "init_reprojection_gm",
+    "joint_velocity_loss",
     "pose_prior_loss",
-    "reprojection_loss",
+    "sapiens_reprojection_gm",
+    "scene_attraction",
+    "scene_penetration",
     "smoothness_loss",
+    "tangent_difference",
     "normalize_q",
+    "joint_local_linear_speed",
     "front_facing_mask",
     "subsample_indices",
     "vertex_normals",

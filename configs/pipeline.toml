@@ -3,16 +3,14 @@
 # (see scripts/stages/); those CLIs carry the full set of flags.
 
 [steps]
-# Active stages, in order (the default chain ends at optimize_smplx — the
-# visually-guided SMPL-X kinematic refinement). List order is honoured: fuse
-# (per-clip) runs before sapiens (precompute), and sam3d reads the VGGT camera
-# that fuse writes. Registered but off the default chain (select via --steps):
-# the SMPL→motion path "smpl, motion, optimize_motion, optimize_dynamics"
-# (SMPL-only) and the "gemma" placeholder.
-run = ["sam3", "vggt", "moge2", "fuse", "sapiens", "sam3d", "smplx", "optimize_smplx"]
+# Active stages, in order; the chain ends at optimize_smplx (visually-guided
+# SMPL-X kinematic refinement). List order is honoured: `scale` (estimate_scale)
+# anchors VGGT's metric scale to the SAM-3D-Body human ruler, so it runs after the
+# body / SMPL-X stages and before `fuse` (which applies it). `--steps` runs any subset.
+run = ["sam3", "vggt", "sapiens", "sam3d", "smplx", "scale", "fuse", "optimize_smplx"]
 
 [runtime]
-device = "cuda"             # GPU device for the model stages (sam3/vggt/moge2/sapiens/sam3d/smplx)
+device = "cuda"             # GPU device for the model stages (sam3/vggt/sapiens/sam3d/smplx)
 
 [sam3]                      # SAM 3 video tracker → sam3/ (per-object masks + bboxes.npz)
 text = "person"             # grounding prompt for frame-0 detection
@@ -25,14 +23,16 @@ save_depth = true           # also dump per-frame depth + confidence at the VGGT
 checkpoint = ""             # local .pt path or HF repo id; empty → download facebook/VGGT-Omega (access-gated)
 # Note: VGGT depth/translation are UP-TO-SCALE (not metric) — one arbitrary per-clip scale shared with the cameras.
 
-[moge2]                     # MoGe2 per-frame intrinsics → moge2/camera.npz
-save_depth = true           # also dump per-frame depth/points (heavy)
-
 [sapiens]                   # Sapiens2 pose (keypoints) → sapiens/
 tasks = "pose"              # subset of {pose, pointmap, normal}; pointmap/normal are heavy & opt-in
 overlay = true              # render pose skeleton overlay
 
-[fuse]                      # metric-align VGGT to MoGe2 + split point clouds → geometry/
+[scale]                     # human-body-anchored metric scale → geometry/scale.npz (runs before fuse)
+conf_drop_q = 0.3           # drop this lowest-confidence fraction of in-mask body vertices per frame
+min_inlier_verts = 50       # skip a frame with fewer inlier vertices than this
+mad_k = 3.0                 # reject frames beyond this many MADs from the median log-scale
+
+[fuse]                      # backproject VGGT → metric point clouds (scale from geometry/scale.npz) → geometry/
 voxel_scene = 0.05          # scene merge voxel size, metres
 conf_drop_q = 0.3           # drop this lowest-confidence fraction of VGGT depth (scene only; human keeps all)
 edge_rtol = 0.04            # depth-edge (flying-pixel) filter tolerance; 0 disables
@@ -52,16 +52,3 @@ overlay = true              # render the combined SMPL-X overlay (all people) �
 [optimize_smplx]            # visually-guided SMPL-X kinematics → sam3d/smplx_kinematic.npz (end of default chain)
 config = "configs/smplx_kinematic.toml"  # weights / optimizer / chamfer / keypoints
 overlay = false             # render reprojected-keypoint debug overlay → sam3d/smplx_kinematic_overlay.mp4
-
-[smpl]                      # MHR → better_human SMPL → smpl_params.npz (standalone; feeds motion)
-iters = 300                 # fine-stage Adam iterations
-
-[motion]                    # build_robot_motion → results/0.npz
-fps = 30.0
-smooth = "gaussian"         # gaussian | average | none
-
-[optimize_motion]           # Stage 1 kinematic L-BFGS → results/1.npz
-config = "configs/kinematic.toml"
-
-[optimize_dynamics]         # Stage 2 RNEA contact forces → results/2.npz
-config = "configs/dynamics.toml"

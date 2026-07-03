@@ -1,11 +1,13 @@
 # BetterVideoReconstruction
 
-Reconstruct a person's **3D motion and contact forces** from a monocular video.
-Given a clip of one person, the pipeline tracks them, recovers per-frame camera
-intrinsics, fits a 3D body each frame, converts it to a shape-aware SMPL
-BetterRobot, and runs a two-stage optimization: a kinematic pass that smooths
-and anchors the trajectory, then a dynamics pass that infers per-contact-joint
-forces via inverse dynamics (RNEA).
+Reconstruct a **per-person SMPL-X body trajectory** from a monocular video.
+Given a clip, the pipeline tracks everyone in it, recovers the camera, fits a 3D
+body every frame for each tracked person, converts each to SMPL-X, anchors the
+scene's metric scale to the human body, fuses the metric geometry, and runs a
+**visually-guided kinematic refinement** (2D reprojection + depth chamfer + pose
+prior + acceleration/jerk smoothness). Standalone SMPL-X stages then add scene
+contact, world-frame gravity, per-contact-joint **forces** via inverse dynamics
+(RNEA), and reconstruction-trust scoring.
 
 It is the video-focused sibling of
 [`BetterImageReconstruction`](../BetterImageReconstruction) (image/scene) and
@@ -16,59 +18,68 @@ optimization residuals used here.
 
 ## Pipeline
 
+The default chain (`scripts/pipeline.py`) runs these stages in order:
+
 ```
-video ─▶ SAM 3 track ─▶ MoGe2 camera ─▶ Sapiens2 pose ─┐
-              │                                         ├▶ SAM-3D-Body (MHR)
-              └▶ VGGT-Ω (multi-view camera + depth)     │      │
-                                                        │      ▼
-                                                   MHR → SMPL ─▶ build_robot_motion
-                                                                      │
-                                            kinematic optimize ◀──────┘
-                                                   │
-                                            dynamics optimize ─▶ motion + contact forces
+video ─▶ sam3 ─▶ vggt ─▶ sapiens ─▶ sam3d ─▶ smplx ─▶ scale ─▶ fuse ─▶ optimize_smplx
 ```
 
-| Stage | Model | Output |
+| Stage | Model | Output (under `out/<stem>/`) |
 |-------|-------|--------|
 | sam3 | SAM 3 (video) | per-person masks + bbox tracks |
 | vggt | VGGT-Omega | multi-view cameras + depth (≤500 frames; records the VGGT inference resolution) |
-| moge2 | MoGe2 | per-frame camera intrinsics (+ optional depth) |
-| sapiens | Sapiens2-5B | 308-keypoint pose + metric pointmap |
-| fuse | metric align + fuse | metric scene + per-frame human point clouds (`geometry/`) |
-| body | SAM-3D-Body | per-frame MHR body params (single person) |
-| smpl | MHR→SMPL fit | per-frame SMPL params (`q(t)`) |
-| motion | BetterRobot | shape-aware SMPL robot + smoothed trajectory |
-| optimize_motion | L-BFGS / `CostStack` | kinematically refined `q(t)` |
-| optimize_dynamics | RNEA | per-contact-joint forces + joint torques |
+| sapiens | Sapiens2-5B | Goliath-308 keypoint pose |
+| sam3d | SAM-3D-Body | per-frame MHR body params (all tracked people) |
+| smplx | MHR→SMPL-X fit | per-frame SMPL-X params |
+| scale | human-body ruler | metric scale anchored to the body (`geometry/scale.npz`) |
+| fuse | metric fuse | metric scene + per-frame human point clouds (`geometry/`) |
+| optimize_smplx | Adam + L-BFGS | visually-guided kinematic refinement (`sam3d/smplx_kinematic.npz`) |
 
-**VGGT-Omega** runs right after the tracker as a multi-view camera/geometry
-stage; it writes its own `vggt/camera.npz` (cross-frame extrinsics + depth, plus
-the inference resolution) and is additive — the body stage still reads MoGe2's
-`moge2/camera.npz`. Its access-gated checkpoints are not bundled (see
-[`INSTALL.md`](INSTALL.md)).
+**VGGT-Omega** runs right after the tracker as the multi-view camera/geometry
+stage; it writes `vggt/camera.npz` (cross-frame extrinsics + depth, plus the
+inference resolution) and the body stage reads that camera directly. Its
+access-gated checkpoints are not bundled (see [`INSTALL.md`](INSTALL.md)).
 
-**Future / placeholder stage:** Gemma 4 VLM triage + contact graph
-(`classify_gemma`).
+**Metric scale** is recovered by `scale` (`estimate_scale`), which uses the
+SAM-3D-Body human as a ruler, so it runs after the body stages and before `fuse`
+(which applies it).
+
+### Standalone SMPL-X stages
+
+Off the default chain, each runs on a single clip's `out/<stem>/` dir:
+
+| Stage | Output |
+|-------|--------|
+| `optimize_smplx_2` | annotation-guided refinement (`sam3d/smplx_kinematic_2.npz`) |
+| `estimate_contacts` | per-joint scene contact (`sam3d/cnt_kin.npz` + overlay) |
+| `estimate_gravity_geocalib` | world-frame gravity (`geocalib/gravity.npz`) |
+| `optimize_dynamics_smplx` | force-only RNEA: per-contact-joint forces + torques (`sam3d/smplx_dynamics.npz`) |
+| `estimate_uncertainty` | per-frame + per-contact reconstruction-trust scoring |
+
+### Dataset pipeline (ClimbingVideos DB)
+
+For the large scene database, `scripts/track_sam3_scenes.py` seeds SAM 3 from the
+per-scene YOLO track, then
+`scripts/precompute_scenes.py --stage {vggt,sapiens,sam3d,smplx}` sweeps each model
+over the batch (shared helpers in `scripts/scene_db.py`).
 
 ## Quick start
 
 ```bash
 # See INSTALL.md for env + submodule + checkpoint setup first.
-uv run python scripts/pipeline.py --source video.mp4 --save-dir out/
+uv run python scripts/pipeline.py --source data/boulder_1.mp4 --save-dir out/
 
-# Then view the result (motion + contact-force arrows) in a viser web viewer:
-uv run python scripts/view_motion.py out/video/results/2.npz
+# Then view the fused scene + refined SMPL-X bodies in a viser web viewer:
+uv run python scripts/view_3d.py out/boulder_1/
 ```
 
 Outputs land under `out/<stem>/` (per clip). The current build is file-based
 and small-batch — a DB-backed dataset is planned later. Each stage is also
 runnable on its own; see [`CLAUDE.md`](CLAUDE.md) for the full stage table, the
-`out/<stem>/` contract, and conventions, and
-[`docs/motion_npz_schema.md`](docs/motion_npz_schema.md) for the motion `.npz`
-schema.
+`out/<stem>/` contract, and conventions.
 
 ## Documentation
 
 - [`INSTALL.md`](INSTALL.md) — environment, submodules, model assets.
 - [`CLAUDE.md`](CLAUDE.md) — architecture, pipeline contract, conventions.
-- [`docs/motion_npz_schema.md`](docs/motion_npz_schema.md) — `results/*.npz` layout.
+- [`docs/geometry_fusion_plan.md`](docs/geometry_fusion_plan.md) — `fuse_geometry` design + `geometry/*.npz` contract.

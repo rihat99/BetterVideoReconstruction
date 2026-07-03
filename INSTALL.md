@@ -21,8 +21,9 @@ If already cloned without submodules:
 git submodule update --init --recursive
 ```
 
-The six submodules under `third_party/` are `sam3`, `sam-3d-body`, `sapiens2`,
-`MHR`, `moge`, and `vggt-omega` (no `sam-3d-objects` — this repo is human-only).
+The six submodules under `third_party/` are `sam3`, `sam-3d-body`,
+`sapiens2`, `MHR`, `vggt-omega`, and `geocalib` (no `sam-3d-objects` — this
+repo is human-only).
 
 ## 2. Create venv and install dependencies
 
@@ -34,12 +35,12 @@ uv sync
 This installs:
 
 - `better-robot` and `better-human` (editable, from sibling directories)
-- `sam3`, `mhr`, `sapiens`, `moge`, and `vggt-omega` (editable, from `third_party/`)
+- `sam3`, `mhr`, `sapiens`, and `vggt-omega` (editable, from `third_party/`)
 - `pymomentum-gpu` (built against torch cu129 — the uv lock pins the matching torch build)
 - All `sam-3d-body` dependencies (listed in `pyproject.toml`)
 
-Unlike the sibling repos, **MoGe and VGGT-Omega are editable submodules** here
-(not git-pip deps), so `uv sync` installs them directly — no extra git step.
+Unlike the sibling repos, **VGGT-Omega is an editable submodule** here
+(not a git-pip dep), so `uv sync` installs it directly — no extra git step.
 
 ### MHR model assets
 
@@ -93,7 +94,7 @@ echo "$(pwd)/third_party/sam-3d-body" > "$SITE/sam-3d-body.pth"
 
 ```bash
 .venv/bin/python -c "
-import better_robot, better_human, sam3, sam_3d_body, detectron2, moge, vggt_omega
+import better_robot, better_human, sam3, sam_3d_body, detectron2, vggt_omega
 print('All imports OK')
 "
 ```

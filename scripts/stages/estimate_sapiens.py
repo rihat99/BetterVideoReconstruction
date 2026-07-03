@@ -183,7 +183,12 @@ class Sapiens2Step:
 
     def process(self, item: InputItem) -> None:
         out_dir = item.out_dir
-        sapiens_dir = out_dir / "sapiens"
+        subdir = getattr(self.args, "subdir", "sapiens") or "sapiens"
+        sapiens_dir = out_dir if subdir in (".", "") else out_dir / subdir
+        # Top-down pose consumes sam3 bboxes: an explicit per-item path from the
+        # manifest (DB layout, where sam3 lives in its own feature tree) wins;
+        # otherwise the sibling out_dir/sam3/bboxes.npz (single-clip layout).
+        bboxes_npz = item.bboxes_path or (out_dir / "sam3" / "bboxes.npz")
         out_npz = sapiens_dir / f"{self.task}.npz"
         if self.args.skip_existing and out_npz.exists():
             raise SkipItem(f"{out_npz} exists")
@@ -204,7 +209,7 @@ class Sapiens2Step:
         H, W = bgr_frames[0].shape[:2]
 
         if self.task == "pose":
-            self._run_pose(out_dir, bgr_frames, sapiens_dir, N=N, H=H, W=W)
+            self._run_pose(bboxes_npz, bgr_frames, sapiens_dir, N=N, H=H, W=W)
         else:
             self._run_dense(bgr_frames, sapiens_dir, N=N, H=H, W=W)
 
@@ -212,7 +217,7 @@ class Sapiens2Step:
 
     def _run_pose(
         self,
-        out_dir: Path,
+        bp: Path,
         bgr_frames: list[np.ndarray],
         sapiens_dir: Path,
         *,
@@ -220,7 +225,6 @@ class Sapiens2Step:
         H: int,
         W: int,
     ) -> None:
-        bp = out_dir / "sam3" / "bboxes.npz"
         if not bp.exists():
             raise SkipItem(
                 f"missing {bp} — pose is top-down and needs bboxes from sam3"
@@ -406,6 +410,11 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     p.add_argument(
         "--label", default="person",
         help="bboxes.npz label to filter on for pose (default: %(default)r)",
+    )
+    p.add_argument(
+        "--subdir", default="sapiens",
+        help="output subfolder under <save-dir>/<stem>/ ('.' writes directly "
+             "into it; default: sapiens)",
     )
     p.add_argument(
         "--batch-size", type=int, default=1,

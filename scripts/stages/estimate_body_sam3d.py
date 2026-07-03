@@ -2,13 +2,25 @@
 
 For each frame, runs SAM-3D-Body on **every** tracked person's bbox + mask
 (``--obj-ids`` defaults to all SAM 3 objects) using **per-frame camera
-intrinsics from VGGT-Omega** at the original frame resolution. These come from
-the fuse stage's ``geometry/transform.npz`` (``intrinsics_px_orig`` — VGGT
-intrinsics denormalized to the native resolution); the stage falls back to
-``vggt/camera.npz`` (denormalized on the fly), then ``moge2/camera.npz``, then
-a one-off MoGe2 frame-0 estimate. Camera estimation is therefore decoupled from
-body fitting — run the camera + fuse stages first for proper per-frame
-intrinsics.
+intrinsics from VGGT-Omega** at the original frame resolution. VGGT geometry is
+up-to-scale, but the camera *intrinsics* are scale-invariant (the per-clip scale
+multiplies depth + camera translation, never the focal length / principal
+point), and SAM-3D-Body consumes only intrinsics — it predicts each person's
+camera-frame translation itself — so the scaleless VGGT camera is exact here.
+Intrinsics come from the fuse stage's ``geometry/transform.npz``
+(``intrinsics_px_orig``) when present, else ``vggt/camera.npz`` (normalized,
+**denormalized to the original resolution** on the fly). Camera estimation is
+**VGGT-only**.
+
+Two run modes:
+
+  * **single clip** — ``--source clip --predictions out/video/``; reads the
+    ``sam3/`` + ``vggt/`` (or ``geometry/``) siblings under ``--predictions``.
+  * **batch / manifest** — ``--source manifest.json --save-dir <dir>`` (a
+    ``precompute_runner`` Step): loads SAM-3D-Body once and sweeps every scene,
+    taking each scene's ``bboxes`` / ``camera`` paths from the manifest. This is
+    how ``scripts/precompute_scenes.py`` fans the stage across the ClimbingVideos
+    scene DB, where ``sam3`` / ``vggt`` live in their own feature trees.
 
 Run from CLI::
 
@@ -18,14 +30,14 @@ Run from CLI::
         [--obj-ids 0,1] [--hf-repo facebook/sam-3d-body-dinov3] \\
         [--device cuda] [--inference-type full] [--no-overlay]
 
-Inputs (under ``--predictions``, written by upstream stages):
+Inputs:
     sam3/bboxes.npz          tracked bboxes (bboxes_per_obj / legacy bboxes)
     sam3/<obj_id:02d>/       per-frame person masks (one dir per tracked person)
     geometry/transform.npz   VGGT per-frame intrinsics at orig res (preferred)
-    vggt/camera.npz          VGGT intrinsics (fallback)
-    moge2/camera.npz         MoGe2 per-frame intrinsics (fallback)
+    vggt/camera.npz          VGGT intrinsics, denormalized on the fly (fallback)
 
-Outputs (into ``--predictions/sam3d/``):
+Outputs (``sam3d/`` under ``--predictions``, or the manifest ``out_dir`` /
+``--subdir`` in batch mode):
     sam3d/params.npz      per-frame MHR pose/shape params for every tracked
                           person, stacked along a leading axis ``(P, N, ...)``
                           (``object_ids (P,)`` records which SAM 3 id each row is)
@@ -47,7 +59,6 @@ import _pym_preload  # noqa: E402, F401  (must be first — re-execs to fix libs
 
 import argparse  # noqa: E402
 import gc  # noqa: E402
-import importlib.util  # noqa: E402
 import tempfile  # noqa: E402
 from dataclasses import dataclass  # noqa: E402
 
@@ -56,17 +67,9 @@ import numpy as np  # noqa: E402
 import torch  # noqa: E402
 from tqdm import tqdm  # noqa: E402
 
+from tools.geometry.intrinsics import denormalize_K  # noqa: E402
+from tools.precompute_runner import InputItem, SkipItem, run_batch  # noqa: E402
 from tools.source import find_frame_file, resolve_source  # noqa: E402
-
-_SAM3D_ROOT = _REPO_ROOT / "third_party" / "sam-3d-body"
-
-
-def _import_from_sam3d(module_name: str, file_path: Path):
-    """Import a module from sam-3d-body by explicit path (avoids venv 'tools' clash)."""
-    spec = importlib.util.spec_from_file_location(module_name, file_path)
-    mod = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(mod)
-    return mod
 
 
 # Keys to extract from per-person output dict (shapes discovered at runtime).
@@ -122,7 +125,6 @@ class Sam3dBodyEstimator:
         self.device = device
         self.inference_type = inference_type
         self._estimator = None
-        self._fov_estimator = None
 
     def _load_model(self):
         if self._estimator is None:
@@ -137,37 +139,20 @@ class Sam3dBodyEstimator:
             self._estimator = _Estimator(sam_3d_body_model=model, model_cfg=model_cfg)
         return self._estimator
 
-    def _load_fov_estimator(self):
-        if self._fov_estimator is None:
-            fov_mod = _import_from_sam3d(
-                "build_fov_estimator",
-                _SAM3D_ROOT / "tools" / "build_fov_estimator.py",
-            )
-            self._fov_estimator = fov_mod.FOVEstimator(name="moge2", device=self.device)
-        return self._fov_estimator
-
-    def _release_fov_estimator(self):
-        if self._fov_estimator is not None:
-            del self._fov_estimator
-            self._fov_estimator = None
-            gc.collect()
-            if torch.cuda.is_available():
-                torch.cuda.empty_cache()
-
     def _resolve_cam_intrinsics(
-        self, predictions_dir: Path, frame_paths: list[Path], *,
-        H: int, W: int, N: int, frame_indices: np.ndarray,
+        self, *, geometry_npz: Path | None, vggt_npz: Path | None,
+        H: int, W: int, frame_indices: np.ndarray,
     ) -> tuple[list[torch.Tensor], np.ndarray, str]:
         """Per-frame pixel-unit ``(1, 3, 3)`` intrinsics for the whole clip.
 
-        Prefers **VGGT-Omega** intrinsics at the original resolution: the fuse
-        stage's ``geometry/transform.npz`` (``intrinsics_px_orig``), else
-        ``vggt/camera.npz`` denormalized on the fly. Falls back to the MoGe2
-        camera stage (``moge2/camera.npz``), then a one-off MoGe2 frame-0
-        estimate. Returns ``(cam_int_per_frame, frame0_K_np, source_str)``.
+        **VGGT-Omega only** (its intrinsics are scale-invariant, so the
+        up-to-scale ambiguity is irrelevant): prefers the fuse stage's
+        ``geometry/transform.npz`` (``intrinsics_px_orig`` — already at orig
+        res), else ``vggt/camera.npz`` (normalized) denormalized on the fly to
+        ``(H, W)``. Raises if neither VGGT source covers all tracked frames.
+        Returns ``(cam_int_per_frame, frame0_K_np,
+        source_str)``.
         """
-        from tools.adapters.moge2 import denormalize_K
-
         def _from_idx_map(idx2k: dict[int, np.ndarray]) -> list[torch.Tensor] | None:
             """Build the per-frame list iff every tracked frame is covered."""
             if not all(int(fi) in idx2k for fi in frame_indices):
@@ -178,9 +163,8 @@ class Sam3dBodyEstimator:
             ]
 
         # Priority 1: VGGT intrinsics at original resolution (fuse stage output).
-        geo = predictions_dir / "geometry" / "transform.npz"
-        if geo.exists():
-            gd = np.load(geo)
+        if geometry_npz is not None and geometry_npz.exists():
+            gd = np.load(geometry_npz)
             K_orig = np.asarray(gd["intrinsics_px_orig"], dtype=np.float32)  # (M,3,3) px @ orig res
             gi = np.asarray(gd["frame_indices"], dtype=np.int64)
             cam_int_list = _from_idx_map({int(f): K_orig[j] for j, f in enumerate(gi)})
@@ -190,43 +174,21 @@ class Sam3dBodyEstimator:
             print("  [body] geometry/transform.npz doesn't cover all tracked frames — falling back")
 
         # Priority 2: VGGT camera (normalized) → denormalize to (H, W).
-        vggt = predictions_dir / "vggt" / "camera.npz"
-        if vggt.exists():
-            vd = np.load(vggt)
+        if vggt_npz is not None and vggt_npz.exists():
+            vd = np.load(vggt_npz)
             Kn = np.asarray(vd["intrinsics"], dtype=np.float32)             # (M,3,3) normalized
             vi = np.asarray(vd["frame_indices"], dtype=np.int64)
             cam_int_list = _from_idx_map({int(f): denormalize_K(Kn[j], H, W) for j, f in enumerate(vi)})
             if cam_int_list is not None:
                 frame0 = cam_int_list[0].squeeze(0).cpu().numpy().astype(np.float32)
                 return cam_int_list, frame0, "vggt/camera.npz (VGGT, denormalized to orig res)"
-            print("  [body] vggt/camera.npz doesn't cover all tracked frames — falling back")
+            print("  [body] vggt/camera.npz doesn't cover all tracked frames")
 
-        # Priority 3: MoGe2 camera stage (per-frame).
-        cam_npz = predictions_dir / "moge2" / "camera.npz"
-        if cam_npz.exists():
-            cd = np.load(cam_npz)
-            intr_norm = np.asarray(cd["intrinsics"], dtype=np.float32)  # (N, 3, 3) normalized
-            if intr_norm.shape[0] != N:
-                raise RuntimeError(
-                    f"{cam_npz} has {intr_norm.shape[0]} frames but bboxes.npz says {N}"
-                )
-            cam_int_list = [
-                torch.from_numpy(denormalize_K(intr_norm[i], H, W).astype(np.float32)).unsqueeze(0).to(self.device)
-                for i in range(N)
-            ]
-            frame0 = cam_int_list[0].squeeze(0).cpu().numpy().astype(np.float32)
-            return cam_int_list, frame0, "moge2/camera.npz (per-frame fallback)"
-
-        # Priority 4: estimate FOV once on frame 0 and reuse it for every frame.
-        fov_est = self._load_fov_estimator()
-        img0_bgr = cv2.imread(str(frame_paths[0]))
-        if img0_bgr is None:
-            raise RuntimeError(f"cannot read frame {frame_paths[0]}")
-        img0_rgb = cv2.cvtColor(img0_bgr, cv2.COLOR_BGR2RGB)
-        cam_int = fov_est.get_cam_intrinsics(img0_rgb).to(self.device)  # (1, 3, 3)
-        self._release_fov_estimator()
-        frame0 = cam_int.squeeze(0).cpu().numpy().astype(np.float32)
-        return [cam_int] * N, frame0, "MoGe2 frame-0 (last-resort fallback; run camera+fuse for per-frame K)"
+        raise RuntimeError(
+            "no usable VGGT camera: need geometry/transform.npz (intrinsics_px_orig) "
+            "or vggt/camera.npz covering all tracked frames "
+            f"(geometry={geometry_npz}, vggt={vggt_npz})."
+        )
 
     def _resolve_people(
         self, data, masks_dir: Path, obj_ids: list[int] | None,
@@ -261,7 +223,11 @@ class Sam3dBodyEstimator:
     def estimate(
         self,
         source: str | Path,
-        predictions_dir: str | Path,
+        predictions_dir: str | Path | None = None,
+        *,
+        sam3_dir: str | Path | None = None,
+        out_dir: str | Path | None = None,
+        camera_npz: str | Path | None = None,
         render_video: bool = False,
         video_fps: float | None = None,
         obj_ids: list[int] | None = None,
@@ -272,17 +238,38 @@ class Sam3dBodyEstimator:
         along a leading person axis ``(P, N, ...)``. When ``render_video`` is on,
         a single combined overlay is written with every person composited onto
         each frame (one mesh colour per person).
+
+        Paths: pass ``predictions_dir`` (single-clip layout — reads its ``sam3``
+        / ``vggt`` / ``geometry`` siblings, writes ``sam3d/``), or the explicit
+        ``sam3_dir`` (holds ``bboxes.npz`` + ``<obj>/`` masks), ``camera_npz``
+        (a VGGT ``camera.npz``) and ``out_dir`` (batch / manifest layout, where
+        those live in separate feature trees). Explicit paths win.
         """
         source = Path(source)
-        predictions_dir = Path(predictions_dir)
-        sam3d_dir = predictions_dir / "sam3d"
+        pred = Path(predictions_dir) if predictions_dir is not None else None
+        # Explicit paths (batch / manifest) win; else derive from --predictions.
+        if sam3_dir is not None:
+            sam3_dir = Path(sam3_dir)
+        elif pred is not None:
+            sam3_dir = pred / "sam3"
+        else:
+            raise ValueError("estimate() needs predictions_dir or an explicit sam3_dir")
+        sam3d_dir = Path(out_dir) if out_dir is not None else (
+            pred / "sam3d" if pred is not None else None)
+        if sam3d_dir is None:
+            raise ValueError("estimate() needs predictions_dir or an explicit out_dir")
+        # Camera intrinsics are VGGT-only (scale-invariant):
+        # an explicit vggt camera.npz wins, else the geometry/vggt siblings.
+        geometry_npz = (pred / "geometry" / "transform.npz") if pred is not None else None
+        vggt_npz = Path(camera_npz) if camera_npz is not None else (
+            pred / "vggt" / "camera.npz" if pred is not None else None)
 
-        bboxes_path = predictions_dir / "sam3" / "bboxes.npz"
-        masks_dir = predictions_dir / "sam3"
+        bboxes_path = sam3_dir / "bboxes.npz"
+        masks_dir = sam3_dir
         if not bboxes_path.exists():
-            raise FileNotFoundError(f"sam3/bboxes.npz not found in {predictions_dir}")
+            raise FileNotFoundError(f"bboxes.npz not found: {bboxes_path}")
         if not masks_dir.is_dir():
-            raise FileNotFoundError(f"sam3/ not found in {predictions_dir}")
+            raise FileNotFoundError(f"sam3 masks dir not found: {masks_dir}")
 
         data = np.load(bboxes_path, allow_pickle=True)
         frame_indices = data["frame_indices"]  # (N,) int32
@@ -306,7 +293,8 @@ class Sam3dBodyEstimator:
 
             estimator = self._load_model()
             cam_int_list, cam_int_np, cam_source = self._resolve_cam_intrinsics(
-                predictions_dir, frame_paths, H=H, W=W, N=N, frame_indices=frame_indices
+                geometry_npz=geometry_npz, vggt_npz=vggt_npz,
+                H=H, W=W, frame_indices=frame_indices,
             )
             print(f"  camera intrinsics: {cam_source}")
 
@@ -432,6 +420,52 @@ class Sam3dBodyEstimator:
         )
 
 
+class Sam3dBodyStep:
+    """precompute_runner Step: load SAM-3D-Body once, fit each manifest scene.
+
+    Batch / manifest mode for the ClimbingVideos scene DB. Each
+    :class:`InputItem` carries the clip (``source_path``), the output dir
+    (``out_dir``), the sam3 ``bboxes.npz`` (``bboxes_path`` — its parent holds
+    the ``<obj>/`` mask dirs) and the VGGT ``camera.npz`` (``camera_path``).
+    ``--subdir`` picks the subfolder of ``out_dir`` to write into (``.`` → write
+    straight into it, as ``precompute_scenes.py`` does for the stage-first tree).
+    """
+
+    def __init__(self, args: argparse.Namespace):
+        self.args = args
+        self.est = Sam3dBodyEstimator(
+            hf_repo=args.hf_repo,
+            device=args.device,
+            inference_type=args.inference_type,
+        )
+
+    def load(self) -> None:
+        self.est._load_model()
+
+    def release(self) -> None:
+        self.est._estimator = None
+        gc.collect()
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+
+    def process(self, item: InputItem) -> None:
+        subdir = getattr(self.args, "subdir", "sam3d") or "sam3d"
+        out_dir = item.out_dir if subdir in (".", "") else item.out_dir / subdir
+        if self.args.skip_existing and (out_dir / "params.npz").exists():
+            raise SkipItem(f"sam3d already done: {out_dir / 'params.npz'}")
+        if item.bboxes_path is None:
+            raise SkipItem(f"no sam3 bboxes path in manifest for {item.stem}")
+        self.est.estimate(
+            source=item.source_path,
+            sam3_dir=item.bboxes_path.parent,   # bboxes.npz + <obj>/ masks live here
+            camera_npz=item.camera_path,
+            out_dir=out_dir,
+            render_video=self.args.overlay,
+            video_fps=self.args.fps,
+            obj_ids=self.args.obj_ids,
+        )
+
+
 # ------------------------------ CLI -------------------------------------------
 
 
@@ -449,11 +483,28 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     )
     p.add_argument(
         "--source", required=True,
-        help="video file or folder of frames (same source used for tracking)",
+        help="single clip (video / folder of frames / image) for --predictions "
+             "mode, or a .json manifest for --save-dir (batch) mode",
+    )
+    # Mode selector — exactly one of these:
+    p.add_argument(
+        "--predictions", default=None,
+        help="single-clip mode: folder holding sam3/bboxes.npz + sam3/<obj>/ + "
+             "vggt/camera.npz (or geometry/transform.npz); writes sam3d/ here",
     )
     p.add_argument(
-        "--predictions", required=True,
-        help="sam3 + moge2 output folder (contains sam3/bboxes.npz, sam3/<obj>/, moge2/camera.npz)",
+        "--save-dir", type=Path, default=None,
+        help="batch mode: run as a precompute_runner Step over the .json --source "
+             "manifest (per-scene bboxes/camera/out_dir paths); load model once",
+    )
+    p.add_argument(
+        "--subdir", default="sam3d",
+        help="batch mode: output subfolder under each manifest out_dir "
+             "('.' writes straight into it; default: sam3d)",
+    )
+    p.add_argument(
+        "--skip-existing", action="store_true",
+        help="batch mode: skip scenes whose sam3d/params.npz already exists",
     )
     p.add_argument(
         "--obj-ids", type=_parse_obj_ids, default=None,
@@ -484,6 +535,17 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
 
 def main(argv: list[str] | None = None) -> int:
     args = _parse_args(argv)
+
+    # Batch / manifest mode: precompute_runner Step (load model once, sweep scenes).
+    if args.save_dir is not None:
+        return run_batch(Sam3dBodyStep(args), args)
+
+    # Single-clip mode.
+    if args.predictions is None:
+        raise SystemExit(
+            "estimate_body_sam3d: pass --predictions <clip-dir> (single clip) "
+            "or --save-dir <dir> with a .json --source manifest (batch)."
+        )
     est = Sam3dBodyEstimator(
         hf_repo=args.hf_repo,
         device=args.device,

@@ -48,6 +48,10 @@ JSON prompt schema (``--prompts`` file or per-item ``prompts`` field) — list o
 
     {"label": str?, "text": str, "confidence": float?, "top_k": int?}
     {"label": str?, "bbox": [x1, y1, x2, y2]}
+    {"label": str?, "select_bbox": [x1, y1, x2, y2], "text": str?, "iou_thresh": float?}
+        # text-ground `text` (default "person") on frame 0, keep the detection
+        # whose mask best matches select_bbox, then track by that mask (falls
+        # back to a plain bbox seed when nothing clears iou_thresh)
     {"label": str?, "mask": "path/to/mask.png"}
     {"label": str?, "points": {"positive": [[x,y],...], "negative": [[x,y],...]}}
 
@@ -190,6 +194,20 @@ def _mask_to_bbox_xyxy(mask: np.ndarray) -> np.ndarray:
     return np.array(
         [xs.min(), ys.min(), xs.max() + 1, ys.max() + 1], dtype=np.int32
     )
+
+
+def _bbox_iou(a, b) -> float:
+    """IoU of two xyxy boxes (pixel coords). 0 when disjoint or degenerate."""
+    ax1, ay1, ax2, ay2 = (float(v) for v in a)
+    bx1, by1, bx2, by2 = (float(v) for v in b)
+    iw = max(0.0, min(ax2, bx2) - max(ax1, bx1))
+    ih = max(0.0, min(ay2, by2) - max(ay1, by1))
+    inter = iw * ih
+    if inter <= 0.0:
+        return 0.0
+    union = max(0.0, ax2 - ax1) * max(0.0, ay2 - ay1) \
+        + max(0.0, bx2 - bx1) * max(0.0, by2 - by1) - inter
+    return float(inter / union) if union > 0.0 else 0.0
 
 
 def _load_mask_file(path: Path) -> np.ndarray:
@@ -451,6 +469,42 @@ class Sam3ObjectTracker:
             acc = m.copy() if acc is None else np.logical_or(acc, m)
         return acc
 
+    def _grounding_select_by_bbox(
+        self,
+        frame_path: Path,
+        text: str,
+        sel_bbox: list[float],
+        confidence: float,
+        min_area_frac: float,
+        iou_thresh: float,
+    ) -> np.ndarray | None:
+        """Text-ground ``text`` on frame 0, return the detection best matching
+        ``sel_bbox`` — or ``None`` when nothing clears ``iou_thresh``.
+
+        This is the robust seed: rather than shape the mask from a (possibly
+        loose or noisy) input box, SAM 3 detects every ``"person"`` on the frame
+        itself, and the external box (e.g. a YOLO human-of-interest track) only
+        *selects* which detection to keep — by highest bbox IoU. The returned
+        mask is a clean SAM 3 person silhouette, then tracked by mask. Returns
+        ``None`` (caller falls back to a plain box seed) when the target isn't
+        grounded — e.g. a fade-in / black seed frame.
+        """
+        try:
+            masks, _labels = self._grounding_for_text(
+                frame_path, text, confidence, top_k=0,
+                default_label=None, min_area_frac=min_area_frac,
+            )
+        except RuntimeError:
+            return None  # nothing grounded on this frame
+
+        best_mask: np.ndarray | None = None
+        best_iou = 0.0
+        for m in masks:
+            iou = _bbox_iou(_mask_to_bbox_xyxy(m), sel_bbox)
+            if iou > best_iou:
+                best_mask, best_iou = m, iou
+        return best_mask if best_iou >= iou_thresh else None
+
     def _resolve_internal_prompts(
         self,
         prompt_list: list[dict],
@@ -479,7 +533,10 @@ class Sam3ObjectTracker:
 
         for entry in prompt_list:
             label = entry.get("label")
-            if "text" in entry:
+            # A ``select_bbox`` entry also carries a ``text`` phrase (the class to
+            # ground), so it must be dispatched to its own branch below rather
+            # than the plain-text-grounding branch.
+            if "text" in entry and "select_bbox" not in entry:
                 detected_masks, detected_labels = self._grounding_for_text(
                     frame0,
                     entry["text"],
@@ -537,8 +594,50 @@ class Sam3ObjectTracker:
                     raise ValueError(f"points entry needs ≥1 positive point: {entry}")
                 internal.append(("points", (pos, neg)))
                 labels.append(label or "point-object")
+            elif "select_bbox" in entry:
+                # Text-ground `text` (default "person"), then keep the detection
+                # whose mask best matches `select_bbox` (external selector, e.g. a
+                # YOLO track box) and track that mask. Degrades to text+box
+                # geometric grounding, then a raw box, when nothing matches.
+                sel = entry["select_bbox"]
+                if len(sel) != 4:
+                    raise ValueError(f"select_bbox entry needs 4 values (xyxy), got {sel}")
+                sel = [float(v) for v in sel]
+                grounded = self._grounding_select_by_bbox(
+                    frame0,
+                    text=entry.get("text", "person"),
+                    sel_bbox=sel,
+                    confidence=entry.get("confidence", self.args.confidence),
+                    min_area_frac=entry.get("min_area_frac", self.args.min_area_frac),
+                    iou_thresh=entry.get("iou_thresh", 0.2),
+                )
+                if grounded is None:
+                    # Graceful degradation: nothing matched (e.g. a fade-in seed
+                    # frame). Try the geometric text+box grounding the plain
+                    # "bbox" prompt uses — strictly ≥ a raw box seed — before
+                    # falling back to the raw box itself.
+                    grounded = self._grounding_for_bbox_text(
+                        frame0, str(label or entry.get("text", "person")), sel,
+                        entry.get("confidence", self.args.confidence),
+                    )
+                    print(
+                        f"  [sam3] select_bbox: no '{entry.get('text', 'person')}' "
+                        f"detection matched {sel} (IoU < thresh) — "
+                        + ("using text+box grounding" if grounded is not None
+                           else "falling back to raw bbox seed")
+                    )
+                if grounded is not None:
+                    if grounded.shape != (H, W):
+                        grounded = _resize_mask_to(grounded, (H, W))
+                    internal.append(("mask", torch.from_numpy(grounded.astype(np.float32))))
+                    labels.append(label or "person")
+                else:
+                    internal.append(("bbox", tuple(sel)))
+                    labels.append(label or "person")
             else:
-                raise ValueError(f"prompt entry has no text/bbox/mask/points: {entry}")
+                raise ValueError(
+                    f"prompt entry has no text/bbox/select_bbox/mask/points: {entry}"
+                )
         return internal, labels
 
     # ------- single part propagation -------
@@ -628,7 +727,12 @@ class Sam3ObjectTracker:
 
     def process(self, item: InputItem) -> None:
         out_dir = item.out_dir
-        sam3_dir = out_dir / "sam3"
+        # ``--masks-subdir`` chooses where SAM 3 outputs land under out_dir.
+        # Default "sam3" gives the usual ``out/<stem>/sam3/…`` tree; "." writes
+        # masks/overlay/bboxes.npz straight into out_dir (the DB
+        # ``features/sam3/<shard>/<scene>/…`` layout).
+        subdir = getattr(self.args, "masks_subdir", "sam3") or "sam3"
+        sam3_dir = out_dir if subdir in (".", "") else out_dir / subdir
         if self.args.skip_existing and (sam3_dir / "bboxes.npz").exists():
             raise SkipItem(f"bboxes.npz exists: {sam3_dir / 'bboxes.npz'}")
         out_dir.mkdir(parents=True, exist_ok=True)
@@ -849,6 +953,12 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     p.add_argument(
         "--checkpoint", type=str, default=None,
         help="path to SAM 3 .pt checkpoint (default: HuggingFace download).",
+    )
+    p.add_argument(
+        "--masks-subdir", default="sam3",
+        help='subdir under each item out_dir for SAM 3 outputs (default: "sam3", '
+             'giving out/<stem>/sam3/…). Pass "." to write masks/overlay/bboxes.npz '
+             'directly into out_dir — used by the DB features/sam3/<shard>/<scene>/ layout.',
     )
     return p.parse_args(argv)
 

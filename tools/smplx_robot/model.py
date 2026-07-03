@@ -1,7 +1,7 @@
 """Build a BetterRobot model for the SMPL-X-mid body + q remapping.
 
-Mirrors ``tools.robot_motion.motion`` (``compute_smpl_joint_offsets`` /
-``remap_smpl_q_to_model``) for the 52-joint :class:`SMPLXMid`. The robot model
+Computes the 52-joint :class:`SMPLXMid` joint offsets and remaps ``q`` between
+``better_human`` kintree order and BetterRobot's DFS order. The robot model
 exists purely so the kinematic stage can measure acceleration / jerk smoothness
 with BetterRobot's exact Lie ``model.difference``; the posed mesh and joints
 used by the visual losses come from ``better_human`` directly.

@@ -70,7 +70,8 @@ class CameraMoge2Step:
                 torch.cuda.empty_cache()
 
     def process(self, item: InputItem) -> None:
-        moge2_dir = item.out_dir / "moge2"
+        subdir = getattr(self.args, "subdir", "moge2") or "moge2"
+        moge2_dir = item.out_dir if subdir in (".", "") else item.out_dir / subdir
         out_npz = moge2_dir / "camera.npz"
         if self.args.skip_existing and out_npz.exists():
             raise SkipItem(f"moge2 already done: {out_npz}")
@@ -80,6 +81,9 @@ class CameraMoge2Step:
 
         with tempfile.TemporaryDirectory(prefix="moge2_frames_") as tmp_root:
             frame_paths, _ = resolve_source(item.source_path, Path(tmp_root))
+            max_frames = getattr(self.args, "max_frames", 0) or 0
+            if max_frames > 0:
+                frame_paths = frame_paths[:max_frames]  # first N frames only
             n = len(frame_paths)
             if n == 0:
                 raise SkipItem(f"no frames resolved from {item.source_path}")
@@ -143,6 +147,12 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     p.set_defaults(dtype="fp16")
     p.add_argument("--model", default=DEFAULT_MODEL,
                    help=f"MoGe2 HuggingFace model id (default: {DEFAULT_MODEL})")
+    p.add_argument("--subdir", default="moge2",
+                   help="output subfolder under <save-dir>/<stem>/ ('.' writes "
+                        "directly into it; default: moge2)")
+    p.add_argument("--max-frames", type=int, default=0,
+                   help="process only the first N frames (0 = all, the default); "
+                        "N=1 gives a single first-frame camera + depth.")
     p.add_argument("--save-depth", action="store_true",
                    help="also write per-frame depth/points to moge2/depth/frame_NNNNNN.npz")
     p.add_argument("--edge-rtol", type=float, default=0.04,

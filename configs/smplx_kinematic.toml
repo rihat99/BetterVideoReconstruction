@@ -6,80 +6,139 @@
 # inline default in the stage; override only what you care about.
 
 [weights]
-# Gradient-balanced so every term moves the optimizer. reprojection is in
-# pixels (~30 at init, large gradient), chamfer in metres (~1.8 at init),
-# pose_prior is 1-(q·q0)^2 (~0 at init, grows as the pose drifts).
-#
-# pose_prior is high on purpose. Reprojection (to the correctly-mapped Goliath-308
-# keypoints — see tools/smplx_optim/keypoints.py) only constrains the image plane,
-# so chamfer to the noisy front-only depth cloud is free to wrench joints in the
-# **depth** direction (~70° at pp=50) — unnatural in 3D though invisible in 2D. A
-# strong joints-only prior holds the pose natural while the root (translation+
-# orientation, excluded from the prior) stays free, so chamfer+reprojection still
-# place/track the body. (With the keypoint correspondence fixed, init reprojection
-# is ~5px and the optimizer no longer fights the converter's good per-frame pose.)
-#
-# chamfer is deliberately MODEST (reprojection is the trusted signal). The metric
-# human cloud is wholesale-wrong on some frames — the image-consistent depth is
-# 1–3 m from the cloud (per-frame depth scale error / mask leakage) — where strong
-# chamfer drags the body off the (good ~5px) image fit. Because good-frame depth
-# error (~15 cm) is ~10× smaller than bad-frame error, no single chamfer weight
-# both seats the body on the good clouds and ignores the bad ones; we bias toward
-# the image. At chamfer=1.0 the body still sits on the cloud where depth is good
-# (~23 cm) but reprojection wins where it isn't (so the body tracks the image,
-# and absolute depth there follows smoothness — the honest monocular answer).
-reprojection = 0.2
-chamfer = 1.0
-pose_prior = 400.0
-# Gentle pull of the ROOT ORIENTATION toward the converter's per-frame value
-# (1-(q·q0)^2 on q[3:7]). The root SE3 is excluded from pose_prior so the body
-# can be placed/oriented freely, but that leaves orientation undamped at the clip
-# boundary (the smoothness stencil constrains end frames least), where it ran away
-# ~90° and broke the image fit. The converter orientation reprojects at ~5px, so a
-# gentle pull toward it stops the runaway while still allowing few-degree
-# refinement. Root translation stays free (depth placement unaffected).
+# Reprojection GM costs are unitless ρ(r)=r²/(s²+r²) ∈ [0,1), not pixels — hence
+# the large weights; chamfer is in metres, pose_prior is 1-(q·q0)².
+reproj_sapiens = 8.0    # Sapiens Goliath-308 reprojection: downweighted independent image cross-check.
+# Primary image anchor: each body joint pinned to its OWN converter-pose projection
+# (identity correspondence, no detector noise). Holds the body image-locked so chamfer
+# can seat depth without sliding it off-image; not an independent observation, so it
+# preserves the (good) converter 2D but can't correct its errors.
+reproj_init = 30.0
+# chamfer OWNS DEPTH: reprojection is depth-ambiguous (pins the image plane, not
+# camera-ray distance). Too small ⇒ body floats off the cloud at its apparent-size
+# depth; too large ⇒ wrenches the body off-image to chase a locally-wrong cloud.
+chamfer = 10.0
+# Gentle constant push of the body away from the camera (+z_cam), depth frames only, so
+# reprojection + chamfer settle absolute (not apparent-size) depth. Set 0 if it fights the fit.
+depth_push = 2.0
+# Scene-penetration repulsion (refine stage): pushes the mesh out of the static scene
+# cloud (geometry/scene.npz) via a point-cloud SDF (nearest point + PCA normal sign the
+# distance; soft dead-zone + Huber ramp, see [penetration]). Corrective — strong enough
+# to clear the wall, weak enough not to overpower the image/depth fit.
+penetration = 2000.0
+# Velocity-gated contact repulsion (refine stage): pushes a contacting vertex off the
+# wall in proportion to its joint's speed (a limb clipping through mid-swing), ~0 for a
+# planted grip. OFF by default — weight 0 skips the whole BetterRobot-Jacobian machinery
+# (no per-person model build). A repulsion, so it only LOWERS the contact rate; set > 0
+# (knee ≈ 0.3) only to clean up fast clip-throughs.
+contact_velocity = 0.0
+# Scene-contact ATTRACTION (refine stage): the inverse of penetration — pulls body verts
+# hovering just outside the wall (0 < s < [contact_attraction].band_m) ONTO it, drawing
+# "close but not touching" parts into contact. The term that RAISES the contact rate. In
+# tension with chamfer: too small ⇒ stays off the wall, too large ⇒ flattens onto it. 0 disables it.
+contact_attraction = 10.0
+# Strong joints-only pose prior: holds the pose natural while chamfer (to the noisy
+# front-only depth cloud) tries to wrench joints in the DEPTH direction. The root is
+# excluded so it stays free to place the body.
+pose_prior = 300.0
+# Gentle pull of the ROOT ORIENTATION toward the converter's per-frame value (the root
+# is excluded from pose_prior). Damps the orientation runaway the smoothness stencil
+# leaves under-constrained at the clip boundary; root translation stays free.
 orient_prior = 50.0
-# Gentle pull of the global body scale toward 1.0 ((s-1)^2). Deliberately weak:
-# the depth cloud can be ~30% off the body's metric size, so scale must be free
-# to make a large correction — this just regularizes scale when depth is scarce.
-scale_prior = 5.0
 
 [smoothness]
-# Penalize raw frame-to-frame tangent differences (dt folded into the weights).
-# Jerk dominates acceleration; the root moves more freely than the joints.
-accel_root = 3.0
-accel_joint = 6.0
-jerk_root = 15.0
-jerk_joint = 30.0
+# Penalize raw frame-to-frame tangent differences (dt folded into the weights). Jerk
+# dominates acceleration; the root moves more freely than the joints. Higher smooths
+# per-frame jitter but over-smooths fast climbing moves — raise/lower to taste.
+accel_root = 12.0
+accel_joint = 24.0
+jerk_root = 150.0
+jerk_joint = 250.0
 
 [optimizer]
-# Adam (not L-BFGS): robust to the heterogeneous gradient scales here.
-# Coarse-to-fine: stage 1 ("placement") moves only root translation + global
-# scale (pose frozen at the converter's per-frame estimate) so the body finds
-# the right depth/size rigidly; stage 2 ("full") unfreezes orientation + joints
-# and refines locally. This avoids the local minimum where the joints deform to
-# chase wrong-depth chamfer (off-image AND contorted).
+# Adam warm-up → optional L-BFGS polish. Adam's per-coordinate step copes with the
+# heterogeneous gradient scales (metre root translation vs joint quaternions, pixel
+# reproj vs metre chamfer) that stall L-BFGS from a cold start. Coarse-to-fine: the three
+# Adam stages place then refine the body (see the per-key notes); L-BFGS then polishes
+# with curvature + strong-Wolfe. Adam already reaches the practical optimum, so L-BFGS is
+# a cheap trim — set iters_lbfgs=0 to skip it.
 lr = 0.01
-iters_stage1 = 150 # stage 1: root translation + scale only
-iters = 300        # stage 2: full (translation + orientation + joints + scale)
-lr_decay = 0.1   # MultiStepLR gamma at 1/2 and 3/4 of each stage's iters
-scale_init = 1.0 # initial global body scale (1.0 = converter size)
-lr_scale = 0.01  # lr for the global scale leaf (its own param group)
+iters_stage1 = 150 # Adam "root":   root SE3 (transl+orient), joints frozen
+iters_stage2 = 300 # Adam "full":   all DOFs, kinematic fit, no scene terms
+iters_stage3 = 200 # Adam "refine": all DOFs + penetration + velocity-gated contact
+lr_decay = 0.1   # MultiStepLR gamma at 1/2 and 3/4 of each Adam stage's iters
+iters_lbfgs = 30   # L-BFGS polish iterations after the Adam warm-up (0 disables it)
+lr_lbfgs = 1.0     # L-BFGS step scale (the strong-Wolfe line search refines it per step)
+lbfgs_history = 10 # L-BFGS history size (curvature pairs kept)
 
 [chamfer]
 conf_thresh = 0.1       # keep VGGT human points above this confidence
 max_points = 1500       # cap depth points per frame (uniform subsample)
 vertex_subsample = 1000 # posed-vertex subsample fed to chamfer / visibility
+# How many frames share one chunked-batched cdist (chamfer + penetration) — collapses
+# the per-frame kernel launches. Lower only if a long clip runs low on VRAM.
+chunk = 16
 
 [keypoints]
+# Secondary Sapiens reprojection (reproj_sapiens). No per-point uncertainty, so a
+# single uniform Geman-McClure scale; the detection score is the per-point weight.
 score_thresh = 0.3      # ignore Sapiens keypoints below this score
-include_hands = false   # add fingertip keypoints to reprojection (chamfer carries hands)
-# Truncate per-keypoint reprojection error at this many pixels (outlier guard):
-# with the correspondence correct, well-tracked joints reproject at <~12px, so
-# this only zeroes the gradient of gross outliers — occluded / mis-detected
-# keypoints on a bad frame — keeping a single bad detection from yanking the pose.
-# 0 disables truncation.
-robust_px = 40.0
+include_hands = false   # add fingertip keypoints to reprojection
+# GM robust scale (px): a keypoint off by ≫ this saturates (bounded cost) — a smooth
+# outlier guard rejecting gross mis-detections while well-tracked joints (<~12px) pull.
+gm_scale_px = 40.0
+
+[reproj_init]
+# GM robust scale (px) for the init-projection anchor. Kept loose (30px) so a legitimate
+# 3D pull (chamfer / scene terms) can drag a joint in the image without being pinned back
+# at the converter 2D; larger ⇒ stiffer / trusts the converter 2D harder.
+gm_scale_px = 30.0
+
+[penetration]
+# Scene-penetration SDF knobs (weight [weights].penetration). REFINE stage only, so the
+# body's depth is already seated; per-frame candidates are pruned to the body box, then
+# the nearest scene point + its outward normal give a signed distance.
+conf_thresh = 0.1      # trust scene points above this VGGT depth confidence
+margin_m = 0.01        # allowed penetration depth (dead-zone), metres
+max_dist_m = 0.15      # ignore verts farther than this from any scene point (not near a surface)
+max_pen_m = 0.10       # occlusion gate: ignore "penetration" deeper than this (wrong correspondence)
+huber_m = 0.02         # penetration excess at which the penalty switches quad→linear (robust tail)
+prune_margin_m = 0.30  # per-frame scene-candidate AABB margin (covers the body's refine-stage motion)
+max_candidates = 1500  # cap per-frame scene candidates to the nearest-to-box (bounds the batched cdist)
+normal_k = 16          # kNN neighbourhood for PCA scene-normal estimation
+
+[contact_velocity]
+# Velocity-gated contact-repulsion knobs (weight [weights].contact_velocity). REFINE
+# stage only; reuses [penetration]'s SDF. Per contacting vertex the loss is
+#   (vel / vel_ref)^vel_exp · relu(contact_band_m − sdf),
+# with `vel` the nearest joint's LOCAL linear speed (BetterRobot Jacobian). The gate is
+# ≈0 for a planted grip, large for a limb clipping the wall mid-swing.
+conf_thresh = 0.1       # trust scene points above this VGGT depth confidence
+max_dist_m = 0.15       # ignore verts farther than this from any scene point
+max_pen_m = 0.10        # occlusion gate: ignore "penetration" deeper than this
+contact_band_m = 0.03   # signed-distance band counted as contact (inside, or within this of the surface)
+vel_ref = 1.0           # velocity scale (m/s); folds into the weight (gate is dimensionless)
+vel_exp = 2.0           # gate exponent (>1 ⇒ super-linear: slow contacts ~free, fast ones repelled hard)
+
+[contact_attraction]
+# Scene-contact attraction knobs (weight [weights].contact_attraction). REFINE stage
+# only; reuses [penetration]'s SDF. A vertex just outside the wall (0 < s < band_m) is
+# pulled onto it; s ≤ 0 is left to [penetration], s ≥ band_m to chamfer, so the two
+# partition the signed-distance axis and never fight.
+conf_thresh = 0.1      # trust scene points above this VGGT depth confidence
+band_m = 0.10          # attract verts within this signed distance of the wall (the "near-wall" band)
+max_dist_m = 0.15      # ignore verts farther than this from any scene point (cloud hole / not a surface)
+
+[contacts]
+# Scene-contact estimation (scripts/stages/estimate_contacts.py) — a separate one-shot
+# stage marking per-joint scene contact on the optimized bodies, reusing the penetration
+# SDF (no gradients). A vertex is in contact when its signed distance is below
+# close_thresh_m; a joint if any vertex nearest it (rest-pose center) is.
+close_thresh_m = 0.02  # "just outside" band counted as contact (≈ penetration dead-zone; soft tissue + voxel quantization)
+max_dist_m = 0.10      # deep-occluder guard: ignore "penetration" deeper than this (wrong correspondence)
+conf_thresh = 0.1      # trust scene points above this VGGT depth confidence
+normal_k = 16          # kNN for PCA scene-normal estimation (as [penetration])
+prune_margin_m = 0.10  # per-frame scene-AABB margin for the SDF nearest-neighbour search
 
 [runtime]
 device = "cuda"

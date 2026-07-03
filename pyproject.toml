@@ -1,7 +1,7 @@
 [project]
 name = "better-video-reconstruction"
 version = "0.1.0"
-description = "Video human motion + contact-force reconstruction (SAM3 track → MoGe2 camera → SAM-3D-Body → MHR→SMPL → kinematic + dynamics optimisation)"
+description = "Monocular-video human reconstruction (SAM3 track → VGGT camera → SAM-3D-Body → MHR→SMPL-X → visually-guided kinematic refinement)"
 requires-python = ">=3.12"
 dependencies = [
     "better-robot",
@@ -9,7 +9,7 @@ dependencies = [
     # MHR (Momentum Human Rig) — submodule
     "mhr",
     "pymomentum-gpu",
-    # pypose: SE3/SO3 tangent ops used by tools/robot_motion (motion packing).
+    # pypose: SE3/SO3 tangent ops (Lie-group manifold math).
     "pypose",
     # Force torch/torchvision to match pymomentum-gpu's cu129 ABI (see uv.sources below).
     "torch>=2.8,<2.9",
@@ -52,14 +52,18 @@ dependencies = [
     "pycocotools",
     "tensorboard",
     "huggingface_hub",
-    # MoGe2 (metric depth + camera intrinsics) — submodule.
-    "moge",
-    # VGGT-Omega (multi-view camera/geometry) — submodule. Placeholder stage today;
-    # vendored + installed so the env is complete (deps are already satisfied above).
+    # VGGT-Omega (multi-view camera + geometry) — submodule, backs estimate_camera_vggt.
     "vggt-omega",
+    # utils3d — depth-map edge filter used by tools/geometry/clean.py (previously
+    # pulled transitively via MoGe; pinned directly now that MoGe is gone).
+    "utils3d @ git+https://github.com/EasternJournalist/utils3d.git@3fab839f0be9931dac7c8488eb0e1600c236e183",
+    # GeoCalib (cvg, ECCV'24) — single-image camera + gravity calibration, submodule.
+    # Backs estimate_gravity_geocalib.py: the camera moves/tilts so gravity can't come
+    # from it; GeoCalib recovers it per frame. Inference-only deps (adds kornia).
+    "geocalib",
     "scikit-learn>=1.4",
-    # Gemma 4 VLM (placeholder stage tools/adapters/gemma_vlm.py): transformers +
-    # accelerate (device_map="auto") + bitsandbytes (4-bit / 8-bit quantization).
+    # Gemma 4 VLM (legacy/ triage stage): transformers + accelerate (device_map="auto")
+    # + bitsandbytes (4/8-bit quantization). Kept installed pending that stage's revival.
     "transformers>=4.50",
     "accelerate>=0.30",
     "bitsandbytes>=0.46",
@@ -71,6 +75,7 @@ dependencies = [
     # sam3 still uses pkg_resources, which setuptools 80+ no longer ships by
     # default; pin below that cutoff so ``import pkg_resources`` keeps working.
     "setuptools<80",
+    "open3d>=0.19.0",
 ]
 
 [[tool.uv.index]]
@@ -84,9 +89,9 @@ better-human = { path = "../better_human", editable = true }
 mhr = { path = "third_party/MHR", editable = true }
 sam3 = { path = "third_party/sam3", editable = true }
 sapiens = { path = "third_party/sapiens2", editable = true }
-# MoGe and VGGT-Omega are not on PyPI — install editable from the submodules.
-moge = { path = "third_party/moge", editable = true }
+# VGGT-Omega is not on PyPI — install editable from the submodule.
 vggt-omega = { path = "third_party/vggt-omega", editable = true }
+geocalib = { path = "third_party/geocalib", editable = true }
 # pymomentum-gpu wheels are built against PyTorch cu129 — force torch/torchvision
 # to the matching CUDA 12.9 build to avoid ABI segfaults (momentum issue #939).
 torch = { index = "pytorch-cu129" }

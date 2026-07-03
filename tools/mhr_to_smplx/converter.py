@@ -1,11 +1,10 @@
 """MHR → SMPL-X conversion using the standard ``smplx`` PyPI package.
 
-Mirrors :mod:`tools.mhr_to_smpl.converter` but targets SMPL-X (10475 vertices,
-21 body joints, 15 + 15 hand joints, separate jaw/eye/expression channels).
-The ``better_human.smpl.SMPLX`` implementation is incomplete (no jaw/eye/face
-deformation) so we lean on pip ``smplx`` here as a temporary fix; downstream
-``q`` packing for BetterRobot is intentionally deferred until we have a
-matching kinematic chain in BetterRobot.
+Targets SMPL-X (10475 vertices, 21 body joints, 15 + 15 hand joints, separate
+jaw/eye/expression channels). ``better_human.smpl.SMPLX`` has no jaw/eye/face
+deformation yet, so we lean on the pip ``smplx`` package here. The SMPL-X
+kinematic ``q`` packing lives downstream in ``optimize_smplx`` (via
+``tools.smplx_robot``).
 
 The fitting pipeline matches the SMPL converter's three-stage Adam:
 

@@ -1,0 +1,116 @@
+# Annotation-guided SMPL-X kinematic refinement — STAGE 2 (scripts/stages/optimize_smplx_2.py).
+#
+# Continues refining the kinematic result (sam3d/smplx_kinematic.npz) with the MANUAL
+# per-joint contact annotation (data/<stem>.npz, from BetterContactAnnotator). Runs the
+# kinematic stage's visual losses plus three annotation-driven terms that replace the
+# heuristic band-attraction with ground truth (see the [ann_*] sections). Most fields
+# match configs/smplx_kinematic.toml — see it for the shared-term rationale; only the
+# stage-2 specifics are commented here.
+
+[weights]
+reproj_sapiens = 8.0
+reproj_init = 30.0
+chamfer = 10.0
+depth_push = 2.0
+# General scene penetration (ALL verts) — kept ON so the body avoids the wall everywhere,
+# including unlabeled joints. ann_repulsion ADDS to this on no-contact verts.
+penetration = 2000.0
+# Heuristic band-attraction — OFF in stage 2: the annotation drives contact now
+# (replaced by ann_attraction, which acts only on joints marked in contact).
+contact_attraction = 0.0
+contact_velocity = 0.0
+# ── annotation-driven terms (stage 2 only) ───────────────────────────────────
+# Mean outside-gap (m) of IN-CONTACT verts pulled onto the wall — like the heuristic
+# contact_attraction but a touch stronger (it acts on trusted ground-truth contacts).
+ann_attraction = 20.0
+# Huber of penetration-excess (m) of NO-CONTACT verts, zero dead-zone — stronger than the
+# general penetration so falsely-snapped contacts are pushed clear.
+ann_repulsion = 4000.0
+# Mean squared world displacement (m²/step, fps² folded in) of IN-CONTACT joints (a
+# planted grip should be ~stationary). Small loss value, so the weight is large.
+ann_velocity = 500.0
+pose_prior = 300.0
+orient_prior = 50.0
+
+[smoothness]
+accel_root = 12.0
+accel_joint = 24.0
+jerk_root = 150.0
+jerk_joint = 250.0
+
+[optimizer]
+# Leaner schedule than the kinematic stage: the init is ALREADY the converged kinematic
+# fit, so the root/full stages only re-settle gently; the work is in the refine stage.
+lr = 0.01
+iters_stage1 = 20  # Adam "root":   root SE3 (transl+orient), joints frozen (gentle re-settle)
+iters_stage2 = 80  # Adam "full":   all DOFs, kinematic fit, no scene terms
+iters_stage3 = 250 # Adam "refine": all DOFs + general penetration + annotation contact terms
+lr_decay = 0.1
+iters_lbfgs = 30
+lr_lbfgs = 1.0
+lbfgs_history = 10
+
+[chamfer]
+conf_thresh = 0.1
+max_points = 1500
+vertex_subsample = 1000
+chunk = 16
+
+[keypoints]
+score_thresh = 0.3
+include_hands = false
+gm_scale_px = 40.0
+
+[reproj_init]
+gm_scale_px = 30.0
+
+[penetration]
+conf_thresh = 0.1
+margin_m = 0.01
+max_dist_m = 0.15
+max_pen_m = 0.10
+huber_m = 0.02
+prune_margin_m = 0.30
+max_candidates = 1500
+normal_k = 16
+
+[contact_velocity]
+conf_thresh = 0.1
+max_dist_m = 0.15
+max_pen_m = 0.10
+contact_band_m = 0.03
+vel_ref = 1.0
+vel_exp = 2.0
+
+[contact_attraction]
+conf_thresh = 0.1
+band_m = 0.10
+max_dist_m = 0.15
+
+[ann_attraction]
+# Real attraction on IN-CONTACT verts: pull onto the nearest scene point from any
+# plausible distance (we KNOW it touches), but capped by max_dist_m so a labeled joint
+# near no surface isn't yanked to a far wrong cluster.
+conf_thresh = 0.1   # trust scene points above this VGGT depth confidence
+band_m = 0.30       # pull in-contact verts within this signed distance onto the wall (wide = "real")
+max_dist_m = 0.30   # but only if a scene point is within this (else no nearby surface to touch)
+
+[ann_repulsion]
+# Push NO-CONTACT verts to a CLEARANCE outside the wall, not merely out of penetration:
+# estimate_contacts still counts a vertex within close_thresh_m (2cm) as contact, so
+# clearance_m must exceed that to stop it registering.
+conf_thresh = 0.1   # trust scene points above this VGGT depth confidence
+clearance_m = 0.03  # push no-contact verts to >= this signed distance outside the wall (> 2cm contact thresh)
+max_dist_m = 0.15   # ignore verts farther than this from any scene point
+max_pen_m = 0.10    # occlusion gate: ignore "penetration" deeper than this (wrong correspondence)
+huber_m = 0.02      # shortfall at which the penalty switches quad→linear
+
+[contacts]
+close_thresh_m = 0.02
+max_dist_m = 0.10
+conf_thresh = 0.1
+normal_k = 16
+prune_margin_m = 0.10
+
+[runtime]
+device = "cuda"

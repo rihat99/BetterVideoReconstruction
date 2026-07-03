@@ -33,7 +33,12 @@ Source forms accepted by :func:`iter_inputs`:
     overrides the default ``<save_dir>/<source.stem>/``), ``prompts``
     (optional list passed through as :attr:`InputItem.prompts` — used by
     steps like ``track_objects_sam3.py`` for per-item prompt overrides;
-    ignored by steps that don't read it)
+    ignored by steps that don't read it), ``bboxes`` (optional path passed
+    through as :attr:`InputItem.bboxes_path` — a per-item bboxes.npz for the
+    top-down pose / body steps; ignored by steps that don't read it),
+    ``camera`` (optional path passed through as :attr:`InputItem.camera_path`
+    — a per-item camera.npz for the body step; ignored by steps that don't
+    read it)
 """
 from __future__ import annotations
 
@@ -58,9 +63,11 @@ class InputItem:
     """One unit of work for a precompute Step."""
 
     source_path: Path
-    out_dir: Path                      # <save_dir>/<source.stem>/ unless overridden by manifest
+    out_dir: Path                       # <save_dir>/<source.stem>/ unless overridden by manifest
     mask_path: Path | None = None
-    prompts: list[dict] | None = None  # opaque per-item prompt list — only some steps read this
+    prompts: list[dict] | None = None   # opaque per-item prompt list — only some steps read this
+    bboxes_path: Path | None = None     # opaque per-item bboxes.npz — only some steps (pose/body) read this
+    camera_path: Path | None = None     # opaque per-item camera.npz — only some steps (body) read this
 
     @property
     def stem(self) -> str:
@@ -150,7 +157,10 @@ def iter_inputs(
             src = Path(entry[src_key])
             out_dir = Path(entry["out_dir"]) if "out_dir" in entry else save_dir / src.stem
             entry_mask = Path(entry["mask"]) if "mask" in entry else _resolve_mask(src, mask, mask_dir)
-            yield InputItem(src, out_dir, entry_mask, prompts=entry.get("prompts"))
+            entry_bboxes = Path(entry["bboxes"]) if "bboxes" in entry else None
+            entry_camera = Path(entry["camera"]) if "camera" in entry else None
+            yield InputItem(src, out_dir, entry_mask, prompts=entry.get("prompts"),
+                            bboxes_path=entry_bboxes, camera_path=entry_camera)
         return
     if suffix == ".txt":
         for src in _read_txt_manifest(src_path):

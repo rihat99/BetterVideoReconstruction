@@ -1,8 +1,7 @@
 """Convert SAM-3D-Body MHR predictions to SMPL-X parameters (pip ``smplx``).
 
-The SMPL-X counterpart of :mod:`convert_mhr_to_smpl`. SMPL-X adds the hands
-(15 + 15 joints) and face channels (jaw / eyes / expression) on top of the
-21-joint body. ``better_human``'s native ``SMPLX`` has no jaw/eye/face
+SMPL-X adds the hands (15 + 15 joints) and face channels (jaw / eyes /
+expression) on top of the 21-joint body. ``better_human``'s native ``SMPLX`` has no jaw/eye/face
 deformation yet, so this stage fits the **standard ``smplx`` PyPI package**
 (loading ``better_human/models/smplx/SMPLX_NEUTRAL.npz``) via the unchanged
 ``tools.mhr_to_smplx.MhrToSmplxConverter``. Jaw/eye/expression are left at
@@ -13,6 +12,19 @@ intentionally deferred, so this stage is the **end of the default pipeline**
 Every tracked person from ``sam3d/params.npz`` (stacked ``(P, N, ...)``) is
 converted; the outputs are stacked the same way and written **inside**
 ``sam3d/`` (alongside the body params), not at the prediction-folder root.
+
+The conversion reads only ``params.npz`` (MHR params + camera) — the ``source``
+video is needed **only for the overlay**, so ``--no-overlay`` runs need no frames.
+
+Two run modes (like ``estimate_body_sam3d``):
+
+  * **single clip** — ``--source clip --predictions out/video/``; reads/writes
+    ``out/video/sam3d/``.
+  * **batch / manifest** — ``--source manifest.json --save-dir <dir>`` (a
+    ``precompute_runner`` Step): builds the MHR→SMPL-X converter once and sweeps
+    every scene, each manifest ``out_dir`` being that scene's sam3d feature dir.
+    This is how ``scripts/precompute_scenes.py`` fans the stage across the
+    ClimbingVideos scene DB.
 
 Run from CLI::
 
@@ -39,11 +51,13 @@ from __future__ import annotations
 import sys
 from pathlib import Path
 
+_HERE = Path(__file__).resolve()
 # Add scripts/ to sys.path so `import _pym_preload` works from this subfolder.
-sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+sys.path.insert(0, str(_HERE.parent.parent))
 import _pym_preload  # noqa: E402, F401  (must be first — re-execs to fix libstdc++ ABI)
 
 import argparse  # noqa: E402
+import gc  # noqa: E402
 import tempfile  # noqa: E402
 import warnings  # noqa: E402
 from dataclasses import dataclass  # noqa: E402
@@ -54,7 +68,9 @@ import torch  # noqa: E402
 from tqdm import tqdm  # noqa: E402
 
 
-_REPO_ROOT = Path(__file__).resolve().parents[2]
+_REPO_ROOT = _HERE.parents[2]
+sys.path.insert(0, str(_REPO_ROOT))  # repo root for tools.*
+from tools.precompute_runner import InputItem, SkipItem, run_batch  # noqa: E402
 _MAPPING_NPZ = (
     _REPO_ROOT
     / "third_party"
@@ -182,14 +198,27 @@ class MhrToSmplxScript:
 
     def run(
         self,
-        source: str | Path,
-        predictions_dir: str | Path,
+        source: str | Path | None = None,
+        predictions_dir: str | Path | None = None,
+        *,
+        sam3d_dir: str | Path | None = None,
         render_video: bool = True,
         video_fps: float | None = None,
     ) -> ConvertResult:
-        source = Path(source)
-        predictions_dir = Path(predictions_dir)
-        sam3d_dir = predictions_dir / "sam3d"
+        """Convert ``<sam3d_dir>/params.npz`` → ``<sam3d_dir>/smplx_params.npz``.
+
+        Pass ``predictions_dir`` (single-clip; ``sam3d_dir = predictions_dir/sam3d``)
+        or an explicit ``sam3d_dir`` (batch / DB layout, where the sam3d feature
+        dir holds ``params.npz`` and receives ``smplx_params.npz``). ``source`` is
+        only needed for the overlay.
+        """
+        pred = Path(predictions_dir) if predictions_dir is not None else None
+        if sam3d_dir is not None:
+            sam3d_dir = Path(sam3d_dir)
+        elif pred is not None:
+            sam3d_dir = pred / "sam3d"
+        else:
+            raise ValueError("run() needs predictions_dir or an explicit sam3d_dir")
 
         body_path = sam3d_dir / "params.npz"
         if not body_path.exists():
@@ -262,6 +291,9 @@ class MhrToSmplxScript:
 
         rendered_path: Path | None = None
         if render_video:
+            if source is None:
+                raise ValueError("overlay requested but no --source video provided")
+            source = Path(source)
             rendered_path = sam3d_dir / "smplx_overlay.mp4"
             self._render_overlay(
                 source=source,
@@ -396,6 +428,52 @@ class MhrToSmplxScript:
                 writer.release()
 
 
+class MhrToSmplxStep:
+    """precompute_runner Step: build the converter once, sweep each manifest scene.
+
+    Batch / manifest mode for the ClimbingVideos scene DB. Each :class:`InputItem`
+    points ``out_dir`` at the scene's **sam3d feature dir** (which holds
+    ``params.npz`` and receives ``smplx_params.npz``). The conversion reads only
+    ``params.npz``; ``source`` is carried through for the overlay but unused when
+    ``--no-overlay``. ``--subdir`` picks the subfolder of ``out_dir`` (``.`` → it
+    directly, as ``precompute_scenes.py`` does for the stage-first tree).
+    """
+
+    def __init__(self, args: argparse.Namespace):
+        self.args = args
+        self.script = MhrToSmplxScript(
+            device=args.device,
+            smplx_model_folder=args.smplx_model_folder,
+            gender=args.gender,
+            num_iters=args.iters,
+            batch_size=args.batch_size,
+        )
+
+    def load(self) -> None:
+        self.script._build_converter()
+
+    def release(self) -> None:
+        self.script._mhr = None
+        self.script._converter = None
+        gc.collect()
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+
+    def process(self, item: InputItem) -> None:
+        subdir = getattr(self.args, "subdir", "sam3d") or "sam3d"
+        sam3d_dir = item.out_dir if subdir in (".", "") else item.out_dir / subdir
+        if self.args.skip_existing and (sam3d_dir / "smplx_params.npz").exists():
+            raise SkipItem(f"smplx already done: {sam3d_dir / 'smplx_params.npz'}")
+        if not (sam3d_dir / "params.npz").exists():
+            raise SkipItem(f"no sam3d params for {item.stem}: {sam3d_dir / 'params.npz'}")
+        self.script.run(
+            source=item.source_path,
+            sam3d_dir=sam3d_dir,
+            render_video=self.args.overlay,
+            video_fps=self.args.fps,
+        )
+
+
 # ------------------------------ CLI -------------------------------------------
 
 
@@ -405,11 +483,28 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     )
     p.add_argument(
         "--source", required=True,
-        help="video file or folder of frames (same source used upstream)",
+        help="single clip (video / folder of frames) for --predictions mode, or a "
+             ".json manifest for --save-dir (batch) mode. Only used for the overlay.",
+    )
+    # Mode selector — exactly one of these:
+    p.add_argument(
+        "--predictions", default=None,
+        help="single-clip mode: folder containing sam3d/params.npz; writes "
+             "sam3d/smplx_params.npz",
     )
     p.add_argument(
-        "--predictions", required=True,
-        help="folder containing sam3d/params.npz (from estimate_body_sam3d.py)",
+        "--save-dir", type=Path, default=None,
+        help="batch mode: run as a precompute_runner Step over the .json --source "
+             "manifest (per-scene out_dir = the sam3d feature dir); build model once",
+    )
+    p.add_argument(
+        "--subdir", default="sam3d",
+        help="batch mode: subfolder of each manifest out_dir that holds params.npz "
+             "and receives smplx_params.npz ('.' = out_dir itself; default: sam3d)",
+    )
+    p.add_argument(
+        "--skip-existing", action="store_true",
+        help="batch mode: skip scenes whose sam3d/smplx_params.npz already exists",
     )
     p.add_argument(
         "--smplx-model-folder", default=None,
@@ -435,6 +530,17 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
 
 def main(argv: list[str] | None = None) -> int:
     args = _parse_args(argv)
+
+    # Batch / manifest mode: precompute_runner Step (build converter once, sweep).
+    if args.save_dir is not None:
+        return run_batch(MhrToSmplxStep(args), args)
+
+    # Single-clip mode.
+    if args.predictions is None:
+        raise SystemExit(
+            "convert_mhr_to_smplx: pass --predictions <clip-dir> (single clip) "
+            "or --save-dir <dir> with a .json --source manifest (batch)."
+        )
     script = MhrToSmplxScript(
         device=args.device,
         smplx_model_folder=args.smplx_model_folder,

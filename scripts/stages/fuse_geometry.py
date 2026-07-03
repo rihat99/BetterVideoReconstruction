@@ -1,11 +1,12 @@
-"""Fuse VGGT geometry with MoGe2 metric depth → metric scene + human clouds.
+"""Fuse VGGT geometry into metric scene + human point clouds.
 
-Runs after the ``moge2`` stage. VGGT-Omega gives cross-frame-consistent cameras
-and depth but **up to one arbitrary scale** and at a **reduced resolution**;
-MoGe2 gives **metric** per-frame depth. This stage:
+Runs after ``estimate_scale``, which anchors VGGT's arbitrary per-clip scale to
+the SAM-3D-Body human ruler (``geometry/scale.npz``). VGGT-Omega gives
+cross-frame-consistent cameras and depth but **up to one arbitrary scale** and at
+a **reduced resolution**. This stage:
 
-  1. estimates one global metric scale ``s`` (per-frame median depth ratio →
-     inlier-weighted median across frames — robust to MoGe2's per-frame noise);
+  1. reads the metric scale ``s`` from ``geometry/scale.npz`` (the human-anchored
+     factor — depth and camera translations all multiply by it);
   2. denormalizes VGGT's intrinsics to the original frame resolution (FOV is
      VGGT's and is preserved — scaling only touches depth + camera translation);
   3. backprojects every cleaned VGGT depth map to metric world points, split into
@@ -21,7 +22,7 @@ Per-clip I/O (``--source`` frames + ``--predictions out/<stem>/``)::
 
     reads:  --source video / folder of frames          (RGB, for per-point colour)
             vggt/camera.npz, vggt/depth/frame_*.npz     (needs [vggt] save_depth)
-            moge2/depth/frame_*.npz                     (needs [moge2] save_depth)
+            geometry/scale.npz                          (metric scale, from estimate_scale)
             sam3/<obj>/frame_*.png
     writes: geometry/transform.npz   scale + metric extrinsics + original-res K
             geometry/scene.npz        merged metric background points (+ colour)
@@ -46,10 +47,9 @@ import cv2
 import numpy as np
 import torch
 
-from tools.adapters.moge2 import denormalize_K
 from tools.geometry.backproject import backproject
 from tools.geometry.clean import clean_depth
-from tools.geometry.depth_align import frame_scale, weighted_median
+from tools.geometry.intrinsics import denormalize_K
 from tools.geometry.voxel import group_reduce, voxel_downsample
 from tools.mask_io import read_binary_mask
 from tools.source import resolve_source
@@ -89,13 +89,16 @@ def _save_cloud(path: Path, points: torch.Tensor, **arrays) -> None:
 
 def fuse(args: argparse.Namespace) -> None:
     pred = Path(args.predictions)
-    for sub in ("vggt/depth", "moge2/depth"):
-        if not (pred / sub).is_dir():
-            raise SystemExit(f"[fuse] missing {sub}/ under {pred} — run that stage with save_depth=true")
+    if not (pred / "vggt" / "depth").is_dir():
+        raise SystemExit(f"[fuse] missing vggt/depth/ under {pred} — run the vggt stage with save_depth=true")
+    scale_path = pred / "geometry" / "scale.npz"
+    if not scale_path.exists():
+        raise SystemExit(f"[fuse] missing {scale_path} — run the scale stage (estimate_scale) first")
     out_dir = pred / "geometry"
     if args.skip_existing and (out_dir / "transform.npz").exists():
         print(f"  skip (exists): {out_dir / 'transform.npz'}")
         return
+    s = float(np.load(scale_path)["scale"])
 
     cam = np.load(pred / "vggt" / "camera.npz")
     frame_indices = cam["frame_indices"]
@@ -108,7 +111,6 @@ def fuse(args: argparse.Namespace) -> None:
 
     scene_pts, scene_conf, scene_col = [], [], []
     human_pts, human_conf, human_obj, human_fid, human_col = [], [], [], [], []
-    ratios, inliers = [], []
 
     with tempfile.TemporaryDirectory(prefix="fuse_frames_") as tmp:
         frame_paths, _ = resolve_source(Path(args.source), Path(tmp))
@@ -120,11 +122,6 @@ def fuse(args: argparse.Namespace) -> None:
             # in-mask point — edge filter only, no confidence drop.
             valid_scene = clean_depth(depth, conf, conf_drop_q=args.conf_drop_q, edge_rtol=args.edge_rtol)
             valid_human = clean_depth(depth, edge_rtol=args.edge_rtol)
-
-            md = np.load(pred / "moge2" / "depth" / f"frame_{idx:06d}.npz")
-            r, n = frame_scale(depth, md["depth"].astype(np.float32), valid_scene, md["mask"])
-            ratios.append(r)
-            inliers.append(n)
 
             rgb = cv2.cvtColor(cv2.imread(str(frame_paths[idx])), cv2.COLOR_BGR2RGB)
             rgb = cv2.resize(rgb, (wv, hv), interpolation=cv2.INTER_AREA)
@@ -152,10 +149,6 @@ def fuse(args: argparse.Namespace) -> None:
                 human_fid.append(torch.full((int(sh.sum()),), k, dtype=torch.int32, device=dev))
                 human_col.append(col_t[sh])
 
-    s = weighted_median(ratios, inliers)
-    per_frame = np.asarray(ratios, np.float32)
-    mad = float(np.nanmedian(np.abs(per_frame - s)))
-
     centroids, inverse, counts = voxel_downsample(torch.cat(scene_pts) * s, args.voxel_scene)
     scene_confidence = group_reduce(torch.cat(scene_conf), inverse, counts.numel(), "amax")
     scene_color = torch.zeros((counts.numel(), 3), device=dev)
@@ -176,10 +169,7 @@ def fuse(args: argparse.Namespace) -> None:
         frame_indices=frame_indices.astype(np.int32),
         image_height=np.int32(ho), image_width=np.int32(wo),
         vggt_height=np.int32(hv), vggt_width=np.int32(wv),
-        per_frame_scale=per_frame,
-        per_frame_inliers=np.asarray(inliers, np.int32),
-        scale_mad=np.float32(mad),
-        scale_method=np.str_("median-of-frame-medians"),
+        scale_method=np.str_("human-anchored (estimate_scale)"),
     )
     _save_cloud(out_dir / "scene.npz", centroids,
                 colors=scene_color, confidence=scene_confidence,
@@ -195,7 +185,7 @@ def fuse(args: argparse.Namespace) -> None:
         obj_id=torch.cat(human_obj) if human_obj else empty[:, 0].to(torch.int32),
         frame_indices=frame_indices.astype(np.int32),
     )
-    print(f"  scale={s:.4f} (mad {mad:.4f}) | scene {centroids.shape[0]} pts | "
+    print(f"  scale={s:.4f} | scene {centroids.shape[0]} pts | "
           f"human {sum(int(t.shape[0]) for t in human_pts)} pts -> {out_dir}")
 
 

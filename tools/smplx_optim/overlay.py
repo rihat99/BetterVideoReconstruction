@@ -1,7 +1,7 @@
 """Reprojection overlay for the SMPL-X kinematic stage (debug / QA).
 
-Draws the optimized body's projected keypoints (green) against the Sapiens
-target keypoints (red) on each frame, per person. A tight green-on-red overlay
+Draws the optimized body's projected Sapiens keypoints (green) against the
+observed 2D target (red) on each frame, per person. A tight green-on-red overlay
 means the reprojection term is doing its job.
 """
 
@@ -40,9 +40,66 @@ def _project_person(mid, q, betas, fvids, corr, extr, K, device, scale=1.0, chun
     return torch.cat(px, 0).cpu().numpy()
 
 
+def render_contact_overlay(source, out_path, joints_2d, joint_contact, parents,
+                           valid_mask, H, W, fps):
+    """Write an mp4 of the projected SMPL-X skeleton coloured by scene contact.
+
+    One skeleton per tracked person: bones (parent→child) are drawn as neutral
+    grey lines and each joint as a dot — **red** when that joint is in contact
+    with the scene, **green** otherwise. Everything is precomputed by the stage;
+    this only rasterizes.
+
+    ``joints_2d (P, N, J, 2)`` are the projected joint pixels, ``joint_contact
+    (P, N, J)`` the per-joint contact flags, ``parents (J,)`` the kinematic-tree
+    parent of each joint (-1 for the root), ``valid_mask (P, N)`` gates frames
+    where a person isn't tracked.
+    """
+    import tempfile
+
+    from tools.source import resolve_source
+
+    out_path = Path(out_path)
+    P, N, J = joint_contact.shape
+
+    def ok(uv):  # finite + not a behind-camera blow-up
+        return np.isfinite(uv).all() and abs(uv[0]) < 1e4 and abs(uv[1]) < 1e4
+
+    with tempfile.TemporaryDirectory(prefix="cnt_kin_overlay_") as tmp:
+        frame_paths, src_fps = resolve_source(Path(source), Path(tmp))
+        writer = cv2.VideoWriter(str(out_path), cv2.VideoWriter_fourcc(*"mp4v"),
+                                 float(fps or src_fps or 30.0), (W, H))
+        try:
+            for i in tqdm(range(min(N, len(frame_paths))), desc="contact overlay"):
+                bgr = cv2.imread(str(frame_paths[i]))
+                if bgr is None:
+                    continue
+                for p in range(P):
+                    if not valid_mask[p, i]:
+                        continue
+                    pts = joints_2d[p, i]                       # (J, 2)
+                    for j in range(1, J):                       # bones (grey)
+                        a, b = pts[int(parents[j])], pts[j]
+                        if ok(a) and ok(b):
+                            cv2.line(bgr, (int(a[0]), int(a[1])), (int(b[0]), int(b[1])),
+                                     (180, 180, 180), 1, cv2.LINE_AA)
+                    for j in range(J):                          # joints (red=contact / green=free)
+                        uv = pts[j]
+                        if not ok(uv):
+                            continue
+                        col = (0, 0, 255) if joint_contact[p, i, j] else (0, 255, 0)
+                        cv2.circle(bgr, (int(uv[0]), int(uv[1])), 3, col, -1, cv2.LINE_AA)
+                writer.write(bgr)
+        finally:
+            writer.release()
+    return out_path
+
+
 def render_keypoint_overlay(source, out_path, mid, save, corr, fvids, extr, K,
                             *, target_scheme, fps, device, score_thresh=0.3):
-    """Write an mp4 overlaying predicted (green) vs Sapiens (red) keypoints."""
+    """Write an mp4 overlaying predicted (green) vs observed (red) Sapiens keypoints.
+
+    A tight green-on-red overlay means the reprojection term is doing its job.
+    """
     import tempfile
 
     from tools.source import resolve_source
@@ -60,12 +117,13 @@ def render_keypoint_overlay(source, out_path, mid, save, corr, fvids, extr, K,
         pred_px.append(_project_person(mid, q, betas, fvids, corr, extr, K, device,
                                        scale=float(scales[p])))
 
+    desc = "reprojection overlay"
     with tempfile.TemporaryDirectory(prefix="smplx_kin_overlay_") as tmp:
         frame_paths, src_fps = resolve_source(Path(source), Path(tmp))
         writer = cv2.VideoWriter(str(out_path), cv2.VideoWriter_fourcc(*"mp4v"),
                                  float(fps or src_fps or 30.0), (W, H))
         try:
-            for i in tqdm(range(min(N, len(frame_paths))), desc="reprojection overlay"):
+            for i in tqdm(range(min(N, len(frame_paths))), desc=desc):
                 bgr = cv2.imread(str(frame_paths[i]))
                 if bgr is None:
                     continue
