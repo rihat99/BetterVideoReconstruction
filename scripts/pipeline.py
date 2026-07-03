@@ -13,15 +13,15 @@ Stages run in the **listed order**. The model **precompute** stages (``sam3``,
 ``vggt``, ``sapiens``) run once over ``--source`` — given a *folder* of videos
 they load each model once and sweep the whole batch
 (``tools/precompute_runner`` semantics). The **per-clip** stages (``sam3d``,
-``smplx``, ``scale``, ``fuse``, ``optimize_smplx``) loop over each clip's
+``smplx``, ``scale``, ``fuse``, ``human_optimization``) loop over each clip's
 ``<save-dir>/<stem>/``. ``scale`` (``estimate_scale``) anchors VGGT's metric
 scale to the SAM-3D-Body human ruler, so it runs **after** the body / SMPL-X
 stages and **before** ``fuse`` (which applies that scale); ``sam3d`` reads the
 VGGT camera from ``vggt/camera.npz`` directly.
 
-The run ends at ``optimize_smplx`` — the visually-guided kinematic refinement of
-the SMPL-X bodies (reprojection + chamfer + pose + smoothness;
-``sam3d/smplx_kinematic.npz``). ``--steps`` runs any subset of the chain.
+The run ends at ``human_optimization`` — the four-stage SMPL-X refinement (default
+chain: root, kinematics_1 → ``human_optim/kinematic_1.npz``). ``--steps`` runs any
+subset of the chain.
 
 Per-stage knobs and the step selection live in ``configs/pipeline.toml``; the
 CLI only takes ``--source``, ``--save-dir``, ``--config``, ``--steps``,
@@ -53,8 +53,8 @@ _MEDIA_EXTS = IMAGE_EXTS | VIDEO_EXTS
 
 # Canonical order. "precompute" stages operate on --source / --save-dir; "perclip"
 # stages operate on a single clip's --predictions dir. ``--steps`` runs any subset;
-# the chain ends at optimize_smplx (visually-guided SMPL-X kinematics).
-DEFAULT_RUN = ["sam3", "vggt", "sapiens", "sam3d", "smplx", "scale", "fuse", "optimize_smplx"]
+# the chain ends at human_optimization (visually-guided SMPL-X kinematics).
+DEFAULT_RUN = ["sam3", "vggt", "sapiens", "sam3d", "smplx", "scale", "fuse", "human_optimization"]
 _PRECOMPUTE = {"sam3", "vggt", "sapiens"}
 _KNOWN = set(DEFAULT_RUN)
 
@@ -72,7 +72,7 @@ def _default_config() -> dict:
                  "human_dilate": 8, "min_scene_voxels": 25, "person_obj_ids": ""},
         "sam3d": {"obj_ids": "", "inference_type": "full", "overlay": True},
         "smplx": {"iters": 300, "gender": "neutral", "overlay": True},
-        "optimize_smplx": {"config": "configs/smplx_kinematic.toml", "overlay": False},
+        "human_optimization": {"config": "configs/human_optimization.toml", "overlay": False, "stages": ""},
     }
 
 
@@ -126,13 +126,20 @@ def _build_precompute_args(step: str, cfg: dict, source: Path, save_dir: Path,
     raise ValueError(step)
 
 
-def _perclip_output(step: str, clip_dir: Path) -> Path:
+def _perclip_output(step: str, clip_dir: Path, cfg: dict) -> Path:
+    if step == "human_optimization":  # skip-check the LAST configured sub-stage's body
+        st = [s.strip() for s in str(cfg["human_optimization"].get("stages", "")).split(",") if s.strip()]
+        st = st or ["root", "kinematics_1"]
+        name = ("dynamics" if "dynamics" in st
+                else "kinematic_2" if "kinematics_2" in st
+                else "kinematic_1" if "kinematics_1" in st
+                else "root")
+        return clip_dir / "human_optim" / f"{name}.npz"
     return {
         "scale": clip_dir / "geometry" / "scale.npz",
         "fuse": clip_dir / "geometry" / "transform.npz",
         "sam3d": clip_dir / "sam3d" / "params.npz",
         "smplx": clip_dir / "sam3d" / "smplx_params.npz",
-        "optimize_smplx": clip_dir / "sam3d" / "smplx_kinematic.npz",
     }[step]
 
 
@@ -172,10 +179,12 @@ def _build_perclip_args(step: str, cfg: dict, clip: Path, clip_dir: Path,
                  "--device", device]
         _flag(extra, not s.get("overlay", True), "--no-overlay")
         return extra
-    if step == "optimize_smplx":
-        s = cfg["optimize_smplx"]
+    if step == "human_optimization":
+        s = cfg["human_optimization"]
         extra = ["--source", str(clip), "--predictions", str(clip_dir),
                  "--config", str(s["config"]), "--device", device]
+        if s.get("stages"):
+            extra += ["--stages", str(s["stages"])]
         _flag(extra, s.get("overlay", False), "--overlay")
         return extra
     raise ValueError(step)
@@ -189,7 +198,7 @@ _SCRIPTS = {
     "fuse": "fuse_geometry.py",
     "sam3d": "estimate_body_sam3d.py",
     "smplx": "convert_mhr_to_smplx.py",
-    "optimize_smplx": "optimize_smplx.py",
+    "human_optimization": "human_optimization.py",
 }
 
 
@@ -227,7 +236,7 @@ def run_pipeline(args: argparse.Namespace) -> int:
             continue
         for clip in clips:
             clip_dir = save_dir / clip.stem
-            if args.skip_existing and _perclip_output(step, clip_dir).exists():
+            if args.skip_existing and _perclip_output(step, clip_dir, cfg).exists():
                 print(f"[pipeline] skip {step} for {clip.stem} (output exists)")
                 continue
             _run(step, _build_perclip_args(step, cfg, clip, clip_dir, device))

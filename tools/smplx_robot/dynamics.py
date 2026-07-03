@@ -1,6 +1,6 @@
 """Trajectory finite differences for the SMPL-X force-only dynamics stage.
 
-``optimize_dynamics_smplx`` freezes the kinematic ``q(t)`` and needs generalised
+``human_optimization`` (the dynamics stage) freezes the kinematic ``q(t)`` and needs generalised
 velocity / acceleration to feed RNEA. Central differences on the BetterRobot
 manifold (via ``model.difference``) give both.
 """

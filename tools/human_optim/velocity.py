@@ -1,7 +1,7 @@
 """Per-joint SE3 (post-FK) linear velocity via the BetterRobot kinematic Jacobian.
 
 The velocity-gated contact-repulsion loss
-(:func:`tools.smplx_optim.losses.contact_velocity_loss`) needs each joint's
+(:func:`tools.human_optim.losses.contact_velocity_loss`) needs each joint's
 *spatial* speed — how fast the joint moves through the world — **not** the SO3
 tangent of its own quaternion (the quantity the smoothness term penalizes). This
 is the **LOCAL-frame linear part of the joint twist after forward kinematics**;

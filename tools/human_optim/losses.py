@@ -9,7 +9,7 @@ so a few wrong observations saturate instead of yanking the pose; which terms ar
 active (and their relative weight) is set in the TOML.
 
 All operate on a single person's world-frame trajectory. ``q`` tensors are
-expected pre-normalized (see :func:`tools.smplx_optim.qmath.normalize_q`).
+expected pre-normalized (see :func:`tools.human_optim.qmath.normalize_q`).
 Posed joints / vertices come from ``better_human``; this module only assembles
 the costs.
 """
@@ -17,10 +17,10 @@ the costs.
 from __future__ import annotations
 
 import torch
-from better_robot.lie import se3, so3
 
 from .camera import project, transform_points
 from .keypoints import Correspondence
+from .motion import tangent_difference
 
 
 def geman_mcclure(r2: torch.Tensor, scale2: torch.Tensor) -> torch.Tensor:
@@ -452,7 +452,7 @@ def contact_velocity_loss(
         threshold-free function of the (detached) per-vertex joint speed
         ``vel_vert``: ≈ 0 for a slow planted contact, large for a fast one. The
         joint speed is the LOCAL-frame linear velocity magnitude from the
-        BetterRobot Jacobian (:func:`tools.smplx_optim.velocity.joint_local_linear_speed`),
+        BetterRobot Jacobian (:func:`tools.human_optim.velocity.joint_local_linear_speed`),
         mapped to each vertex by its nearest joint.
 
     ``L = mean_active( g · relu(contact_band_m − s) )``. The same gates as the
@@ -523,7 +523,7 @@ def joint_velocity_loss(
     (the constant ``fps²`` folds into the weight, as in :func:`smoothness_loss`).
     That displacement magnitude equals the joint's LOCAL-frame linear-velocity
     magnitude — the BetterRobot-Jacobian quantity in
-    :mod:`tools.smplx_optim.velocity` — because the body-frame rotation preserves
+    :mod:`tools.human_optim.velocity` — because the body-frame rotation preserves
     norm; but the finite difference of the posed world joints is directly
     differentiable through ``q`` (that Jacobian path is detached), so we use it as
     the loss. Gradients flow through ``joints_world`` only. Returns
@@ -602,28 +602,6 @@ def depth_push_loss(
     z_cam = transform_points(joints_world[:, :1, :], extrinsics)[:, 0, 2]  # (T,) pelvis depth
     m = frame_mask.to(z_cam.dtype)
     return -(z_cam * m).sum() / m.sum().clamp_min(1.0)
-
-
-def tangent_difference(q: torch.Tensor, num_joints: int) -> torch.Tensor:
-    """Batched Lie tangent ``q_{t+1} ⊖ q_t`` ``(T-1, 6 + 3·(num_joints-1))``.
-
-    ``q`` is normalized in ``better_human`` order: the root SE3 free-flyer at
-    ``q[:7]`` then the ``num_joints-1`` parent-local joint quaternions stride-4
-    in ``q[7:]``. This is exactly the per-joint operation BetterRobot's
-    ``model.difference`` dispatches — root via ``se3.log(q0⁻¹∘q1)``, each
-    spherical joint via ``so3.log(q0⁻¹∘q1)`` — but vectorized over frames *and*
-    joints in a handful of batched ops (identical value + gradient, ~14× faster,
-    and with no need to build / remap into a BetterRobot model just to diff).
-    The joint block keeps ``better_human`` order rather than the model's DFS
-    order; that permutation is irrelevant here because :func:`smoothness_loss`
-    weights every joint tangent identically.
-    """
-    q0, q1 = q[:-1], q[1:]
-    root = se3.log(se3.compose(se3.inverse(q0[..., :7]), q1[..., :7]))   # (T-1, 6)
-    j0 = q0[..., 7:].unflatten(-1, (num_joints - 1, 4))                  # (T-1, J-1, 4)
-    j1 = q1[..., 7:].unflatten(-1, (num_joints - 1, 4))
-    dj = so3.log(so3.normalize(so3.compose(so3.inverse(j0), j1)))        # (T-1, J-1, 3)
-    return torch.cat([root, dj.flatten(-2)], dim=-1)                     # (T-1, 6+3(J-1))
 
 
 def smoothness_loss(

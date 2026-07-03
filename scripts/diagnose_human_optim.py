@@ -1,4 +1,4 @@
-"""Per-frame diagnostics for the SMPL-X kinematic stage (``optimize_smplx``).
+"""Per-frame diagnostics for the SMPL-X kinematic stage (``human_optimization`` kinematics_1).
 
 Plots every loss term **as a function of frame index**, for the converter init
 vs the refined trajectory, alongside the *evidence* each term depends on
@@ -14,9 +14,9 @@ vs the refined trajectory, alongside the *evidence* each term depends on
 It reuses the exact correspondence + projection + visibility code the optimizer
 uses, so the numbers match the stage (no re-derivation, no fresh mismatch).
 
-    .venv/bin/python scripts/diagnose_smplx.py --predictions out/sport_climb/
+    .venv/bin/python scripts/diagnose_human_optim.py --predictions out/sport_climb/
 
-Writes ``out/<stem>/sam3d/diagnostics/loss_person<oid>.png`` (one per person) and
+Writes ``out/<stem>/human_optim/diagnostics/loss_person<oid>.png`` (one per person) and
 prints a short table of the worst frames per term.
 """
 
@@ -41,16 +41,17 @@ import matplotlib.pyplot as plt  # noqa: E402
 import numpy as np  # noqa: E402
 import torch  # noqa: E402
 
-from tools.smplx_optim import (  # noqa: E402
+from tools.human_optim import (  # noqa: E402
     build_correspondence, fold_root_to_world, joint_local_linear_speed, project,
     subsample_indices, transform_points, vertex_to_joint, world_from_cam,
 )
-from tools.smplx_optim.qmath import normalize_q  # noqa: E402
-from tools.smplx_optim.visibility import front_facing_mask, vertex_normals  # noqa: E402
+from tools.human_optim import paths  # noqa: E402
+from tools.human_optim.qmath import normalize_q  # noqa: E402
+from tools.human_optim.visibility import front_facing_mask, vertex_normals  # noqa: E402
 from tools.smplx_robot import load_smplx_mid, make_smplx_robot_model  # noqa: E402
 from tools.geometry.normals import estimate_point_normals  # noqa: E402
 
-_DEFAULT_CONFIG = _REPO_ROOT / "configs" / "smplx_kinematic.toml"
+_DEFAULT_CONFIG = _REPO_ROOT / "configs" / "human_optimization.toml"
 _DEFAULT_SMPLX_MODEL = (
     _REPO_ROOT.parent / "better_human" / "models" / "smplx" / "SMPLX_NEUTRAL.npz"
 )
@@ -305,6 +306,7 @@ def run(predictions_dir, config_path, device):
     max_points = int(chcfg.get("max_points", 1500))
     vsub = int(chcfg.get("vertex_subsample", 1000))
     score_thresh = float(kpcfg.get("score_thresh", 0.3))
+    include_hands = bool(kpcfg.get("include_hands", False))
     sap_gm_px = float(kpcfg.get("gm_scale_px", kpcfg.get("robust_px", 40.0)))
     pncfg = cfg.get("penetration", {})
     pen = dict(conf_thresh=float(pncfg.get("conf_thresh", 0.1)),
@@ -316,7 +318,7 @@ def run(predictions_dir, config_path, device):
     contact = dict(contact_band_m=float(cfg.get("contact_velocity", {}).get("contact_band_m", 0.03)))
 
     sp = dict(np.load(sam3d / "smplx_params.npz", allow_pickle=True))
-    kin = dict(np.load(sam3d / "smplx_kinematic.npz", allow_pickle=True))
+    kin = dict(np.load(paths.body_path(pred, "kinematic_1"), allow_pickle=True))
     pose = dict(np.load(pred / "sapiens" / "pose.npz", allow_pickle=True))
     human = dict(np.load(pred / "geometry" / "human.npz", allow_pickle=True))
     tr = dict(np.load(pred / "geometry" / "transform.npz", allow_pickle=True))
@@ -339,11 +341,10 @@ def run(predictions_dir, config_path, device):
 
     mid = load_smplx_mid(_DEFAULT_SMPLX_MODEL, device)
     fvids = torch.as_tensor([int(x) for x in mid.frame_vertex_ids], dtype=torch.long, device=device)
-    corr = build_correspondence(list(mid.frame_names), include_hands=False, device=device)
+    corr = build_correspondence(list(mid.frame_names), include_hands=include_hands, device=device)
     sub = subsample_indices(mid.num_vertices, vsub, device=device)
 
-    diag_dir = sam3d / "diagnostics"
-    diag_dir.mkdir(parents=True, exist_ok=True)
+    diag_dir = paths.diagnostics_dir(pred)
 
     for p, oid in enumerate(object_ids):
         pk = object_ids.index(oid)  # index into kin arrays (same order)
@@ -394,7 +395,7 @@ def run(predictions_dir, config_path, device):
         out_png = diag_dir / f"loss_person{oid:02d}.png"
         plot_person(oid, valid, init, final, motion_i, motion_f, posedev, depth_cnt,
                     max_points, sap_gm_px, out_png)
-        print(f"[diagnose_smplx] wrote {out_png}")
+        print(f"[diagnose] wrote {out_png}")
 
         vv = valid.copy()
         vv2 = valid[1:].copy()

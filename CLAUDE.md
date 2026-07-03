@@ -31,8 +31,9 @@ Both reuse the same per-stage CLIs in `scripts/stages/` and the `tools/` library
 ## The pipeline & `out/<stem>/` contract
 
 Run in this order (the orchestrator does it for you; each stage is also a
-standalone CLI). The **default chain ends at `optimize_smplx`** (rows 1–8); the
-rest are standalone SMPL-X stages, off the default chain.
+standalone CLI). The **default chain ends at `human_optimization`** (rows 1–8,
+which runs its `root` + `kinematics_1` sub-stages); the rest are standalone
+SMPL-X stages, off the default chain.
 
 | # | Stage (`scripts/stages/…`) | Reads | Writes (under `out/<stem>/`) |
 |---|---|---|---|
@@ -43,25 +44,26 @@ rest are standalone SMPL-X stages, off the default chain.
 | 5 | `convert_mhr_to_smplx.py` | `sam3d/params.npz` | `sam3d/smplx_params.npz` (per-person `(P,N,…)`: betas, body/hand pose, global_orient, transl, jaw/eye/expr), `sam3d/smplx_overlay.mp4` |
 | 6 | `estimate_scale.py` | `sam3d/smplx_params.npz`, `vggt/camera.npz`, `vggt/depth/`, `sam3/` | `geometry/scale.npz` (human-body-anchored metric scale + per-frame diagnostics), `geometry/diagnostics/scale_over_time.png` |
 | 7 | `fuse_geometry.py` | `vggt/`, `geometry/scale.npz`, `sam3/` | `geometry/transform.npz` (metric scale + orig-res VGGT cameras), `geometry/scene.npz`, `geometry/human.npz` — see `docs/geometry_fusion_plan.md` |
-| 8 | `optimize_smplx.py` | `sam3d/smplx_params.npz`, `sapiens/pose.npz`, `geometry/{human,transform,scene}.npz` | `sam3d/smplx_kinematic.npz` (**all tracked people**, refined **world-frame** params `(P,N,…)` + `q (P,N,211)` + `scale (P,)`≡1 (compat), 52-joint `SMPLXMid`, `frame='world'`), `sam3d/smplx_kinematic_overlay.mp4` (`--overlay`) |
-| – | `optimize_smplx_2.py` | `sam3d/smplx_kinematic.npz`, **`data/<stem>.npz`** (manual contact annotation), `sapiens/pose.npz`, `geometry/{human,scene,transform}.npz` | `sam3d/smplx_kinematic_2.npz` (annotation-guided refinement; same schema), `sam3d/smplx_kinematic_2_overlay.mp4` (`--overlay`) |
-| – | `estimate_contacts.py` | `sam3d/<bodies>.npz` (`--bodies`, default `smplx_kinematic`), `geometry/{scene,transform}.npz`, frames | `sam3d/cnt_<tag>.npz` (`joint_contact (P,N,J)` bool + `joint_sdf_cm`), `sam3d/cnt_<tag>_overlay.mp4` (skeleton; joints **red**=contact / **green**=free) |
+| 8 | `human_optimization.py` (`root`+`kinematics_1`) | `sam3d/smplx_params.npz`, `sapiens/pose.npz`, `geometry/{human,transform,scene}.npz` | `human_optim/kinematic_1.npz` (**all tracked people**, refined **world-frame** params `(P,N,…)` + `q (P,N,211)` + `scale (P,)`≡1 (compat), 52-joint `SMPLXMid`, `frame='world'`), `human_optim/kinematic_1_overlay.mp4` (`--overlay`) |
+| – | `human_optimization.py --stages kinematics_2` | `human_optim/kinematic_1.npz`, **`data/<stem>.npz`** (manual contact annotation), `sapiens/pose.npz`, `geometry/{human,scene,transform}.npz` | `human_optim/kinematic_2.npz` (annotation-guided refinement; same schema), `human_optim/kinematic_2_overlay.mp4` (`--overlay`) |
+| – | `estimate_contacts.py` | `human_optim/<bodies>.npz` (`--bodies`, default `kinematic_1`), `geometry/{scene,transform}.npz`, frames | `human_optim/contacts_<tag>.npz` (`joint_contact (P,N,J)` bool + `joint_sdf_cm`), `human_optim/contacts_<tag>_overlay.mp4` (skeleton; joints **red**=contact / **green**=free) |
 | – | `estimate_gravity_geocalib.py` | frames, `geometry/transform.npz` | `geocalib/gravity.npz` (world-frame unit `gravity_world (3,)` down + per-frame diagnostics + `reliable` flag; magnitude 9.81 applied by dynamics) |
-| – | `optimize_dynamics_smplx.py` | `sam3d/smplx_kinematic_2.npz` (frozen `q`), `sam3d/cnt_kin_2.npz`, `geocalib/gravity.npz` | `sam3d/smplx_dynamics.npz` (force-only RNEA: world `contact_forces`, `joint_torques (P,N,159)`, + viewer-ready `joints_world`/`torque_mag`/`contact_forces_world (P,N,52,…)`) |
-| – | `estimate_uncertainty.py` | `sam3d/<bodies>.npz` (`--bodies`, default `smplx_kinematic_2`→`smplx_kinematic`), `sam3d/smplx_params.npz`, `sam3d/cnt_<tag>.npz`, `sapiens/pose.npz`, `geometry/{human,transform}.npz`, frames (`--overlay`) | `sam3d/uncertainty_<tag>.npz` (per-frame data-fit loss + relative/observability/residual/cue axes, per-contact confidence), `sam3d/diagnostics/uncertainty_person<oid>.png`, `sam3d/uncertainty_<tag>_overlay.mp4` (`--overlay`) |
+| – | `human_optimization.py --stages dynamics` | `human_optim/kinematic_2.npz` (frozen `q`), `human_optim/contacts_2.npz`, `geocalib/gravity.npz` | `human_optim/dynamics.npz` (force-only RNEA: world `contact_forces`, `joint_torques (P,N,159)`, + viewer-ready `joints_world`/`torque_mag`/`contact_forces_world (P,N,52,…)`) |
+| – | `estimate_uncertainty.py` | `human_optim/<bodies>.npz` (`--bodies`, default `kinematic_2`→`kinematic_1`), `sam3d/smplx_params.npz`, `human_optim/contacts_<tag>.npz`, `sapiens/pose.npz`, `geometry/{human,transform}.npz`, frames (`--overlay`) | `human_optim/uncertainty_<tag>.npz` (per-frame data-fit loss + relative/observability/residual/cue axes, per-contact confidence), `human_optim/diagnostics/uncertainty_person<oid>.png`, `human_optim/uncertainty_<tag>_overlay.mp4` (`--overlay`) |
 
 Viewer: `scripts/view_3d.py out/<stem>/` (viser: fused `geometry/` scene cloud +
 camera frustums + GeoCalib gravity arrow + per-climber human points + the refined
 SMPL-X bodies — a **`body source` dropdown** switches `original`
-(`smplx_params.npz`) / `kinematics` (`smplx_kinematic.npz`) / `kinematics_2`
-(`smplx_kinematic_2.npz`) / **`dynamics`** (`smplx_dynamics.npz` — no mesh: the
-52-joint skeleton as red torque-scaled spheres + white cylinder bones + cyan
-contact-force arrows), defaulting to the most-refined body present).
-`scripts/diagnose_smplx.py` plots every `optimize_smplx` loss term per frame.
+(`sam3d/smplx_params.npz`) / `kinematics` (`human_optim/kinematic_1.npz`) /
+`kinematics_2` (`human_optim/kinematic_2.npz`) / **`dynamics`**
+(`human_optim/dynamics.npz` — no mesh: the 52-joint skeleton as red torque-scaled
+spheres + white cylinder bones + cyan contact-force arrows), defaulting to the
+most-refined body present). `scripts/diagnose_human_optim.py` plots every
+`human_optimization` kinematics_1 loss term per frame, per person.
 
 `vggt` and `sapiens` are **precompute_runner Steps** (operate on `--source` /
 `--save-dir`; a *folder* of videos loads each model once and sweeps the batch).
-The post-track stages (`sam3d`, `smplx`, `scale`, `fuse`, `optimize_smplx`) take
+The post-track stages (`sam3d`, `smplx`, `scale`, `fuse`, `human_optimization`) take
 `--predictions <clip-dir>`.
 
 ## Setup
@@ -88,11 +90,11 @@ uv run python scripts/stages/estimate_body_sam3d.py --source video.mp4 --predict
 uv run python scripts/stages/convert_mhr_to_smplx.py --source video.mp4 --predictions out/video/
 uv run python scripts/stages/estimate_scale.py --predictions out/video/            # human-anchored metric scale (before fuse)
 uv run python scripts/stages/fuse_geometry.py --source video.mp4 --predictions out/video/   # applies the scale
-uv run python scripts/stages/optimize_smplx.py --source video.mp4 --predictions out/video/ --overlay
-uv run python scripts/stages/optimize_smplx_2.py --source video.mp4 --predictions out/video/ --overlay   # annotation-guided (needs data/<stem>.npz)
-uv run python scripts/stages/estimate_contacts.py --source video.mp4 --predictions out/video/            # per-joint scene contact
+uv run python scripts/stages/human_optimization.py --source video.mp4 --predictions out/video/ --overlay   # root + kinematics_1 (default chain)
+uv run python scripts/stages/human_optimization.py --source video.mp4 --predictions out/video/ --stages kinematics_2   # annotation-guided (needs data/<stem>.npz)
+uv run python scripts/stages/estimate_contacts.py --source video.mp4 --predictions out/video/            # per-joint scene contact (--bodies kinematic_1)
 uv run python scripts/stages/estimate_gravity_geocalib.py --source video.mp4 --predictions out/video/    # world-frame gravity
-uv run python scripts/stages/optimize_dynamics_smplx.py --predictions out/video/                         # force-only RNEA
+uv run python scripts/stages/human_optimization.py --predictions out/video/ --stages dynamics            # force-only RNEA (needs contacts_2 + gravity)
 uv run python scripts/stages/estimate_uncertainty.py --source video.mp4 --predictions out/video/ --overlay   # reconstruction-trust scoring
 ```
 
@@ -108,16 +110,14 @@ BetterVideoReconstruction/
 ├── docs/geometry_fusion_plan.md   # fuse_geometry design + geometry/*.npz contract
 ├── configs/
 │   ├── pipeline.toml              # orchestrator: per-stage knobs + [steps]
-│   ├── smplx_kinematic.toml       # optimize_smplx (visually-guided SMPL-X kinematics)
-│   ├── smplx_kinematic_2.toml     # optimize_smplx_2 (annotation-guided refinement)
-│   └── smplx_dynamics.toml        # optimize_dynamics_smplx (force-only RNEA)
+│   └── human_optimization.toml    # all 4 human-optimization stages: 4-column [loss_weights.*] tables + shared knobs
 ├── scripts/
 │   ├── pipeline.py                # LOCAL pipeline (load-once subprocess orchestrator)
 │   ├── precompute_scenes.py       # DATASET pipeline: vggt/sapiens/sam3d/smplx fan-out
 │   ├── track_sam3_scenes.py       # DATASET pipeline: SAM 3 seeding + fan-out
 │   ├── scene_db.py                # shared scene-DB access + target selection
 │   ├── view_3d.py                 # viser: geometry + cameras + bodies + dynamics
-│   ├── diagnose_smplx.py          # per-frame plots of every optimize_smplx loss term
+│   ├── diagnose_human_optim.py    # per-frame per-person plots of every kinematics_1 loss term
 │   ├── _pym_preload.py            # libstdc++ LD_PRELOAD shim for pymomentum
 │   └── stages/                    # the per-stage CLIs in the table above
 ├── tools/                         # importable library (repo root on sys.path via scripts)
@@ -130,7 +130,7 @@ BetterVideoReconstruction/
 │   │   └── geocalib.py            # GeoCalib single-image camera + gravity calib
 │   ├── mhr_to_smplx/              # MHR → SMPL-X fitter (pip smplx; the body output)
 │   ├── smplx_robot/               # SMPLXMid → BetterRobot 52-joint model + q remap; inertia.py + dynamics.py
-│   ├── smplx_optim/               # visually-guided SMPL-X losses + optimizer + overlay
+│   ├── human_optim/               # the 4-stage human optimizer: config/paths/body/motion/losses/optimizer/stages + contacts/overlay/diagnostics
 │   └── geometry/                  # depth clean + backproject + voxel merge + normals + surface + intrinsics + human-anchored scale
 └── third_party/                   # submodules: sam3, sam-3d-body, sapiens2, MHR, vggt-omega, geocalib
 ```
@@ -147,29 +147,44 @@ BetterVideoReconstruction/
   at zero). Its outputs live **inside `sam3d/`** next to the body params. SMPL-X has
   a BetterRobot 52-joint kinematic model (`tools/smplx_robot.make_smplx_robot_model`
   builds a `SMPLXMid`); the kinematic stage writes `q (P,N,211)`.
-- **`optimize_smplx` is visually-guided, multi-person, world-frame.** It refines
-  each person's trajectory against image + geometry: two **robust (Geman-McClure)
-  2D reprojection** terms — the detector-free **init-projection anchor** (each body
-  joint pinned to its OWN converter-pose projection, identity correspondence) plus
-  a downweighted **Sapiens** cross-check — **chamfer** of visible posed vertices to
-  the metric VGGT human depth, a gentle **depth-push**, a **joints-only pose prior**
-  + gentle root-orientation prior, **acceleration + jerk** smoothness (exact Lie
-  tangent — batched `so3`/`se3`), a **scene-penetration** repulsion (point-cloud
-  SDF) and a **scene-contact attraction** (its inverse — the term that *raises* the
-  contact rate), plus an off-by-default velocity-gated contact repulsion. The leaf
-  is `q (T,211)` for `SMPLXMid` (quaternions renormalised in the forward — no
-  exp-retraction singularity). **No per-body scale** — the metric geometry is sized
-  to the body upstream by `estimate_scale`, so the body is used at native size
-  (`smplx_kinematic.npz` still writes `scale (P,)`≡1 for consumer compat). The fit
-  is an **Adam warm-up** in three coarse-to-fine stages (`root`: rigid placement;
-  `full`: all DOFs, no scene terms; `refine`: add the scene terms) then a short
-  **L-BFGS** polish. Posed-mesh inference is `better_human`; BVR adds the visual
-  losses + the batched Lie smoothness (`tools/smplx_optim`). Chamfer + penetration
-  are **chunked-batched** cdists (the per-frame loop was launch-bound — the real
-  speed lever). **All loss weights live only in `configs/smplx_kinematic.toml`.**
+- **`human_optimization` is one stage, four sub-stages, one config.** A single
+  `human_optimization.py` dispatcher runs four stages: **`root`** (rigid placement —
+  root SE3 only, joints frozen), **`kinematics_1`** (the visually-guided kinematic
+  fit), **`kinematics_2`** (annotation-guided), **`dynamics`** (force-only RNEA). The
+  default chain runs `root` + `kinematics_1`; the latter two are opt-in and, for now,
+  algorithmically **frozen**. `root` and `kinematics_1` share ONE optimization call —
+  `root` is its first phase, and the priors / init-anchor stay pinned to the converter
+  input pose across both (so root cannot be a separate call). Machinery lives in
+  **`tools/human_optim/`** (config / paths / body / motion / losses / optimizer /
+  stages), keeping the dispatcher thin.
+  - **The kinematic fit** (`kinematics_1`) refines each person's world-frame `q
+    (T,211)` for `SMPLXMid` against image + geometry: two **robust (Geman-McClure) 2D
+    reprojection** terms — the detector-free **init-projection anchor** (each body
+    joint pinned to its OWN converter-pose projection) + a downweighted **Sapiens**
+    cross-check — **chamfer** of visible posed vertices to the metric VGGT human
+    depth, a gentle **depth-push**, a **joints-only pose prior** + gentle
+    root-orientation prior, **acceleration + jerk** smoothness (exact Lie tangent,
+    batched `so3`/`se3` in `tools/human_optim/motion.py`), a **scene-penetration**
+    repulsion and its inverse **scene-contact attraction** (the term that *raises*
+    contact), plus an off-by-default velocity-gated contact repulsion. Quaternions are
+    renormalised in the forward (no exp-retraction singularity). It runs `full` (all
+    DOFs, no scene) → `refine` (add scene terms on the seated body) → a short
+    **L-BFGS** polish. Chamfer + penetration are **chunked-batched** cdists (the
+    per-frame loop was launch-bound — the real speed lever).
+  - **No per-body scale** — `estimate_scale` sizes the metric geometry to the body
+    upstream, so the body is used at native size (`kinematic_1.npz` writes
+    `scale (P,)`≡1 for consumer compat). Frozen at 1.0; one `apply_scale` path is
+    kept for a future unfreeze. Posed-mesh inference is `better_human`; **no pip
+    `smplx` on the optimization path** (only the upstream `convert_mhr_to_smplx`).
+  - **One config, table-shaped.** `configs/human_optimization.toml` holds every loss
+    weight as a length-4 array **`[root, kinematics_1, kinematics_2, dynamics]`**,
+    grouped into `[loss_weights.kinematic|motion|scene|annotation|dynamics]` tables (a
+    term is off in a stage whose column is 0); shared operational knobs are separate
+    scalar sections. `config.py` flattens each column into a per-stage `{term: weight}`
+    dict the optimizer consumes.
   - **Keypoint correspondence is Goliath-308, not COCO-wholebody.** Sapiens emits
     `goliath_308` (no wrists in the body block; wrists live in the hand blocks).
-    `tools/smplx_optim/keypoints.py` maps SMPL-X-mid joints to these indices —
+    `tools/human_optim/keypoints.py` maps SMPL-X-mid joints to these indices —
     getting it right is what makes reprojection reliable (init reprojection is ~5px,
     i.e. the converter pose is already good).
   - **Chamfer owns DEPTH.** Reprojection pins the image plane, not the camera-ray
@@ -196,36 +211,36 @@ BetterVideoReconstruction/
   its signed distance is below `close_thresh_m`; a **joint** is in contact if any of
   its vertices is (vertex→joint by **nearest joint centre**, not LBS argmax — which
   would displace contact to the proximal joint). `--bodies` selects the body
-  (`smplx_kinematic` → `cnt_kin`, `smplx_kinematic_2` → `cnt_kin_2`). Core geometry
-  in `tools/smplx_optim/contacts.py`; knobs in `smplx_kinematic.toml` `[contacts]`.
-- **`kinematics_2` is annotation-guided refinement.** `optimize_smplx_2` continues
-  refining `smplx_kinematic.npz` using **manual per-joint contact labels**
-  (`data/<stem>.npz` from `../BetterContactAnnotator`: tri-state over 10 coarse
-  joints). It runs the kinematic losses plus three annotation-driven terms in the
-  refine stage (weights `[weights].ann_*`): a **real attraction** pulling in-contact
-  joints ONTO the wall, a **clearance repulsion** pushing no-contact joints past the
-  contact threshold, and **velocity damping** on in-contact joints. Unlabeled joints
-  feel none of these. `view_3d`'s `body source` compares original / kinematics /
+  (`kinematic_1` → `contacts_1`, `kinematic_2` → `contacts_2`). Core geometry
+  in `tools/human_optim/contacts.py`; knobs in `human_optimization.toml` `[contacts]`.
+- **`kinematics_2` is annotation-guided refinement.** `human_optimization --stages
+  kinematics_2` continues refining `kinematic_1.npz` using **manual per-joint contact
+  labels** (`data/<stem>.npz` from `../BetterContactAnnotator`: tri-state over 10
+  coarse joints). It runs the kinematic losses plus three annotation-driven terms in
+  the refine phase (`[loss_weights.annotation]`): a **real attraction** pulling
+  in-contact joints ONTO the wall, a **clearance repulsion** pushing no-contact joints
+  past the contact threshold, and **velocity damping** on in-contact joints. Unlabeled
+  joints feel none of these. `view_3d`'s `body source` compares original / kinematics /
   kinematics_2.
-- **SMPL-X dynamics is a force-only RNEA pass** (`optimize_dynamics_smplx`): with
-  the kinematic `q` frozen, solve per-contact-joint **world-frame forces** so the
-  RNEA **base wrench** `tau[:6]` (the un-actuatable free-flyer root) vanishes; joint
-  torques are whatever RNEA returns. Reads `smplx_kinematic_2.npz`, `cnt_kin_2.npz`
-  (SDF contacts on that body — NOT the coarse annotation), and `geocalib/gravity.npz`.
-  Real inertia for the 52-joint body comes from an LBS-argmax vertex→joint
-  segmentation + per-part convex hulls renormalised to `total_mass_kg`
-  (`tools/smplx_robot/inertia.py`); the per-person scale is folded in. Force-bearing
-  joints default to hands (resultant at the wrist) + feet, active when any sub-joint
-  is in contact — **no upward-only prior** (a climber's hand pulls down/in on a
-  hold). Temporal `force_smooth`/`torque_smooth` terms cut per-frame flicker. `v`/`a`
-  are central finite-differences of `q` (`velocity_acceleration_from_trajectory`,
-  now in `tools/smplx_robot/dynamics.py`), **not** denoised. Config
-  `configs/smplx_dynamics.toml`; `[runtime].device` defaults to **cpu**.
+- **SMPL-X dynamics is a force-only RNEA pass** (`human_optimization --stages
+  dynamics`): with the kinematic `q` frozen, solve per-contact-joint **world-frame
+  forces** so the RNEA **base wrench** `tau[:6]` (the un-actuatable free-flyer root)
+  vanishes; joint torques are whatever RNEA returns. Reads `kinematic_2.npz`,
+  `contacts_2.npz` (SDF contacts on that body — NOT the coarse annotation), and
+  `geocalib/gravity.npz`. Real inertia for the 52-joint body comes from an LBS-argmax
+  vertex→joint segmentation + per-part convex hulls renormalised to
+  `[inertia].total_mass_kg` (`tools/smplx_robot/inertia.py`); the per-person scale is
+  folded in. Force-bearing joints default to hands (resultant at the wrist) + feet,
+  active when any sub-joint is in contact — **no upward-only prior** (a climber's hand
+  pulls down/in on a hold). Temporal `force_smooth`/`torque_smooth` terms cut per-frame
+  flicker. `v`/`a` are central finite-differences of `q`
+  (`velocity_acceleration_from_trajectory` in `tools/smplx_robot/dynamics.py`),
+  **not** denoised. `[stages.dynamics].device` defaults to **cpu**.
 - **Reconstruction trust is a separate scoring stage** (`estimate_uncertainty`):
   per-frame + per-contact trust of an optimized body. The headline is a per-frame
   **data-fit loss** `L(t)` = the kinematic stage's *data* terms only
   (`reproj_sapiens·GM + reproj_init·GM + chamfer`, same weights + GM kernel as
-  `optimize_smplx`; priors/smoothness excluded) → a **relative score**
+  `human_optimization`'s kinematics_1 stage; priors/smoothness excluded) → a **relative score**
   `s = L*/L(t) ∈ (0,1]` (robust variant vs the 5th-percentile loss). Three more
   axes: **observability** (per-clip-normalised geomean of # Sapiens kp / # confident
   depth points / mean VGGT depth-conf), **absolute residuals** (px + cm, fixed

@@ -1,6 +1,6 @@
 """Per-body mass / COM / inertia for the 52-joint SMPL-X-mid body.
 
-The SMPL-X dynamics stage (``scripts/stages/optimize_dynamics_smplx.py``) needs a
+The SMPL-X dynamics stage (``scripts/stages/human_optimization.py``, dynamics) needs a
 BetterRobot ``Model`` carrying *real* inertial tensors so RNEA produces meaningful
 joint torques and the contact-force balance is physical. SMPL-X-mid ships **no
 part segmentation** (52 joints, 10475 verts). What

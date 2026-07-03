@@ -64,7 +64,7 @@ def render_contact_overlay(source, out_path, joints_2d, joint_contact, parents,
     def ok(uv):  # finite + not a behind-camera blow-up
         return np.isfinite(uv).all() and abs(uv[0]) < 1e4 and abs(uv[1]) < 1e4
 
-    with tempfile.TemporaryDirectory(prefix="cnt_kin_overlay_") as tmp:
+    with tempfile.TemporaryDirectory(prefix="contacts_overlay_") as tmp:
         frame_paths, src_fps = resolve_source(Path(source), Path(tmp))
         writer = cv2.VideoWriter(str(out_path), cv2.VideoWriter_fourcc(*"mp4v"),
                                  float(fps or src_fps or 30.0), (W, H))

@@ -3,11 +3,11 @@
 # (see scripts/stages/); those CLIs carry the full set of flags.
 
 [steps]
-# Active stages, in order; the chain ends at optimize_smplx (visually-guided
-# SMPL-X kinematic refinement). List order is honoured: `scale` (estimate_scale)
-# anchors VGGT's metric scale to the SAM-3D-Body human ruler, so it runs after the
-# body / SMPL-X stages and before `fuse` (which applies it). `--steps` runs any subset.
-run = ["sam3", "vggt", "sapiens", "sam3d", "smplx", "scale", "fuse", "optimize_smplx"]
+# Active stages, in order; the chain ends at human_optimization (four-stage SMPL-X
+# refinement). List order is honoured: `scale` (estimate_scale) anchors VGGT's metric
+# scale to the SAM-3D-Body human ruler, so it runs after the body / SMPL-X stages and
+# before `fuse` (which applies it). `--steps` runs any subset.
+run = ["sam3", "vggt", "sapiens", "sam3d", "smplx", "scale", "fuse", "human_optimization"]
 
 [runtime]
 device = "cuda"             # GPU device for the model stages (sam3/vggt/sapiens/sam3d/smplx)
@@ -50,6 +50,7 @@ iters = 300                 # fine-stage Adam iterations
 gender = "neutral"          # neutral | male | female
 overlay = true              # render the combined SMPL-X overlay (all people) → sam3d/smplx_overlay.mp4
 
-[optimize_smplx]            # visually-guided SMPL-X kinematics → sam3d/smplx_kinematic.npz (end of default chain)
-config = "configs/smplx_kinematic.toml"  # weights / optimizer / chamfer / keypoints
-overlay = false             # render reprojected-keypoint debug overlay → sam3d/smplx_kinematic_overlay.mp4
+[human_optimization]        # four-stage SMPL-X refinement → human_optim/ (default chain: root, kinematics_1)
+config = "configs/human_optimization.toml"
+stages = ""                 # subset of root,kinematics_1,kinematics_2,dynamics; empty → config [stages].run
+overlay = false             # reprojected-keypoint debug overlay → human_optim/kinematic_1_overlay.mp4

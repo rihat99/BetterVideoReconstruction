@@ -55,8 +55,8 @@ import torch  # noqa: E402
 
 from tools.geometry.human_scale import combine_log_scales  # noqa: E402
 from tools.mask_io import read_binary_mask  # noqa: E402
-from tools.smplx_optim import normalize_q  # noqa: E402
-from tools.smplx_optim.visibility import front_facing_mask, vertex_normals  # noqa: E402
+from tools.human_optim import normalize_q  # noqa: E402
+from tools.human_optim.visibility import front_facing_mask, vertex_normals  # noqa: E402
 from tools.smplx_robot import load_smplx_mid  # noqa: E402
 
 _DEFAULT_SMPLX_MODEL = (

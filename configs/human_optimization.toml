@@ -1,0 +1,128 @@
+# human_optimization — one config, four stages.
+# Loss-weight rows are per-stage arrays, columns = [root, kinematics_1, kinematics_2, dynamics].
+# Scene/annotation terms apply only in a stage's refine phase (the body seats first).
+
+[stages]
+run = ["root", "kinematics_1"]   # default chain; kinematics_2 (needs annotations) + dynamics are opt-in
+
+[stages.root]
+iters = { root = 150 }
+
+[stages.kinematics_1]
+iters = { full = 300, refine = 200, lbfgs = 30 }
+
+[stages.kinematics_2]
+iters = { root = 20, full = 80, refine = 250, lbfgs = 30 }
+
+[stages.dynamics]
+device = "cpu"
+
+#                       root  kin1  kin2  dyn
+[loss_weights.kinematic]
+reproj_sapiens      = [   8,    8,    8,    0 ]
+reproj_init         = [  30,   30,   30,    0 ]
+chamfer             = [  10,   10,   10,    0 ]
+depth_push          = [   2,    2,    2,    0 ]
+pose_prior          = [ 300,  300,  300,    0 ]
+orient_prior        = [  50,   50,   50,    0 ]
+
+[loss_weights.motion]
+accel_root          = [  12,   12,   12,    0 ]
+accel_joint         = [  24,   24,   24,    0 ]
+jerk_root           = [ 150,  150,  150,    0 ]
+jerk_joint          = [ 250,  250,  250,    0 ]
+
+[loss_weights.scene]
+penetration         = [   0, 2000, 2000,    0 ]
+contact_attraction  = [   0,   10,    0,    0 ]
+contact_velocity    = [   0,    0,    0,    0 ]
+
+[loss_weights.annotation]
+ann_attraction      = [   0,    0,   20,    0 ]
+ann_repulsion       = [   0,    0, 4000,    0 ]
+ann_velocity        = [   0,    0,  500,    0 ]
+
+[loss_weights.dynamics]
+base_wrench         = [   0,    0,    0,  1.0 ]
+force_magnitude     = [   0,    0,    0, 0.01 ]
+force_smooth        = [   0,    0,    0, 0.02 ]
+torque_smooth       = [   0,    0,    0, 0.02 ]
+
+[optimizer]
+lr = 0.01
+lr_decay = 0.1
+lr_lbfgs = 1.0
+lbfgs_history = 10
+
+[chamfer]
+conf_thresh = 0.1
+max_points = 1500
+vertex_subsample = 1000
+chunk = 16
+
+[keypoints]
+score_thresh = 0.3
+include_hands = false
+gm_scale_px = 40.0
+
+[reproj_init]
+gm_scale_px = 30.0
+
+[penetration]
+conf_thresh = 0.1
+margin_m = 0.01
+max_dist_m = 0.15
+max_pen_m = 0.10
+huber_m = 0.02
+prune_margin_m = 0.30
+max_candidates = 1500
+normal_k = 16
+
+[contact_velocity]
+conf_thresh = 0.1
+max_dist_m = 0.15
+max_pen_m = 0.10
+contact_band_m = 0.03
+vel_ref = 1.0
+vel_exp = 2.0
+
+[contact_attraction]
+conf_thresh = 0.1
+band_m = 0.10
+max_dist_m = 0.15
+
+[ann_attraction]
+conf_thresh = 0.1
+band_m = 0.30
+max_dist_m = 0.30
+
+[ann_repulsion]
+conf_thresh = 0.1
+clearance_m = 0.03
+max_dist_m = 0.15
+max_pen_m = 0.10
+huber_m = 0.02
+
+[contacts]
+close_thresh_m = 0.02
+max_dist_m = 0.10
+conf_thresh = 0.1
+normal_k = 16
+prune_margin_m = 0.10
+
+[contact]
+groups = ["left_hand", "right_hand", "left_foot", "right_foot"]
+
+[inertia]
+total_mass_kg = 70.0
+density = 1000.0
+
+[dynamics_optimizer]
+max_iter = 200
+history_size = 20
+lr = 1.0
+tolerance_grad = 1e-9
+tolerance_change = 1e-12
+
+[runtime]
+device = "cuda"

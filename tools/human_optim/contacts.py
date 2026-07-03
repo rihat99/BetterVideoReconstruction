@@ -6,7 +6,7 @@ per-vertex contacts to **per-joint** contacts by nearest-joint assignment (each
 vertex belongs to the joint center it is spatially closest to in the rest pose).
 
 The SDF is the same signed distance the kinematic stage's scene-penetration loss
-uses (:func:`tools.smplx_optim.losses.scene_penetration`): for each body vertex,
+uses (:func:`tools.human_optim.losses.scene_penetration`): for each body vertex,
 the nearest scene point ``p`` with its outward PCA normal ``n`` gives a signed
 distance ``(v − p)·n`` — negative behind the surface (penetrating), positive in
 front — using the camera-oriented normals from

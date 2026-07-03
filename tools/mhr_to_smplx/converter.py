@@ -3,7 +3,7 @@
 Targets SMPL-X (10475 vertices, 21 body joints, 15 + 15 hand joints, separate
 jaw/eye/expression channels). ``better_human.smpl.SMPLX`` has no jaw/eye/face
 deformation yet, so we lean on the pip ``smplx`` package here. The SMPL-X
-kinematic ``q`` packing lives downstream in ``optimize_smplx`` (via
+kinematic ``q`` packing lives downstream in ``human_optimization`` (via
 ``tools.smplx_robot``).
 
 The fitting pipeline matches the SMPL converter's three-stage Adam:

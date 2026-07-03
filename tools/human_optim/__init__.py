@@ -1,6 +1,6 @@
 """Visually-guided SMPL-X kinematic optimization: losses + camera/keypoint utils.
 
-The genuinely new work behind ``scripts/stages/optimize_smplx.py``: project
+The genuinely new work behind ``scripts/stages/human_optimization.py`` (kinematics_1): project
 SMPL-X joints to the image (reprojection), pull visible vertices onto the metric
 depth cloud (chamfer), anchor the pose (prior), and limit acceleration + jerk
 (smoothness). Posed-mesh inference stays in ``better_human``; the BetterRobot
@@ -34,8 +34,8 @@ from .losses import (
     scene_attraction,
     scene_penetration,
     smoothness_loss,
-    tangent_difference,
 )
+from .motion import tangent_difference
 from .qmath import normalize_q
 from .velocity import joint_local_linear_speed
 from .visibility import front_facing_mask, subsample_indices, vertex_normals

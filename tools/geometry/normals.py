@@ -1,7 +1,7 @@
 """Per-point surface normals for an unstructured point cloud.
 
 The fused scene cloud (``geometry/scene.npz``) stores points but no normals, yet
-the penetration SDF in :mod:`tools.smplx_optim.losses` needs them to *sign* the
+the penetration SDF in :mod:`tools.human_optim.losses` needs them to *sign* the
 distance: a body vertex behind the local surface — on the far side of the
 outward normal — is penetrating. We estimate one normal per point by local PCA
 (the smallest principal axis of the k nearest neighbours) and orient it toward

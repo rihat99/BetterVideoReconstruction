@@ -1,6 +1,6 @@
 """Scene-contact estimation for the optimized SMPL-X bodies.
 
-Reads the refined world-frame SMPL-X trajectory (``sam3d/smplx_kinematic.npz``)
+Reads the refined world-frame SMPL-X trajectory (``human_optim/kinematic_1.npz``)
 and the static scene cloud (``geometry/scene.npz``) and marks, for every tracked
 person, which **joints** are in contact with the scene:
 
@@ -12,7 +12,7 @@ person, which **joints** are in contact with the scene:
   3. lift to **per-joint** contact by nearest-joint assignment — a joint is in
      contact if any vertex closest to it is (vertex→joint by rest-pose 3D distance).
 
-then renders ``cnt_kin_overlay.mp4``: the projected SMPL-X skeleton on each frame,
+then renders ``contacts_1_overlay.mp4``: the projected SMPL-X skeleton on each frame,
 joints coloured **red** in contact / **green** otherwise.
 
 Run from CLI::
@@ -20,9 +20,9 @@ Run from CLI::
     .venv/bin/python scripts/stages/estimate_contacts.py \\
         --source video.mp4 --predictions out/video/ [--no-overlay]
 
-Reads:  sam3d/smplx_kinematic.npz, geometry/scene.npz, geometry/transform.npz
-Writes: sam3d/cnt_kin.npz          (joint_contact (P,N,J) bool + joint_sdf_cm)
-        sam3d/cnt_kin_overlay.mp4  (--overlay; default on)
+Reads:  human_optim/kinematic_1.npz, geometry/scene.npz, geometry/transform.npz
+Writes: human_optim/contacts_1.npz          (joint_contact (P,N,J) bool + joint_sdf_cm)
+        human_optim/contacts_1_overlay.mp4  (--overlay; default on)
 """
 
 from __future__ import annotations
@@ -43,14 +43,15 @@ import numpy as np  # noqa: E402
 import torch  # noqa: E402
 
 from tools.geometry.normals import estimate_point_normals  # noqa: E402
-from tools.smplx_optim import (  # noqa: E402
+from tools.human_optim import (  # noqa: E402
     contact_from_sdf, lift_joint_contact, project, scene_sdf, transform_points,
     vertex_to_joint, world_from_cam,
 )
-from tools.smplx_optim.qmath import normalize_q  # noqa: E402
+from tools.human_optim import paths  # noqa: E402
+from tools.human_optim.qmath import normalize_q  # noqa: E402
 from tools.smplx_robot import load_smplx_mid  # noqa: E402
 
-_DEFAULT_CONFIG = _REPO_ROOT / "configs" / "smplx_kinematic.toml"
+_DEFAULT_CONFIG = _REPO_ROOT / "configs" / "human_optimization.toml"
 _DEFAULT_SMPLX_MODEL = (
     _REPO_ROOT.parent / "better_human" / "models" / "smplx" / "SMPLX_NEUTRAL.npz"
 )
@@ -91,23 +92,21 @@ def _pose(mid, betas: torch.Tensor, q: torch.Tensor, scale: float, *, chunk=64):
 
 
 def run(source, predictions_dir, config_path, *, device_override=None, overlay=True,
-        bodies="smplx_kinematic") -> Path:
+        bodies="kinematic_1") -> Path:
     cfg = _load_config(Path(config_path))
     if device_override:
         cfg["runtime"]["device"] = device_override
     device = cfg["runtime"]["device"]
     cc = cfg["contacts"]
     pred = Path(predictions_dir)
-    sam3d = pred / "sam3d"
 
-    # Which optimized body to read contact from: the kinematic stage's
-    # (smplx_kinematic, default) or the annotation-guided stage 2's
-    # (smplx_kinematic_2). Output tag mirrors it: cnt_kin / cnt_kin_2.
-    kin_path = sam3d / f"{bodies}.npz"
-    tag = "kin" + bodies.removeprefix("smplx_kinematic")
+    # Which optimized body to read contact from: kinematics_1 (default) or the
+    # annotation-guided kinematics_2. Output tag mirrors it: contacts_1 / contacts_2.
+    kin_path = paths.body_path(pred, bodies)
+    tag = bodies.removeprefix("kinematic_")
     scene_path = pred / "geometry" / "scene.npz"
     if not kin_path.exists():
-        raise SystemExit(f"missing {kin_path} — run the optimize_smplx stage first")
+        raise SystemExit(f"missing {kin_path} — run human_optimization {bodies} first")
     if not scene_path.exists():
         raise SystemExit(f"missing {scene_path} — run fuse_geometry.py first (needs vggt --save-depth)")
 
@@ -173,13 +172,13 @@ def run(source, predictions_dir, config_path, *, device_override=None, overlay=T
         close_thresh_m=np.float32(cc["close_thresh_m"]),
         max_dist_m=np.float32(cc["max_dist_m"]),
     )
-    out_path = sam3d / f"cnt_{tag}.npz"
+    out_path = paths.contacts_path(pred, tag)
     np.savez(out_path, **save)
     print(f"[estimate_contacts] wrote {out_path}")
 
     if overlay:
-        from tools.smplx_optim.overlay import render_contact_overlay
-        ov = render_contact_overlay(source, sam3d / f"cnt_{tag}_overlay.mp4",
+        from tools.human_optim.overlay import render_contact_overlay
+        ov = render_contact_overlay(source, paths.overlay_path(pred, f"contacts_{tag}"),
                                     joints_2d, joint_contact, parents, valid_mask, H, W, fps)
         print(f"[estimate_contacts] wrote {ov}")
     return out_path
@@ -189,9 +188,9 @@ def main(argv=None) -> int:
     ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     ap.add_argument("--source", required=True)
     ap.add_argument("--predictions", required=True)
-    ap.add_argument("--bodies", default="smplx_kinematic",
-                    help="which optimized body npz under sam3d/ to read "
-                         "(default smplx_kinematic; smplx_kinematic_2 for the annotation stage)")
+    ap.add_argument("--bodies", default="kinematic_1", choices=["kinematic_1", "kinematic_2"],
+                    help="which refined body under human_optim/ to read contact from "
+                         "(default kinematic_1; kinematic_2 for the annotation stage)")
     ap.add_argument("--config", type=Path, default=_DEFAULT_CONFIG)
     ap.add_argument("--device", default=None)
     ap.add_argument("--overlay", action=argparse.BooleanOptionalAction, default=True)

@@ -3,8 +3,8 @@
 A reconstruction is only as trustworthy as the evidence behind it, and that
 evidence varies frame to frame (a keypoint dropout, a bad depth patch, a fast
 occluded limb). This standalone stage scores that trust. For each tracked person
-it reads an optimized body (``smplx_kinematic_2`` if present, else
-``smplx_kinematic``) and computes, **per frame**, four complementary axes:
+it reads an optimized body (``kinematic_2`` if present, else
+``kinematic_1``) and computes, **per frame**, four complementary axes:
 
 1. **Data-fit loss** ``L(t)`` — the kinematic stage's *data* terms (Sapiens +
    init-anchor reprojection, robustified with the same Geman-McClure kernel, plus
@@ -26,7 +26,7 @@ it reads an optimized body (``smplx_kinematic_2`` if present, else
    the init-anchor reprojection). When independent observations conflict,
    uncertainty is high — no ground truth needed.
 
-And, **per contact** (every ``cnt_kin*`` joint-contact), a confidence in [0, 1]
+And, **per contact** (every ``contacts_*`` joint-contact), a confidence in [0, 1]
 from the SDF **margin** past the contact threshold (``joint_sdf_cm`` — a contact
 right at the boundary is uncertain, a deeply-inside one is not) × the contacting
 joint's **speed** (a planted grip is slow; a fast "contact" is a limb clipping the
@@ -39,21 +39,21 @@ SDF margin is read straight from ``estimate_contacts`` (no recompute).
 
 Reads (under ``out/<stem>/``)::
 
-    sam3d/<bodies>.npz        optimized body (q, betas, scale, valid_mask)
+    human_optim/<bodies>.npz  optimized body (q, betas, scale, valid_mask)
     sam3d/smplx_params.npz    converter init pose (the init-anchor 2D target)
-    sam3d/<cnt>.npz           per-joint contact + joint_sdf_cm (for per-contact)
+    human_optim/<cnt>.npz     per-joint contact + joint_sdf_cm (for per-contact)
     sapiens/pose.npz          Goliath-308 keypoints + scores
     geometry/{transform,human}.npz  cameras + per-frame metric human depth cloud
 
 Writes::
 
-    sam3d/uncertainty_<tag>.npz                 per-frame + per-contact arrays
-    sam3d/diagnostics/uncertainty_person<oid>.png   the four-axis plot per person
+    human_optim/uncertainty_<tag>.npz                 per-frame + per-contact arrays
+    human_optim/diagnostics/uncertainty_person<oid>.png   the four-axis plot per person
 
 Standalone CLI::
 
     uv run python scripts/stages/estimate_uncertainty.py --predictions out/video/
-    uv run python scripts/stages/estimate_uncertainty.py --predictions out/video/ --bodies smplx_kinematic
+    uv run python scripts/stages/estimate_uncertainty.py --predictions out/video/ --bodies kinematic_1
 """
 
 from __future__ import annotations
@@ -69,7 +69,6 @@ for _p in (str(_BETTER_HUMAN_SRC), str(_REPO_ROOT)):
         sys.path.insert(0, _p)
 
 import argparse  # noqa: E402
-import tomllib  # noqa: E402
 
 import matplotlib  # noqa: E402
 
@@ -78,22 +77,24 @@ import matplotlib.pyplot as plt  # noqa: E402
 import numpy as np  # noqa: E402
 import torch  # noqa: E402
 
-from tools.smplx_optim import (  # noqa: E402
+from tools.human_optim import (  # noqa: E402
     build_correspondence, fold_root_to_world, geman_mcclure, project,
     subsample_indices, transform_points, vertex_to_joint, world_from_cam,
 )
-from tools.smplx_optim.qmath import normalize_q  # noqa: E402
-from tools.smplx_optim.visibility import front_facing_mask, vertex_normals  # noqa: E402
+from tools.human_optim.qmath import normalize_q  # noqa: E402
+from tools.human_optim import paths  # noqa: E402
+from tools.human_optim.config import load_config  # noqa: E402
+from tools.human_optim.visibility import front_facing_mask, vertex_normals  # noqa: E402
 from tools.smplx_robot import load_smplx_mid  # noqa: E402
 
-_DEFAULT_CONFIG = _REPO_ROOT / "configs" / "smplx_kinematic.toml"
+_DEFAULT_CONFIG = _REPO_ROOT / "configs" / "human_optimization.toml"
 _DEFAULT_SMPLX_MODEL = (
     _REPO_ROOT.parent / "better_human" / "models" / "smplx" / "SMPLX_NEUTRAL.npz"
 )
 # Which contacts pair with which body, and the output tag.
 _BODY_TO_CONTACT = {
-    "smplx_kinematic_2": ("cnt_kin_2", "kin_2"),
-    "smplx_kinematic": ("cnt_kin", "kin"),
+    "kinematic_2": ("contacts_2", "2"),
+    "kinematic_1": ("contacts_1", "1"),
 }
 
 # ── scoring references (tunable; one home, here) ──────────────────────────────
@@ -233,7 +234,7 @@ def _joint_speed(jw, fps):
     """Per-frame, per-joint world speed ``(T, J)`` (m/s), central finite-difference.
 
     Its magnitude equals the BetterRobot-Jacobian LOCAL linear speed (the rotation
-    preserves norm — see ``tools/smplx_optim/velocity.py``), so no model is needed."""
+    preserves norm — see ``tools/human_optim/velocity.py``), so no model is needed."""
     T = jw.shape[0]
     speed = jw.new_zeros(T, jw.shape[1])
     if T >= 3:
@@ -490,42 +491,50 @@ def _worst(name, arr, valid, k=6, unit="", low=False):
 
 # ─────────────────────────────── main ────────────────────────────────────────
 
-def run(predictions_dir, *, source=None, overlay=False, bodies="smplx_kinematic_2",
+def run(predictions_dir, *, source=None, overlay=False, bodies="kinematic_2",
         config_path=_DEFAULT_CONFIG, device="cuda"):
     pred = Path(predictions_dir)
     sam3d = pred / "sam3d"
     if bodies not in _BODY_TO_CONTACT:
         raise SystemExit(f"--bodies must be one of {sorted(_BODY_TO_CONTACT)}")
-    body_path = sam3d / f"{bodies}.npz"
+    body_path = paths.body_path(pred, bodies)
     if not body_path.exists():
-        # default fall-back: prefer kinematics_2, else the kinematic body
-        alt = "smplx_kinematic" if bodies == "smplx_kinematic_2" else None
-        if alt and (sam3d / f"{alt}.npz").exists():
+        # default fall-back: prefer kinematics_2, else kinematics_1
+        alt = "kinematic_1" if bodies == "kinematic_2" else None
+        if alt and paths.body_path(pred, alt).exists():
             print(f"[uncertainty] {bodies}.npz absent → using {alt}.npz")
             bodies = alt
-            body_path = sam3d / f"{alt}.npz"
+            body_path = paths.body_path(pred, alt)
         else:
             raise SystemExit(f"no body npz at {body_path}")
     cnt_name, tag = _BODY_TO_CONTACT[bodies]
 
-    cfg = tomllib.load(Path(config_path).open("rb")) if Path(config_path).exists() else {}
-    kp, ch = cfg.get("keypoints", {}), cfg.get("chamfer", {})
-    wts = cfg.get("weights", {})
-    weights = (float(wts.get("reproj_sapiens", 8.0)), float(wts.get("reproj_init", 30.0)),
-               float(wts.get("chamfer", 10.0)))
-    sap_gm = float(kp.get("gm_scale_px", 40.0))
-    init_gm = float(cfg.get("reproj_init", {}).get("gm_scale_px", 30.0))
-    score_thresh = float(kp.get("score_thresh", 0.3))
-    conf_thresh = float(ch.get("conf_thresh", 0.1))
-    max_points = int(ch.get("max_points", 1500))
-    vsub = int(ch.get("vertex_subsample", 1000))
+    # Data-fit loss uses the SAME weights + kernels as human_optimization's
+    # kinematics_1 stage (its data terms only — reproj + chamfer), read from the
+    # kinematics_1 column + shared knobs of the single config; else defaults.
+    if Path(config_path).exists():
+        hc = load_config(config_path)
+        w1, knb = hc.weights_for("kinematics_1"), hc.knobs
+        weights = (float(w1["reproj_sapiens"]), float(w1["reproj_init"]), float(w1["chamfer"]))
+        sap_gm = float(knb["keypoints"]["gm_scale_px"])
+        init_gm = float(knb["reproj_init"]["gm_scale_px"])
+        score_thresh = float(knb["keypoints"]["score_thresh"])
+        conf_thresh = float(knb["chamfer"]["conf_thresh"])
+        max_points = int(knb["chamfer"]["max_points"])
+        vsub = int(knb["chamfer"]["vertex_subsample"])
+        include_hands = bool(knb["keypoints"]["include_hands"])
+    else:
+        weights = (8.0, 30.0, 10.0)
+        sap_gm, init_gm, score_thresh = 40.0, 30.0, 0.3
+        conf_thresh, max_points, vsub = 0.1, 1500, 1000
+        include_hands = False
 
     body = dict(np.load(body_path, allow_pickle=True))
     params = dict(np.load(sam3d / "smplx_params.npz", allow_pickle=True))
     pose = dict(np.load(pred / "sapiens" / "pose.npz", allow_pickle=True))
     human = dict(np.load(pred / "geometry" / "human.npz", allow_pickle=True))
     tr = dict(np.load(pred / "geometry" / "transform.npz", allow_pickle=True))
-    cnt_path = sam3d / f"{cnt_name}.npz"
+    cnt_path = paths.contacts_path(pred, tag)
     cnt = dict(np.load(cnt_path, allow_pickle=True)) if cnt_path.exists() else None
     if cnt is None:
         print(f"[uncertainty] {cnt_path} absent → per-contact axis skipped")
@@ -541,15 +550,14 @@ def run(predictions_dir, *, source=None, overlay=False, bodies="smplx_kinematic_
     mid = load_smplx_mid(_DEFAULT_SMPLX_MODEL, device)
     J = mid.num_joints
     fvids = torch.as_tensor([int(x) for x in mid.frame_vertex_ids], dtype=torch.long, device=device)
-    corr = build_correspondence(list(mid.frame_names), include_hands=False, device=device)
+    corr = build_correspondence(list(mid.frame_names), include_hands=include_hands, device=device)
     sub = subsample_indices(mid.num_vertices, vsub, device=device)
     jnames = list(mid.joint_names)
     _finger = ("index", "middle", "pinky", "ring", "thumb")
     body_idx = torch.tensor([i for i in range(J) if not any(f in jnames[i].lower() for f in _finger)],
                             dtype=torch.long, device=device)
 
-    diag_dir = sam3d / "diagnostics"
-    diag_dir.mkdir(parents=True, exist_ok=True)
+    diag_dir = paths.diagnostics_dir(pred)
 
     P = len(object_ids)
     store = {k: np.full((P, N), np.nan, np.float32) for k in
@@ -667,7 +675,7 @@ def run(predictions_dir, *, source=None, overlay=False, bodies="smplx_kinematic_
             n_low = int(np.nansum(cc < 0.3))
             print(f"    contacts: {int(jc.sum())} total, mean conf={m:.2f}, {n_low} low (<0.3)")
 
-    out_npz = sam3d / f"uncertainty_{tag}.npz"
+    out_npz = paths.uncertainty_path(pred, tag)
     np.savez(
         out_npz,
         object_ids=np.asarray(object_ids, np.int32),
@@ -689,7 +697,7 @@ def run(predictions_dir, *, source=None, overlay=False, bodies="smplx_kinematic_
         panel = dict(oid=object_ids[0], valid=store["valid"][0], combined=store["combined"][0],
                      reproj=store["reproj_sap_px"][0], cham=store["chamfer_cm"][0],
                      jc=cstore["joint_contact"][0], cc=cstore["contact_conf"][0])
-        ov = sam3d / f"uncertainty_{tag}_overlay.mp4"
+        ov = paths.overlay_path(pred, f"uncertainty_{tag}")
         _render_overlay(source, ov, joints_2d=joints_2d, joint_contact=cstore["joint_contact"],
                         contact_conf=cstore["contact_conf"], valid_mask=store["valid"],
                         parents=np.asarray(body["parents"]), panel=panel, H=H, W=W, fps=fps)
@@ -701,10 +709,10 @@ def main(argv=None) -> int:
     ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     ap.add_argument("--source", default=None, help="original video / frames (needed for --overlay)")
     ap.add_argument("--predictions", required=True, help="out/<stem>/ clip directory")
-    ap.add_argument("--bodies", default="smplx_kinematic_2",
+    ap.add_argument("--bodies", default="kinematic_2",
                     choices=sorted(_BODY_TO_CONTACT),
-                    help="which optimized body to score (default: smplx_kinematic_2, "
-                         "falls back to smplx_kinematic)")
+                    help="which refined body to score (default: kinematic_2, "
+                         "falls back to kinematic_1)")
     ap.add_argument("--overlay", action="store_true",
                     help="also write uncertainty_<tag>_overlay.mp4 (frame + contact skeleton "
                          "beside the panels with a sweeping playhead); requires --source")
