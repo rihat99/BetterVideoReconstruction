@@ -10,13 +10,16 @@ a **reduced resolution**. This stage:
   2. denormalizes VGGT's intrinsics to the original frame resolution (FOV is
      VGGT's and is preserved — scaling only touches depth + camera translation);
   3. backprojects every cleaned VGGT depth map to metric world points, split into
-     a static **scene** cloud and per-frame **human** points via the SAM3 masks
-     (union of all tracked people, each point tagged with ``obj_id``). The scene
-     subtracts a *dilated* human mask (imperfect masks leak human pixels into the
-     background); the human keeps every in-mask point (edge filter only — no
-     confidence gate);
+     a static **scene** cloud and per-frame **human** points via the SAM3 masks.
+     The scene subtracts a *dilated* mask of **every** tracked person, so no one —
+     climber or bystander — leaks into it; the **human** cloud keeps only the
+     reconstructed climbers (``sam3d/smplx_params.npz`` ``object_ids``), tagged by
+     ``obj_id`` (edge filter only — no confidence gate);
   4. merges near-duplicate points by voxel hashing — the scene globally (it is
-     static); the human is kept per-frame, unmerged (the person moves).
+     static); the human is kept per-frame, unmerged (the person moves);
+  5. drops small disconnected voxel clusters from the scene — floating depth
+     fragments and off-surface blobs (e.g. an untracked bystander VGGT placed off
+     the wall).
 
 Per-clip I/O (``--source`` frames + ``--predictions out/<stem>/``)::
 
@@ -50,7 +53,7 @@ import torch
 from tools.geometry.backproject import backproject
 from tools.geometry.clean import clean_depth
 from tools.geometry.intrinsics import denormalize_K
-from tools.geometry.voxel import group_reduce, voxel_downsample
+from tools.geometry.voxel import group_reduce, large_component_mask, voxel_downsample
 from tools.mask_io import read_binary_mask
 from tools.source import resolve_source
 
@@ -107,6 +110,15 @@ def fuse(args: argparse.Namespace) -> None:
     ho, wo = int(cam["image_height"]), int(cam["image_width"])
     requested = [int(x) for x in args.person_obj_ids.split(",")] if args.person_obj_ids else None
     objs = _discover_objs(pred / "sam3", requested)
+    # Every tracked person is carved out of the scene, but only the reconstructed
+    # climbers (smplx_params object_ids) go into the human cloud — a tracked
+    # bystander is thus excluded from both. Falls back to all objs if smplx params
+    # are absent (standalone fuse without the smplx stage).
+    smplx_path = pred / "sam3d" / "smplx_params.npz"
+    climber_ids = objs
+    if smplx_path.exists():
+        ids = np.load(smplx_path, allow_pickle=True)["object_ids"].ravel()
+        climber_ids = [int(o) for o in ids if int(o) in objs]
     dev = args.device
 
     scene_pts, scene_conf, scene_col = [], [], []
@@ -128,9 +140,10 @@ def fuse(args: argparse.Namespace) -> None:
 
             is_human, obj_id = _human_masks(pred / "sam3", idx, objs, hv, wv)
             # Imperfect masks leak human-edge pixels into the background, so subtract
-            # a *dilated* human band from the scene; collect the human from the tight mask.
+            # a *dilated* band of every tracked person from the scene; collect the
+            # human from the tight mask, restricted to the reconstructed climbers.
             scene_mask = valid_scene & ~_dilate(is_human, args.human_dilate)
-            human_mask = valid_human & is_human
+            human_mask = valid_human & is_human & np.isin(obj_id, climber_ids)
 
             depth_t, K_t, E_t = (torch.from_numpy(depth).to(dev),
                                  torch.from_numpy(K_px[k]).to(dev), torch.from_numpy(extr[k]).to(dev))
@@ -149,11 +162,18 @@ def fuse(args: argparse.Namespace) -> None:
                 human_fid.append(torch.full((int(sh.sum()),), k, dtype=torch.int32, device=dev))
                 human_col.append(col_t[sh])
 
-    centroids, inverse, counts = voxel_downsample(torch.cat(scene_pts) * s, args.voxel_scene)
+    centroids, inverse, counts, coords = voxel_downsample(torch.cat(scene_pts) * s, args.voxel_scene)
     scene_confidence = group_reduce(torch.cat(scene_conf), inverse, counts.numel(), "amax")
     scene_color = torch.zeros((counts.numel(), 3), device=dev)
     scene_color.index_add_(0, inverse, torch.cat(scene_col).float())
     scene_color = (scene_color / counts.unsqueeze(1)).round().to(torch.uint8)
+
+    # Drop small disconnected clusters — floating depth fragments and off-surface
+    # blobs (e.g. an untracked bystander VGGT placed off the wall).
+    keep = large_component_mask(coords, args.min_scene_voxels)
+    n_dropped = int((~keep).sum())
+    centroids, counts = centroids[keep], counts[keep]
+    scene_confidence, scene_color = scene_confidence[keep], scene_color[keep]
 
     out_dir.mkdir(parents=True, exist_ok=True)
     extr_metric = extr.copy()
@@ -185,8 +205,8 @@ def fuse(args: argparse.Namespace) -> None:
         obj_id=torch.cat(human_obj) if human_obj else empty[:, 0].to(torch.int32),
         frame_indices=frame_indices.astype(np.int32),
     )
-    print(f"  scale={s:.4f} | scene {centroids.shape[0]} pts | "
-          f"human {sum(int(t.shape[0]) for t in human_pts)} pts -> {out_dir}")
+    print(f"  scale={s:.4f} | scene {centroids.shape[0]} pts ({n_dropped} dropped: small clusters) | "
+          f"human {sum(int(t.shape[0]) for t in human_pts)} pts (climbers {climber_ids}) -> {out_dir}")
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -203,6 +223,9 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--human-dilate", type=int, default=8,
                    help="grow the human mask by N px before subtracting it from the scene, so "
                         "imperfect mask edges don't leak human points into it (default: 8; 0 disables)")
+    p.add_argument("--min-scene-voxels", type=int, default=25,
+                   help="drop scene clusters smaller than this many connected voxels "
+                        "(floating fragments / off-surface blobs); 1 disables (default: 25)")
     p.add_argument("--person-obj-ids", default=None,
                    help="comma-separated SAM3 object ids to treat as people (default: all)")
     p.add_argument("--device", default="cuda", help="cuda | cpu (default: cuda)")

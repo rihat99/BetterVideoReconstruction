@@ -37,6 +37,7 @@ voxel_scene = 0.05          # scene merge voxel size, metres
 conf_drop_q = 0.3           # drop this lowest-confidence fraction of VGGT depth (scene only; human keeps all)
 edge_rtol = 0.04            # depth-edge (flying-pixel) filter tolerance; 0 disables
 human_dilate = 8            # grow the human mask N px before subtracting from the scene (cleaner scene); 0 disables
+min_scene_voxels = 25       # drop scene clusters smaller than this many connected voxels (floating blobs); 1 disables
 person_obj_ids = ""         # restrict SAM3 ids treated as people, e.g. "0,1"; empty → all
 
 [sam3d]                     # SAM-3D-Body MHR fit → sam3d/params.npz (camera from VGGT via fuse)

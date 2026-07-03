@@ -2,7 +2,7 @@
 
 Runs the active stages in order for a video (or a folder of videos):
 
-    sam3 → vggt → sapiens → sam3d → smplx → scale → fuse → optimize_smplx
+    sam3 → vggt → sapiens → sam3d → smplx → scale → fuse → ™
 
 Each stage is invoked as a subprocess of the current interpreter — this
 isolates per-stage model memory (SAM 3, VGGT-Omega, Sapiens2 and SAM-3D-Body
@@ -69,7 +69,7 @@ def _default_config() -> dict:
         "sapiens": {"tasks": "pose", "overlay": True},
         "scale": {"conf_drop_q": 0.3, "min_inlier_verts": 50, "mad_k": 3.0},
         "fuse": {"voxel_scene": 0.05, "conf_drop_q": 0.3, "edge_rtol": 0.04,
-                 "human_dilate": 8, "person_obj_ids": ""},
+                 "human_dilate": 8, "min_scene_voxels": 25, "person_obj_ids": ""},
         "sam3d": {"obj_ids": "", "inference_type": "full", "overlay": True},
         "smplx": {"iters": 300, "gender": "neutral", "overlay": True},
         "optimize_smplx": {"config": "configs/smplx_kinematic.toml", "overlay": False},
@@ -150,7 +150,8 @@ def _build_perclip_args(step: str, cfg: dict, clip: Path, clip_dir: Path,
                  "--voxel-scene", str(f["voxel_scene"]),
                  "--conf-drop-q", str(f["conf_drop_q"]),
                  "--edge-rtol", str(f["edge_rtol"]),
-                 "--human-dilate", str(f["human_dilate"])]
+                 "--human-dilate", str(f["human_dilate"]),
+                 "--min-scene-voxels", str(f["min_scene_voxels"])]
         if f.get("person_obj_ids"):
             extra += ["--person-obj-ids", str(f["person_obj_ids"])]
         return extra
