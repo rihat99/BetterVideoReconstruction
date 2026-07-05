@@ -15,6 +15,12 @@ landmarks, the **SMPL** (not SMPL-X) motion/dynamics path, and the **Gemma**
 placeholder — lives under **`legacy/`** and is imported by nothing here; see
 [`legacy/README.md`](legacy/README.md).
 
+## Git workflow
+
+Commit directly to **`main`** — do **not** create branches. Land all work on
+`main` (this overrides the default "branch before committing on the default
+branch" behavior for this repo).
+
 ## Two pipelines, shared stages
 
 - **Local, file-based** — `scripts/pipeline.py` runs the chain on a video / folder
