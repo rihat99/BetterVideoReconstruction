@@ -31,6 +31,23 @@ def _camera_world_pose(extrinsic: np.ndarray):
     return -R.T @ t, vt.SO3.from_matrix(R.T).wxyz
 
 
+def _camera_follow_target(extrinsic: np.ndarray) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """OpenCV cam-from-world ``[R|t]`` → viewer camera ``(position, look_at, up)`` in world.
+
+    For an "onboard" view that matches the reconstructed camera: the eye is the
+    camera centre ``C = -Rᵀt``; the optical axis (OpenCV +z) and up (OpenCV −y,
+    since image y points down) map to the world frame via ``Rᵀ``. ``look_at`` is one
+    unit ahead of ``C`` along the optical axis, so feeding these to
+    :attr:`viser.CameraHandle.position` / ``look_at`` / ``up_direction`` orients the
+    viewer exactly like the source camera (match its vertical FOV separately).
+    """
+    R, t = extrinsic[:3, :3], extrinsic[:3, 3]
+    C = -R.T @ t
+    forward = R.T @ np.array([0.0, 0.0, 1.0])
+    up = R.T @ np.array([0.0, -1.0, 0.0])
+    return C, C + forward, up
+
+
 def _unit(v) -> np.ndarray:
     """Normalize a vector; return it unchanged if its norm is ~0."""
     v = np.asarray(v, np.float64)
@@ -81,12 +98,124 @@ def _top4_skin_weights(lbs_w: np.ndarray) -> np.ndarray:
     return (w / w.sum(1, keepdims=True)).astype(np.float32)
 
 
-def _background_image(top=(30, 32, 36), bottom=(52, 55, 61), height: int = 256) -> np.ndarray:
-    """A dark, faintly-graded grey backdrop (darker top → lighter bottom).
+def _background_image() -> np.ndarray:
+    """A solid white backdrop, set full-canvas via
+    :meth:`viser.SceneApi.set_background_image`."""
+    return np.full((2, 2, 3), 255, np.uint8)
 
-    Rendered full-canvas via :meth:`viser.SceneApi.set_background_image`; the gentle
-    vertical gradient reads as a studio backdrop rather than a flat fill.
+
+def _srgb_to_linear(c: np.ndarray) -> np.ndarray:
+    """sRGB→linear on ``[0, 1]`` floats (standard IEC 61966-2-1 transfer)."""
+    c = np.asarray(c, np.float64)
+    return np.where(c <= 0.04045, c / 12.92, ((c + 0.055) / 1.055) ** 2.4)
+
+
+def _unlit_glb(vertices: np.ndarray, faces: np.ndarray, colors_srgb: np.ndarray) -> bytes:
+    """Export an **unlit**, vertex-coloured GLB so a surface mesh matches the point cloud.
+
+    viser's point cloud is drawn by a custom shader that writes the stored colours
+    straight to the framebuffer — unlit and un-tone-mapped. A mesh instead goes
+    through three.js's default lit ``MeshStandardMaterial`` *and* the renderer's
+    ACES tone-map + sRGB output-encode, which is what makes it look dim and washed
+    out next to the cloud. Two steps close most of that gap from the Python side:
+
+    * flag the material ``KHR_materials_unlit`` → three.js renders an unlit
+      ``MeshBasicMaterial`` (no lighting term), and
+    * pre-**linearize** the colours into ``COLOR_0``: three.js reads glTF vertex
+      colours as linear and re-encodes to sRGB on output, so storing
+      ``sRGB→linear`` values makes that encode restore the original stored colour.
+
+    (A small residual remains: the renderer's ACES tone-map still applies to the
+    mesh but not to the point shader, and can't be disabled through glTF — so the
+    surface sits a touch darker than the cloud, far closer than the lit default.)
+
+    :param vertices: ``(V, 3)`` mesh vertices.
+    :param faces: ``(F, 3)`` triangle indices.
+    :param colors_srgb: ``(V, 3)`` ``uint8`` sRGB per-vertex colours.
+    :returns: GLB bytes for :meth:`viser.SceneApi.add_glb`.
     """
-    t = np.linspace(0.0, 1.0, height, dtype=np.float32)[:, None]
-    col = (1.0 - t) * np.array(top, np.float32) + t * np.array(bottom, np.float32)
-    return np.repeat(col[:, None, :], 2, axis=1).astype(np.uint8)   # (H, 2, 3)
+    import io
+    import json
+    import struct
+
+    import trimesh
+    from trimesh.visual.material import PBRMaterial
+
+    lin = np.clip(_srgb_to_linear(np.asarray(colors_srgb, np.float64) / 255.0), 0.0, 1.0)
+    vc = np.empty((len(lin), 4), np.uint8)
+    vc[:, :3] = np.round(lin * 255.0).astype(np.uint8)
+    vc[:, 3] = 255
+    mesh = trimesh.Trimesh(vertices, faces, vertex_colors=vc, process=False)
+    mesh.visual.material = PBRMaterial(doubleSided=True, metallicFactor=0.0, roughnessFactor=1.0)
+    with io.BytesIO() as buf:
+        mesh.export(buf, file_type="glb")
+        glb = buf.getvalue()
+
+    # A GLB is a 12-byte header then length-prefixed chunks; the first is the JSON
+    # document. Patch it to declare KHR_materials_unlit on every material, re-pad the
+    # chunk to a 4-byte boundary, and fix the total-length field. The BIN chunk (the
+    # tail) is untouched, so accessor byte-offsets stay valid.
+    json_len = struct.unpack("<I", glb[12:16])[0]
+    doc = json.loads(glb[20:20 + json_len])
+    tail = glb[20 + json_len:]
+    used = doc.setdefault("extensionsUsed", [])
+    if "KHR_materials_unlit" not in used:
+        used.append("KHR_materials_unlit")
+    for mat in doc.get("materials", []):
+        mat.setdefault("extensions", {})["KHR_materials_unlit"] = {}
+    new_json = json.dumps(doc, separators=(",", ":")).encode()
+    new_json += b" " * ((4 - len(new_json) % 4) % 4)
+    out = bytearray(glb[:12] + struct.pack("<II", len(new_json), 0x4E4F534A) + new_json + tail)
+    struct.pack_into("<I", out, 8, len(out))
+    return bytes(out)
+
+
+def _fit_ground_plane(points: np.ndarray, gravity_down: np.ndarray, *,
+                      low_frac: float = 0.03, min_planarity: float = 0.15
+                      ) -> tuple[np.ndarray, np.ndarray, float] | None:
+    """Robustly fit a floor plane to the lowest scene points.
+
+    Takes the lowest ``low_frac`` of ``points`` by height along ``gravity_down``,
+    then alternates trim-to-inliers with a PCA refit — seeded from a horizontal
+    guess so vertical wall points that dip into the low band get shed and the fit
+    locks onto the actual floor. A small band matters: widen it and the wall
+    footings swamp the floor and tilt the normal, so ``low_frac`` stays low.
+
+    :param points: ``(N, 3)`` world-frame scene points.
+    :param gravity_down: ``(3,)`` world-frame gravity (down) direction.
+    :param low_frac: fraction of points (by down-gravity height) to fit over.
+    :param min_planarity: reject the fit when the band's middle-to-largest singular
+        ratio falls below this — i.e. the lowest points are a *line* (a wall's
+        bottom edge, no floor) so the in-plane orientation and normal are
+        undetermined.
+    :returns: ``(centroid (3,), up_normal (3,), extent)`` — the plane centroid, its
+        unit normal oriented against gravity, and a planar size for drawing the
+        grid — or ``None`` if there are too few points or no planar floor is found.
+    """
+    pts = np.asarray(points, np.float64)
+    if len(pts) < 100:
+        return None
+    g = _unit(gravity_down)
+    height = pts @ g                                    # larger ⇒ lower
+    low = pts[height >= np.quantile(height, 1.0 - low_frac)]
+    if len(low) < 30:
+        return None
+    normal, centroid, keep = _unit(-g), low.mean(0), low  # seed: horizontal floor
+    for _ in range(4):
+        resid = np.abs((low - centroid) @ normal)
+        inliers = low[resid <= 2.5 * (np.median(resid) + 1e-9)]
+        if len(inliers) < 30:
+            break
+        keep = inliers
+        centroid = keep.mean(0)
+        normal = np.linalg.svd(keep - centroid, full_matrices=False)[2][-1]
+        if normal @ g > 0.0:                            # orient against gravity
+            normal = -normal
+    centered = keep - centroid
+    svals = np.linalg.svd(centered, full_matrices=False)[1]
+    if svals[0] < 1e-9 or svals[1] / svals[0] < min_planarity:
+        return None                                     # degenerate band (a line)
+    normal = _unit(normal)
+    planar = centered - np.outer(centered @ normal, normal)
+    extent = max(2.0 * float(np.quantile(np.linalg.norm(planar, axis=1), 0.9)), 0.5)
+    return centroid, normal, extent

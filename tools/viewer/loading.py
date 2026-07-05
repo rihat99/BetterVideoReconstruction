@@ -37,8 +37,8 @@ def _load_gravity(pred: Path) -> dict | None:
 
 
 def _load_dynamics(pred: Path) -> dict | None:
-    """Numpy arrays for the force-only dynamics skeleton (``smplx_dynamics.npz``)."""
-    f = pred / "sam3d" / "smplx_dynamics.npz"
+    """Numpy arrays for the force-only dynamics skeleton (``human_optim/dynamics.npz``)."""
+    f = pred / "human_optim" / "dynamics.npz"
     if not f.exists():
         return None
     dd = np.load(f, allow_pickle=True)
@@ -63,6 +63,90 @@ def _load_dynamics(pred: Path) -> dict | None:
     }
 
 
+_VIDEO_EXTS = (".mp4", ".mov", ".avi", ".mkv", ".webm")
+
+
+def _load_video_frames(pred: Path, n_frames: int, *, video_dir: Path | None,
+                       max_dim: int = 400) -> tuple[np.ndarray | None, float | None]:
+    """Load the clip's original footage + its playback fps, aligned to the frame index.
+
+    Finds ``<video_dir>/<clip-stem>.<ext>`` (``video_dir`` defaults to the repo's
+    ``data/``) and decodes it the **same way the pipeline did** — cv2 sequential —
+    so the RGB lines up with the geometry frame-for-frame. VGGT records the
+    original index of each processed frame in ``vggt/camera.npz``
+    (``frame_indices``); those pick the frames matching the ``n_frames`` extrinsics
+    (identity unless a long clip was uniformly subsampled). Decoding with a
+    different backend (e.g. decord) can report a different frame count on the same
+    file, so cv2 is used here to stay byte-aligned with the pipeline. Frames are
+    downscaled so the longer side is ``max_dim`` for a light sidebar pane.
+
+    :param pred: the clip's ``out/<stem>/`` directory.
+    :param n_frames: number of pipeline frames (extrinsics) to align to.
+    :param video_dir: directory holding ``<stem>.<ext>``; ``None`` → repo ``data/``.
+    :param max_dim: longer-side pixel cap for the returned frames.
+    :returns: ``(frames, fps)`` — ``(n_frames, h, w, 3)`` ``uint8`` RGB indexed by the
+        frame slider (black where a frame is missing) and the real-time playback fps
+        (native container fps, scaled for any frame subsample); ``(None, None)`` if no
+        source video is found.
+    """
+    import cv2
+
+    vdir = video_dir if video_dir is not None else _REPO_ROOT / "data"
+    video = next((vdir / f"{pred.name}{ext}" for ext in _VIDEO_EXTS
+                  if (vdir / f"{pred.name}{ext}").exists()), None)
+    if video is None:
+        return None, None
+
+    fi = None
+    cam = pred / "vggt" / "camera.npz"
+    if cam.exists():
+        cd = np.load(cam)
+        if "frame_indices" in cd.files:
+            fi = np.asarray(cd["frame_indices"], np.int64)
+    if fi is None:                                  # older clip → assume 1:1
+        fi = np.arange(n_frames, dtype=np.int64)
+    fi = fi[:n_frames]
+
+    cap = cv2.VideoCapture(str(video))
+    if not cap.isOpened():
+        return None, None
+    # Real-time playback default from the native container fps. When the pipeline
+    # uniformly subsampled a long clip (non-identity frame_indices), the kept frames
+    # span more source time than they number, so scale by that span to stay real-time
+    # (identity → unchanged); None when cv2 can't report the fps.
+    raw_fps = float(cap.get(cv2.CAP_PROP_FPS) or 0.0)
+    span = float(fi[-1] - fi[0]) if len(fi) > 1 else 0.0
+    play_fps = (raw_fps * (len(fi) - 1) / span if raw_fps > 0.0 and span > 0.0
+                else (raw_fps or None))
+    want = {int(i) for i in fi}
+    kept: dict[int, np.ndarray] = {}
+    i = 0
+    while True:
+        ok, bgr = cap.read()
+        if not ok:
+            break
+        if i in want:
+            rgb = cv2.cvtColor(bgr, cv2.COLOR_BGR2RGB)
+            h, w = rgb.shape[:2]
+            s = max_dim / max(h, w)
+            if s < 1.0:
+                rgb = cv2.resize(rgb, (round(w * s), round(h * s)),
+                                 interpolation=cv2.INTER_AREA)
+            kept[i] = rgb
+        i += 1
+    cap.release()
+    if not kept:
+        return None, None
+
+    h, w = next(iter(kept.values())).shape[:2]
+    out = np.zeros((n_frames, h, w, 3), np.uint8)
+    for f, orig in enumerate(fi):
+        frame = kept.get(int(orig))
+        if frame is not None:
+            out[f] = frame
+    return out, play_fps
+
+
 def _load_smplx_mid(device: str):
     """Load the 52-joint ``SMPLXMid`` model + resolve the torch device (``mid, dev``)."""
     import torch
@@ -78,7 +162,7 @@ def _load_smplx_mid(device: str):
 
 
 def _smplx_kinematic_skinned(npz_path: Path, *, device: str = "cuda"):
-    """Skinning data from a world-frame kinematic SMPL-X body (``smplx_kinematic*.npz``).
+    """Skinning data from a world-frame kinematic SMPL-X body (``human_optim/kinematic_*.npz``).
 
     The params are already world-frame (``frame='world'``) on the 52-joint
     ``SMPLXMid`` body, so there is no camera→world fold. Each person has a single
@@ -254,6 +338,8 @@ class ClipData:
     # a present key maps to (verts, faces, vertex_colors, vertex_normals) or None.
     scene_meshes: dict = field(default_factory=dict)
     scene_normals: np.ndarray | None = None   # camera-oriented normals, computed once
+    video_frames: np.ndarray | None = None    # original footage, frame-slider aligned (sidebar pane)
+    fps: float | None = None                  # real-time playback fps (from the source video)
 
 
 def _subsample_human_mask(fid: np.ndarray, obj: np.ndarray, max_per_frame: int) -> np.ndarray:
@@ -278,7 +364,7 @@ def _subsample_human_mask(fid: np.ndarray, obj: np.ndarray, max_per_frame: int) 
 
 
 def load_clip_data(pred: Path, *, device: str, show_smplx: bool,
-                   human_max_points: int = 0) -> ClipData:
+                   human_max_points: int = 0, video_dir: Path | None = None) -> ClipData:
     """Load one clip's geometry + all SMPL-X body sources into numpy."""
     geo = pred / "geometry"
     scene = np.load(geo / "scene.npz")
@@ -300,11 +386,12 @@ def load_clip_data(pred: Path, *, device: str, show_smplx: bool,
             orig = _smplx_params_skinned(pred, extr, device=device)
             if orig is not None:
                 skinned["original"] = orig
-        for name, fn in (("kinematics", "smplx_kinematic.npz"),
-                         ("kinematics_2", "smplx_kinematic_2.npz")):
-            if (pred / "sam3d" / fn).exists():
-                skinned[name] = _smplx_kinematic_skinned(pred / "sam3d" / fn, device=device)
+        for name, fn in (("kinematics", "kinematic_1.npz"),
+                         ("kinematics_2", "kinematic_2.npz")):
+            if (pred / "human_optim" / fn).exists():
+                skinned[name] = _smplx_kinematic_skinned(pred / "human_optim" / fn, device=device)
 
+    video_frames, play_fps = _load_video_frames(pred, len(extr), video_dir=video_dir)
     return ClipData(
         path=pred, name=pred.name,
         scene_points=scene["points"], scene_colors=scene["colors"],
@@ -315,7 +402,8 @@ def load_clip_data(pred: Path, *, device: str, show_smplx: bool,
         gravity=_load_gravity(pred),
         skinned=skinned,
         dynamics=_load_dynamics(pred) if show_smplx else None,
-        n_frames=len(extr))
+        n_frames=len(extr),
+        video_frames=video_frames, fps=play_fps)
 
 
 def ensure_scene_mesh(data: ClipData, method: str) -> tuple | None:

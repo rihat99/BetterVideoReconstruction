@@ -2,9 +2,9 @@
 
 Builds every scene node for a single clip from its :class:`~tools.viewer.loading.ClipData`
 — the scene cloud (points or a reconstructed surface), the camera frustums +
-centre path, the gravity arrow, the per-frame human points, the skinned SMPL-X
-bodies, and the force-only dynamics skeleton — and moves them together with the
-frame slider. One ``/clip`` root frame owns them all, so :meth:`ClipScene.dispose`
+centre path, the gravity arrow, the fitted ground plane, the per-frame human
+points, the skinned SMPL-X bodies, and the force-only dynamics skeleton — and
+moves them together with the frame slider. One ``/clip`` root frame owns them all, so :meth:`ClipScene.dispose`
 tears the whole clip down in a single removal.
 """
 from __future__ import annotations
@@ -14,8 +14,10 @@ import numpy as np
 from .helpers import (
     _BODY_COLORS,
     _camera_world_pose,
+    _fit_ground_plane,
     _time_color,
     _unit,
+    _unlit_glb,
     _wxyz_shortest_arc_z,
 )
 from .loading import ClipData, ensure_scene_mesh
@@ -24,6 +26,9 @@ from .loading import ClipData, ensure_scene_mesh
 _DYN_R0, _DYN_RB, _DYN_MAXS, _DYN_FSCALE = 0.022, 0.012, 3.0, 5e-4
 # cap on drawn camera frustums, so a long clip isn't a dense wire mess
 _CAM_MAX_FRUSTUMS = 24
+# draw the ground grid this many times the fitted floor's data extent, so it reads
+# as a floor spanning the scene rather than a small patch under the climber
+_GROUND_GRID_MULT = 10.0
 
 
 class ClipScene:
@@ -60,12 +65,9 @@ class ClipScene:
 
         # -- cameras: a frustum per (strided) frame + the full centre path --
         centers = np.stack([_camera_world_pose(e)[0] for e in data.extr]).astype(np.float32)
-        # Framing + lighting anchors: where the human is, and the side the cameras
-        # watch from. The viewer orbits about ``focus_point``; the key light comes
-        # from the camera side (see ``_build_lights``).
+        # Framing anchor: where the human is. The viewer orbits about ``focus_point``.
         self.camera_mean = centers.mean(0).astype(np.float64)
         self.focus_point = self._compute_focus()
-        self._build_lights()
         self.camera_nodes: list = []
         # Thin, time-coloured frustums along the path, capped in number: hundreds of
         # identical blue frustums read as a wire mess, so cap the count (the spline
@@ -86,7 +88,7 @@ class ClipScene:
         self.camera_centers = centers
         self.camera_cursor = ss.add_icosphere(
             "/clip/cameras/cursor", radius=max(camera_scale * 0.5, 0.02),
-            color=(245, 245, 245), position=tuple(centers[0].tolist()),
+            color=(235, 40, 40), position=tuple(centers[0].tolist()),
             visible=self.layers["cameras"])
 
         # -- gravity arrow (down), anchored at the mean camera centre --
@@ -103,6 +105,9 @@ class ClipScene:
                               shaft_radius=camera_scale * 0.12,
                               head_radius=camera_scale * 0.25, head_length=camera_scale * 0.4),
             ]
+
+        # -- ground plane fitted to the lowest scene points, drawn as a grid --
+        self._build_ground()
 
         # -- human points: one hidden node per (frame, climber), preloaded --
         self.human_nodes: list[list] = [[] for _ in range(self.n_frames)]
@@ -187,9 +192,10 @@ class ClipScene:
                    else f"GeoCalib, spread {d.gravity['spread']:.1f}°")
             gtxt = f"[{g[0]:+.2f} {g[1]:+.2f} {g[2]:+.2f}] ({tag})"
         srcs = ", ".join(self.body_source_names) or "—"
+        gnd = "" if self.ground_angle is None else f" · ground ∠grav {self.ground_angle:.1f}°"
         return (f"**{d.name}** — {d.n_frames} frames · {len(d.scene_points):,} scene pts · "
                 f"{self.n_cameras} cameras · {len(d.human_points):,} human pts · "
-                f"climbers {d.obj_ids}\n\nbodies: {srcs} · gravity: {gtxt}")
+                f"climbers {d.obj_ids}\n\nbodies: {srcs} · gravity: {gtxt}{gnd}")
 
     # -- framing + lighting --
     def _compute_focus(self) -> np.ndarray:
@@ -224,32 +230,33 @@ class ClipScene:
             d, dist = np.array([0.0, 0.0, -1.0]), 1.0
         return self.focus_point + (d / dist) * max(dist, 2.0)
 
-    def _build_lights(self) -> None:
-        """Add one key light from the viewing (camera) side; viser's default lights
-        provide the ambient fill.
+    def _build_ground(self) -> None:
+        """Fit a plane to the lowest scene points and draw it as a ground grid.
 
-        The VGGT cameras all sit in front of the scene, so ``camera_mean - focus``
-        is the direction of the side we look from. A directional light aimed back
-        along that axis — tilted up and to one side for shape — lights the
-        front-facing surfaces we actually see. viser aims a directional light from
-        its position toward the origin, so a position along ``+key_dir`` makes it
-        travel ``−key_dir`` into the scene (magnitude irrelevant — parallel rays,
-        no shadows). Point clouds are unlit in three.js, so this shapes the meshes:
-        the bodies, the reconstructed scene surface, and the dynamics bones.
+        Uses :func:`~tools.viewer.helpers._fit_ground_plane`; the recovered normal
+        should sit close to the gravity axis on a level floor, and ``ground_angle``
+        records that offset (degrees) for the info panel. The grid (natively in its
+        local x-y plane, normal ``+z``) is rotated so ``+z`` aligns with the fitted
+        up-normal and placed at the plane centroid.
         """
-        ss = self.server.scene
-        front = self.camera_mean - self.focus_point
-        n = float(np.linalg.norm(front))
-        front = front / n if n > 1e-6 else np.array([0.0, 0.0, -1.0])
-        up = np.array([0.0, -1.0, 0.0])                      # VGGT world up is -y
-        side = np.cross(up, front)
-        sn = float(np.linalg.norm(side))
-        side = side / sn if sn > 1e-6 else np.array([1.0, 0.0, 0.0])
-        key_dir = _unit(front + 0.55 * up + 0.65 * side)     # front, a bit above + to a side
-        self.light_nodes = [
-            ss.add_light_directional("/clip/lights/key", color=(255, 246, 232),
-                                     intensity=2.3, position=tuple((key_dir * 10.0).tolist())),
-        ]
+        self.ground_nodes: list = []
+        self.ground_angle: float | None = None
+        g_down = (np.asarray(self.data.gravity["g"], np.float64)
+                  if self.data.gravity is not None
+                  else np.array([0.0, 1.0, 0.0]))             # VGGT world up is -y ⇒ down +y
+        fit = _fit_ground_plane(self.data.scene_points, g_down)
+        if fit is None:
+            return
+        centroid, normal, extent = fit
+        up = _unit(-g_down)
+        self.ground_angle = float(np.degrees(np.arccos(np.clip(normal @ up, -1.0, 1.0))))
+        size = extent * _GROUND_GRID_MULT
+        self.ground_nodes = [self.server.scene.add_grid(
+            "/clip/ground", width=size, height=size,
+            cell_size=max(size / 20.0, 0.05), section_size=max(size / 4.0, 0.25),
+            cell_color=(170, 170, 170), section_color=(110, 110, 110),
+            plane="xy", wxyz=_wxyz_shortest_arc_z(normal),
+            position=tuple(float(x) for x in centroid), visible=self.layers["ground"])]
 
     # -- layer visibility --
     def _apply_static_layers(self) -> None:
@@ -260,9 +267,11 @@ class ClipScene:
         self.camera_cursor.visible = self.layers["cameras"]
         for h in self.gravity_nodes:
             h.visible = self.layers["gravity"]
+        for h in self.ground_nodes:
+            h.visible = self.layers["ground"]
 
     def set_static_layer(self, name: str, on: bool) -> None:
-        """Toggle one static layer (``scene`` / ``cameras`` / ``gravity``)."""
+        """Toggle one static layer (``scene`` / ``cameras`` / ``gravity`` / ``ground``)."""
         if name == "scene":
             self.scene_node.visible = on
         elif name == "cameras":
@@ -272,6 +281,9 @@ class ClipScene:
         elif name == "gravity":
             for h in self.gravity_nodes:
                 h.visible = on
+        elif name == "ground":
+            for h in self.ground_nodes:
+                h.visible = on
 
     def _build_scene_node(self):
         """Create the ``/clip/scene`` node — a surface mesh for the selected method
@@ -280,18 +292,11 @@ class ClipScene:
         mesh_data = (ensure_scene_mesh(self.data, self._surface)
                      if self._surface != "points" else None)
         if mesh_data is not None:
-            import trimesh
-            from trimesh.visual.material import PBRMaterial
-            v, f, vc, vn = mesh_data
-            # Bake the camera-oriented vertex normals in (GLB export carries them)
-            # so three.js shades a correctly-facing surface.
-            mesh = trimesh.Trimesh(v, f, vertex_colors=vc, vertex_normals=vn, process=False)
-            # Matte + double-sided: a climbing wall is diffuse (not metal), and a
-            # non-metallic surface reads correctly under the camera-side lights —
-            # metallic PBR needs an environment map, which we don't set.
-            mesh.visual.material = PBRMaterial(
-                doubleSided=True, metallicFactor=0.0, roughnessFactor=0.95)
-            node = ss.add_mesh_trimesh("/clip/scene", mesh)
+            v, f, vc, _vn = mesh_data       # normals unused: unlit, and viser recomputes them
+            # Render the surface UNLIT and colour-matched to the point cloud
+            # (helpers._unlit_glb): the default lit + tone-mapped material is what
+            # makes a mesh look dim/washed next to the raw-coloured cloud.
+            node = ss.add_glb("/clip/scene", _unlit_glb(v, f, vc))
         else:
             node = ss.add_point_cloud(
                 "/clip/scene", self.data.scene_points, self.data.scene_colors,
