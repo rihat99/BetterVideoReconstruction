@@ -19,6 +19,28 @@ from __future__ import annotations
 import numpy as np
 
 
+def weighted_median(values: np.ndarray, weights: np.ndarray) -> float:
+    """Weighted median of 1-D ``values`` (``weights ≥ 0``).
+
+    The smallest value whose cumulative weight reaches half the total — a robust
+    center that lets a per-vertex weight (e.g. VGGT confidence × body-part emphasis)
+    steer which vertices set a frame's log-scale. Falls back to the plain median if
+    all weights are zero; ``nan`` for empty input.
+    """
+    values = np.asarray(values, dtype=np.float64)
+    weights = np.asarray(weights, dtype=np.float64)
+    if values.size == 0:
+        return float("nan")
+    order = np.argsort(values)
+    v, w = values[order], weights[order]
+    cw = np.cumsum(w)
+    total = float(cw[-1])
+    if total <= 0.0:
+        return float(np.median(values))
+    idx = int(np.searchsorted(cw, 0.5 * total))
+    return float(v[min(idx, v.size - 1)])
+
+
 def combine_log_scales(
     frame_log: np.ndarray,
     frame_weight: np.ndarray,

@@ -228,6 +228,7 @@ def optimize_person(
     scene_pts: torch.Tensor | None = None, scene_normals: torch.Tensor | None = None,
     scene_conf: torch.Tensor | None = None, fps: float = 30.0,
     contact_labels: torch.Tensor | None = None,
+    chamfer_weights: torch.Tensor | None = None,
 ) -> tuple[torch.Tensor, Metrics, Metrics]:
     """Optimize one person over ``phases``. Returns ``(q_world_opt, before, after)``.
 
@@ -374,7 +375,8 @@ def optimize_person(
                                         frame_vertex_ids, score_thresh=score_thresh, gm_scale_px=sap_gm_px)
         L_init = (init_reprojection_gm(jw, body_idx, extrinsics, K, init_target, gm_scale_px=init_gm_px)
                   if (use_init and w_init > 0.0) else jw.new_zeros(()))
-        L_ch = chamfer_loss(vw[:, sub], vismask, depth_pad, depth_valid, chunk=chunk)
+        L_ch = chamfer_loss(vw[:, sub], vismask, depth_pad, depth_valid, chunk=chunk,
+                            vertex_weights=chamfer_weights)
         L_push = (depth_push_loss(jw, extrinsics, frame_has_depth)
                   if w_push != 0.0 else jw.new_zeros(()))
         L_pp = pose_prior_loss(qn, q_init, mid.num_joints)

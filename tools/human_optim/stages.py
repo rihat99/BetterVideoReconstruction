@@ -27,6 +27,7 @@ from tools.smplx_robot import (
     load_smplx_mid, make_smplx_inertial_model, remap_q_bh_to_model,
 )
 from tools.smplx_robot.dynamics import velocity_acceleration_from_trajectory
+from tools.smplx_robot.vertex_weights import geodesic_endeffector_weights
 
 from . import paths
 from .camera import fold_root_to_world, world_from_cam
@@ -69,6 +70,24 @@ def _sapiens_for(pose: dict, oid: int, N: int):
     ids = [int(x) for x in pose["object_ids"]]
     p = ids.index(oid)
     return pose["keypoints"][p], pose["keypoint_scores"][p]
+
+
+def _fill_invalid_frames(arr: np.ndarray, valid: np.ndarray) -> np.ndarray:
+    """Replace each invalid-frame row of ``arr`` (T, …) with its nearest valid frame.
+
+    The converter writes NaN/Inf params for untracked (``valid_mask=False``) frames;
+    the init forward pass can't pose those (``mat2SE3`` rejects the non-finite
+    rotation). Holding the nearest valid pose across a gap keeps the trajectory finite
+    and flat there (no smoothness spike into valid neighbours). A no-op when every
+    frame is valid, so fully-tracked clips are untouched.
+    """
+    if valid.all():
+        return arr
+    idx = np.flatnonzero(valid)
+    if idx.size == 0:
+        return np.nan_to_num(arr)
+    nearest = idx[np.abs(np.arange(len(arr))[:, None] - idx[None, :]).argmin(1)]
+    return arr[nearest]
 
 
 def _load_scene(pred: Path, knobs: dict, wfc: torch.Tensor, device, tag: str):
@@ -206,6 +225,10 @@ def run_kinematic(source, pred: Path, cfg: HumanOptimConfig, stages_to_run,
     fvids = torch.as_tensor([int(x) for x in mid.frame_vertex_ids], dtype=torch.long, device=device)
     corr = build_correspondence(list(mid.frame_names), include_hands=bool(knobs["keypoints"]["include_hands"]), device=device)
     sub = subsample_indices(mid.num_vertices, int(knobs["chamfer"]["vertex_subsample"]), device=device)
+    # Per-vertex body-part emphasis for chamfer (geodesic linear·r1.0): extremities ×10, torso ÷10.
+    chamfer_w = torch.as_tensor(
+        geodesic_endeffector_weights(mid.vertices_template, mid.faces, mid.lbs_weights, mid.joint_names),
+        dtype=torch.float32, device=device)[sub]                                   # (Ns,)
     torch.manual_seed(0)
     phases = _kinematic_phases(cfg, stages_to_run)
 
@@ -216,8 +239,9 @@ def run_kinematic(source, pred: Path, cfg: HumanOptimConfig, stages_to_run,
         vmask = np.asarray(sp["valid_mask"][p], dtype=bool)
         betas_mean = torch.as_tensor(sp["betas"][p][vmask].mean(0), dtype=torch.float32, device=device)
 
-        def t(k):  # per-frame (N, ...) param tensor
-            return torch.as_tensor(sp[k][p], dtype=torch.float32, device=device)
+        def t(k):  # per-frame (N, ...) param tensor; invalid frames held from nearest valid
+            return torch.as_tensor(_fill_invalid_frames(sp[k][p], vmask),
+                                   dtype=torch.float32, device=device)
         betas_T = betas_mean[None].expand(N, -1)
         q_cam = mid.from_classic(betas_T, t("body_pose"), t("transl"), t("global_orient"),
                                  t("left_hand_pose"), t("right_hand_pose"))
@@ -239,7 +263,8 @@ def run_kinematic(source, pred: Path, cfg: HumanOptimConfig, stages_to_run,
             mid, betas_mean, q_world, extrinsics=extr, K=K, depth_points=depth,
             target_kp=target_kp, scores=scores, corr=corr, frame_vertex_ids=fvids,
             sub=sub, knobs=knobs, phases=phases,
-            scene_pts=scene_pts, scene_normals=scene_normals, scene_conf=scene_conf, fps=fps)
+            scene_pts=scene_pts, scene_normals=scene_normals, scene_conf=scene_conf, fps=fps,
+            chamfer_weights=chamfer_w)
         print(f"    before: {before}\n    after:  {after}")
         _append_classic(out, mid, betas_T, q_opt)
         betas_out.append(betas_mean.cpu().numpy().astype(np.float32))
@@ -343,6 +368,10 @@ def run_kinematics_2(source, pred: Path, cfg: HumanOptimConfig, device: str, *,
     fvids = torch.as_tensor([int(x) for x in mid.frame_vertex_ids], dtype=torch.long, device=device)
     corr = build_correspondence(list(mid.frame_names), include_hands=bool(knobs["keypoints"]["include_hands"]), device=device)
     sub = subsample_indices(mid.num_vertices, int(knobs["chamfer"]["vertex_subsample"]), device=device)
+    # Per-vertex body-part emphasis for chamfer (geodesic linear·r1.0): extremities ×10, torso ÷10.
+    chamfer_w = torch.as_tensor(
+        geodesic_endeffector_weights(mid.vertices_template, mid.faces, mid.lbs_weights, mid.joint_names),
+        dtype=torch.float32, device=device)[sub]                                   # (Ns,)
     torch.manual_seed(0)
     phases = _kinematics_2_phases(cfg)
 
@@ -382,7 +411,7 @@ def run_kinematics_2(source, pred: Path, cfg: HumanOptimConfig, device: str, *,
             target_kp=target_kp, scores=scores, corr=corr, frame_vertex_ids=fvids,
             sub=sub, knobs=knobs, phases=phases,
             scene_pts=scene_pts, scene_normals=scene_normals, scene_conf=scene_conf, fps=fps,
-            contact_labels=contact_labels)
+            contact_labels=contact_labels, chamfer_weights=chamfer_w)
         print(f"    before: {before}\n    after:  {after}")
         _append_classic(out, mid, betas_T, q_opt)
         betas_out.append(betas_mean.cpu().numpy().astype(np.float32))

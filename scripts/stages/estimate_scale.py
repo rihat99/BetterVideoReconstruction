@@ -53,11 +53,12 @@ import cv2  # noqa: E402
 import numpy as np  # noqa: E402
 import torch  # noqa: E402
 
-from tools.geometry.human_scale import combine_log_scales  # noqa: E402
+from tools.geometry.human_scale import combine_log_scales, weighted_median  # noqa: E402
 from tools.mask_io import read_binary_mask  # noqa: E402
 from tools.human_optim import normalize_q  # noqa: E402
 from tools.human_optim.visibility import front_facing_mask, vertex_normals  # noqa: E402
 from tools.smplx_robot import load_smplx_mid  # noqa: E402
+from tools.smplx_robot.vertex_weights import geodesic_endeffector_weights  # noqa: E402
 
 _DEFAULT_SMPLX_MODEL = (
     _REPO_ROOT.parent / "better_human" / "models" / "smplx" / "SMPLX_NEUTRAL.npz"
@@ -66,6 +67,7 @@ _DEFAULT_SMPLX_MODEL = (
 
 def _frame_log_scale(
     verts_cam: np.ndarray,
+    vert_weight: np.ndarray,
     K: np.ndarray,
     depth_rel: np.ndarray,
     conf: np.ndarray,
@@ -77,6 +79,10 @@ def _frame_log_scale(
 
     :param verts_cam: ``(Nf, 3)`` camera-frame front-facing vertices (metric m);
         their ``z`` is the body (metric) depth ``d_metric``.
+    :param vert_weight: ``(Nf,)`` per-vertex body-part emphasis aligned to
+        ``verts_cam`` (the geodesic-to-endeffector field); multiplied into the VGGT
+        confidence so the robust center is a *weighted* median — the extremities
+        (whose metric size VGGT most distorts) steer the scale more, the torso less.
     :param K: ``(3, 3)`` VGGT-resolution pixel intrinsics.
     :param depth_rel: ``(Hv, Wv)`` VGGT up-to-scale depth.
     :param conf: ``(Hv, Wv)`` VGGT depth confidence (higher = better).
@@ -85,7 +91,7 @@ def _frame_log_scale(
         vertices by VGGT confidence before reducing.
     :param min_inliers: skip the frame (return ``nan``) below this many inliers.
     :returns: ``(log_scale, weight)`` — ``(nan, 0.0)`` if too few inliers; the
-        weight is the summed VGGT confidence of the surviving vertices.
+        weight is the summed (confidence × part-emphasis) of the surviving vertices.
     """
     height, width = depth_rel.shape
     depth_metric = verts_cam[:, 2]
@@ -96,7 +102,7 @@ def _frame_log_scale(
     inb = (depth_metric > 0) & (px >= 0) & (px < width) & (py >= 0) & (py < height)
     if not inb.any():
         return float("nan"), 0.0
-    px, py, depth_metric = px[inb], py[inb], depth_metric[inb]
+    px, py, depth_metric, vwt = px[inb], py[inb], depth_metric[inb], vert_weight[inb]
     drel = depth_rel[py, px]
     cvals = conf[py, px]
     valid = mask[py, px] & np.isfinite(drel) & (drel > 0)
@@ -107,7 +113,8 @@ def _frame_log_scale(
     if int(keep.sum()) < min_inliers:
         return float("nan"), 0.0
     log_ratio = np.log(depth_metric[keep]) - np.log(drel[keep])
-    return float(np.median(log_ratio)), float(cvals[keep].sum())
+    w = cvals[keep] * vwt[keep]
+    return float(weighted_median(log_ratio, w)), float(w.sum())
 
 
 def _plot(
@@ -165,6 +172,9 @@ def estimate_scale(args: argparse.Namespace) -> None:
     device = args.device
 
     mid = load_smplx_mid(str(_DEFAULT_SMPLX_MODEL), device)
+    # Per-vertex body-part emphasis (geodesic linear·r1.0): extremities ×10, torso ÷10.
+    vert_w = geodesic_endeffector_weights(mid.vertices_template, mid.faces,
+                                          mid.lbs_weights, mid.joint_names)  # (V,)
 
     n_frames = len(frame_indices)
     per_frame_scale = np.full((P, n_frames), np.nan, dtype=np.float32)
@@ -205,7 +215,7 @@ def estimate_scale(args: argparse.Namespace) -> None:
             conf = vd["depth_conf"].astype(np.float32)
             mask = cv2.resize(mask.astype(np.uint8), (wv, hv), interpolation=cv2.INTER_NEAREST) > 0
             log_s, weight = _frame_log_scale(
-                verts_np[fi][front_np[fi]], K_vggt[col], depth, conf, mask,
+                verts_np[fi][front_np[fi]], vert_w[front_np[fi]], K_vggt[col], depth, conf, mask,
                 args.conf_drop_q, args.min_inlier_verts)
             if not np.isfinite(log_s):
                 continue

@@ -134,6 +134,7 @@ def chamfer_loss(
     depth_valid: torch.Tensor,    # (T, Md) bool — real (vs padding) depth points
     *,
     chunk: int = 16,
+    vertex_weights: torch.Tensor | None = None,   # (Ns,) per-vertex body-part emphasis
 ) -> torch.Tensor:
     """Bidirectional chamfer between visible vertices and depth points.
 
@@ -149,6 +150,12 @@ def chamfer_loss(
     masked to ``+inf`` so they never win a min; frames with no visible vertex or no
     depth point drop out of the average. Numerically identical to the per-frame
     form (validated to fp tolerance).
+
+    ``vertex_weights`` ``(Ns,)`` reweights the **vertex→depth** term into a *weighted*
+    mean over the visible vertices (the reverse depth→vertex term stays uniform — a
+    raw depth point carries no body-part label). It emphasizes some body regions
+    (e.g. the extremities, whose metric depth VGGT most distorts) over the torso; a
+    weight of ``None`` reproduces the plain uniform mean.
     """
     T = vertices_sub.shape[0]
     INF = torch.finfo(vertices_sub.dtype).max
@@ -161,7 +168,11 @@ def chamfer_loss(
         d = torch.cdist(vertices_sub[s:e], depth_padded[s:e])              # (b, Ns, Md)
         v2d = d.masked_fill(~depth_valid[s:e][:, None, :], INF).min(2).values  # (b, Ns)
         d2v = d.masked_fill(~vismask[s:e][:, :, None], INF).min(1).values      # (b, Md)
-        v2d_mean = (v2d * vismask[s:e]).sum(1) / nv[s:e].clamp_min(1)
+        if vertex_weights is None:
+            v2d_mean = (v2d * vismask[s:e]).sum(1) / nv[s:e].clamp_min(1)
+        else:
+            vis_w = vismask[s:e] * vertex_weights                         # (b, Ns)
+            v2d_mean = (v2d * vis_w).sum(1) / vis_w.sum(1).clamp_min(1e-6)
         d2v_mean = (d2v * depth_valid[s:e]).sum(1) / nd[s:e].clamp_min(1)
         parts.append(v2d_mean + d2v_mean)                                 # (b,)
     terms = torch.where(fvalid, torch.cat(parts), vertices_sub.new_zeros(()))
