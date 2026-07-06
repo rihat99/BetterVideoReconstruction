@@ -21,6 +21,14 @@ from .helpers import _camera_world_pose, _top4_skin_weights
 
 _REPO_ROOT = Path(__file__).resolve().parents[2]
 
+# SMPL-X hand joints — fingers, excluded from the body skeleton (wrists kept) and
+# OR-folded into the wrist for contact. Shared with :mod:`tools.viewer.scene`.
+_FINGER_TOKENS = ("index", "middle", "pinky", "ring", "thumb")
+# Confidence quantile dropped from the displayed scene cloud, so what you see is the
+# cloud the optimizer / estimate_contacts actually run their SDF against (mirrors
+# ``[penetration]/[contacts].conf_drop_q`` in configs/human_optimization.toml).
+_SCENE_CONF_DROP_Q = 0.1
+
 
 def _load_gravity(pred: Path) -> dict | None:
     """World-frame gravity from ``geocalib/gravity.npz`` (unit down + source flag)."""
@@ -61,6 +69,46 @@ def _load_dynamics(pred: Path) -> dict | None:
         "ref": ref,
         "P": dd["joints_world"].shape[0],
     }
+
+
+def _load_skeleton(pred: Path) -> dict | None:
+    """Body-skeleton topology + per-joint scene contact for the kinematic body.
+
+    The joint tree (``parents`` / ``joint_names``, 52-joint ``SMPLXMid`` order) comes
+    from ``human_optim/kinematic_1.npz`` so the skeleton can be drawn even without a
+    contact pass; the per-joint contact flags come from ``human_optim/contacts_1.npz``
+    when present (same joint order), driving the joint-sphere colour. ``None`` when no
+    kinematic body exists.
+    """
+    kin = pred / "human_optim" / "kinematic_1.npz"
+    if not kin.exists():
+        return None
+    kd = np.load(kin, allow_pickle=True)
+    out: dict = {
+        "parents": np.asarray(kd["parents"], np.int32),          # (J,)
+        "joint_names": [str(x) for x in kd["joint_names"]],      # (J,)
+        "contact": None,                                         # (P, N, J) bool or None
+        "contact_oids": None,                                    # (P,) or None
+    }
+    cf = pred / "human_optim" / "contacts_1.npz"
+    if cf.exists():
+        cd = np.load(cf, allow_pickle=True)
+        contact = cd["joint_contact"].astype(bool)           # (P, N, J), fresh copy
+        # OR-fold each hand's finger contact into its wrist: the skeleton draws only
+        # the wrist (fingers are excluded), and a hand on the wall touches through the
+        # fingers — the same "resolve hand contact at the wrist" convention the
+        # dynamics stage uses. Mutates the copy; on-disk contacts_1.npz is untouched.
+        names = out["joint_names"]
+        for side in ("left", "right"):
+            wrist = names.index(f"{side}_wrist")
+            fingers = [j for j, nm in enumerate(names)
+                       if nm.startswith(f"{side}_") and any(t in nm for t in _FINGER_TOKENS)]
+            if fingers:
+                contact[..., wrist] |= contact[..., fingers].any(-1)
+        out["contact"] = contact
+        out["contact_oids"] = (np.asarray(cd["object_ids"], np.int32)
+                               if "object_ids" in cd.files else None)
+    return out
 
 
 _VIDEO_EXTS = (".mp4", ".mov", ".avi", ".mkv", ".webm")
@@ -333,6 +381,7 @@ class ClipData:
     gravity: dict | None
     skinned: dict          # name -> (faces, object_ids, people); "original" first
     dynamics: dict | None
+    skeleton: dict | None  # kinematic body-skeleton topology + per-joint contact
     n_frames: int
     # scene-surface meshes, built lazily and cached per method ("bpa"/"poisson");
     # a present key maps to (verts, faces, vertex_colors, vertex_normals) or None.
@@ -372,6 +421,16 @@ def load_clip_data(pred: Path, *, device: str, show_smplx: bool,
     transform = np.load(geo / "transform.npz")
     extr = transform["extrinsics"]
 
+    # Show the same scene cloud the optimizer / estimate_contacts run against: drop the
+    # lowest-confidence quantile of voxels, so a point you see is a point that exists
+    # for contact (raw VGGT confidence has no fixed scale, hence a quantile gate).
+    sp, sco = scene["points"], scene["colors"]
+    if "confidence" in scene.files and _SCENE_CONF_DROP_Q > 0.0:
+        conf = scene["confidence"]
+        if len(conf) == len(sp) and len(conf):
+            keep = conf >= np.quantile(conf, _SCENE_CONF_DROP_Q)
+            sp, sco = sp[keep], sco[keep]
+
     hp, hc = human["points"], human["colors"]
     hf, ho = human["frame_id"], human["obj_id"]
     if human_max_points and len(hp):
@@ -386,22 +445,23 @@ def load_clip_data(pred: Path, *, device: str, show_smplx: bool,
             orig = _smplx_params_skinned(pred, extr, device=device)
             if orig is not None:
                 skinned["original"] = orig
-        for name, fn in (("kinematics", "kinematic_1.npz"),
-                         ("kinematics_2", "kinematic_2.npz")):
+        # kinematics_2 temporarily excluded from the viewer (not actively worked on).
+        for name, fn in (("kinematics", "kinematic_1.npz"),):
             if (pred / "human_optim" / fn).exists():
                 skinned[name] = _smplx_kinematic_skinned(pred / "human_optim" / fn, device=device)
 
     video_frames, play_fps = _load_video_frames(pred, len(extr), video_dir=video_dir)
     return ClipData(
         path=pred, name=pred.name,
-        scene_points=scene["points"], scene_colors=scene["colors"],
+        scene_points=sp, scene_colors=sco,
         human_points=hp, human_colors=hc, human_fid=hf, human_obj=ho,
         obj_ids=[int(o) for o in np.unique(ho)],
         extr=extr, aspect=float(transform["image_width"]) / float(transform["image_height"]),
         fov_y=np.radians(transform["fov_y_deg"].astype(np.float64)),
         gravity=_load_gravity(pred),
         skinned=skinned,
-        dynamics=_load_dynamics(pred) if show_smplx else None,
+        dynamics=None,   # dynamics temporarily excluded from the viewer (not actively worked on)
+        skeleton=_load_skeleton(pred) if show_smplx else None,
         n_frames=len(extr),
         video_frames=video_frames, fps=play_fps)
 

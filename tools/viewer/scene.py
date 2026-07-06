@@ -20,15 +20,32 @@ from .helpers import (
     _unlit_glb,
     _wxyz_shortest_arc_z,
 )
-from .loading import ClipData, ensure_scene_mesh
+from .loading import _FINGER_TOKENS, ClipData, ensure_scene_mesh
 
 # dynamics sphere-floor / bone radius / max torque grow factor / metres-per-newton
 _DYN_R0, _DYN_RB, _DYN_MAXS, _DYN_FSCALE = 0.022, 0.012, 3.0, 5e-4
+# body-skeleton overlay: fixed joint-sphere radius / bone radius (m) and the
+# default kinematic mesh opacity while the skeleton shows over it (slider-tunable).
+_SKEL_R, _SKEL_RB, _SKEL_ALPHA = 0.028, 0.012, 0.7
+# joint-sphere colours — red in scene contact / green free (matches estimate_contacts)
+_CONTACT_RGB, _FREE_RGB = (235, 45, 45), (60, 200, 90)
+# (``_FINGER_TOKENS`` — the hand joints excluded from the body skeleton — is imported
+# from ``loading`` so the skeleton build and the finger→wrist contact fold agree.)
 # cap on drawn camera frustums, so a long clip isn't a dense wire mess
 _CAM_MAX_FRUSTUMS = 24
 # draw the ground grid this many times the fitted floor's data extent, so it reads
 # as a floor spanning the scene rather than a small patch under the climber
 _GROUND_GRID_MULT = 10.0
+
+
+def _unit_cylinder():
+    """A unit +z cylinder (radius 1, height 1) with a light-grey vertex colour,
+    scaled per-frame into skeleton / dynamics bones."""
+    import trimesh
+
+    cyl = trimesh.creation.cylinder(radius=1.0, height=1.0, sections=10)
+    cyl.visual.vertex_colors = np.array([235, 235, 235, 255], np.uint8)
+    return cyl
 
 
 class ClipScene:
@@ -40,10 +57,12 @@ class ClipScene:
 
     def __init__(self, server, data: ClipData, layers: dict, *,
                  scene_point_size: float, human_point_size: float, camera_scale: float,
-                 camera_stride: int, scene_surface: str = "points") -> None:
+                 camera_stride: int, scene_surface: str = "points",
+                 mesh_opacity: float = _SKEL_ALPHA) -> None:
         self.server = server
         self.data = data
         self.layers = layers
+        self.mesh_opacity = float(mesh_opacity)   # kinematic mesh alpha under the skeleton
         self.scene_point_size = scene_point_size
         self.human_point_size = human_point_size
         self.camera_scale = camera_scale
@@ -143,14 +162,49 @@ class ClipScene:
                 hs.append((h, person))
             self.skinned[name] = hs
 
+        # -- body-skeleton overlay for the kinematic body (spheres + bones), hidden --
+        # Joints come from the kinematic body's per-frame world joints; a sphere is
+        # red in scene contact (contacts_1.npz) / green free, and the mesh goes
+        # translucent while the skeleton overlays it. Fingers are excluded.
+        self.skel = data.skeleton
+        self.skel_nodes: dict[int, dict] = {}
+        self._contact: dict[int, np.ndarray] = {}
+        self._skel_shown = False          # any skeleton node currently visible
+        self._kin_translucent = False     # last-applied kinematic-mesh transparency
+        kin = data.skinned.get("kinematics")
+        if kin is not None and self.skel is not None:
+            _f, kin_oids, people = kin
+            names, parents = self.skel["joint_names"], self.skel["parents"]
+            joints = [j for j, nm in enumerate(names)
+                      if not any(t in nm for t in _FINGER_TOKENS)]
+            jointset = set(joints)
+            if self.skel["contact"] is not None:
+                c_oids = (self.skel["contact_oids"] if self.skel["contact_oids"] is not None
+                          else np.arange(self.skel["contact"].shape[0]))
+                self._contact = {int(o): self.skel["contact"][i] for i, o in enumerate(c_oids)}
+            cyl = _unit_cylinder()
+            for p, person in enumerate(people):
+                if person is None:
+                    continue
+                oid = int(kin_oids[p])
+                spheres = {j: ss.add_icosphere(
+                    f"/clip/skeleton/p{oid:02d}/joint_{j:02d}", radius=_SKEL_R,
+                    color=_FREE_RGB, position=(0.0, 0.0, 0.0), visible=False) for j in joints}
+                bones = []
+                for j in joints:
+                    par = int(parents[j])
+                    if par < 0 or par not in jointset:
+                        continue
+                    h = ss.add_mesh_trimesh(f"/clip/skeleton/p{oid:02d}/bone_{j:02d}",
+                                            cyl, visible=False)
+                    bones.append((h, j, par))
+                self.skel_nodes[oid] = {"spheres": spheres, "bones": bones}
+
         # -- dynamics skeleton (spheres + bones), hidden; forces added per frame --
         self.dyn = data.dynamics
         self.dyn_nodes: list[dict] = []
         if self.dyn is not None:
-            import trimesh
-
-            unit_cyl = trimesh.creation.cylinder(radius=1.0, height=1.0, sections=10)
-            unit_cyl.visual.vertex_colors = np.array([235, 235, 235, 255], np.uint8)
+            unit_cyl = _unit_cylinder()
             Jd = self.dyn["jw"].shape[2]
             for p in range(self.dyn["P"]):
                 oid = int(self.dyn["oids"][p])
@@ -333,6 +387,15 @@ class ClipScene:
             for h in self.camera_nodes[:-1]:   # last node is the centre-path spline
                 h.scale = scale
 
+    def set_mesh_opacity(self, alpha: float) -> None:
+        """Live-update the kinematic mesh opacity used while the skeleton overlays it."""
+        self.mesh_opacity = float(alpha)
+        if self._kin_translucent:
+            with self.server.atomic():
+                for hp in self.skinned.get("kinematics", []):
+                    if hp is not None:
+                        hp[0].opacity = self.mesh_opacity
+
     def set_active_body(self, src: str) -> None:
         """Select the body source and re-pose it at the current frame."""
         self.active = src
@@ -377,8 +440,58 @@ class ClipScene:
                     bw, bp = person["bone_wxyz"][f], person["bone_pos"][f]
                     for j, bone in enumerate(handle.bones):
                         bone.wxyz, bone.position = bw[j], bp[j]
+        self._apply_skeleton(f)
         if self.dyn is not None:
             self._apply_dynamics(f, show and src == "dynamics")
+
+    # -- body-skeleton overlay --
+    def _apply_skeleton(self, f: int) -> None:
+        """Pose + contact-colour the kinematic body skeleton and set the kinematic
+        mesh's transparency — both gated on the ``skeleton`` layer + active source.
+
+        The mesh opacity is pushed only on a state change (once per toggle), and the
+        per-joint pose/visibility loop is skipped entirely while the skeleton is
+        hidden and already torn down, so idle playback stays cheap.
+        """
+        on = self.layers.get("skeleton", False) and self.active == "kinematics"
+        if on != self._kin_translucent:
+            for hp in self.skinned.get("kinematics", []):
+                if hp is not None:
+                    hp[0].opacity = self.mesh_opacity if on else None
+            self._kin_translucent = on
+        if not on and not self._skel_shown:
+            return
+        kin = self.data.skinned.get("kinematics")
+        if kin is not None:
+            _f, kin_oids, people = kin
+            for p, person in enumerate(people):
+                nd = None if person is None else self.skel_nodes.get(int(kin_oids[p]))
+                if nd is None:
+                    continue
+                live = on and f < len(person["valid"]) and bool(person["valid"][f])
+                bp = person["bone_pos"][f]                    # (J, 3) world joints
+                con = self._contact.get(int(kin_oids[p]))     # (N, J) bool or None
+                for j, sp in nd["spheres"].items():
+                    if live:
+                        sp.position = (float(bp[j, 0]), float(bp[j, 1]), float(bp[j, 2]))
+                        hot = con is not None and f < len(con) and bool(con[f, j])
+                        sp.color = _CONTACT_RGB if hot else _FREE_RGB
+                        sp.visible = True
+                    else:
+                        sp.visible = False
+                for h, j, par in nd["bones"]:
+                    a, b = bp[par], bp[j]
+                    d = b - a
+                    length = float(np.linalg.norm(d))
+                    if live and length > 1e-6:
+                        h.position = (float((a[0] + b[0]) * 0.5), float((a[1] + b[1]) * 0.5),
+                                      float((a[2] + b[2]) * 0.5))
+                        h.wxyz = _wxyz_shortest_arc_z(d)
+                        h.scale = (_SKEL_RB, _SKEL_RB, length)
+                        h.visible = True
+                    else:
+                        h.visible = False
+        self._skel_shown = on
 
     # -- dynamics --
     def _apply_dynamics(self, f: int, on: bool) -> None:

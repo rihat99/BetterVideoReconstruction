@@ -16,11 +16,11 @@ import numpy as np
 
 from .helpers import _background_image, _camera_follow_target
 from .loading import ClipData, load_clip_data
-from .scene import ClipScene
+from .scene import ClipScene, _SKEL_ALPHA
 
-_LAYER_LABELS = (("body", "SMPL-X body"), ("human", "human points"),
-                 ("scene", "scene points"), ("cameras", "cameras"),
-                 ("gravity", "gravity"), ("ground", "ground plane"))
+_LAYER_LABELS = (("body", "SMPL-X body"), ("skeleton", "body skeleton"),
+                 ("human", "human points"), ("scene", "scene points"),
+                 ("cameras", "cameras"), ("gravity", "gravity"), ("ground", "ground plane"))
 # scene rendering choices; the label lower-cases to the internal method name
 # ("points" / "bpa" / "poisson").
 _SURFACE_OPTIONS = ("points", "BPA", "Poisson")
@@ -47,8 +47,8 @@ class Viewer:
         self.opts = dict(camera_stride=camera_stride, device=device,
                          show_smplx=show_smplx, human_max_points=human_max_points,
                          video_dir=video_dir)
-        self.layers = {"body": show_smplx, "human": True, "scene": True,
-                       "cameras": True, "gravity": False, "ground": True}
+        self.layers = {"body": show_smplx, "skeleton": False, "human": True,
+                       "scene": True, "cameras": True, "gravity": False, "ground": True}
         self._surface = scene_surface    # scene rendering: "points" / "bpa" / "poisson"
         self.cache: dict[Path, ClipData] = {}
         self.scene: ClipScene | None = None
@@ -119,9 +119,12 @@ class Viewer:
             self.scene_ps = g.add_slider("scene points", 0.002, 0.08, 0.002, sc0)
             self.human_ps = g.add_slider("human points", 0.002, 0.08, 0.002, hu0)
             self.cam_size = g.add_slider("camera frustum", 0.02, 0.6, 0.02, cam0)
+            # Kinematic mesh opacity while the skeleton overlays it (0.1 see-through → 1.0 opaque).
+            self.body_opacity = g.add_slider("body opacity", 0.1, 1.0, 0.05, _SKEL_ALPHA)
         self.scene_ps.on_update(lambda _: self._on_scene_ps())
         self.human_ps.on_update(lambda _: self._on_human_ps())
         self.cam_size.on_update(lambda _: self._on_camera_scale())
+        self.body_opacity.on_update(lambda _: self._on_body_opacity())
         self.frame = None
         self.info = g.add_markdown("")
 
@@ -157,7 +160,7 @@ class Viewer:
                     return
                 if key in ("scene", "cameras", "gravity", "ground"):
                     self.scene.set_static_layer(key, self.layers[key])
-                else:  # body / human are per-frame → re-apply the current frame
+                else:  # body / skeleton / human are per-frame → re-apply the current frame
                     self.scene.apply_frame(self._cur())
         return cb
 
@@ -186,6 +189,11 @@ class Viewer:
         with self._lock:
             if self.scene is not None:
                 self.scene.set_camera_scale(float(self.cam_size.value))
+
+    def _on_body_opacity(self) -> None:
+        with self._lock:
+            if self.scene is not None:
+                self.scene.set_mesh_opacity(float(self.body_opacity.value))
 
     def _on_client_connect(self, client) -> None:
         # Snap the camera back whenever the user moves it while onboard mode is on
@@ -303,7 +311,8 @@ class Viewer:
                 scene_point_size=float(self.scene_ps.value),
                 human_point_size=float(self.human_ps.value),
                 camera_scale=float(self.cam_size.value),
-                camera_stride=self.opts["camera_stride"], scene_surface=self._surface)
+                camera_stride=self.opts["camera_stride"], scene_surface=self._surface,
+                mesh_opacity=float(self.body_opacity.value))
 
             srcs = self.scene.body_source_names
             self.body.options = tuple(srcs) if srcs else ("(none)",)
