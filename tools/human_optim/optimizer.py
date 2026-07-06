@@ -229,6 +229,7 @@ def optimize_person(
     scene_conf: torch.Tensor | None = None, fps: float = 30.0,
     contact_labels: torch.Tensor | None = None,
     chamfer_weights: torch.Tensor | None = None,
+    frame_valid: torch.Tensor | None = None,
 ) -> tuple[torch.Tensor, Metrics, Metrics]:
     """Optimize one person over ``phases``. Returns ``(q_world_opt, before, after)``.
 
@@ -245,6 +246,12 @@ def optimize_person(
     repulsion pushing the vertices of no-contact joints off it, and a velocity
     damper on in-contact joints (weights ``ann_*``). It defaults to the plain
     kinematics behaviour (no annotation terms).
+
+    ``frame_valid`` (optional ``(T,)`` bool) excludes untracked frames — whose
+    converter pose was held from the nearest valid frame and so is glued to the
+    moving camera — from the init-projection anchor and the scene terms (just as
+    the zeroed Sapiens scores / emptied depth cloud already exclude them from the
+    reprojection / chamfer terms). Defaults to all-valid (a no-op on gap-free clips).
 
     The body is used at its native (converter) size — the metric geometry is
     already sized to it by the human-anchored ``estimate_scale`` stage upstream.
@@ -342,8 +349,12 @@ def optimize_person(
             return None
         with torch.no_grad():
             v0 = mid.forward(betas, normalize_q(q, mid.num_joints)).vertices
-            return _padded_scene_candidates(v0[:, sub], scene_pts, scene_normals,
+            cand = _padded_scene_candidates(v0[:, sub], scene_pts, scene_normals,
                                             scene_conf, float(pen_cfg["prune_margin_m"]), max_cand)
+        if frame_valid is not None:      # untracked frames: drop their candidates → all scene terms skip them
+            pad_p, pad_n, pad_c, valid = cand
+            cand = (pad_p, pad_n, pad_c, valid & frame_valid[:, None])
+        return cand
 
     def _build_vel_gate():
         """Static per-subsampled-vertex joint speed ``(T, Ns)`` from the current
@@ -373,7 +384,8 @@ def optimize_person(
         w_ann_vel = float(w.get("ann_velocity", 0.0))
         L_sap = sapiens_reprojection_gm(jw, vw, extrinsics, K, target_kp, scores, corr,
                                         frame_vertex_ids, score_thresh=score_thresh, gm_scale_px=sap_gm_px)
-        L_init = (init_reprojection_gm(jw, body_idx, extrinsics, K, init_target, gm_scale_px=init_gm_px)
+        L_init = (init_reprojection_gm(jw, body_idx, extrinsics, K, init_target,
+                                       gm_scale_px=init_gm_px, frame_mask=frame_valid)
                   if (use_init and w_init > 0.0) else jw.new_zeros(()))
         L_ch = chamfer_loss(vw[:, sub], vismask, depth_pad, depth_valid, chunk=chunk,
                             vertex_weights=chamfer_weights)

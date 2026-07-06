@@ -84,6 +84,7 @@ from tools.human_optim import (  # noqa: E402
 from tools.human_optim.qmath import normalize_q  # noqa: E402
 from tools.human_optim import paths  # noqa: E402
 from tools.human_optim.config import load_config  # noqa: E402
+from tools.human_optim.stages import _person_depth_points  # noqa: E402  # shared chamfer-target loader
 from tools.human_optim.visibility import front_facing_mask, vertex_normals  # noqa: E402
 from tools.smplx_robot import load_smplx_mid  # noqa: E402
 
@@ -123,34 +124,31 @@ def _idx(arr, oid):
     return [int(x) for x in arr].index(oid)
 
 
-def _person_depth_and_conf(human, oid, N, conf_thresh, max_points, device):
-    """Per-frame world depth points (conf-gated, capped) + per-frame depth count
-    and mean VGGT confidence for one person — matching the kinematic stage's gate."""
-    obj = human["obj_id"]
-    fr_all = human["frame_id"]
-    conf_all = human["confidence"]
-    mine = obj == oid
-    # Per-frame mean confidence over ALL of this person's points (raw geometry quality).
+def _person_depth_and_conf(human, oid, N, conf_drop_q, max_points, device):
+    """Chamfer-target depth points + per-frame depth count and mean VGGT confidence.
+
+    The depth points come from the optimizer's OWN loader
+    (:func:`tools.human_optim.stages._person_depth_points`, a per-frame quantile
+    gate), so the data-fit chamfer this stage scores is identical to what the
+    kinematic stage optimized — by construction, not by a parallel re-implementation
+    that can drift.
+
+    ``depth_cnt`` / ``mean_conf`` (the observability axis) are computed here over the
+    person's **raw** per-frame points — uncapped and ungated: those channels are
+    per-clip normalized, so neither the loader's ``max_points`` cap nor the
+    confidence gate must flatten them (per-frame gating keeps a fixed fraction of
+    every frame anyway, so a gated count is just a scaled raw count; the gate's
+    quality signal is the separate ``mean_conf`` channel)."""
+    depth = _person_depth_points(human, oid, N, conf_drop_q, max_points, device)
+    mine = human["obj_id"] == oid
+    fr = human["frame_id"][mine].astype(np.int64)
+    cf = human["confidence"][mine]
+    depth_cnt = np.bincount(fr, minlength=N).astype(np.int64)[:N]
     mean_conf = np.zeros(N, np.float32)
     if mine.any():
-        fm, cm = fr_all[mine], conf_all[mine]
-        sums = np.bincount(fm, weights=cm, minlength=N)
-        cnts = np.bincount(fm, minlength=N).astype(np.float32)
-        mean_conf = (sums / np.maximum(cnts, 1.0)).astype(np.float32)[:N]
-    # Confident points (the chamfer target).
-    keep = mine & (conf_all > conf_thresh)
-    pts, fr = human["points"][keep], fr_all[keep]
-    order = np.argsort(fr, kind="stable")
-    pts, fr = pts[order], fr[order]
-    bnd = np.searchsorted(fr, np.arange(N + 1))
-    out, cnt = [], np.zeros(N, np.int64)
-    for t in range(N):
-        p = pts[bnd[t]:bnd[t + 1]]
-        cnt[t] = len(p)
-        if len(p) > max_points:
-            p = p[np.linspace(0, len(p) - 1, max_points).astype(int)]
-        out.append(torch.as_tensor(p, dtype=torch.float32, device=device))
-    return out, cnt, mean_conf
+        sums = np.bincount(fr, weights=cf, minlength=N)
+        mean_conf = (sums / np.maximum(depth_cnt, 1)).astype(np.float32)[:N]
+    return depth, depth_cnt, mean_conf
 
 
 def _sapiens_for(pose, oid):
@@ -519,14 +517,14 @@ def run(predictions_dir, *, source=None, overlay=False, bodies="kinematic_2",
         sap_gm = float(knb["keypoints"]["gm_scale_px"])
         init_gm = float(knb["reproj_init"]["gm_scale_px"])
         score_thresh = float(knb["keypoints"]["score_thresh"])
-        conf_thresh = float(knb["chamfer"]["conf_thresh"])
+        conf_drop_q = float(knb["chamfer"]["conf_drop_q"])
         max_points = int(knb["chamfer"]["max_points"])
         vsub = int(knb["chamfer"]["vertex_subsample"])
         include_hands = bool(knb["keypoints"]["include_hands"])
     else:
         weights = (8.0, 30.0, 10.0)
         sap_gm, init_gm, score_thresh = 40.0, 30.0, 0.3
-        conf_thresh, max_points, vsub = 0.1, 1500, 1000
+        conf_drop_q, max_points, vsub = 0.3, 1500, 1000
         include_hands = False
 
     body = dict(np.load(body_path, allow_pickle=True))
@@ -613,7 +611,7 @@ def run(predictions_dir, *, source=None, overlay=False, bodies="kinematic_2",
                            score_thresh=score_thresh, sap_gm=sap_gm, init_gm=init_gm)
         rep = {k: (v.detach().cpu().numpy() if torch.is_tensor(v) else v) for k, v in rep.items()}
 
-        depth, depth_cnt, mean_conf = _person_depth_and_conf(human, oid, N, conf_thresh, max_points, device)
+        depth, depth_cnt, mean_conf = _person_depth_and_conf(human, oid, N, conf_drop_q, max_points, device)
         cham_cm = _chamfer_per_frame(vw, sub, mid.faces, extr, depth)
 
         pf = _score_person(rep, cham_cm, depth_cnt, mean_conf, valid, weights)

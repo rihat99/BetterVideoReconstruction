@@ -125,7 +125,7 @@ def fuse(args: argparse.Namespace) -> None:
     human_pts, human_conf, human_obj, human_fid, human_col = [], [], [], [], []
 
     with tempfile.TemporaryDirectory(prefix="fuse_frames_") as tmp:
-        frame_paths, _ = resolve_source(Path(args.source), Path(tmp))
+        frame_paths, src_fps = resolve_source(Path(args.source), Path(tmp))
         for k, idx in enumerate(frame_indices):
             idx = int(idx)
             vd = np.load(pred / "vggt" / "depth" / f"frame_{idx:06d}.npz")
@@ -179,6 +179,7 @@ def fuse(args: argparse.Namespace) -> None:
     extr_metric = extr.copy()
     extr_metric[:, :3, 3] *= s
     K_orig = np.stack([denormalize_K(K_norm[k], ho, wo) for k in range(len(frame_indices))])
+    fps = float(src_fps) if src_fps else 30.0   # video native fps; 30.0 for folder/image sources
     np.savez(
         out_dir / "transform.npz",
         scale=np.float32(s),
@@ -189,6 +190,7 @@ def fuse(args: argparse.Namespace) -> None:
         frame_indices=frame_indices.astype(np.int32),
         image_height=np.int32(ho), image_width=np.int32(wo),
         vggt_height=np.int32(hv), vggt_width=np.int32(wv),
+        fps=np.float32(fps),
         scale_method=np.str_("human-anchored (estimate_scale)"),
     )
     _save_cloud(out_dir / "scene.npz", centroids,

@@ -47,18 +47,34 @@ _ROOT_DOF = ("transl", "orient")
 
 # ─────────────────────────────── io helpers ──────────────────────────────
 
-def _person_depth_points(human: dict, oid: int, N: int, conf_thresh: float,
+def _person_depth_points(human: dict, oid: int, N: int, conf_drop_q: float,
                          max_points: int, device) -> list[torch.Tensor]:
-    """Per-frame world-frame depth points for one person (conf-gated, capped)."""
-    mask = (human["obj_id"] == oid) & (human["confidence"] > conf_thresh)
-    pts = human["points"][mask]
-    fr = human["frame_id"][mask]
+    """Per-frame world-frame depth points for one person (conf-gated, capped).
+
+    The confidence gate is a **per-frame quantile**: within each frame, drop that
+    frame's lowest ``conf_drop_q`` fraction of points by VGGT depth-confidence. VGGT
+    confidence has no fixed scale (≥~1 by construction) so an absolute floor never
+    fires. A *per-clip* quantile would instead pile its whole drop onto the frames
+    whose confidence sits systematically lower (VGGT's per-frame median drifts up to
+    ~4× within a clip — measured on sport_climb — so a clip-wide q=0.3 empties >90 %
+    of some frames while barely touching others, and the emptied frames keep only
+    reprojection to hold the body). Gating per frame keeps ``1 − conf_drop_q`` of
+    *every* frame by construction, matching ``clean_depth`` / ``estimate_scale``.
+    The human cloud gets no confidence gate at fuse, so this is its only quality
+    filter before chamfer.
+    """
+    person = human["obj_id"] == oid
+    pts = human["points"][person]
+    conf = human["confidence"][person]
+    fr = human["frame_id"][person]
     order = np.argsort(fr, kind="stable")
-    pts, fr = pts[order], fr[order]
+    pts, conf, fr = pts[order], conf[order], fr[order]
     bnd = np.searchsorted(fr, np.arange(N + 1))
     out = []
     for t in range(N):
-        p = pts[bnd[t]:bnd[t + 1]]
+        p, c = pts[bnd[t]:bnd[t + 1]], conf[bnd[t]:bnd[t + 1]]
+        if conf_drop_q > 0.0 and c.size:
+            p = p[c >= np.quantile(c, conf_drop_q)]   # per-frame: keep the top 1−q of THIS frame
         if len(p) > max_points:
             p = p[np.linspace(0, len(p) - 1, max_points).astype(int)]
         out.append(torch.as_tensor(p, dtype=torch.float32, device=device))
@@ -102,6 +118,14 @@ def _load_scene(pred: Path, knobs: dict, wfc: torch.Tensor, device, tag: str):
     sc = dict(np.load(scene_path, allow_pickle=True))
     scene_pts = torch.as_tensor(sc["points"], dtype=torch.float32, device=device)
     scene_conf = torch.as_tensor(sc["confidence"], dtype=torch.float32, device=device)
+    # Quantile confidence gate: drop the lowest conf_drop_q fraction of scene voxels
+    # (the raw VGGT confidence scale is arbitrary, so the old absolute floor never
+    # fired). The scene is already per-frame conf-gated at fuse; this trims the
+    # least-reliable merged voxels before the penetration/attraction NN search.
+    q = float(knobs["penetration"].get("conf_drop_q", 0.0))
+    if q > 0.0 and scene_conf.numel():
+        keep = scene_conf >= torch.quantile(scene_conf, q)
+        scene_pts, scene_conf = scene_pts[keep], scene_conf[keep]
     nk = int(knobs["penetration"]["normal_k"])
     scene_normals = estimate_point_normals(scene_pts, wfc[:, :3, 3], k=nk)
     print(f"[{tag}] scene terms ON ({scene_pts.shape[0]} pts, PCA normals k={nk})")
@@ -251,12 +275,13 @@ def run_kinematic(source, pred: Path, cfg: HumanOptimConfig, stages_to_run,
         kp_np, sc_np = _sapiens_for(pose, oid, N)
         target_kp = torch.as_tensor(kp_np, dtype=torch.float32, device=device)
         scores = torch.as_tensor(sc_np, dtype=torch.float32, device=device)
-        depth = _person_depth_points(human, oid, N, float(knobs["chamfer"]["conf_thresh"]),
+        depth = _person_depth_points(human, oid, N, float(knobs["chamfer"]["conf_drop_q"]),
                                      int(knobs["chamfer"]["max_points"]), device)
         for i in range(N):
             if not vmask[i]:
                 scores[i] = 0.0
                 depth[i] = depth[i][:0]
+        frame_valid = torch.as_tensor(vmask, dtype=torch.bool, device=device)
 
         print(f"[{tag}] person obj_id={oid} ({int(vmask.sum())}/{N} valid) …")
         q_opt, before, after = optimize_person(
@@ -264,7 +289,7 @@ def run_kinematic(source, pred: Path, cfg: HumanOptimConfig, stages_to_run,
             target_kp=target_kp, scores=scores, corr=corr, frame_vertex_ids=fvids,
             sub=sub, knobs=knobs, phases=phases,
             scene_pts=scene_pts, scene_normals=scene_normals, scene_conf=scene_conf, fps=fps,
-            chamfer_weights=chamfer_w)
+            chamfer_weights=chamfer_w, frame_valid=frame_valid)
         print(f"    before: {before}\n    after:  {after}")
         _append_classic(out, mid, betas_T, q_opt)
         betas_out.append(betas_mean.cpu().numpy().astype(np.float32))
@@ -388,12 +413,13 @@ def run_kinematics_2(source, pred: Path, cfg: HumanOptimConfig, device: str, *,
         kp_np, sc_np = _sapiens_for(pose, oid, N)
         target_kp = torch.as_tensor(kp_np, dtype=torch.float32, device=device)
         scores = torch.as_tensor(sc_np, dtype=torch.float32, device=device)
-        depth = _person_depth_points(human, oid, N, float(knobs["chamfer"]["conf_thresh"]),
+        depth = _person_depth_points(human, oid, N, float(knobs["chamfer"]["conf_drop_q"]),
                                      int(knobs["chamfer"]["max_points"]), device)
         for i in range(N):
             if not vmask[i]:
                 scores[i] = 0.0
                 depth[i] = depth[i][:0]
+        frame_valid = torch.as_tensor(vmask, dtype=torch.bool, device=device)
 
         contact_labels = None
         if oid in ann_oids:
@@ -411,7 +437,7 @@ def run_kinematics_2(source, pred: Path, cfg: HumanOptimConfig, device: str, *,
             target_kp=target_kp, scores=scores, corr=corr, frame_vertex_ids=fvids,
             sub=sub, knobs=knobs, phases=phases,
             scene_pts=scene_pts, scene_normals=scene_normals, scene_conf=scene_conf, fps=fps,
-            contact_labels=contact_labels, chamfer_weights=chamfer_w)
+            contact_labels=contact_labels, chamfer_weights=chamfer_w, frame_valid=frame_valid)
         print(f"    before: {before}\n    after:  {after}")
         _append_classic(out, mid, betas_T, q_opt)
         betas_out.append(betas_mean.cpu().numpy().astype(np.float32))

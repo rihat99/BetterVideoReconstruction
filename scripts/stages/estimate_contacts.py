@@ -63,7 +63,8 @@ def _load_config(path: Path) -> dict:
     c = cfg.setdefault("contacts", {})
     c.setdefault("close_thresh_m", 0.02)   # "just outside" distance counted as contact
     c.setdefault("max_dist_m", 0.10)       # deep-occluder guard (reject spurious deep penetration)
-    c.setdefault("conf_thresh", 0.1)       # trust scene points above this VGGT confidence
+    c.setdefault("conf_thresh", 0.1)       # residual absolute floor (VGGT conf ≥~1 ⇒ non-binding)
+    c.setdefault("conf_drop_q", 0.1)       # quantile confidence gate: drop the lowest fraction of scene voxels
     c.setdefault("normal_k", 16)           # kNN for PCA scene-normal estimation
     c.setdefault("prune_margin_m", 0.10)   # per-frame scene-AABB margin for the SDF nearest-neighbour
     cfg.setdefault("runtime", {}).setdefault("device", "cuda")
@@ -127,15 +128,16 @@ def run(source, predictions_dir, config_path, *, device_override=None, overlay=T
 
     scene_pts = torch.as_tensor(sc["points"], dtype=torch.float32, device=device)
     scene_conf = torch.as_tensor(sc["confidence"], dtype=torch.float32, device=device)
+    q = float(cc.get("conf_drop_q", 0.0))          # quantile confidence gate (arbitrary VGGT conf scale)
+    if q > 0.0 and scene_conf.numel():
+        keep = scene_conf >= torch.quantile(scene_conf, q)
+        scene_pts, scene_conf = scene_pts[keep], scene_conf[keep]
     scene_normals = estimate_point_normals(scene_pts, cam_centers, k=int(cc["normal_k"]))
     print(f"[estimate_contacts] scene cloud {scene_pts.shape[0]} pts, PCA normals "
           f"k={int(cc['normal_k'])}; close<{float(cc['close_thresh_m']) * 100:.0f}cm")
 
     mid = load_smplx_mid(_DEFAULT_SMPLX_MODEL, device)
     J = mid.num_joints
-    with torch.no_grad():                    # rest-pose geometry → nearest-joint map (once)
-        v_rest, j_rest = mid.forward_shape(torch.zeros(1, mid.num_betas, device=device))
-    v2j = vertex_to_joint(v_rest[0], j_rest[0])   # (V,) nearest joint center per vertex
 
     joint_contact = np.zeros((P, N, J), dtype=bool)
     joint_sdf_cm = np.full((P, N, J), np.nan, dtype=np.float32)
@@ -145,6 +147,13 @@ def run(source, predictions_dir, config_path, *, device_override=None, overlay=T
         betas = torch.as_tensor(kin["betas"][p], dtype=torch.float32, device=device)
         q = torch.as_tensor(kin["q"][p], dtype=torch.float32, device=device)
         scale = float(kin["scale"][p])
+        # Nearest-joint map from THIS person's shaped rest mesh: body shape moves
+        # boundary vertices between joints, so a zero-beta map would mislabel them.
+        # Scale is uniform about the pelvis ⇒ nearest-joint is scale-invariant, so the
+        # unscaled shaped rest mesh is exact here.
+        with torch.no_grad():
+            v_rest, j_rest = mid.forward_shape(betas[None])
+        v2j = vertex_to_joint(v_rest[0], j_rest[0])                  # (V,) per person
         jw, vw = _pose(mid, betas, q, scale)                         # (N,J,3), (N,V,3) world
 
         sdf, dmin, conf = scene_sdf(vw, scene_pts, scene_normals, scene_conf,

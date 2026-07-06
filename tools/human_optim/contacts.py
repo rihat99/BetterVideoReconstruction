@@ -37,12 +37,15 @@ def scene_sdf(
 
     Returns ``(sdf, dmin, conf)``, each ``(T, V)``:
 
-      * ``sdf``  — signed Euclidean distance ``sign((v−p)·n)·‖v−p‖`` (metres);
-        negative = behind the surface (penetrating). The magnitude is the true
-        Euclidean distance to the nearest scene point; only the **sign** comes
-        from the normal, so a vertex far to the *side* of a surface reads as far
-        (no lateral false "closeness").
-      * ``dmin`` — Euclidean distance to that nearest scene point (metres).
+      * ``sdf``  — **perpendicular** signed distance ``(v−p)·n`` (metres); negative
+        = behind the surface (penetrating). This is the *same* convention the
+        kinematic penetration loss uses, so contact and repulsion agree: a vertex
+        far to the *side* of the surface reads ~0 (grazing) rather than as a deep
+        penetration equal to its Euclidean distance — the far ``dmin`` guard is
+        what rejects those lateral strays, not a spurious large negative ``sdf``.
+      * ``dmin`` — Euclidean distance to that nearest scene point (metres); the
+        far-guard (a vertex with no scene point within ``max_dist_m`` is not a
+        contact, whatever its perpendicular sign).
       * ``conf`` — confidence of that nearest scene point.
 
     The scene cloud is large (~10⁵ pts) but only points near the body matter, so
@@ -68,8 +71,7 @@ def scene_sdf(
         d = torch.cdist(v[None], cp[None])[0]                    # (V, Mc)
         dm, idx = d.min(dim=1)                                   # (V,)
         p, n = cp[idx], cn[idx]
-        signed = ((v - p) * n).sum(dim=-1)                       # (V,) perpendicular sign
-        sdf[t] = torch.where(signed < 0, -dm, dm)               # signed Euclidean SDF
+        sdf[t] = ((v - p) * n).sum(dim=-1)                       # (V,) perpendicular signed distance
         dmin[t] = dm
         conf[t] = cc[idx]
     return sdf, dmin, conf
