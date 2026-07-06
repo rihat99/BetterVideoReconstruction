@@ -1,4 +1,4 @@
-"""The kinematic-stage losses: reprojection, chamfer, depth push, pose prior, smoothness.
+"""The kinematic-stage losses: reprojection, chamfer, pose prior, smoothness.
 
 Reprojection is two **robust Geman-McClure** terms against complementary 2D
 evidence: :func:`init_reprojection_gm` (the body joints anchored to their OWN
@@ -430,96 +430,6 @@ def scene_attraction(
     return loss, gap_cm.detach(), tot_count
 
 
-def contact_velocity_loss(
-    vertices_sub: torch.Tensor,    # (T, Ns, 3) subsampled posed vertices (grad through q)
-    vel_vert: torch.Tensor,        # (T, Ns) per-vertex joint speed (m/s), DETACHED gate input
-    scene_padded: torch.Tensor,    # (T, Mc, 3) per-frame candidate scene points, padded
-    normal_padded: torch.Tensor,   # (T, Mc, 3) outward unit normals, padded
-    conf_padded: torch.Tensor,     # (T, Mc) point confidence, padded
-    scene_valid: torch.Tensor,     # (T, Mc) bool — real (vs padding) candidates
-    *,
-    conf_thresh: float,
-    max_dist_m: float,
-    max_pen_m: float,
-    contact_band_m: float,
-    vel_ref: float,
-    vel_exp: float,
-    chunk: int = 16,
-) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-    """Velocity-gated contact repulsion: push *fast-moving* contacts off the scene.
-
-    A real contact is (near-)stationary; a body vertex that is in contact with the
-    scene **while its joint moves fast** is unphysical (a limb clipping through the
-    wall mid-swing). This loss finds contacts *inside* the optimization loop —
-    differentiably, via the same point-cloud SDF as :func:`scene_penetration` — and
-    repels them with a force that **scales with the joint's speed**:
-
-      * **contact term** ``relu(contact_band_m − s)`` where ``s = (v−p)·n`` is the
-        signed distance to the nearest scene point (negative = inside). It is > 0
-        when a vertex is inside the scene or just outside it (within
-        ``contact_band_m``); its gradient w.r.t. ``v`` is the outward normal, so
-        minimizing it pushes the vertex **out along the surface** (the repulsion).
-        The NN is detached; gradients flow through ``v`` only.
-      * **velocity gate** ``g = (vel/vel_ref)^vel_exp`` — a smooth, monotone,
-        threshold-free function of the (detached) per-vertex joint speed
-        ``vel_vert``: ≈ 0 for a slow planted contact, large for a fast one. The
-        joint speed is the LOCAL-frame linear velocity magnitude from the
-        BetterRobot Jacobian (:func:`tools.human_optim.velocity.joint_local_linear_speed`),
-        mapped to each vertex by its nearest joint.
-
-    ``L = mean_active( g · relu(contact_band_m − s) )``. The same gates as the
-    penetration loss keep strays out: ``conf_thresh`` (confident scene points),
-    ``dmin < max_dist_m`` (near a surface), ``s > −max_pen_m`` (no behind-occluder
-    correspondences). Reduced as a per-frame mean over active verts, averaged over
-    frames that have any (this term is off by default, so it was left on the older
-    per-frame reduction that :func:`scene_penetration` has since dropped for a joint
-    mean). Chunked-batched ``cdist`` (its own
-    nearest-neighbour pass, mirroring the penetration loop). Returns
-    ``(loss, mean_inside_depth_cm, n_contact)`` — the latter two detached diagnostics.
-    """
-    T = vertices_sub.shape[0]
-    if scene_padded.shape[1] == 0:        # no scene candidates near the body in any frame
-        z = vertices_sub.new_zeros(())
-        return z, z, vertices_sub.new_zeros((), dtype=torch.long)
-    INF = torch.finfo(vertices_sub.dtype).max
-    gate = (vel_vert / vel_ref).clamp_min(0.0) ** vel_exp        # (T, Ns) detached, smart increasing fn
-    tot_depth = vertices_sub.new_zeros(())
-    tot_count = vertices_sub.new_zeros((), dtype=torch.long)
-    parts, fparts = [], []
-    for s0 in range(0, T, chunk):
-        e0 = min(s0 + chunk, T)
-        V = vertices_sub[s0:e0]                                   # (b, Ns, 3)
-        with torch.no_grad():
-            d = torch.cdist(V, scene_padded[s0:e0])
-            d = d.masked_fill(~scene_valid[s0:e0][:, None, :], INF)
-            dmin, idx = d.min(dim=2)                              # (b, Ns) — detached NN
-        gi = idx[..., None].expand(-1, -1, 3)
-        p = torch.gather(scene_padded[s0:e0], 1, gi)              # (b, Ns, 3)
-        n = torch.gather(normal_padded[s0:e0], 1, gi)
-        c = torch.gather(conf_padded[s0:e0], 1, idx)              # (b, Ns)
-        sgn = ((V - p) * n).sum(dim=-1)                           # (b, Ns) signed, diff through V
-        has = scene_valid[s0:e0].any(dim=1, keepdim=True)
-        active = (c > conf_thresh) & (dmin < max_dist_m) & (sgn.detach() > -max_pen_m) & has
-        contact = torch.relu(contact_band_m - sgn)               # >0 inside / within band; grad = outward n
-        term = gate[s0:e0] * contact                             # velocity-gated repulsion
-        a = (active & (contact > 0)).to(term.dtype)              # only gated contacting verts count
-        na = a.sum(1)                                            # (b,)
-        parts.append((term * a).sum(1) / na.clamp_min(1))
-        fparts.append(na > 0)
-        with torch.no_grad():
-            inside = active & (sgn < 0)
-            tot_depth = tot_depth + (-sgn[inside]).sum()
-            tot_count = tot_count + (active & (contact > 0)).sum()
-    fvalid = torch.cat(fparts)
-    if not bool(fvalid.any()):
-        z = vertices_sub.new_zeros(())
-        return z, z, tot_count
-    terms = torch.where(fvalid, torch.cat(parts), vertices_sub.new_zeros(()))
-    loss = terms.sum() / fvalid.sum().clamp_min(1)
-    depth_cm = (tot_depth / tot_count.clamp_min(1)) * 100.0
-    return loss, depth_cm.detach(), tot_count
-
-
 def joint_velocity_loss(
     joints_world: torch.Tensor,    # (T, J, 3) posed (scaled) world joints — grad through q
     contact_labels: torch.Tensor,  # (T, J) int8 tri-state: 1 = annotated in-contact this frame
@@ -596,36 +506,6 @@ def root_orient_prior_loss(
     """
     cos = (q[..., 3:7] * q_init[..., 3:7]).sum(dim=-1)
     return (1.0 - cos.square()).mean()
-
-
-def depth_push_loss(
-    joints_world: torch.Tensor,    # (T, J, 3) posed (scaled) world joints
-    extrinsics: torch.Tensor,      # (T, 4, 4) cam_from_world
-    frame_mask: torch.Tensor,      # (T,) bool — frames where the push is active (have depth)
-) -> torch.Tensor:
-    """Gentle push of the body AWAY from the camera (along +z_cam).
-
-    DISABLED by default (weight 0 in every stage column): the mechanism below
-    assumed a *free* global scale, but scale is frozen at 1.0 now (``estimate_scale``
-    sizes the world instead), so the push can no longer trade depth against size and
-    chamfer already owns depth. Kept behind the ``w_push != 0.0`` gate for
-    experiments; re-enabling it resurrects the stale mechanism described here.
-
-    Returns the mean over active frames of the NEGATIVE camera-frame depth of the
-    pelvis (joint 0), so minimizing it slides the body deeper along the viewing
-    direction. The reprojection terms hold the body on the camera rays, so — with
-    the global scale free — the body GROWS to keep filling the silhouette as it
-    recedes: it slides out along the rays toward the metric depth cloud and
-    balances the scene-penetration push-out (which shoves it the other way, toward
-    the camera). The pelvis is **scale-invariant** (scale is applied about it), so
-    this term moves only the root translation; scale responds indirectly through
-    reprojection. Gated to frames that have a depth cloud (``frame_mask``) so the
-    recession is always met by a chamfer counter-pull — on a depth-less frame
-    nothing pushes back, so the term stays off there to avoid runaway.
-    """
-    z_cam = transform_points(joints_world[:, :1, :], extrinsics)[:, 0, 2]  # (T,) pelvis depth
-    m = frame_mask.to(z_cam.dtype)
-    return -(z_cam * m).sum() / m.sum().clamp_min(1.0)
 
 
 def smoothness_loss(

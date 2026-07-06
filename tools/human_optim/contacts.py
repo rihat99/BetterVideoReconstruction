@@ -142,3 +142,160 @@ def lift_joint_contact(
     jsdf.scatter_reduce_(1, idx, sdf, reduce="amin", include_self=True)
     jsdf_cm = torch.where(jsdf < INF * 0.5, jsdf * 100.0, torch.full_like(jsdf, float("nan")))
     return jc > 0.5, jsdf_cm
+
+
+def joint_guarded_min_sdf(
+    sdf: torch.Tensor,      # (T, V) signed SDF (m)
+    dmin: torch.Tensor,     # (T, V) Euclidean NN distance (m)
+    conf: torch.Tensor,     # (T, V) NN-point confidence
+    v2j: torch.Tensor,      # (V,) long vertex→joint
+    num_joints: int,
+    *,
+    max_dist_m: float,
+    conf_thresh: float,
+) -> torch.Tensor:
+    """Per-joint minimum signed distance over each joint's GUARDED vertices ``(T, J)``.
+
+    A vertex contributes only if it passes the same far / confidence guards as
+    :func:`contact_from_sdf` (``dmin < max_dist_m`` and ``conf > conf_thresh``);
+    guarded-out vertices are set to ``+inf`` so they never win the per-joint min, and
+    a joint with no guarded vertex this frame is ``+inf``. This is the continuous
+    per-joint signal the temporal hysteresis (:func:`hysteresis_spans`) thresholds —
+    the guarded counterpart of :func:`lift_joint_contact`'s raw ``joint_sdf`` (which
+    stays unguarded as the diagnostic channel). Feeding hysteresis the guarded min
+    keeps its ``enter`` threshold exactly equivalent to the old per-vertex boolean
+    (``∃`` guarded vertex with ``sdf < enter``) while letting a looser ``exit`` hold
+    the span.
+    """
+    guard = (dmin < max_dist_m) & (conf > conf_thresh)
+    INF = torch.finfo(sdf.dtype).max
+    gsdf = torch.where(guard, sdf, torch.full_like(sdf, INF))
+    T = sdf.shape[0]
+    idx = v2j[None].expand(T, -1)
+    out = torch.full((T, num_joints), INF, device=sdf.device, dtype=sdf.dtype)
+    out.scatter_reduce_(1, idx, gsdf, reduce="amin", include_self=True)
+    return out
+
+
+def hysteresis_spans(
+    series: torch.Tensor,   # (T, J) per-joint continuous signal (smaller = more in contact)
+    *,
+    enter_below: float,
+    exit_below: float,
+    min_frames: int,
+) -> torch.Tensor:
+    """Temporal hysteresis + min-duration on a per-joint scalar series → ``(T, J)`` bool.
+
+    ``series`` is a per-frame continuous signal where *smaller* means more in contact
+    (here the guarded per-joint min signed distance). Per joint, independently:
+
+      * **enter** a contact span at the first frame with ``series < enter_below``;
+      * **stay** in it while ``series < exit_below`` — a looser threshold, so labels
+        do not blink on and off at the boundary (``exit_below ≥ enter_below``);
+      * close the span otherwise. A ``+inf`` / NaN frame (no guarded vertex) fails
+        both tests and breaks the span.
+
+    Then any span shorter than ``min_frames`` is dropped (1–2-frame flicker). Returns
+    the boolean contact mask. Pure temporal post-process, no gradients.
+    """
+    T, J = series.shape
+    enter = series < enter_below                       # (T, J) — start condition (⊆ stay)
+    stay = series < exit_below                         # (T, J) — continue condition
+    active = torch.zeros(J, dtype=torch.bool, device=series.device)
+    out = torch.zeros((T, J), dtype=torch.bool, device=series.device)
+    for t in range(T):
+        active = (active & stay[t]) | enter[t]         # hysteresis: continue-if-staying, or (re)enter
+        out[t] = active
+    if min_frames > 1 and T > 0:
+        oc = out.cpu().numpy()
+        for j in range(J):
+            col = oc[:, j]
+            t = 0
+            while t < T:
+                if col[t]:
+                    s = t
+                    while t < T and col[t]:
+                        t += 1
+                    if t - s < min_frames:
+                        col[s:t] = False
+                else:
+                    t += 1
+        out = torch.as_tensor(oc, device=series.device)
+    return out
+
+
+# ── drift / stillness (for the estimate_contacts contact readout) ──
+# Instantaneous joint speed cannot tell a gripping hand from a slow near-wall pass:
+# a grip's few-mm per-frame fit jitter × ~30 fps is 0.1–0.3 m/s, the same range as a
+# slow pass. The discriminative signal is the NET displacement over a short window
+# (~1/3 s): jitter cancels so a grip nets < ~2 cm while a slow pass accumulates 3–7 cm.
+
+def joint_drift(
+    joints_world: torch.Tensor,   # (T, J, 3) posed world-frame joints
+    *,
+    fps: float,
+    window_s: float,
+) -> torch.Tensor:
+    """Net joint displacement across a centered time window ``(T, J)`` metres.
+
+    For every frame ``t`` and joint ``j``, the straight-line distance between the
+    joint's position ``window_s/2`` seconds before and after::
+
+        drift[t, j] = ‖p[t + h, j] − p[t − h, j]‖,   h = round(window_s · fps / 2)
+
+    The window is clamped to the clip at the two ends, and the raw displacement is
+    rescaled by ``2h / (hi − lo)`` so a half-length end window reports the same drift
+    a full interior window would for the same motion — otherwise the first/last ``h``
+    frames read as artificially still (a fast joint there would false-contact). Two
+    gathers, no loop, no gradients — a signal to READ, never to optimize. ``T < 2`` ⇒
+    all-zero.
+    """
+    T = joints_world.shape[0]
+    if T < 2:
+        return joints_world.new_zeros(joints_world.shape[:2])
+    h = max(1, int(round(window_s * float(fps) / 2.0)))
+    idx = torch.arange(T, device=joints_world.device)
+    lo = (idx - h).clamp_min(0)
+    hi = (idx + h).clamp_max(T - 1)
+    disp = (joints_world[hi] - joints_world[lo]).norm(dim=-1)          # (T, J)
+    span = (hi - lo).clamp_min(1).to(disp.dtype)                      # actual window frames (2h interior)
+    return disp * (2 * h / span)[:, None]                            # scale short end-windows to full width
+
+
+def stillness_weight(drift: torch.Tensor, *, still_m: float) -> torch.Tensor:
+    """Per-joint stillness weight ``w ∈ [0, 1]`` from :func:`joint_drift` ``(T, J)``.
+
+    A linear ramp ``w = clamp(1 − drift / (2·still_m), 0, 1)``: ``1`` at zero drift
+    (fully still), ``0.5`` at ``still_m``, ``0`` at ``2·still_m`` and beyond. The one
+    knob ``still_m`` is the net drift at which a joint is "half in contact"; it is the
+    contact readout's recall knob — :func:`drift_gated_contact` kills a contact where
+    ``w == 0`` (drift ≥ ``2·still_m``).
+    """
+    return (1.0 - drift / (2.0 * float(still_m))).clamp(0.0, 1.0)
+
+
+def drift_gated_contact(
+    guarded_min_sdf: torch.Tensor,   # (T, J) guarded per-joint min signed distance (m)
+    drift: torch.Tensor,             # (T, J) per-joint net window drift (m)
+    *,
+    close_thresh_m: float,
+    exit_thresh_m: float,
+    min_frames: int,
+    still_m: float,
+) -> torch.Tensor:
+    """The contact readout ``(T, J)`` bool: drift-gate, then temporal hysteresis.
+
+    A joint-frame can only be in contact when it is both **near the wall** (its
+    guarded min signed distance below the hysteresis thresholds) and **still** (net
+    window drift under ``2·still_m``, i.e. :func:`stillness_weight` ``> 0``). Frames
+    that fail the stillness gate have their distance forced to ``+inf`` so
+    :func:`hysteresis_spans` breaks the span there — exactly how the old hard speed
+    veto plugged in, but with the windowed-drift signal that actually separates a
+    grip from a slow pass. Shared by ``estimate_contacts`` and the offline scorer so
+    both score the identical readout.
+    """
+    w = stillness_weight(drift, still_m=still_m)
+    INF = torch.finfo(guarded_min_sdf.dtype).max
+    gated = torch.where(w > 0.0, guarded_min_sdf, torch.full_like(guarded_min_sdf, INF))
+    return hysteresis_spans(gated, enter_below=close_thresh_m,
+                            exit_below=exit_thresh_m, min_frames=min_frames)

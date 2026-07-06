@@ -4,9 +4,8 @@ The leaf variables are ``q (T, 211)`` in ``better_human`` order; quaternions are
 normalized inside every forward (so there is no exp-retraction singularity). Each
 iteration: ``better_human`` forward → world joints / vertices → the weighted losses
 (two robust reprojection terms, chamfer, pose / orientation priors, smoothness,
-scene penetration, scene-contact attraction, velocity-gated contact repulsion).
-Visibility and the chamfer / penetration nearest-neighbours are recomputed detached
-each call.
+scene penetration, scene-contact attraction). Visibility and the chamfer /
+penetration nearest-neighbours are recomputed detached each call.
 
 The schedule is a list of :class:`PhaseSpec` — each phase names its trainable DOF
 groups, iteration count, whether the scene terms are active, its optimizer (Adam or
@@ -18,9 +17,8 @@ terms. Priors and the init-projection anchor are pinned to the *call's input* po
 and threaded across all its phases — so root and kinematics_1 share one call
 (anchored to the converter pose) rather than running as separate calls.
 
-The contact loss's per-joint speed comes from a BetterRobot kinematic model built
-once per person (:mod:`tools.human_optim.velocity`); all posed-mesh inference stays
-in ``better_human``. This module assembles the objective and drives ``torch.optim``.
+All posed-mesh inference stays in ``better_human``; this module assembles the
+objective and drives ``torch.optim``.
 """
 
 from __future__ import annotations
@@ -29,19 +27,15 @@ from dataclasses import dataclass
 
 import torch
 
-from tools.smplx_robot import make_smplx_robot_model
-
 from .camera import project, transform_points
 from .contacts import vertex_to_joint
 from .losses import (
-    chamfer_loss, clearance_repulsion, contact_velocity_loss, depth_push_loss,
-    init_reprojection_gm, joint_velocity_loss, pad_frames,
-    pose_prior_loss, root_orient_prior_loss, sapiens_reprojection_gm,
+    chamfer_loss, clearance_repulsion, init_reprojection_gm, joint_velocity_loss,
+    pad_frames, pose_prior_loss, root_orient_prior_loss, sapiens_reprojection_gm,
     scene_attraction, scene_penetration, smoothness_loss,
 )
 from .motion import tangent_difference
 from .qmath import normalize_q
-from .velocity import joint_local_linear_speed
 from .visibility import front_facing_mask, vertex_normals
 
 
@@ -54,21 +48,15 @@ class Metrics:
     jerk: float
     pen_cm: float = float("nan")  # mean penetration depth into the scene cloud (nan = no scene)
     pen_n: int = 0                # number of penetrating vertex-instances (summed over frames)
-    contact_n: int = 0            # gated contacting vertex-instances (velocity-gated contact loss)
-    contact_cm: float = float("nan")  # mean inside-depth of those contacting verts (cm)
-    depth_m: float = float("nan")  # mean pelvis camera-frame depth (the z-push target / diagnostic)
-    attract_n: int = 0            # near-wall vertex-instances in the attraction band (summed over frames)
-    attract_cm: float = float("nan")  # mean outside-gap of those near-wall verts (cm)
+    depth_m: float = float("nan")  # mean pelvis camera-frame depth (diagnostic)
 
     def __str__(self) -> str:
         ini = "n/a" if self.reproj_init_px != self.reproj_init_px else f"{self.reproj_init_px:.2f}px"
         dep = "" if self.depth_m != self.depth_m else f"  depth={self.depth_m:.2f}m"
         pen = "" if self.pen_cm != self.pen_cm else f"  pen={self.pen_cm:.2f}cm/{self.pen_n}v"
-        ct = "" if self.contact_cm != self.contact_cm else f"  contact={self.contact_cm:.2f}cm/{self.contact_n}v"
-        at = "" if self.attract_cm != self.attract_cm else f"  attract={self.attract_cm:.2f}cm/{self.attract_n}v"
         return (f"reproj_sap={self.reproj_sap_px:.2f}px  reproj_init={ini}  "
                 f"chamfer={self.chamfer_m * 100:.2f}cm  "
-                f"‖accel‖={self.accel:.4f}  ‖jerk‖={self.jerk:.4f}{dep}{pen}{ct}{at}")
+                f"‖accel‖={self.accel:.4f}  ‖jerk‖={self.jerk:.4f}{dep}{pen}")
 
 
 @dataclass
@@ -154,8 +142,7 @@ def _padded_scene_candidates(vertices_sub_det: torch.Tensor, scene_pts: torch.Te
 def _metrics(mid, betas, q_world, *, extrinsics, K, depth_pad, depth_valid, target_kp,
             scores, corr, frame_vertex_ids, sub, score_thresh, chunk=16,
             body_idx=None, init_target=None,
-            scene_pts=None, scene_normals=None, scene_conf=None, pen=None,
-            model=None, v2j_sub=None, fps=30.0, contact=None, attract=None) -> Metrics:
+            scene_pts=None, scene_normals=None, scene_conf=None, pen=None) -> Metrics:
     qn = normalize_q(q_world, mid.num_joints)
     out = mid.forward(betas, qn)
     jw = out.joints_world.tensor()[..., :3]
@@ -181,11 +168,8 @@ def _metrics(mid, betas, q_world, *, extrinsics, K, depth_pad, depth_valid, targ
     vismask = _visibility(vw[:, sub], n[:, sub], extrinsics)
     cham = float(chamfer_loss(vw[:, sub], vismask, depth_pad, depth_valid, chunk=chunk))
     # penetration into the scene cloud (diagnostic — same SDF the loss uses, on
-    # all subsampled verts; candidates pruned to each frame's body box) + the
-    # velocity-gated contact diagnostic (reuses the same candidates)
+    # all subsampled verts; candidates pruned to each frame's body box)
     pen_cm, pen_n = float("nan"), 0
-    contact_n, contact_cm = 0, float("nan")
-    attract_n, attract_cm = 0, float("nan")
     if scene_pts is not None:
         cand = _padded_scene_candidates(vw[:, sub], scene_pts, scene_normals, scene_conf,
                                         float(pen["prune_margin_m"]), int(pen["max_candidates"]))
@@ -194,20 +178,7 @@ def _metrics(mid, betas, q_world, *, extrinsics, K, depth_pad, depth_valid, targ
             margin_m=float(pen["margin_m"]), max_dist_m=float(pen["max_dist_m"]),
             max_pen_m=float(pen["max_pen_m"]), huber_m=float(pen["huber_m"]), chunk=chunk)
         pen_cm, pen_n = float(dcm), int(npen)
-        if attract is not None:
-            _, agm, na = scene_attraction(
-                vw[:, sub], *cand, conf_thresh=float(attract["conf_thresh"]),
-                band_m=float(attract["band_m"]), max_dist_m=float(attract["max_dist_m"]), chunk=chunk)
-            attract_n, attract_cm = int(na), float(agm)
-        if model is not None and contact is not None:
-            speed = joint_local_linear_speed(model, mid, q_world, fps)  # (T, J)
-            _, cdm, cn = contact_velocity_loss(
-                vw[:, sub], speed[:, v2j_sub], *cand,
-                conf_thresh=float(contact["conf_thresh"]), max_dist_m=float(contact["max_dist_m"]),
-                max_pen_m=float(contact["max_pen_m"]), contact_band_m=float(contact["contact_band_m"]),
-                vel_ref=float(contact["vel_ref"]), vel_exp=float(contact["vel_exp"]), chunk=chunk)
-            contact_n, contact_cm = int(cn), float(cdm)
-    # mean pelvis camera-frame depth over frames with depth (the z-push diagnostic)
+    # mean pelvis camera-frame depth over frames with depth (a placement diagnostic)
     pelvis_z = transform_points(jw[:, :1, :], extrinsics)[:, 0, 2]   # (T,)
     fhd = depth_valid.any(dim=1)
     depth_m = (float((pelvis_z * fhd).sum() / fhd.sum().clamp_min(1))
@@ -217,7 +188,7 @@ def _metrics(mid, betas, q_world, *, extrinsics, K, depth_pad, depth_valid, targ
     accel = d1[1:] - d1[:-1]
     jerk = accel[1:] - accel[:-1]
     return Metrics(reproj_sap, reproj_init, cham, float(accel.norm()), float(jerk.norm()),
-                   pen_cm, pen_n, contact_n, contact_cm, depth_m, attract_n, attract_cm)
+                   pen_cm, pen_n, depth_m)
 
 
 def optimize_person(
@@ -265,8 +236,6 @@ def optimize_person(
     score_thresh = float(kp["score_thresh"])
     sap_gm_px = float(kp["gm_scale_px"])
     pen_cfg = knobs["penetration"]
-    contact_cfg = knobs["contact_velocity"]
-    attract_cfg = knobs["contact_attraction"]
     chunk = int(knobs["chamfer"]["chunk"])
     max_cand = int(pen_cfg["max_candidates"])
 
@@ -278,29 +247,20 @@ def optimize_person(
     use_init = _wmax("reproj_init") > 0.0
     init_gm_px = float(knobs["reproj_init"]["gm_scale_px"]) if use_init else 0.0
     use_pen = scene_pts is not None
-    use_contact = use_pen and _wmax("contact_velocity") > 0.0
-    use_attract = use_pen and _wmax("contact_attraction") > 0.0
     use_ann = contact_labels is not None
     ann_at_cfg = knobs["ann_attraction"] if use_ann else None
     ann_rep_cfg = knobs["ann_repulsion"] if use_ann else None
 
     depth_pad, depth_valid = pad_frames(depth_points, channels=3,
                                         device=q_world_init.device, dtype=q_world_init.dtype)
-    frame_has_depth = depth_valid.any(dim=1)   # (T,) — frames the depth-push acts on
 
-    # `v2j_sub` maps each subsampled vertex to its nearest rest-pose joint — needed
-    # by the velocity-gated contact loss AND by the kinematics_2 annotation terms
-    # (to inherit each vertex's joint contact label), so build it for either. The
-    # BetterRobot kinematic model is built once per person (betas fixed) only for
-    # the velocity-gated contact loss's Jacobian speed.
-    model = v2j_sub = None
-    if use_contact or use_ann:
+    # `v2j_sub` maps each subsampled vertex to its nearest rest-pose joint — needed by
+    # the kinematics_2 annotation terms to inherit each vertex's joint contact label.
+    v2j_sub = None
+    if use_ann:
         with torch.no_grad():
             v_rest, j_rest = mid.forward_shape(betas_mean[None])
         v2j_sub = vertex_to_joint(v_rest[0], j_rest[0])[sub]   # (Ns,) nearest joint per subsampled vert
-    if use_contact:
-        model = make_smplx_robot_model(mid, betas_mean, device=q_world_init.device,
-                                       dtype=q_world_init.dtype)
     incontact_v = nocontact_v = None
     if use_ann:
         vlabel = contact_labels[:, v2j_sub]                   # (T, Ns) tri-state
@@ -327,9 +287,7 @@ def optimize_person(
         target_kp=target_kp, scores=scores, corr=corr, frame_vertex_ids=frame_vertex_ids,
         sub=sub, score_thresh=score_thresh, chunk=chunk,
         body_idx=body_idx, init_target=init_target,
-        scene_pts=scene_pts, scene_normals=scene_normals, scene_conf=scene_conf, pen=pen_cfg,
-        model=model, v2j_sub=v2j_sub, fps=fps, contact=contact_cfg,
-        attract=attract_cfg if use_attract else None)
+        scene_pts=scene_pts, scene_normals=scene_normals, scene_conf=scene_conf, pen=pen_cfg)
     before = mk(q_world_init)
 
     q_init = q_world_init.detach().clone()   # the anchor (priors + init reprojection)
@@ -356,20 +314,10 @@ def optimize_person(
             cand = (pad_p, pad_n, pad_c, valid & frame_valid[:, None])
         return cand
 
-    def _build_vel_gate():
-        """Static per-subsampled-vertex joint speed ``(T, Ns)`` from the current
-        pose, or None — the velocity input to the contact loss's gate (detached,
-        computed once per scene phase; refinement barely changes joint speeds)."""
-        if not use_contact:
-            return None
-        with torch.no_grad():
-            speed = joint_local_linear_speed(model, mid, q, fps)   # (T, J)
-        return speed[:, v2j_sub]                                   # (T, Ns)
-
-    def _forward_losses(w: dict, scene_cand, vel_gate):
+    def _forward_losses(w: dict, scene_cand):
         """Forward the posed mesh and assemble the phase-weighted loss. Returns
         ``(loss, components)`` — ``components`` carries the per-term tensors +
-        penetration / contact diagnostics for logging + diagnostics."""
+        penetration diagnostics for logging + diagnostics."""
         qn = normalize_q(q, mid.num_joints)
         out = mid.forward(betas, qn)
         jw, vw = out.joints_world.tensor()[..., :3], out.vertices
@@ -377,8 +325,6 @@ def optimize_person(
             normals = vertex_normals(vw.detach(), mid.faces)
             vismask = _visibility(vw.detach()[:, sub], normals[:, sub], extrinsics)
         w_init = float(w["reproj_init"])
-        w_push = float(w["depth_push"])
-        w_attract = float(w["contact_attraction"])
         w_ann_attract = float(w.get("ann_attraction", 0.0))
         w_ann_repel = float(w.get("ann_repulsion", 0.0))
         w_ann_vel = float(w.get("ann_velocity", 0.0))
@@ -389,8 +335,6 @@ def optimize_person(
                   if (use_init and w_init > 0.0) else jw.new_zeros(()))
         L_ch = chamfer_loss(vw[:, sub], vismask, depth_pad, depth_valid, chunk=chunk,
                             vertex_weights=chamfer_weights)
-        L_push = (depth_push_loss(jw, extrinsics, frame_has_depth)
-                  if w_push != 0.0 else jw.new_zeros(()))
         L_pp = pose_prior_loss(qn, q_init, mid.num_joints)
         L_ro = root_orient_prior_loss(qn, q_init)
         L_sm = smoothness_loss(qn, mid.num_joints, accel_root=float(w["accel_root"]),
@@ -403,20 +347,6 @@ def optimize_person(
                 max_pen_m=float(pen_cfg["max_pen_m"]), huber_m=float(pen_cfg["huber_m"]), chunk=chunk)
         else:
             L_pen, pen_cm, pen_n = vw.new_zeros(()), float("nan"), 0
-        if vel_gate is not None:                       # velocity-gated contact (scene phase, weight>0)
-            L_ct, ct_cm, ct_n = contact_velocity_loss(
-                vw[:, sub], vel_gate, *scene_cand, conf_thresh=float(contact_cfg["conf_thresh"]),
-                max_dist_m=float(contact_cfg["max_dist_m"]), max_pen_m=float(contact_cfg["max_pen_m"]),
-                contact_band_m=float(contact_cfg["contact_band_m"]), vel_ref=float(contact_cfg["vel_ref"]),
-                vel_exp=float(contact_cfg["vel_exp"]), chunk=chunk)
-        else:
-            L_ct, ct_cm, ct_n = vw.new_zeros(()), float("nan"), 0
-        if scene_cand is not None and use_attract and w_attract > 0.0:  # contact attraction (scene phase)
-            L_at, at_cm, at_n = scene_attraction(
-                vw[:, sub], *scene_cand, conf_thresh=float(attract_cfg["conf_thresh"]),
-                band_m=float(attract_cfg["band_m"]), max_dist_m=float(attract_cfg["max_dist_m"]), chunk=chunk)
-        else:
-            L_at, at_cm, at_n = vw.new_zeros(()), float("nan"), 0
         # kinematics_2 annotation-driven terms. The attraction (in-contact verts →
         # ONTO the wall) and the strong repulsion (no-contact verts → OFF the wall)
         # both need the scene candidates, so run in the scene phases; the velocity
@@ -440,39 +370,32 @@ def optimize_person(
         if use_ann and w_ann_vel > 0.0:
             L_ann_vel, ann_vel_cms, ann_vel_n = joint_velocity_loss(jw, contact_labels, fps=fps)
         loss = (float(w["reproj_sapiens"]) * L_sap + w_init * L_init + float(w["chamfer"]) * L_ch
-                + w_push * L_push + float(w["pose_prior"]) * L_pp + float(w["orient_prior"]) * L_ro + L_sm
-                + float(w["penetration"]) * L_pen + float(w["contact_velocity"]) * L_ct + w_attract * L_at
+                + float(w["pose_prior"]) * L_pp + float(w["orient_prior"]) * L_ro + L_sm
+                + float(w["penetration"]) * L_pen
                 + w_ann_attract * L_ann_at + w_ann_repel * L_ann_rep + w_ann_vel * L_ann_vel)
-        return loss, dict(sap=L_sap, init=L_init, ch=L_ch, push=L_push, pp=L_pp, sm=L_sm,
+        return loss, dict(sap=L_sap, init=L_init, ch=L_ch, pp=L_pp, sm=L_sm,
                           pen=L_pen, pen_cm=pen_cm, pen_n=pen_n, has_pen=scene_cand is not None,
-                          ct=L_ct, ct_cm=ct_cm, ct_n=ct_n, has_ct=vel_gate is not None,
-                          at=L_at, at_cm=at_cm, at_n=at_n, has_at=scene_cand is not None and use_attract,
                           ann_at=L_ann_at, ann_at_cm=ann_at_cm, ann_at_n=ann_at_n,
                           ann_rep=L_ann_rep, ann_rep_cm=ann_rep_cm, ann_rep_n=ann_rep_n,
                           ann_vel=L_ann_vel, ann_vel_cms=ann_vel_cms, ann_vel_n=ann_vel_n,
                           has_ann=use_ann and scene_cand is not None)
 
     def _log(tag, it, loss, c, w):
-        w_pen, w_contact, w_attract = float(w["penetration"]), float(w["contact_velocity"]), float(w["contact_attraction"])
-        w_rep_sap, w_rep_init, w_push = float(w["reproj_sapiens"]), float(w["reproj_init"]), float(w["depth_push"])
+        w_pen = float(w["penetration"])
+        w_rep_sap, w_rep_init = float(w["reproj_sapiens"]), float(w["reproj_init"])
         w_ann_attract, w_ann_repel, w_ann_vel = float(w.get("ann_attraction", 0.0)), float(w.get("ann_repulsion", 0.0)), float(w.get("ann_velocity", 0.0))
         pen_str = (f" pen={float(c['pen_cm']):.1f}cm/{int(c['pen_n'])}v·{w_pen:g}={w_pen * c['pen'].item():.3f}"
                    if c["has_pen"] else "")
-        ct_str = (f" contact={float(c['ct_cm']):.1f}cm/{int(c['ct_n'])}v·{w_contact:g}={w_contact * c['ct'].item():.3f}"
-                  if c["has_ct"] else "")
-        at_str = (f" attract={float(c['at_cm']):.1f}cm/{int(c['at_n'])}v·{w_attract:g}={w_attract * c['at'].item():.3f}"
-                  if c["has_at"] else "")
         ann_str = (f" ann_at={float(c['ann_at_cm']):.1f}cm/{int(c['ann_at_n'])}v·{w_ann_attract:g}={w_ann_attract * c['ann_at'].item():.3f}"
                    f" ann_rep={float(c['ann_rep_cm']):.1f}cm/{int(c['ann_rep_n'])}v·{w_ann_repel:g}={w_ann_repel * c['ann_rep'].item():.3f}"
                    f" ann_vel={float(c['ann_vel_cms']):.1f}cm/s·{w_ann_vel:g}={w_ann_vel * c['ann_vel'].item():.4f}"
                    if c["has_ann"] else "")
-        push_str = (f" push·{w_push:g}={w_push * c['push'].item():.3f}" if w_push != 0.0 else "")
         init_str = (f"rep_init={c['init'].item():.4f}·{w_rep_init:g}={w_rep_init * c['init'].item():.2f} "
                     if w_rep_init > 0.0 else "")
         print(f"    [{tag:9s}] it {it:4d}  loss={loss.item():.4f}  "
               f"(rep_sap={c['sap'].item():.4f}·{w_rep_sap:g}={w_rep_sap * c['sap'].item():.2f} "
               f"{init_str}ch={c['ch'].item() * 100:.1f}cm pose={c['pp'].item():.4f} "
-              f"smooth={c['sm'].item():.3f}{push_str}{pen_str}{ct_str}{at_str}{ann_str})")
+              f"smooth={c['sm'].item():.3f}{pen_str}{ann_str})")
 
     # ── run the phases in order ──────────────────────────────────────────────
     # Adam (per-coordinate steps) tolerates the very different gradient scales here
@@ -482,7 +405,6 @@ def optimize_person(
     # no stale momentum leaks across an unfreeze; DOFs frozen by zeroing the grad.
     for ph in phases:
         scene_cand = _build_scene_cand() if ph.scene else None
-        vel_gate = _build_vel_gate() if ph.scene else None
         if ph.optimizer == "lbfgs":
             opt = torch.optim.LBFGS([q], lr=float(oc["lr_lbfgs"]), max_iter=int(ph.iters),
                                     history_size=int(oc["lbfgs_history"]), line_search_fn="strong_wolfe")
@@ -490,7 +412,7 @@ def optimize_person(
 
             def closure():
                 opt.zero_grad()
-                loss, c = _forward_losses(ph.weights, scene_cand, vel_gate)
+                loss, c = _forward_losses(ph.weights, scene_cand)
                 loss.backward()
                 step[0] += 1
                 if step[0] == 1 or step[0] % 5 == 0:
@@ -505,7 +427,7 @@ def optimize_person(
             opt, milestones=[ph.iters // 2, 3 * ph.iters // 4], gamma=float(oc["lr_decay"]))
         for it in range(int(ph.iters)):
             opt.zero_grad()
-            loss, c = _forward_losses(ph.weights, scene_cand, vel_gate)
+            loss, c = _forward_losses(ph.weights, scene_cand)
             loss.backward()
             q.grad.mul_(mask)  # freeze the DOF groups not active this phase
             opt.step()

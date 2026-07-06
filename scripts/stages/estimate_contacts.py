@@ -10,7 +10,10 @@ person, which **joints** are in contact with the scene:
      SDF the kinematic stage's penetration loss uses) → per-vertex contact
      (inside the scene, or just outside it within ``close_thresh_m``),
   3. lift to **per-joint** contact by nearest-joint assignment — a joint is in
-     contact if any vertex closest to it is (vertex→joint by rest-pose 3D distance).
+     contact if any vertex closest to it is (vertex→joint by rest-pose 3D distance),
+  4. keep a joint-frame only if the joint is also **still** — its net displacement
+     over a ~1/3 s window is under ``2·still_m`` (a joint sliding along the wall is a
+     pass, not a grip) — then temporal hysteresis (enter/exit) + a min-duration.
 
 then renders ``contacts_1_overlay.mp4``: the projected SMPL-X skeleton on each frame,
 joints coloured **red** in contact / **green** otherwise.
@@ -44,8 +47,8 @@ import torch  # noqa: E402
 
 from tools.geometry.normals import estimate_point_normals  # noqa: E402
 from tools.human_optim import (  # noqa: E402
-    contact_from_sdf, lift_joint_contact, project, scene_sdf, transform_points,
-    vertex_to_joint, world_from_cam,
+    contact_from_sdf, drift_gated_contact, joint_drift, joint_guarded_min_sdf,
+    lift_joint_contact, project, scene_sdf, transform_points, vertex_to_joint, world_from_cam,
 )
 from tools.human_optim import paths  # noqa: E402
 from tools.human_optim.qmath import normalize_q  # noqa: E402
@@ -61,12 +64,17 @@ def _load_config(path: Path) -> dict:
     """Operational knobs for the contact stage (no loss weights here)."""
     cfg = tomllib.load(path.open("rb")) if path.exists() else {}
     c = cfg.setdefault("contacts", {})
-    c.setdefault("close_thresh_m", 0.02)   # "just outside" distance counted as contact
+    c.setdefault("close_thresh_m", 0.02)   # enter: "just outside" distance counted as contact
+    c.setdefault("exit_thresh_m", 0.035)   # stay: looser hysteresis exit (holds a span, kills boundary flicker)
+    c.setdefault("min_frames", 3)          # drop contact spans shorter than this many frames
     c.setdefault("max_dist_m", 0.10)       # deep-occluder guard (reject spurious deep penetration)
     c.setdefault("conf_thresh", 0.1)       # residual absolute floor (VGGT conf ≥~1 ⇒ non-binding)
     c.setdefault("conf_drop_q", 0.1)       # quantile confidence gate: drop the lowest fraction of scene voxels
     c.setdefault("normal_k", 16)           # kNN for PCA scene-normal estimation
     c.setdefault("prune_margin_m", 0.10)   # per-frame scene-AABB margin for the SDF nearest-neighbour
+    g = cfg.setdefault("contact_gate", {})
+    g.setdefault("window_s", 0.35)         # drift window (s) for the stillness gate
+    g.setdefault("still_m", 0.025)         # net drift (m) at which stillness = 0.5 (gate kills frames >= 2·still_m)
     cfg.setdefault("runtime", {}).setdefault("device", "cuda")
     return cfg
 
@@ -99,6 +107,7 @@ def run(source, predictions_dir, config_path, *, device_override=None, overlay=T
         cfg["runtime"]["device"] = device_override
     device = cfg["runtime"]["device"]
     cc = cfg["contacts"]
+    cg = cfg["contact_gate"]
     pred = Path(predictions_dir)
 
     # Which optimized body to read contact from: kinematics_1 (default) or the
@@ -120,7 +129,7 @@ def run(source, predictions_dir, config_path, *, device_override=None, overlay=T
     object_ids = np.asarray(kin["object_ids"], dtype=np.int32)
     parents = np.asarray(kin["parents"], dtype=np.int32)
     valid_mask = np.asarray(kin["valid_mask"], dtype=bool)
-    fps = float(kin["fps"])
+    fps = float(tr.get("fps", kin.get("fps", 30.0)))   # drift window needs the true clip fps
 
     extr = torch.as_tensor(tr["extrinsics"], dtype=torch.float32, device=device)       # (N,4,4)
     K = torch.as_tensor(tr["intrinsics_px_orig"], dtype=torch.float32, device=device)  # (N,3,3)
@@ -158,9 +167,20 @@ def run(source, predictions_dir, config_path, *, device_override=None, overlay=T
 
         sdf, dmin, conf = scene_sdf(vw, scene_pts, scene_normals, scene_conf,
                                     prune_margin_m=float(cc["prune_margin_m"]))
+        # Raw (unguarded) per-joint min-sdf diagnostic — kept as the continuous channel.
         vcon = contact_from_sdf(sdf, dmin, conf, close_thresh_m=float(cc["close_thresh_m"]),
                                 max_dist_m=float(cc["max_dist_m"]), conf_thresh=float(cc["conf_thresh"]))
-        jc, jsdf = lift_joint_contact(vcon, sdf, v2j, J)
+        _, jsdf = lift_joint_contact(vcon, sdf, v2j, J)
+        # Final contact: a joint-frame must be BOTH near the wall and still. Drift-gate
+        # the guarded per-joint min-sdf (frames whose net window drift ≥ 2·still_m are a
+        # pass, not a grip → forced non-contact), then temporal hysteresis (enter<close,
+        # stay<exit) + min-duration, so labels stop flickering at the boundary.
+        gsdf = joint_guarded_min_sdf(sdf, dmin, conf, v2j, J,
+                                     max_dist_m=float(cc["max_dist_m"]), conf_thresh=float(cc["conf_thresh"]))
+        drift = joint_drift(jw, fps=fps, window_s=float(cg["window_s"]))
+        jc = drift_gated_contact(gsdf, drift, close_thresh_m=float(cc["close_thresh_m"]),
+                                 exit_thresh_m=float(cc["exit_thresh_m"]), min_frames=int(cc["min_frames"]),
+                                 still_m=float(cg["still_m"]))
         px = project(transform_points(jw, extr), K)                  # (N,J,2)
 
         jc_np = jc.cpu().numpy()
@@ -179,7 +199,11 @@ def run(source, predictions_dir, config_path, *, device_override=None, overlay=T
         num_people=np.int32(P), num_frames=np.int32(N),
         video_height=np.int32(H), video_width=np.int32(W), fps=np.float32(fps),
         close_thresh_m=np.float32(cc["close_thresh_m"]),
+        exit_thresh_m=np.float32(cc["exit_thresh_m"]),
+        min_frames=np.int32(cc["min_frames"]),
         max_dist_m=np.float32(cc["max_dist_m"]),
+        drift_window_s=np.float32(cg["window_s"]),
+        drift_still_m=np.float32(cg["still_m"]),
     )
     out_path = paths.contacts_path(pred, tag)
     np.savez(out_path, **save)

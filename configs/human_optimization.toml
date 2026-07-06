@@ -9,6 +9,9 @@ run = ["root", "kinematics_1"]   # default chain; kinematics_2 (needs annotation
 iters = { root = 150 }
 
 [stages.kinematics_1]
+# The bistable contact terms (still_attraction / motion_clearance below) live INSIDE
+# refine + lbfgs, reweighted every iteration by a per-vertex stillness weight — no
+# separate contact phase. Set their weights to 0 to disable them (pure fit).
 iters = { full = 300, refine = 200, lbfgs = 30 }
 
 [stages.kinematics_2]
@@ -22,7 +25,6 @@ device = "cpu"
 reproj_sapiens      = [   8,    8,    8,    0 ]
 reproj_init         = [  30,   30,   30,    0 ]
 chamfer             = [  10,   10,   10,    0 ]
-depth_push          = [   0,    0,    0,    0 ]   # disabled: scale is frozen so its growth mechanism is gone; chamfer owns depth
 pose_prior          = [ 300,  300,  300,    0 ]
 orient_prior        = [  50,   50,   50,    0 ]
 
@@ -34,8 +36,13 @@ jerk_joint          = [ 500,  500,  500,    0 ]
 
 [loss_weights.scene]
 penetration         = [   0, 4000, 4000,    0 ]
-contact_attraction  = [   0,   10,    0,    0 ]
-contact_velocity    = [   0,    0,    0,    0 ]
+# NOTE: an in-loop contact term (pull the body onto the scene wall during kinematics_1) was
+# tried TWICE — round 1 discrete detect→enforce, round 2 continuous drift-blend — and removed
+# both times. It structurally can't work: chamfer wants the body on the human depth cloud,
+# contact wants it on the scene wall, and those disagree by a few cm, so any weight degrades
+# fit (chamfer +1-2.8cm) AND the readout labels (P 0.909→0.885, FPR up) at ~1.3x runtime. The
+# drift-gated READOUT ([contact_gate] below) is the win and needs no body change. Full design +
+# measured gate tables in docs/UPDATE_AGENT.md; do not re-add without new evidence.
 
 [loss_weights.annotation]
 ann_attraction      = [   0,    0,   20,    0 ]
@@ -79,19 +86,6 @@ prune_margin_m = 0.30
 max_candidates = 6000
 normal_k = 16
 
-[contact_velocity]
-conf_thresh = 0.1
-max_dist_m = 0.15
-max_pen_m = 0.10
-contact_band_m = 0.03
-vel_ref = 1.0
-vel_exp = 2.0
-
-[contact_attraction]
-conf_thresh = 0.1
-band_m = 0.10
-max_dist_m = 0.15
-
 [ann_attraction]
 conf_thresh = 0.1
 band_m = 0.30
@@ -104,8 +98,22 @@ max_dist_m = 0.15
 max_pen_m = 0.10
 huber_m = 0.02
 
+# drift / stillness gate for the estimate_contacts contact READOUT. A joint is "still"
+# when its NET displacement over a ~1/3 s window is small: instantaneous speed can't
+# separate a gripping hand's mm-jitter (0.1-0.3 m/s) from a slow near-wall pass — net
+# window drift can (a grip nets < ~2 cm, a pass 3-7 cm). still_m is the drift at which
+# stillness = 0.5, and it is the readout's RECALL KNOB (pooled over 4 clips, close 2 cm:
+# still_m 0.025 -> P 0.909 / R 0.481 / FPR 0.040 [default]; 0.05 -> R 0.594 / FPR 0.058).
+# Default favors precision — contacts feed positive-enforcing consumers (kinematics_2
+# attraction, dynamics), where a false positive costs more than a missed one.
+[contact_gate]
+window_s = 0.35        # drift window (~11 frames at 30 fps)
+still_m  = 0.025       # net drift at which stillness = 0.5; raise toward ~0.05 for more recall
+
 [contacts]
-close_thresh_m = 0.02
+close_thresh_m = 0.02  # enter: "just outside" distance counted as contact
+exit_thresh_m = 0.035  # stay: looser hysteresis exit (holds a span, kills 1-frame boundary flicker)
+min_frames = 3         # drop contact spans shorter than this many frames
 max_dist_m = 0.10
 conf_thresh = 0.1      # residual absolute floor (VGGT conf ≥~1 ⇒ non-binding)
 conf_drop_q = 0.1      # quantile gate applied once at scene load: drop the lowest-confidence scene voxels
