@@ -1,243 +1,226 @@
-# UPDATE — contacts inside `kinematics_1`, round 5
+# UPDATE — round 6: the last modeling lever, then wrap up
 
-*2026-07-07, rev 7. Covers the betas that shape the body, the `estimate_scale`
-stage, the contact readout and its new confidence, a kinematics_2-on-auto-labels
-experiment, and a code polish pass. Rounds 1–4 history: revs 4–6 in git.*
+*2026-07-07, rev 8. Covers: betas optimization inside `kinematics_1` (the final
+experiment), a competition_2 autopsy, confidence calibration, a small weight
+ablation, the real cleanup, and corpus readiness. Rounds 1–5 history: revs 4–7
+in git.*
 
-## Round 4 worked — where we are now
+## Round 5 — what it left us
 
-All of round 4 landed and was measured. Two separate gains: the methods
-themselves (at the fixed round-3 readout point), then the operating point you
-picked.
+Five commits landed (`14f1bac`…`312fa4f`). One move shipped, three returned
+honest nulls:
 
-| step (readout close 0.02 / still 0.025) | P | R | F1 | FPR | grip speed |
-|---|---|---|---|---|---|
-| round-3 winner | 0.906 | 0.565 | 0.696 | 0.049 | 11.5 cm/s |
-| + span-merge + pre-enforcement gate | 0.905 | 0.608 | 0.727 | 0.053 | 11.5 |
-| + target smoothing (0.35 s) | 0.902 | 0.622 | 0.736 | 0.056 | 11.5 |
-| + velocity damper (500) | 0.906 | 0.618 | 0.735 | 0.054 | **7.3** |
+- **Shipped**: the per-joint label confidence, both classes (`86b00a1`) — the
+  deliverable for learning from these labels later.
+- **Null**: robust betas aggregation + scale erosion (reverted). The short-limb
+  effect in the *predicted* betas is only 1–5 mm — far too small to explain a
+  ~40 mm hover. Important nuance: aggregation can only pick among what the
+  per-frame model already predicted. If every frame under-predicts the limbs,
+  no averaging scheme can fix it. That is exactly why round 6 goes one level
+  deeper (below).
+- **Null**: kinematics_2 on auto labels (kept as an off-by-default capability).
+  Auto labels only reinforce contacts we already found — they cannot create the
+  missing ones — and kinematics_1 already damps them. It did fix a real latent
+  bug (the honest drift now carries into kinematics_2's output).
 
-At your chosen operating point (close 0.03 / still 0.03): **P 0.896 / R 0.678 /
-F1 0.772 / FPR 0.066**, leave-one-clip-out stable, and you confirmed the motion
-looks visibly better. The damper is back and honest — because the readout now
-judges stillness from the body *before* enforcement, damping can no longer fake
-a still contact.
+Numbers are unchanged: **P 0.896 / R 0.678 / F1 0.772 / FPR 0.066** pooled.
 
-Round 4 also closed some questions for good:
+## The confidence recheck you asked for
 
-- **A global scale cannot fix the hovering.** Still hands/feet already
-  *penetrate* the wall by ~3 cm on average while the missed ones hover +4 cm —
-  one number can't move both ways at once. The problem is per-limb, i.e.
-  **body proportions**, not scale.
-- The remaining misses are mostly **moving contacts** (excluded by design) and
-  **occluded holds** (never in the scene cloud). Target smoothing recovered a
-  little; the camera is not the culprit (3 of 4 cameras are static).
-- The optimizer itself is healthy: the two kinematic trees agree on quaternion
-  conventions; no hidden graph bug.
+I re-read the shipped code line by line and verified it numerically on the
+real outputs. **Verdict: it computes correctly** — no sign, unit, or indexing
+bugs; it uses the honest pre-enforcement drift and the final post-merge
+labels; and on real data it behaves exactly as designed: no-contact confidence
+rises smoothly with joint speed (0.00 → 0.96 across speed deciles), contact
+confidence falls with distance to the wall, near-wall slow "hover" joints
+correctly get ~0.01 (the honest unknown), fast joints get 0.94–0.99.
 
-## Round 5 — what it is about
+Two *calibration* gaps, though — not bugs, but places where the shipped
+behavior is narrower than what you asked for:
 
-You named the two things still standing, and this round attacks exactly them,
-plus the groundwork for learning from these labels:
+1. **The "far ⇒ confident no-contact" rule almost never fires.** The distance
+   branch is gated by two radii that nearly touch: the signed distance is only
+   measured out to 10 cm (beyond that the joint reads "no scene support"), and
+   "did we see the space" only counts scene points within 15 cm. So the far
+   branch can only trigger in the thin 10–15 cm shell. A slow hand 40 cm from
+   the wall — your own example of an obvious no-contact — currently scores ~0,
+   indistinguishable from an occluded joint. In practice no-contact confidence
+   is motion-and-persistence only. Round 6 fixes this with the *unguarded*
+   distance channel we already save, with the "far" threshold set beyond any
+   plausible hold protrusion (~25–30 cm) — so a hand touching a hold that was
+   carved out of the cloud (nearest reconstructed wall 10–20 cm behind it)
+   still reads *uncertain*, not confidently-free.
+2. **Bridged and edge contact frames carry near-zero confidence.** Inside a
+   merged gap the joint can be up to 8 cm off the wall, which zeroes the
+   closeness factor — so the very frames the span-merge deliberately bridged
+   get confidence ≈ 0 (9% of contact labels on boulder_1, 29% on
+   competition_2). Honest, but a learner can't tell "bridged by strong span
+   evidence" from "marginal". Fix: save a small `merged` flag alongside, and
+   let the consumer decide.
 
-1. **Limbs come out short** (worst on competition_2), so the hand stops a few
-   centimetres before the wall. Proportions live in the **betas** — the ten
-   shape numbers each frame's body model predicts. Today we take a plain
-   *average* of them over all frames, good and bad alike. When the person is
-   small in the image or half cut off, the per-frame betas collapse toward the
-   average human — which, for a tall climber, means shorter limbs — and those
-   bad frames dilute the good ones. So: measure how noisy the per-frame betas
-   really are, then replace the average with a robust, quality-weighted
-   estimate. The metric scale gets the same noise treatment (details below) —
-   scale and betas together decide where the fingertips end up.
-2. **Occluded contacts can't be recovered — but they can be honestly labeled.**
-   The plan is a full rewrite of contact confidence: every joint in every frame
-   gets a confidence in its label, **whether that label is contact or
-   no-contact**. A fast-moving joint is a near-certain no-contact. A slow joint
-   far from the wall is a certain no-contact. A still joint pressed into the
-   wall is a certain contact. A slow joint where the scene cloud has *no
-   points* (the occluded case) is a low-confidence unknown — for either label.
-   That "unknown" is the honest answer to occlusion, and it is what makes these
-   labels usable for training later: a learner can be told which labels to
-   trust. The current per-contact confidence was machine-generated and only
-   covers positives; it gets deleted and rebuilt from named signals.
-3. **Try kinematics_2 with our auto labels.** kinematics_2 with manual
-   annotations produces the most natural motion we have. Feed it the automatic
-   labels instead (weighted by the new confidence) and see how close it gets —
-   the first turn of the self-training loop you described.
-4. **Polish.** We are heading toward the final iteration: dead code out, big
-   scripts split, war-story comments compressed, no behavior change, runtime
-   not a hair slower.
+## Round 6 — the final iteration
 
-## The plan — five moves
+Your call: the one unsolved reconstruction problem is **contacts missed
+because the limb is too short to reach**. Scale (human and scene) is
+exhausted. The last lever is **optimizing the betas themselves inside the
+fit** — letting the 3D evidence (depth cloud, wall) adjust the ten shape
+numbers, with a strong leash: stay close to the initial betas. Plus: find out
+*why* competition_2 specifically is so bad, and then close out — calibrate,
+ablate, clean, and get ready for the large corpus.
 
-**1. Robust betas (the proportions lever).** First a diagnostic, then the fix.
-Diagnostic: per clip, how much do the per-frame betas move, and do they
-correlate with how large the person is in the image? Also plot the limb lengths
-they imply over time — if competition_2's far-away frames systematically imply
-shorter arms, we have the mechanism in hand. Fix: one small function that
-aggregates per-frame betas into one per-person vector using a **weighted
-median** — frames where the person is big, well-tracked and confidently
-detected count more; outlier frames stop mattering at all. The optimizer uses
-it (today it uses the plain mean); the scale stage A/Bs it as its ruler.
-This is *not* the rejected "optimize betas in the fit" — betas stay frozen in
-the optimizer; only how we summarize what the upstream model already predicted
-changes.
+## The plan — six moves
 
-**2. A noise pass on `estimate_scale`.** Three suspects, each cheap to test:
-(a) **Mask edge bleed** — the person's mask includes a rim of pixels whose
-VGGT depth is really the *background wall*, farther than the body. Those pixels
-drag the scale down, which pushes the whole scene slightly toward the camera —
-and matches the measured symptom (still hands *penetrating* by ~3 cm). Fix:
-erode the mask a few pixels before use. (b) **Frame quality** — pool per-frame
-scale estimates weighted by how well that frame saw the body (mask size, depth
-confidence), not just how many pixels it had. (c) **Extremity emphasis** — the
-scale stage weights hands/feet ×10, but VGGT depth is at its *worst* exactly on
-thin fast limbs; A/B whether that emphasis helps or hurts the scale estimate.
-Order matters: fix betas first, then scale, then re-measure the
-penetration-vs-hover balance — once proportions are right, one clean global
-scale may finally be able to center both.
+**1. competition_2 autopsy (first — it sets expectations).** Before the betas
+experiment, a read-only investigation of the one clip where we are extremely
+bad: is it limb proportions, or is the VGGT depth on the person so poor that
+nothing downstream can be right? Concrete checks, all from existing artifacts:
+depth confidence on the person vs the other clips, the scale stage's
+diagnostics (how many frames actually contributed), mask and tracking quality,
+person size in the image, how far the fitted body sits from the human depth
+cloud per body part, and the per-limb hover gaps. Deliverable: a short verdict
+— "competition_2 fails because of X" — and a prediction of whether betas
+optimization can plausibly rescue it. If depth is the culprit, we say so and
+stop expecting miracles from move 2 there.
 
-**3. Contact confidence, rewritten.** Deleted: the old positives-only formula
-in the uncertainty stage. Built instead, at the point where labels are made
-(the contact readout): per person, frame and joint, three numbers —
+**2. Betas optimization in `kinematics_1` (the experiment).** One shape vector
+per person (not per frame), optimized jointly with the pose, starting from the
+converter's betas and pulled back to them by a prior — your regularization
+choice. Why this can work where round-5 aggregation couldn't: the optimizer is
+not limited to what the image model predicted — the depth cloud and the wall
+get a vote. And there is a geometric reason it targets exactly the hover: at a
+fixed depth, lengthening an arm *along the viewing ray* barely changes the 2D
+projection, so the image anchors don't resist the correction we need; sideways
+changes do get resisted, which is what keeps the fit honest. Guard rails: the
+prior (grid over its weight, pick the gentlest that closes hover), a report of
+how much the betas actually moved — in implied limb-length millimetres and
+body-height percent — and a consistency flag if the body's overall size drifts
+past ~2% (the scene's metric scale was set using the original body as the
+ruler; a large size change would undermine it). Off by default until it wins;
+judged on the same gates as always. competition_2 and the funnel's *hovering*
+category are the bellwethers.
 
-- **p_contact** — how contact-like the *geometry and motion* look: rises as the
-  joint gets closer to the wall and stiller (using the honest pre-enforcement
-  drift, so enforcement can't inflate it).
-- **observability** — how much we actually *saw*: are there scene points near
-  the joint at all (occlusion check), how confident is VGGT depth there, is the
-  joint in frame.
-- **label confidence** — confidence in the final binary label. For a *contact*:
-  observability × p_contact × persistence. For a *no-contact*: either the joint
-  is moving fast (confident from motion alone, even when occluded — you can't
-  grip while flying) or we saw the space near it and it wasn't contact-like.
-  Slow + occluded ⇒ low confidence: the honest unknown.
+**3. Confidence calibration (the recheck's two findings).** Re-point the far
+branch at the unguarded distance with a carve-safe threshold; save the
+`merged` flag; fix the misleading knob comment. Small, readout-only, validated
+by the same reliability curves — the slow-far bucket must move from ~0 to
+clearly-confident while the hover band stays uncertain.
 
-Every ingredient is something we already compute (signed distance, drift, VGGT
-confidence, Sapiens score, persistence) — one shot, no optimizer cost.
-Validation: against the manual annotations, bin the labels by confidence and
-check accuracy rises with confidence (a reliability curve), plus the two
-monotonicity checks straight from your examples (faster ⇒ more confident
-no-contact; closer ⇒ more confident contact).
+**4. A small weight ablation.** One factor at a time, ×0.5 and ×2, over the
+handful of weights that matter (the two reprojections, chamfer, attraction,
+the damper, radial, jerk/snap, pose prior, penetration) — scouted on two
+clips, winners confirmed on four. Two possible outcomes, both useful: a
+clear improvement (adopt it), or a flat table (the config is robust — worth
+documenting before pointing it at thousands of videos). No adoption without
+the usual gates.
 
-**4. kinematics_2 on auto labels.** Run the existing kinematics_2 machinery
-with `contacts_1` labels instead of the manual file. Three safety rails:
-(a) **positives only** — an auto "no contact" is not a real negative (it may be
-occlusion), so the repulsion term stays off; only attraction and the velocity
-damper act, each scaled by the new label confidence; (b) the honest drift from
-kinematics_1 is carried through into the kinematics_2 output, so the readout on
-the refined body still judges stillness pre-enforcement (this also fixes a
-latent gap for *manual* kinematics_2, which today loses that field); (c) the
-final judge stays external — scored against manual annotations, same gates.
-If confident negatives prove trustworthy in move 3's reliability curve, a
-second variant may cautiously enable repulsion on them.
+**5. The real cleanup.** Last round's polish was minor by design; this one is
+the deliverable. The deferred items: compress the war-story comments in the
+config and the optimizer code to one contract line each; rename the
+"prototype" scorer to what it is (`score_contacts.py`) and move its reusable
+parts into a proper tools module; shrink the uncertainty stage now that its
+old confidence block is gone. Plus the experiment residue: delete one-shot
+diagnostic scripts once their evidence is recorded, verify the reverted
+round-5 experiments left no dead flags, keep the kinematics_2-auto capability
+(one small flag, tested, and it's the future self-training hook — flagged for
+your veto). Hard rule, unchanged: behavior-preserving, one clip re-runs
+bit-identical, nothing gets slower.
 
-**5. The polish pass.** Now that the method is settling: remove what brings
-nothing (the orphaned velocity helper of a long-removed loss; the old
-confidence block; anything a grep proves dead), rename the "prototype" scorer
-to what it is (the evaluation harness) and move its reusable parts into tools,
-split oversized scripts, and cut the long war-story comments in the config and
-code down to one line each — history lives in git and these docs. Hard rule:
-behavior-preserving. After cleanup, one clip re-runs bit-identical and no
-slower. This lands last, once the round's experiments have settled, so we don't
-polish code that changes the next day.
+**6. Corpus readiness.** The point of all of it: running this on thousands of
+videos. A defaults audit (a bare, flagless run of every stage must equal the
+tuned behavior); a DB driver for the contacts + confidence stage (same
+symlink-farm pattern as the other drivers); a memory check on the one new
+full-cloud pass (the confidence neighbourhood search — prune it if a big DB
+scene makes it balloon); a per-stage runtime/VRAM table; and a smoke test on a
+handful of DB scenes. The full DB re-run itself stays the separately scheduled
+finale (Issue-22) — round 6 makes it safe to press that button.
 
 ## How we judge it
 
-- **Labels**: P / R / F1 / FPR per clip + pooled (4 clips; sport_climb
-  separate), against the round-4 final point (P 0.896 / R 0.678 / F1 0.772 /
-  FPR 0.066). Recall up, precision ≥ ~0.88, FPR not above ~0.07.
-- **The funnel, re-run** after betas + scale: the hovering category should
-  shrink and the penetration/hover imbalance should center; competition_2 is
-  the bellwether clip.
-- **Reprojection gate** unchanged: vs **raw** targets, within +0.5 px of the
-  round-4 winner. Chamfer / penetration reported, not gated.
-- **Confidence**: the reliability curve must be monotone-ish per class, and the
-  known occluded misses must land in low-confidence no-contact (that is the
-  whole point).
-- **kinematics_2-auto**: judged against manual annotations *and* your eyes in
-  the viewer — naturalness (grip speed, jitter) is the reason to run it.
-- **Runtime**: optimizer untouched except the kin2 experiment; everything else
-  is one-shot. Cleanup must not cost a millisecond.
-- **Leave-one-clip-out** at the final operating point, as before.
+- **Betas experiment**: pooled F1/recall must *improve* (that's its only job),
+  precision ≥ ~0.88, FPR ≤ ~0.07, reprojection vs raw targets within +0.5 px,
+  runtime within ~1.05×, naturalness flat, betas movement reported in mm/%.
+  Null ⇒ revert and record, like round 5's T1/T2.
+- **Confidence calibration**: reliability stays monotone; the slow-far bucket
+  gains confidence; hover band stays low; occluded/carve cases stay uncertain.
+- **Ablation**: adopt only clear pooled wins; otherwise document sensitivity.
+- **Cleanup**: bit-identical labels, float-identical bodies, runtime ≤ 1.0×.
+- **Readiness**: the smoke test passes end-to-end with default flags.
 
 ## Honest limits
 
-- Occluded contacts stay unrecovered — they become *honestly uncertain* instead
-  of confidently wrong. That is the deliverable, not recall on them.
-- Moving contacts stay excluded by design; recall 0.9 remains capped by that
-  category unless the definition changes (not this round).
-- Robust betas can only recover what the per-frame model *sometimes* saw — if
-  every frame of a clip under-predicts limb length, no aggregation fixes it.
-- kinematics_2-auto learns from labels made on kinematics_1's body — the
-  external judge (manual annotations) is what keeps that loop honest.
+- Betas optimization is leashed to the initial shape on purpose — it can close
+  a few centimetres of systematic limb error, not reinvent the body. If
+  competition_2's problem is depth (move 1 will tell us), betas won't save it.
+- Occluded contacts stay unrecovered-but-honestly-uncertain; moving contacts
+  stay excluded by design. Recall's ceiling still stands where round 4 measured
+  it — move 2 attacks the *hovering* slice, nothing else.
+- The scale-vs-betas consistency flag is a report, not a fix: if betas want to
+  change body size materially, the honest response is to revisit scale — a
+  bridge we cross only if the flag fires.
 
 ## Order of work
 
-1. **Commit round 4 first** (12 files, working tree → main) so every round-5
-   diff is separable.
-2. Betas diagnostic → robust betas → scale noise pass → re-run
-   scale→fuse→kinematics_1→contacts on the locals → funnel + scores.
-3. Confidence rewrite (readout-only; no bodies change) → reliability curves.
-4. kinematics_2-on-auto experiment (uses 2's bodies + 3's confidence).
-5. Polish pass, then the final combined tables + leave-one-out.
+1. competition_2 autopsy (read-only; sets expectations for 2).
+2. Betas optimization: implement → grid the prior → gates → adopt or revert.
+3. Confidence calibration + reliability re-run (independent; readout-only).
+4. Weight ablation (on the post-2 config).
+5. Cleanup (parity-gated), then corpus readiness + smoke test.
+6. Final tables, leave-one-out, and a closing "round 6 outcome" here. After
+   that, durable contracts move into CLAUDE.md / module docstrings, and these
+   UPDATE docs become history.
 
 ## Still not doing
 
-- No per-body scale, no betas optimization inside the fit (aggregation only).
-- No auto negative *enforcement* by default (repulsion off for auto labels;
-  a confidence-gated variant only if the reliability curve earns it).
-- No reduction of any smoothness weight; no camera-pose modification.
-- No new per-iteration work inside the optimizer loop.
-- dynamics, the viewer, and the DB stay untouched (the DB re-run still folds
-  into the pending Issue-22 pass at the very end).
+- No per-frame betas, no second body-scale — one shape vector per person,
+  prior-leashed.
+- No camera-pose changes; no new losses beyond the betas prior.
+- No reduction of smoothness weights.
+- The full DB re-run is not part of round 6 (Issue-22, you schedule it).
 
-## Round 5 outcome
+## Round 6 — outcome
 
-One of the five moves worked; the rest gave honest answers instead of wins. All
-of it is committed on `main`, one commit per move, with the numbers.
+One real improvement shipped; the two modelling experiments were honest nulls,
+both reverted and recorded. Commits: `26a471d` (T3), `4649ab2` (T5), `240b97e`
+(T6). T2 and T4 changed no code (reverted / not adopted).
 
-**Robust betas + the scale noise pass (moves 1 & 2) — tested, reverted.** The
-short-limb idea is real: the diagnostic confirmed the per-frame betas are noisy,
-and on the worst clip (competition_2) the further away the climber is, the shorter
-the limbs come out. But the effect is far too small to matter. A quality-weighted
-robust average moves the arm/leg length by only 1–5 mm, while the gap between a
-hovering hand and the wall is about 40 mm. Mask erosion did nudge the scale in the
-predicted direction, but a bigger scale pushes the *human depth cloud* away too, so
-the body just re-fits and the hand-to-wall gap barely changes — it only trades a
-little recall for a little precision (F1 down 0.013). This settles a question
-round 4 only suspected: a single overall scale cannot fix a per-limb problem. The
-diagnostic script is kept as the evidence; the code was reverted.
+- **competition_2 autopsy.** It is bad because the climber is the *smallest in
+  frame* of any clip (22% of the height vs 55–58% for the boulder clips), which
+  gives the weakest keypoints and the sparsest depth — not because its depth is
+  broken (its body-to-cloud error and scale are middle-of-the-pack; a good clip,
+  boulder_3, actually has worse body-to-cloud error). So the problem is size and
+  observability, and it is exactly the regime where the short-limb bias is worst.
 
-**Contact confidence (move 3) — worked, shipped.** Every joint in every frame now
-carries a confidence in its label, for *both* the contact and the no-contact
-answer. It reads well against the manual annotations: the more confident we are a
-joint is touching, the more often it really is (accuracy climbs from 0.78 to 0.94
-across the confidence range). The no-contact side needed a fix — our first formula
-called a hand hovering just off a *visible* wall a "confident no-contact", which is
-exactly the case we're most unsure about. Changing "not close" to "clearly far
-past the hover zone" fixed it, and the contacts we miss now sit at much lower
-confidence than before (average 0.71 → 0.44). The honest limit: because almost
-nothing here is truly occluded (the misses are visible hovers, not hidden holds),
-the no-contact confidence flags only some of the misses — but where a hold *is*
-occluded, it correctly reads "uncertain". The old, positives-only confidence was
-deleted from the uncertainty stage, which now just reads the new field.
+- **Betas in the fit — a null, and worse than neutral.** We let the ten shape
+  numbers move during the fit, leashed to their starting value. The more they
+  move, the *worse* the contacts get (at the loosest leash, recall drops 2 points
+  and limbs lengthen only ~5–9 mm against a ~40 mm gap, while body height inflates
+  over 1%). The fit simply does not reward lengthening a limb — a short limb
+  already sits on the near part of its depth cloud, so nothing pulls it further.
+  Reverted to off; the capability is gone, the finding kept.
 
-**kinematics_2 on our own labels (move 4) — tested, kept as an option.** Feeding
-the second refinement our automatic contacts instead of the manual ones does not
-improve the result (label agreement drops slightly, 0.772 → 0.759, and the motion
-is no calmer because the first stage is already damped). The reason is structural:
-the automatic labels can only *reinforce* contacts we already found — a hand we
-missed has no label to pull it onto the wall — so the loop cannot discover what it
-did not already see. It is left as an off-by-default option. It did carry one real
-fix, though: the second refinement now passes the honest "before enforcement"
-stillness measurement through to the contact readout, closing a gap that until now
-affected the manual path too.
+- **Confidence far-branch — shipped.** The "this joint is clearly far from the
+  wall, so we're sure it's not touching" rule almost never fired, because it read
+  a distance that was capped at 10 cm. It now reads the true distance. On the four
+  clips the no-contact confidence went from barely-correlated to clearly-correlated
+  with being right (+0.25 → +0.41), the confident predictions are 92% accurate,
+  and the honest misses stay honestly uncertain. We also save a small `merged`
+  flag marking the frames the span-merge bridged. Labels are unchanged.
 
-**Where recall stands.** Unchanged at the round-4 operating point (about 0.68 on
-the four tuning clips). The two things capping it are the same as before and both
-out of this round's scope: contacts that are genuinely moving (excluded by our own
-definition) and hands that stop a few centimetres short because the limb is a bit
-too short (which needs per-limb body shape, not a global scale). Move 3 is the
-lasting deliverable — labels you can now tell apart by how much to trust them.
+- **Weight ablation — the config is robust.** Nudging each weight up and down by
+  2× moved the pooled F1 by at most +0.005 on the four clips — nothing crossed the
+  bar to adopt, and most changes hurt. The chamfer weight is the one that really
+  matters (either direction costs 2–3 points). A flat table is the point: the
+  round-4 weights are well-tuned, which is what we want before running thousands
+  of videos.
+
+- **Cleanup + corpus readiness.** Compressed the round-history comments to
+  one-line contracts (the config shrank 205→166 lines, no behaviour change),
+  renamed the "prototype" contact scorer to `score_contacts.py`, and deleted the
+  betas diagnostic. Found and fixed a memory blow-up: the confidence step builds a
+  distance matrix against the whole scene cloud, which would hit ~2.5 GB on the
+  biggest dataset scenes (measured up to 380k points) — now bounded to ~1 GB with
+  no change to the result. Wrote a dataset driver for the contact stage and
+  smoke-tested it on three scenes (zero failures, multi-person handled).
+
+*These UPDATE docs are now historical — the durable contracts live in `CLAUDE.md`
+and the per-stage module docstrings.*

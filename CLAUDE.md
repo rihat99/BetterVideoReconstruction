@@ -29,8 +29,10 @@ branch" behavior for this repo).
 - **ClimbingVideos dataset** — `scripts/track_sam3_scenes.py` (SAM 3, seeded from
   the YOLO first-frame bbox) + `scripts/precompute_scenes.py`
   (`--stage vggt|sapiens|sam3d|smplx`, GPU-sharded) over the scene DB, writing
-  `features/<stage>/<aa>/<bb>/<scene>/`. Shared DB access + row selection live in
-  `scripts/scene_db.py`.
+  `features/<stage>/<aa>/<bb>/<scene>/`. The `--predictions` stages that don't fit
+  the manifest fan-out run on a symlink farm instead: `scripts/precompute_contacts_scenes.py`
+  (the contact readout → `features/contacts/`, `--out-root` redirects for smoke tests).
+  Shared DB access + row selection live in `scripts/scene_db.py`.
 
 Both reuse the same per-stage CLIs in `scripts/stages/` and the `tools/` library.
 
@@ -52,7 +54,7 @@ SMPL-X stages, off the default chain.
 | 7 | `fuse_geometry.py` | `vggt/`, `geometry/scale.npz`, `sam3/` | `geometry/transform.npz` (metric scale + orig-res VGGT cameras), `geometry/scene.npz`, `geometry/human.npz` — see `docs/geometry_fusion_plan.md` |
 | 8 | `human_optimization.py` (`root`+`kinematics_1`) | `sam3d/smplx_params.npz`, `sapiens/pose.npz`, `geometry/{human,transform,scene}.npz` | `human_optim/kinematic_1.npz` (**all tracked people**, refined **world-frame** params `(P,N,…)` + `q (P,N,211)` + `scale (P,)`≡1 (compat), 52-joint `SMPLXMid`, `frame='world'`), `human_optim/kinematic_1_overlay.mp4` (`--overlay`) |
 | – | `human_optimization.py --stages kinematics_2` | `human_optim/kinematic_1.npz`, **`data/<stem>.npz`** (manual contact annotation), `sapiens/pose.npz`, `geometry/{human,scene,transform}.npz` | `human_optim/kinematic_2.npz` (annotation-guided refinement; same schema), `human_optim/kinematic_2_overlay.mp4` (`--overlay`) |
-| – | `estimate_contacts.py` | `human_optim/<bodies>.npz` (`--bodies`, default `kinematic_1`), `geometry/{scene,transform}.npz`, frames | `human_optim/contacts_<tag>.npz` (`joint_contact (P,N,J)` bool + `joint_sdf_cm` + `label_confidence`/`p_contact`/`observability` — round-5 T3, both classes), `human_optim/contacts_<tag>_overlay.mp4` (skeleton; joints **red**=contact / **green**=free, dot size ∝ confidence) |
+| – | `estimate_contacts.py` | `human_optim/<bodies>.npz` (`--bodies`, default `kinematic_1`), `geometry/{scene,transform}.npz`, frames | `human_optim/contacts_<tag>.npz` (`joint_contact (P,N,J)` bool + `joint_sdf_cm` + `merged` (span-merge-bridged frames) + `label_confidence`/`p_contact`/`observability` — both classes; the no-contact `label_confidence` reads the **unguarded** distance for its far-from-wall branch), `human_optim/contacts_<tag>_overlay.mp4` (skeleton; joints **red**=contact / **green**=free, dot size ∝ confidence) |
 | – | `estimate_gravity_geocalib.py` | frames, `geometry/transform.npz` | `geocalib/gravity.npz` (world-frame unit `gravity_world (3,)` down + per-frame diagnostics + `reliable` flag; magnitude 9.81 applied by dynamics) |
 | – | `human_optimization.py --stages dynamics` | `human_optim/kinematic_2.npz` (frozen `q`), `human_optim/contacts_2.npz`, `geocalib/gravity.npz` | `human_optim/dynamics.npz` (force-only RNEA: world `contact_forces`, `joint_torques (P,N,159)`, + viewer-ready `joints_world`/`torque_mag`/`contact_forces_world (P,N,52,…)`) |
 | – | `estimate_uncertainty.py` | `human_optim/<bodies>.npz` (`--bodies`, default `kinematic_2`→`kinematic_1`), `sam3d/smplx_params.npz`, `human_optim/contacts_<tag>.npz`, `sapiens/pose.npz`, `geometry/{human,transform}.npz`, frames (`--overlay`) | `human_optim/uncertainty_<tag>.npz` (**per-frame body trust only** — data-fit loss + relative/observability/residual/cue axes; per-contact `label_confidence` now lives in `contacts_<tag>.npz`, read here for the viz), `human_optim/diagnostics/uncertainty_person<oid>.png`, `human_optim/uncertainty_<tag>_overlay.mp4` (`--overlay`) |
@@ -120,6 +122,7 @@ BetterVideoReconstruction/
 ├── scripts/
 │   ├── pipeline.py                # LOCAL pipeline (load-once subprocess orchestrator)
 │   ├── precompute_scenes.py       # DATASET pipeline: vggt/sapiens/sam3d/smplx fan-out
+│   ├── precompute_contacts_scenes.py  # DATASET pipeline: contact readout (symlink farm)
 │   ├── track_sam3_scenes.py       # DATASET pipeline: SAM 3 seeding + fan-out
 │   ├── scene_db.py                # shared scene-DB access + target selection
 │   ├── view_3d.py                 # viser: geometry + cameras + bodies + dynamics
