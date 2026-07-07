@@ -44,7 +44,7 @@ _DEFAULT_CONFIG = _REPO_ROOT / "configs" / "human_optimization.toml"
 
 
 def run(source, predictions_dir, config_path, *, stages=None, annotations=None,
-        device_override=None, overlay=False, bodies="kinematic_2") -> None:
+        device_override=None, overlay=False, bodies="kinematic_2", labels="manual") -> None:
     """Run the requested human-optimization stages in dependency order."""
     cfg = load_config(config_path)
     requested = stages if stages else list(cfg.run)
@@ -58,7 +58,8 @@ def run(source, predictions_dir, config_path, *, stages=None, annotations=None,
     if kin_stages:
         run_kinematic(source, pred, cfg, kin_stages, kin_device, overlay=overlay)
     if "kinematics_2" in requested:
-        run_kinematics_2(source, pred, cfg, kin_device, annotations=annotations, overlay=overlay)
+        run_kinematics_2(source, pred, cfg, kin_device, annotations=annotations, overlay=overlay,
+                         labels_mode=labels)
     if "dynamics" in requested:
         dyn_device = device_override or cfg.stage_opts.get("dynamics", {}).get("device", "cpu")
         run_dynamics(pred, cfg, dyn_device, bodies=bodies)
@@ -75,6 +76,9 @@ def main(argv=None) -> int:
                          "(default: config [stages].run)")
     ap.add_argument("--annotations", default=None,
                     help="kinematics_2 manual-contact npz (default: <source>.npz or data/<stem>.npz)")
+    ap.add_argument("--labels", choices=("manual", "auto"), default="manual",
+                    help="kinematics_2 contact labels: manual annotation (default) or our own "
+                         "contacts_1.npz, confidence-weighted (round-5 T4)")
     ap.add_argument("--bodies", default="kinematic_2",
                     help="dynamics: which refined body to solve on (kinematic_1|kinematic_2)")
     ap.add_argument("--config", type=Path, default=_DEFAULT_CONFIG)
@@ -83,7 +87,7 @@ def main(argv=None) -> int:
     args = ap.parse_args(argv)
     stages = [s.strip() for s in args.stages.split(",") if s.strip()] if args.stages else None
     run(args.source, args.predictions, args.config, stages=stages, annotations=args.annotations,
-        device_override=args.device, overlay=args.overlay, bodies=args.bodies)
+        device_override=args.device, overlay=args.overlay, bodies=args.bodies, labels=args.labels)
     return 0
 
 

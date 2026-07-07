@@ -221,6 +221,7 @@ def optimize_person(
     scene_pts: torch.Tensor | None = None, scene_normals: torch.Tensor | None = None,
     scene_conf: torch.Tensor | None = None, fps: float = 30.0,
     contact_labels: torch.Tensor | None = None,
+    contact_conf: torch.Tensor | None = None,
     chamfer_weights: torch.Tensor | None = None,
     frame_valid: torch.Tensor | None = None,
     cam_centers: torch.Tensor | None = None,
@@ -247,7 +248,11 @@ def optimize_person(
     attraction pulling the vertices of in-contact joints onto the wall, a *strong*
     repulsion pushing the vertices of no-contact joints off it, and a velocity
     damper on in-contact joints (weights ``ann_*``). It defaults to the plain
-    kinematics behaviour (no annotation terms).
+    kinematics behaviour (no annotation terms). ``contact_conf`` (optional
+    ``(T, 52)`` float in [0,1], round-5 T4) scales the attraction's vertex weights
+    and the velocity damper's per-joint contribution by each joint's label
+    confidence, so an uncertain auto-label pulls proportionally less; ``None`` keeps
+    every labelled joint at weight 1.
 
     ``auto_contact`` (optional dict) enables **kinematics_1** auto-contact mode: when
     ``contact_labels`` is not supplied and the ``ann_attraction`` weight is > 0, labels
@@ -313,6 +318,12 @@ def optimize_person(
     if use_auto:
         auto_group_mask = torch.zeros(mid.num_joints, dtype=torch.bool, device=q_world_init.device)
         auto_group_mask[auto_contact["group_joints"]] = True   # only these joints may be labeled 1
+
+    # T4: per-vertex label-confidence weight (kinematics_2-on-auto). Scales the attraction; the
+    # velocity damper takes the per-joint conf directly. None ⇒ every active vertex weighted 1.
+    conf_v = None
+    if contact_conf is not None and v2j_sub is not None:
+        conf_v = contact_conf[:, v2j_sub].clamp(0.0, 1.0)      # (T, Ns)
 
     incontact_v = nocontact_v = None
     def _bind_labels(labels: torch.Tensor) -> None:
@@ -477,7 +488,7 @@ def optimize_person(
                     L_ann_at, ann_at_cm, ann_at_n = attraction_penalty(
                         *sig, conf_thresh=float(ann_at_cfg["conf_thresh"]),
                         band_m=float(ann_at_cfg["band_m"]), max_dist_m=float(ann_at_cfg["max_dist_m"]),
-                        active_mask=incontact_v)
+                        active_mask=incontact_v, active_weight=conf_v)
                 if w_ann_repel > 0.0 and ann_rep_cfg is not None:   # manual-only; auto has no ann_rep_cfg
                     L_ann_rep, ann_rep_cm, ann_rep_n = clearance_penalty(
                         *sig, conf_thresh=float(ann_rep_cfg["conf_thresh"]),
@@ -488,7 +499,8 @@ def optimize_person(
         # every phase the labels are present (refine + lbfgs for auto, all phases for manual).
         L_ann_vel = vw.new_zeros(()); ann_vel_cms = float("nan"); ann_vel_n = 0
         if have_labels and w_ann_vel > 0.0:
-            L_ann_vel, ann_vel_cms, ann_vel_n = joint_velocity_loss(jw, contact_labels, fps=fps)
+            L_ann_vel, ann_vel_cms, ann_vel_n = joint_velocity_loss(jw, contact_labels, fps=fps,
+                                                                    joint_weight=contact_conf)
         loss = (float(w["reproj_sapiens"]) * L_sap + w_init * L_init + float(w["chamfer"]) * L_ch
                 + float(w["pose_prior"]) * L_pp + float(w["orient_prior"]) * L_ro + L_sm
                 + float(w["penetration"]) * L_pen + w_radial * L_radial

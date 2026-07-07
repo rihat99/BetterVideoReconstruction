@@ -395,7 +395,8 @@ def attraction_penalty(
     conf_thresh: float,
     band_m: float,
     max_dist_m: float,
-    active_mask: torch.Tensor | None = None,  # (T, Ns) bool — restrict to these verts
+    active_mask: torch.Tensor | None = None,    # (T, Ns) bool — restrict to these verts
+    active_weight: torch.Tensor | None = None,  # (T, Ns) float in [0,1] — per-vertex weight
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
     """Soft attraction pulling near-wall vertices ONTO the scene (penalty head).
 
@@ -407,20 +408,24 @@ def attraction_penalty(
     lower bound switches it off and the penetration dead-zone takes over (so the two
     never fight: attraction owns ``s∈(0, band)``, penetration ``s<−margin``).
     ``active_mask`` restricts which vertices are attracted — the kinematics_1
-    auto-detected contact joints, or the kinematics_2 manually-annotated ones. Returns
+    auto-detected contact joints, or the kinematics_2 manually-annotated ones.
+    ``active_weight`` (round-5 T4) scales each attracted vertex's contribution by its
+    joint's label confidence, so an uncertain auto-contact pulls proportionally less
+    (``None`` ⇒ every active vertex weighted 1, the original behaviour). Returns
     ``(loss, mean_gap_cm, n_attracted)`` — the latter two detached."""
     sd = sgn.detach()
     active = (conf > conf_thresh) & (dmin < max_dist_m) & (sd > 0.0) & (sd < band_m) & has
     if active_mask is not None:
         active = active & active_mask
-    a = active.to(sgn.dtype)
-    n_active = a.sum()
-    if not bool(n_active > 0):
+    if not bool(active.any()):
         z = sgn.new_zeros(())
         return z, z, sgn.new_zeros((), dtype=torch.long)
-    loss = (sgn * a).sum() / n_active.clamp_min(1)               # grad pulls each attracted v inward (−n)
+    a = active.to(sgn.dtype)
+    if active_weight is not None:
+        a = a * active_weight
+    loss = (sgn * a).sum() / a.sum().clamp_min(1e-6)             # grad pulls each attracted v inward (−n)
     with torch.no_grad():
-        gap_cm = ((sd * a).sum() / active.sum().clamp_min(1)) * 100.0
+        gap_cm = ((sd * active.to(sd.dtype)).sum() / active.sum().clamp_min(1)) * 100.0
         n_attr = active.sum()
     return loss, gap_cm.detach(), n_attr
 
@@ -451,6 +456,7 @@ def joint_velocity_loss(
     contact_labels: torch.Tensor,  # (T, J) int8 tri-state: 1 = annotated in-contact this frame
     *,
     fps: float,
+    joint_weight: torch.Tensor | None = None,  # (T, J) float in [0,1] — per-joint confidence weight
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
     """Damp the world velocity of joints a human annotated as in contact.
 
@@ -480,6 +486,8 @@ def joint_velocity_loss(
     sp2 = (dp * dp).sum(dim=-1)                          # (T-1, J) squared per-step speed (×fps²→weight)
     pair = (contact_labels[:-1] == 1) & (contact_labels[1:] == 1)  # in contact at BOTH ends of the step
     gate = pair.to(sp2.dtype)
+    if joint_weight is not None:                         # T4: down-weight uncertain contacts (min over the step)
+        gate = gate * torch.minimum(joint_weight[:-1], joint_weight[1:])
     n = gate.sum()
     loss = (sp2 * gate).sum() / n.clamp_min(1.0)
     with torch.no_grad():

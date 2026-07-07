@@ -400,8 +400,15 @@ def resolve_annotation_path(source, annotations) -> Path:
 
 
 def run_kinematics_2(source, pred: Path, cfg: HumanOptimConfig, device: str, *,
-                     annotations=None, overlay: bool = False) -> Path:
-    """Annotation-guided refinement of ``kinematic_1.npz`` → ``human_optim/kinematic_2.npz``."""
+                     annotations=None, overlay: bool = False, labels_mode: str = "manual") -> Path:
+    """Contact-guided refinement of ``kinematic_1.npz`` → ``human_optim/kinematic_2.npz``.
+
+    ``labels_mode='manual'`` (default) uses the human annotation ``data/<stem>.npz``;
+    ``'auto'`` (round-5 T4) uses our own ``contacts_1.npz`` labels instead —
+    positives-only (in-contact → ``+1``, else ``-1``, **never** ``0``, so the
+    clearance repulsion stays inert by construction), each weighted by the T3
+    ``label_confidence``.
+    """
     knobs = cfg.knobs
     pred = Path(pred)
     tag = "human_optim/kinematic_2"
@@ -422,12 +429,22 @@ def run_kinematics_2(source, pred: Path, cfg: HumanOptimConfig, device: str, *,
     cam_centers = wfc[:, :3, 3]                     # (N,3) world camera centers (radial-velocity damper)
     scene_pts, scene_normals, scene_conf = _load_scene(pred, knobs, wfc, device, tag)
 
-    ann_path = resolve_annotation_path(source, annotations)
-    ann = dict(np.load(ann_path, allow_pickle=True))
-    ann_contacts = ann["contacts"]
-    ann_names = [str(x) for x in ann["joint_names"]]
-    ann_oids = [int(x) for x in ann["object_ids"]]
-    print(f"[{tag}] annotation {ann_path} — {ann_contacts.shape[0]} people, joints {ann_names}, ids {ann_oids}")
+    # Label source: our own contacts_1 (auto) or the human annotation (manual).
+    cnt = ann_contacts = ann_names = ann_oids = cnt_oids = None
+    if labels_mode == "auto":
+        cnt_path = paths.contacts_path(pred, "1")
+        if not cnt_path.exists():
+            raise SystemExit(f"missing {cnt_path} — run estimate_contacts (--bodies kinematic_1) first")
+        cnt = dict(np.load(cnt_path, allow_pickle=True))
+        cnt_oids = [int(x) for x in cnt["object_ids"]]
+        print(f"[{tag}] AUTO labels from {cnt_path.name} (contacts_1), ids {cnt_oids}")
+    else:
+        ann_path = resolve_annotation_path(source, annotations)
+        ann = dict(np.load(ann_path, allow_pickle=True))
+        ann_contacts = ann["contacts"]
+        ann_names = [str(x) for x in ann["joint_names"]]
+        ann_oids = [int(x) for x in ann["object_ids"]]
+        print(f"[{tag}] annotation {ann_path} — {ann_contacts.shape[0]} people, joints {ann_names}, ids {ann_oids}")
 
     mid = load_smplx_mid(_DEFAULT_SMPLX_MODEL, device)
     mid_names = list(mid.joint_names)
@@ -467,8 +484,23 @@ def run_kinematics_2(source, pred: Path, cfg: HumanOptimConfig, device: str, *,
                 depth[i] = depth[i][:0]
         frame_valid = torch.as_tensor(vmask, dtype=torch.bool, device=device)
 
-        contact_labels = None
-        if oid in ann_oids:
+        contact_labels = contact_conf = None
+        if labels_mode == "auto":
+            if cnt_oids is not None and oid in cnt_oids:
+                cp = cnt_oids.index(oid)
+                jc = np.asarray(cnt["joint_contact"][cp], bool)                # (N, 52)
+                lab = np.where(jc, np.int8(1), np.int8(-1)).astype(np.int8)    # +1 / -1, NEVER 0 (repulsion inert)
+                lab[~vmask] = -1
+                contact_labels = torch.as_tensor(lab, dtype=torch.int8, device=device)
+                if "label_confidence" in cnt:
+                    cf = np.asarray(cnt["label_confidence"][cp], np.float32)
+                    contact_conf = torch.as_tensor(cf, dtype=torch.float32, device=device)
+                nc = int((lab == 1).any(1).sum())
+                print(f"[{tag}] obj_id={oid}: AUTO contacts on {nc} frames"
+                      f"{' (confidence-weighted)' if contact_conf is not None else ''}")
+            else:
+                print(f"[{tag}] obj_id={oid}: no auto contacts (re-refine only)")
+        elif oid in ann_oids:
             lab = _contact_labels(ann_contacts[ann_oids.index(oid)], ann_names, mid_names, N)
             lab[~vmask] = -1
             contact_labels = torch.as_tensor(lab, dtype=torch.int8, device=device)
@@ -483,14 +515,20 @@ def run_kinematics_2(source, pred: Path, cfg: HumanOptimConfig, device: str, *,
             target_kp=target_kp, scores=scores, corr=corr, frame_vertex_ids=fvids,
             sub=sub, knobs=knobs, phases=phases,
             scene_pts=scene_pts, scene_normals=scene_normals, scene_conf=scene_conf, fps=fps,
-            contact_labels=contact_labels, chamfer_weights=chamfer_w, frame_valid=frame_valid,
-            cam_centers=cam_centers)
+            contact_labels=contact_labels, contact_conf=contact_conf,
+            chamfer_weights=chamfer_w, frame_valid=frame_valid, cam_centers=cam_centers)
         print(f"    before: {before}\n    after:  {after}")
         _append_classic(out, mid, betas_T, q_opt)
         betas_out.append(betas_mean.cpu().numpy().astype(np.float32))
 
+    # Forward the honest pre-enforcement drift + frozen labels from kinematic_1 (round-5 T4): kin2's
+    # own velocity damper must not be able to game the contact readout, so estimate_contacts on this
+    # body reads the SAME drift_pre kinematic_1 measured before ANY enforcement. Fixes a latent gap
+    # that until now dropped drift_pre for the manual kinematics_2 too.
+    extra = {k: kin[k] for k in ("drift_pre", "auto_labels") if k in kin}
     out_path = paths.body_path(pred, "kinematic_2")
-    save = _save_body(out_path, mid, out, betas_out, object_ids, kin["valid_mask"], N, P, H, W, fps)
+    save = _save_body(out_path, mid, out, betas_out, object_ids, kin["valid_mask"], N, P, H, W, fps,
+                      extra=extra or None)
     print(f"[{tag}] wrote {out_path}")
 
     if overlay:
