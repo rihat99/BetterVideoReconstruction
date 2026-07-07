@@ -192,3 +192,52 @@ polish code that changes the next day.
 - No new per-iteration work inside the optimizer loop.
 - dynamics, the viewer, and the DB stay untouched (the DB re-run still folds
   into the pending Issue-22 pass at the very end).
+
+## Round 5 outcome
+
+One of the five moves worked; the rest gave honest answers instead of wins. All
+of it is committed on `main`, one commit per move, with the numbers.
+
+**Robust betas + the scale noise pass (moves 1 & 2) — tested, reverted.** The
+short-limb idea is real: the diagnostic confirmed the per-frame betas are noisy,
+and on the worst clip (competition_2) the further away the climber is, the shorter
+the limbs come out. But the effect is far too small to matter. A quality-weighted
+robust average moves the arm/leg length by only 1–5 mm, while the gap between a
+hovering hand and the wall is about 40 mm. Mask erosion did nudge the scale in the
+predicted direction, but a bigger scale pushes the *human depth cloud* away too, so
+the body just re-fits and the hand-to-wall gap barely changes — it only trades a
+little recall for a little precision (F1 down 0.013). This settles a question
+round 4 only suspected: a single overall scale cannot fix a per-limb problem. The
+diagnostic script is kept as the evidence; the code was reverted.
+
+**Contact confidence (move 3) — worked, shipped.** Every joint in every frame now
+carries a confidence in its label, for *both* the contact and the no-contact
+answer. It reads well against the manual annotations: the more confident we are a
+joint is touching, the more often it really is (accuracy climbs from 0.78 to 0.94
+across the confidence range). The no-contact side needed a fix — our first formula
+called a hand hovering just off a *visible* wall a "confident no-contact", which is
+exactly the case we're most unsure about. Changing "not close" to "clearly far
+past the hover zone" fixed it, and the contacts we miss now sit at much lower
+confidence than before (average 0.71 → 0.44). The honest limit: because almost
+nothing here is truly occluded (the misses are visible hovers, not hidden holds),
+the no-contact confidence flags only some of the misses — but where a hold *is*
+occluded, it correctly reads "uncertain". The old, positives-only confidence was
+deleted from the uncertainty stage, which now just reads the new field.
+
+**kinematics_2 on our own labels (move 4) — tested, kept as an option.** Feeding
+the second refinement our automatic contacts instead of the manual ones does not
+improve the result (label agreement drops slightly, 0.772 → 0.759, and the motion
+is no calmer because the first stage is already damped). The reason is structural:
+the automatic labels can only *reinforce* contacts we already found — a hand we
+missed has no label to pull it onto the wall — so the loop cannot discover what it
+did not already see. It is left as an off-by-default option. It did carry one real
+fix, though: the second refinement now passes the honest "before enforcement"
+stillness measurement through to the contact readout, closing a gap that until now
+affected the manual path too.
+
+**Where recall stands.** Unchanged at the round-4 operating point (about 0.68 on
+the four tuning clips). The two things capping it are the same as before and both
+out of this round's scope: contacts that are genuinely moving (excluded by our own
+definition) and hands that stop a few centimetres short because the limb is a bit
+too short (which needs per-limb body shape, not a global scale). Move 3 is the
+lasting deliverable — labels you can now tell apart by how much to trust them.

@@ -15,8 +15,16 @@ person, which **joints** are in contact with the scene:
      over a ~1/3 s window is under ``2·still_m`` (a joint sliding along the wall is a
      pass, not a grip) — then temporal hysteresis (enter/exit) + a min-duration.
 
-then renders ``contacts_1_overlay.mp4``: the projected SMPL-X skeleton on each frame,
-joints coloured **red** in contact / **green** otherwise.
+The stillness gate reads the body's persisted pre-enforcement drift (``drift_pre``,
+round 4) when present, and a **span-merge** bridges short flicker gaps behind a
+re-grip guard. Each joint-frame then gets a **label confidence** in [0,1] (round-5
+T3, :mod:`tools.human_optim.confidence`) — for BOTH the contact and no-contact
+classes, from the signed distance, that drift, scene observability and temporal
+persistence — saved as ``label_confidence`` (with its ``p_contact`` /
+``observability`` components).
+
+Renders ``contacts_1_overlay.mp4``: the projected SMPL-X skeleton, joints **red**
+in contact (dot size ∝ confidence) / **green** otherwise.
 
 Run from CLI::
 
@@ -24,7 +32,8 @@ Run from CLI::
         --source video.mp4 --predictions out/video/ [--no-overlay]
 
 Reads:  human_optim/kinematic_1.npz, geometry/scene.npz, geometry/transform.npz
-Writes: human_optim/contacts_1.npz          (joint_contact (P,N,J) bool + joint_sdf_cm)
+Writes: human_optim/contacts_1.npz          (joint_contact (P,N,J) bool + joint_sdf_cm
+                                             + p_contact / observability / label_confidence)
         human_optim/contacts_1_overlay.mp4  (--overlay; default on)
 """
 

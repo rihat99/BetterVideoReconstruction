@@ -52,10 +52,10 @@ SMPL-X stages, off the default chain.
 | 7 | `fuse_geometry.py` | `vggt/`, `geometry/scale.npz`, `sam3/` | `geometry/transform.npz` (metric scale + orig-res VGGT cameras), `geometry/scene.npz`, `geometry/human.npz` — see `docs/geometry_fusion_plan.md` |
 | 8 | `human_optimization.py` (`root`+`kinematics_1`) | `sam3d/smplx_params.npz`, `sapiens/pose.npz`, `geometry/{human,transform,scene}.npz` | `human_optim/kinematic_1.npz` (**all tracked people**, refined **world-frame** params `(P,N,…)` + `q (P,N,211)` + `scale (P,)`≡1 (compat), 52-joint `SMPLXMid`, `frame='world'`), `human_optim/kinematic_1_overlay.mp4` (`--overlay`) |
 | – | `human_optimization.py --stages kinematics_2` | `human_optim/kinematic_1.npz`, **`data/<stem>.npz`** (manual contact annotation), `sapiens/pose.npz`, `geometry/{human,scene,transform}.npz` | `human_optim/kinematic_2.npz` (annotation-guided refinement; same schema), `human_optim/kinematic_2_overlay.mp4` (`--overlay`) |
-| – | `estimate_contacts.py` | `human_optim/<bodies>.npz` (`--bodies`, default `kinematic_1`), `geometry/{scene,transform}.npz`, frames | `human_optim/contacts_<tag>.npz` (`joint_contact (P,N,J)` bool + `joint_sdf_cm`), `human_optim/contacts_<tag>_overlay.mp4` (skeleton; joints **red**=contact / **green**=free) |
+| – | `estimate_contacts.py` | `human_optim/<bodies>.npz` (`--bodies`, default `kinematic_1`), `geometry/{scene,transform}.npz`, frames | `human_optim/contacts_<tag>.npz` (`joint_contact (P,N,J)` bool + `joint_sdf_cm` + `label_confidence`/`p_contact`/`observability` — round-5 T3, both classes), `human_optim/contacts_<tag>_overlay.mp4` (skeleton; joints **red**=contact / **green**=free, dot size ∝ confidence) |
 | – | `estimate_gravity_geocalib.py` | frames, `geometry/transform.npz` | `geocalib/gravity.npz` (world-frame unit `gravity_world (3,)` down + per-frame diagnostics + `reliable` flag; magnitude 9.81 applied by dynamics) |
 | – | `human_optimization.py --stages dynamics` | `human_optim/kinematic_2.npz` (frozen `q`), `human_optim/contacts_2.npz`, `geocalib/gravity.npz` | `human_optim/dynamics.npz` (force-only RNEA: world `contact_forces`, `joint_torques (P,N,159)`, + viewer-ready `joints_world`/`torque_mag`/`contact_forces_world (P,N,52,…)`) |
-| – | `estimate_uncertainty.py` | `human_optim/<bodies>.npz` (`--bodies`, default `kinematic_2`→`kinematic_1`), `sam3d/smplx_params.npz`, `human_optim/contacts_<tag>.npz`, `sapiens/pose.npz`, `geometry/{human,transform}.npz`, frames (`--overlay`) | `human_optim/uncertainty_<tag>.npz` (per-frame data-fit loss + relative/observability/residual/cue axes, per-contact confidence), `human_optim/diagnostics/uncertainty_person<oid>.png`, `human_optim/uncertainty_<tag>_overlay.mp4` (`--overlay`) |
+| – | `estimate_uncertainty.py` | `human_optim/<bodies>.npz` (`--bodies`, default `kinematic_2`→`kinematic_1`), `sam3d/smplx_params.npz`, `human_optim/contacts_<tag>.npz`, `sapiens/pose.npz`, `geometry/{human,transform}.npz`, frames (`--overlay`) | `human_optim/uncertainty_<tag>.npz` (**per-frame body trust only** — data-fit loss + relative/observability/residual/cue axes; per-contact `label_confidence` now lives in `contacts_<tag>.npz`, read here for the viz), `human_optim/diagnostics/uncertainty_person<oid>.png`, `human_optim/uncertainty_<tag>_overlay.mp4` (`--overlay`) |
 
 Viewer: `scripts/view_3d.py out/<stem>/` (viser: fused `geometry/` scene cloud +
 camera frustums + GeoCalib gravity arrow + per-climber human points + the refined
@@ -251,10 +251,11 @@ BetterVideoReconstruction/
   axes: **observability** (per-clip-normalised geomean of # Sapiens kp / # confident
   depth points / mean VGGT depth-conf), **absolute residuals** (px + cm, fixed
   thresholds), **cue disagreement** (px spread between the Sapiens vs init-anchor
-  reprojections). `combined = robust_score × obs_score`. **Per contact**, a
-  confidence = SDF margin × joint speed × visibility × temporal persistence. The npz
-  keeps every axis; the plot is a simplified 3-panel (confidence / fit-error /
-  contacts), shared with the `--overlay` video.
+  reprojections). `combined = robust_score × obs_score`. Per-contact confidence is
+  **no longer computed here** — round-5 T3 moved it to `estimate_contacts`
+  (`label_confidence`, both classes); this stage only reads it for the plot/overlay.
+  The plot is a simplified 3-panel (confidence / fit-error / contacts), shared with
+  the `--overlay` video.
 - **Camera is its own stage; the body uses the VGGT camera.** VGGT intrinsics are
   scale-invariant, so the scaleless VGGT camera is exact for the body (which
   predicts its own metric translation). `estimate_body_sam3d` reads `K` from
