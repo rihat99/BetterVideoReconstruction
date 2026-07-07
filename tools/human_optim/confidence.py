@@ -62,6 +62,9 @@ def _scene_neighbourhood(jw: torch.Tensor, scene_pts: torch.Tensor, scene_conf: 
     conf_near = torch.zeros((N, J), device=dev)
     if M == 0:
         return n_near, conf_near
+    # Bound the (chunk*J, M) cdist to ~1 GB: DB scene clouds reach ~4e5 points (~2.5 GB at chunk 32).
+    # A smaller stride gives an identical result (n_near / conf_near are per-(frame,joint)) — lossless.
+    chunk = max(1, min(chunk, int(1e9 // (J * M * 4))))
     kk = min(k, M)
     for s in range(0, N, chunk):
         e = min(s + chunk, N)
