@@ -15,8 +15,8 @@ person, which **joints** are in contact with the scene:
      over a ~1/3 s window is under ``2·still_m`` (a joint sliding along the wall is a
      pass, not a grip) — then temporal hysteresis (enter/exit) + a min-duration.
 
-The stillness gate reads the body's persisted pre-enforcement drift (``drift_pre``,
-round 4) when present, and a **span-merge** bridges short flicker gaps behind a
+The stillness gate reads the body's persisted pre-enforcement drift (``drift_pre``)
+when present, and a **span-merge** bridges short flicker gaps behind a
 re-grip guard (the bridged frames flagged in ``merged``). Each joint-frame then gets
 a **label confidence** in [0,1] (:mod:`tools.human_optim.confidence`) — for BOTH the
 contact and no-contact classes, from the guarded signed distance, that drift, scene
@@ -83,13 +83,13 @@ def _load_config(path: Path) -> dict:
     c.setdefault("conf_drop_q", 0.1)       # quantile confidence gate: drop the lowest fraction of scene voxels
     c.setdefault("normal_k", 16)           # kNN for PCA scene-normal estimation
     c.setdefault("prune_margin_m", 0.10)   # per-frame scene-AABB margin for the SDF nearest-neighbour
-    c.setdefault("merge_dist_m", 0.03)     # §4 span-merge: bridge a flicker gap the joint barely moved across
+    c.setdefault("merge_dist_m", 0.03)     # span-merge: bridge a flicker gap the joint barely moved across
     c.setdefault("merge_max_gap_s", 2.0)   # …only gaps shorter than this
     c.setdefault("merge_sdf_m", 0.08)      # …re-grip guard: it stayed within this of the wall the whole gap
     g = cfg.setdefault("contact_gate", {})
     g.setdefault("window_s", 0.35)         # drift window (s) for the stillness gate
     g.setdefault("still_m", 0.025)         # net drift (m) at which stillness = 0.5 (gate kills frames >= 2·still_m)
-    # T3: per-joint label confidence (readout-only; NOT registered in config.py). Defaults +
+    #per-joint label confidence (readout-only; NOT registered in config.py). Defaults +
     # semantics live in tools/human_optim/confidence.py, shared with the scorer's --reliability.
     k = cfg.setdefault("contact_confidence", {})
     for key, val in CONTACT_CONFIDENCE_DEFAULTS.items():
@@ -170,10 +170,10 @@ def run(source, predictions_dir, config_path, *, device_override=None, overlay=T
     joint_contact = np.zeros((P, N, J), dtype=bool)
     joint_sdf_cm = np.full((P, N, J), np.nan, dtype=np.float32)
     joints_2d = np.full((P, N, J, 2), np.nan, dtype=np.float32)
-    merged_all = np.zeros((P, N, J), dtype=bool)            # T3: frames the span-merge bridged
-    p_contact_all = np.zeros((P, N, J), np.float32)         # T3: geometry+motion contact-likeness
-    observability_all = np.zeros((P, N, J), np.float32)     # T3: how much the scene saw the joint
-    label_conf_all = np.zeros((P, N, J), np.float32)        # T3: confidence in the final binary label
+    merged_all = np.zeros((P, N, J), dtype=bool)            #frames the span-merge bridged
+    p_contact_all = np.zeros((P, N, J), np.float32)         #geometry+motion contact-likeness
+    observability_all = np.zeros((P, N, J), np.float32)     #how much the scene saw the joint
+    label_conf_all = np.zeros((P, N, J), np.float32)        #confidence in the final binary label
 
     for p in range(P):
         betas = torch.as_tensor(kin["betas"][p], dtype=torch.float32, device=device)
@@ -201,7 +201,7 @@ def run(source, predictions_dir, config_path, *, device_override=None, overlay=T
         gsdf = joint_guarded_min_sdf(sdf, dmin, conf, v2j, J,
                                      max_dist_m=float(cc["max_dist_m"]), conf_thresh=float(cc["conf_thresh"]))
         drift = joint_drift(jw, fps=fps, window_s=float(cg["window_s"]))
-        # §5 honest gate: when the body carries the refine-start drift_pre (kinematics_1, round 4),
+        # honest gate: when the body carries the refine-start drift_pre (kinematics_1),
         # the stillness gate reads it (the pre-enforcement measurement) instead of re-measuring the
         # final body — the damper can then no longer manufacture false stillness. Fall back per
         # person to the computed final-body drift (kinematics_2 / old npz / NaN).
@@ -212,11 +212,11 @@ def run(source, predictions_dir, config_path, *, device_override=None, overlay=T
         jc_pre = drift_gated_contact(gsdf, drift, close_thresh_m=float(cc["close_thresh_m"]),
                                      exit_thresh_m=float(cc["exit_thresh_m"]), min_frames=int(cc["min_frames"]),
                                      still_m=float(cg["still_m"]))
-        # §4 span-merge: bridge short same-joint gaps the joint barely moved across AND stayed near
+        # span-merge: bridge short same-joint gaps the joint barely moved across AND stayed near
         # the wall throughout (flicker / brief re-settle); the re-grip guard blocks leave-and-return.
         jc = merge_contact_spans(jc_pre, jw, gsdf, merge_dist_m=float(cc["merge_dist_m"]),
                                  max_gap_s=float(cc["merge_max_gap_s"]), gap_sdf_m=float(cc["merge_sdf_m"]), fps=fps)
-        merged_bool = jc & ~jc_pre     # T3: frames the merge bridged — confidence stays honest, the flag marks them
+        merged_bool = jc & ~jc_pre     #frames the merge bridged — confidence stays honest, the flag marks them
         px = project(transform_points(jw, extr), K)                  # (N,J,2)
 
         jc_np = jc.cpu().numpy()
@@ -226,7 +226,7 @@ def run(source, predictions_dir, config_path, *, device_override=None, overlay=T
         joints_2d[p] = px.cpu().numpy()
         merged_np = merged_bool.cpu().numpy(); merged_np[~valid_mask[p]] = False
         merged_all[p] = merged_np
-        # T3: per-joint confidence in the FINAL label (both classes; occlusion ⇒ honest low conf).
+        #per-joint confidence in the FINAL label (both classes; occlusion ⇒ honest low conf).
         # p_far reads the UNGUARDED distance jsdf (cm→m); gsdf saturates at max_dist and can't see "far".
         jc_final = torch.as_tensor(jc_np, dtype=torch.bool, device=device)
         pc, obs_c, lconf = contact_confidence(

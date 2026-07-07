@@ -229,8 +229,8 @@ def optimize_person(
 ) -> tuple[torch.Tensor, Metrics, Metrics, dict]:
     """Optimize one person over ``phases``. Returns ``(q_world_opt, before, after, aux)``.
 
-    ``aux`` carries the round-4 detection-time signals the caller persists into the body
-    npz (docs/UPDATE_AGENT.md §2): ``drift_pre (T, num_joints)`` — ``joint_drift`` of the
+    ``aux`` carries the detection-time signals the caller persists into the body
+    npz: ``drift_pre (T, num_joints)`` — ``joint_drift`` of the
     refine-start (pre-attraction) body, the honest pre-enforcement stillness measurement —
     and ``auto_labels (T, num_joints)`` int8 — the frozen labels the attraction used. Both
     are ``None`` when auto detection did not run (manual ``kinematics_2``, no scene, or a
@@ -249,7 +249,7 @@ def optimize_person(
     repulsion pushing the vertices of no-contact joints off it, and a velocity
     damper on in-contact joints (weights ``ann_*``). It defaults to the plain
     kinematics behaviour (no annotation terms). ``contact_conf`` (optional
-    ``(T, 52)`` float in [0,1], round-5 T4) scales the attraction's vertex weights
+    ``(T, 52)`` float in [0,1]) scales the attraction's vertex weights
     and the velocity damper's per-joint contribution by each joint's label
     confidence, so an uncertain auto-label pulls proportionally less; ``None`` keeps
     every labelled joint at weight 1.
@@ -319,7 +319,7 @@ def optimize_person(
         auto_group_mask = torch.zeros(mid.num_joints, dtype=torch.bool, device=q_world_init.device)
         auto_group_mask[auto_contact["group_joints"]] = True   # only these joints may be labeled 1
 
-    # T4: per-vertex label-confidence weight (kinematics_2-on-auto). Scales the attraction; the
+    # per-vertex label-confidence weight (kinematics_2-on-auto). Scales the attraction; the
     # velocity damper takes the per-joint conf directly. None ⇒ every active vertex weighted 1.
     conf_v = None
     if contact_conf is not None and v2j_sub is not None:
@@ -351,12 +351,12 @@ def optimize_person(
             jw0i = o0i.joints_world.tensor()[..., :3]
             init_target = project(transform_points(jw0i[:, body_idx, :], extrinsics), K)
 
-    # Round-4 §7: smooth the 2D TARGET tracks (not the trajectory) so converter / Sapiens per-frame
+    # Smooth the 2D TARGET tracks (not the trajectory) so converter / Sapiens per-frame
     # jitter is not imprinted into the objective and the smoothness terms stop fighting the targets.
     # Only the LOSS sees the smoothed targets; the gate metric (reproj_init) is reported vs the RAW
     # init target and reproj_sap vs the raw Sapiens keypoints, so smoothing cannot flatter the numbers.
     # Validity gates the SG filter within runs (frame_valid for init; score >= thresh for Sapiens);
-    # the scores themselves are untouched. window_s = 0 ⇒ no-op (round-3 parity).
+    # the scores themselves are untouched. window_s = 0 ⇒ no-op.
     kp_smooth_s = float(kp.get("smooth_window_s", 0.0))
     init_smooth_s = float(knobs["reproj_init"].get("smooth_window_s", 0.0)) if use_init else 0.0
     target_kp_loss = target_kp
@@ -413,9 +413,9 @@ def optimize_person(
         int8 with ``1`` on detected group joints / ``-1`` everywhere else — never ``0``, so
         ``nocontact_v`` stays empty and the clearance repulsion can never fire in auto mode; and
         ``drift (T, num_joints)`` — the refine-start net window drift the detection gated on, kept
-        so the caller can persist it as the honest pre-enforcement stillness measurement (round 4,
-        docs/UPDATE_AGENT.md §2). No gradient path (``no_grad`` forward from the detached leaf), run
-        once per stage — the round-1 circularity cannot re-open."""
+        so the caller can persist it as the honest pre-enforcement stillness measurement. No
+        gradient path (``no_grad`` forward from the detached leaf), run once per stage — so
+        contact detection cannot feed back into the fit."""
         ac = auto_contact
         with torch.no_grad():
             o = mid.forward(betas, normalize_q(q, mid.num_joints))
@@ -469,7 +469,7 @@ def optimize_person(
                     if (w_radial > 0.0 and cam_centers is not None) else jw.new_zeros(()))
         # Scene terms share ONE detached nearest-neighbour pass (scene_signed_distance):
         # penetration + contact attraction + clearance repulsion are penalty heads on it, so
-        # the round-3 default (penetration + attraction) costs one cdist, not two.
+        # the default (penetration + attraction) costs one cdist, not two.
         L_pen, pen_cm, pen_n = vw.new_zeros(()), float("nan"), 0
         L_ann_at = L_ann_rep = vw.new_zeros(())
         ann_at_cm = ann_rep_cm = float("nan"); ann_at_n = ann_rep_n = 0
@@ -538,7 +538,7 @@ def optimize_person(
     # that would stall L-BFGS cold; the final L-BFGS phase (all DOFs free, strong-
     # Wolfe) then sharpens the already-close fit. A fresh optimizer per phase, so
     # no stale momentum leaks across an unfreeze; DOFs frozen by zeroing the grad.
-    auto_drift_pre = None    # (T, num_joints) refine-start drift, persisted by the caller (round-4 §2)
+    auto_drift_pre = None    # (T, num_joints) refine-start drift, persisted by the caller
     for ph in phases:
         scene_cand = _build_scene_cand() if ph.scene else None
         if use_auto and contact_labels is None and scene_cand is not None:

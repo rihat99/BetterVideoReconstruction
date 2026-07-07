@@ -204,8 +204,8 @@ def scene_signed_distance(
     not differentiable); gradients flow through ``v`` in ``s`` only. Penetration,
     contact attraction and clearance repulsion differ *only* in the penalty they put
     on ``s`` (:func:`penetration_penalty` / :func:`attraction_penalty` /
-    :func:`clearance_penalty`), so running several on the same vertices (the round-3
-    default: penetration + contact attraction) shares this one ``cdist`` instead of
+    :func:`clearance_penalty`), so running several on the same vertices (penetration +
+    contact attraction) shares this one ``cdist`` instead of
     repeating it per loss.
 
     Chunked over frames — one batched ``cdist`` + gather per chunk — so the distance
@@ -409,7 +409,7 @@ def attraction_penalty(
     never fight: attraction owns ``s∈(0, band)``, penetration ``s<−margin``).
     ``active_mask`` restricts which vertices are attracted — the kinematics_1
     auto-detected contact joints, or the kinematics_2 manually-annotated ones.
-    ``active_weight`` (round-5 T4) scales each attracted vertex's contribution by its
+    ``active_weight`` scales each attracted vertex's contribution by its
     joint's label confidence, so an uncertain auto-contact pulls proportionally less
     (``None`` ⇒ every active vertex weighted 1, the original behaviour). Returns
     ``(loss, mean_gap_cm, n_attracted)`` — the latter two detached."""
@@ -486,7 +486,7 @@ def joint_velocity_loss(
     sp2 = (dp * dp).sum(dim=-1)                          # (T-1, J) squared per-step speed (×fps²→weight)
     pair = (contact_labels[:-1] == 1) & (contact_labels[1:] == 1)  # in contact at BOTH ends of the step
     gate = pair.to(sp2.dtype)
-    if joint_weight is not None:                         # T4: down-weight uncertain contacts (min over the step)
+    if joint_weight is not None:                         # down-weight uncertain contacts (min over the step)
         gate = gate * torch.minimum(joint_weight[:-1], joint_weight[1:])
     n = gate.sum()
     loss = (sp2 * gate).sum() / n.clamp_min(1.0)

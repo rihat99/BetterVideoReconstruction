@@ -156,7 +156,7 @@ def _save_body(out_path: Path, mid, out: dict, betas_out: list, object_ids: np.n
     Body optimized at native (converter) size — no per-body scale now that the metric
     geometry is human-anchored upstream. ``scale`` is kept as ones so the consumers that
     re-apply it about the pelvis stay a no-op. ``extra`` (optional) is merged in as extra
-    arrays — ``kinematics_1`` uses it to persist ``drift_pre`` / ``auto_labels`` (round 4).
+    arrays — ``kinematics_1`` uses it to persist ``drift_pre`` / ``auto_labels``.
     """
     nb = mid.num_joints
     parents = [-1] + [int(mid.parent_tree[0, i]) for i in range(1, nb)]
@@ -273,9 +273,8 @@ def run_kinematic(source, pred: Path, cfg: HumanOptimConfig, stages_to_run,
     if "auto_contact" in knobs and "kinematics_1" in stages_to_run:
         ac = dict(knobs["auto_contact"])
         # Detector stillness: [auto_contact] may pin its OWN window_s / still_m — decoupled from the
-        # readout's [contact_gate] so the readout recall knob (round-4 operating point) can move
-        # WITHOUT changing the frozen labels / bodies; otherwise it inherits [contact_gate] (one
-        # shared notion of "still", the round-3 behaviour).
+        # readout's [contact_gate] so the readout recall knob can move WITHOUT changing the frozen
+        # labels / bodies; omit to inherit [contact_gate] (one shared notion of "still").
         ac.setdefault("window_s", float(knobs["contact_gate"]["window_s"]))
         ac.setdefault("still_m", float(knobs["contact_gate"]["still_m"]))
         idx = {n: i for i, n in enumerate(mid.joint_names)}
@@ -287,7 +286,7 @@ def run_kinematic(source, pred: Path, cfg: HumanOptimConfig, stages_to_run,
 
     out = _new_out()
     betas_out = []
-    drift_pre_p, auto_labels_p = [], []   # round-4 §2: refine-start drift + frozen labels, per person
+    drift_pre_p, auto_labels_p = [], []   # refine-start drift + frozen labels, per person
     for p in range(P):
         oid = int(object_ids[p])
         vmask = np.asarray(sp["valid_mask"][p], dtype=bool)
@@ -324,7 +323,7 @@ def run_kinematic(source, pred: Path, cfg: HumanOptimConfig, stages_to_run,
         print(f"    before: {before}\n    after:  {after}")
         _append_classic(out, mid, betas_T, q_opt)
         betas_out.append(betas_mean.cpu().numpy().astype(np.float32))
-        # Persist the detection-time signals (round-4 §2). None ⇒ detection did not run
+        # Persist the detection-time signals. None ⇒ detection did not run
         # for this person (no scene / weight 0): write NaN drift + -1 labels; consumers
         # then fall back to computing drift from the body.
         dp, al = aux["drift_pre"], aux["auto_labels"]
@@ -404,7 +403,7 @@ def run_kinematics_2(source, pred: Path, cfg: HumanOptimConfig, device: str, *,
     """Contact-guided refinement of ``kinematic_1.npz`` → ``human_optim/kinematic_2.npz``.
 
     ``labels_mode='manual'`` (default) uses the human annotation ``data/<stem>.npz``;
-    ``'auto'`` (round-5 T4) uses our own ``contacts_1.npz`` labels instead —
+    ``'auto'`` uses our own ``contacts_1.npz`` labels instead —
     positives-only (in-contact → ``+1``, else ``-1``, **never** ``0``, so the
     clearance repulsion stays inert by construction), each weighted by the T3
     ``label_confidence``.
@@ -521,7 +520,7 @@ def run_kinematics_2(source, pred: Path, cfg: HumanOptimConfig, device: str, *,
         _append_classic(out, mid, betas_T, q_opt)
         betas_out.append(betas_mean.cpu().numpy().astype(np.float32))
 
-    # Forward the honest pre-enforcement drift + frozen labels from kinematic_1 (round-5 T4): kin2's
+    # Forward the honest pre-enforcement drift + frozen labels from kinematic_1: kin2's
     # own velocity damper must not be able to game the contact readout, so estimate_contacts on this
     # body reads the SAME drift_pre kinematic_1 measured before ANY enforcement. Fixes a latent gap
     # that until now dropped drift_pre for the manual kinematics_2 too.

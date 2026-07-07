@@ -7,20 +7,18 @@ signed distance → drift/stillness gate → temporal hysteresis) on the optimiz
 
   * ``close_thresh_m`` — the SDF "just outside" distance counted as contact;
   * ``still_m`` — the net-drift scale of the stillness gate (``still_m = inf`` is the
-    NO-GATE column, i.e. the pure SDF baseline the round-1 work started from).
+    NO-GATE column, i.e. the pure SDF baseline).
 
-The self-confirmation trap (``docs/UPDATE.md`` §3) is why we report **precision, recall
-AND the false-positive rate on annotated no-contact joint-frames** per clip (per coarse
-joint group + overall): recall is exactly the number a contact-attraction pull inflates
-for free, so precision + FPR are the honest signal. The GATE the user decides on: an
-operating point whose precision is at or above the round-1 detector's while recall is
-well above it (the hard speed veto was the recall killer — the windowed drift gate
-should give most of it back).
+The self-confirmation trap is why we report **precision, recall AND the false-positive
+rate on annotated no-contact joint-frames** per clip (per coarse joint group + overall):
+recall is exactly the number a contact-attraction pull inflates for free, so precision +
+FPR are the honest signal. The GATE the user decides on: a strong-precision operating
+point whose recall sits well above the pure-SDF baseline.
 
 Scene is loaded exactly as ``estimate_contacts`` loads it (``[contacts]`` conf gate +
 PCA normals), so the grid scores the identical readout the stage writes.
 
-    uv run python scripts/prototype_auto_contacts.py --predictions out/boulder_1/ out/boulder_3/ [--device cuda]
+    uv run python scripts/score_contacts.py --predictions out/boulder_1/ out/boulder_3/ [--device cuda]
 """
 
 from __future__ import annotations
@@ -55,11 +53,11 @@ _DEFAULT_CONFIG = _REPO_ROOT / "configs" / "human_optimization.toml"
 _DEFAULT_SMPLX_MODEL = _REPO_ROOT.parent / "better_human" / "models" / "smplx" / "SMPLX_NEUTRAL.npz"
 _COARSE = list(_ANN_TO_SMPLX.keys())   # the 10 annotated coarse joints
 
-# The readout grid. still_m = inf ⇒ no drift gate = the pure SDF baseline (round 1's start).
+# The readout grid. still_m = inf ⇒ no drift gate = the pure SDF baseline.
 _CLOSE_GRID = (0.02, 0.03)
 _STILL_GRID = (0.02, 0.025, 0.03, 0.05, float("inf"))
-# Round-1 detector numbers (from docs/UPDATE_AGENT.md §1), printed as a static reference.
-_ROUND1_DETECTOR = "precision 0.83–0.97, recall 0.19–0.65, FPR 0.01–0.21 (hard speed veto)"
+# A static SDF-only detector reference, printed alongside the pooled grid for comparison.
+_SDF_DETECTOR_REF = "precision 0.83–0.97, recall 0.19–0.65, FPR 0.01–0.21 (hard speed veto)"
 
 
 # ─────────────────────────────── scoring ─────────────────────────────────
@@ -151,7 +149,7 @@ def _readout_signals(mid, betas, q, scale, scene_pts, scene_normals, scene_conf,
 
     Everything the (close_thresh_m, still_m) sweep does NOT change — the pose, the scene
     SDF, the guarded per-joint min, and the net window drift — computed once. ``joints_world``
-    is returned for the §4 span-merge (its distance guard).
+    is returned for the span-merge (its distance guard).
     """
     J = mid.num_joints
     v_rest, j_rest = mid.forward_shape(betas[None])
@@ -188,7 +186,7 @@ def _load_contact_cfg(path: Path) -> tuple[dict, dict]:
     cc.setdefault("prune_margin_m", 0.10)
     cc.setdefault("close_thresh_m", 0.02)   # standard-readout enter distance (funnel reads it; grid sweeps it)
     cc.setdefault("exit_thresh_m", 0.035); cc.setdefault("min_frames", 3)
-    cc.setdefault("merge_max_gap_s", 2.0); cc.setdefault("merge_sdf_m", 0.08)   # §4 span-merge knobs
+    cc.setdefault("merge_max_gap_s", 2.0); cc.setdefault("merge_sdf_m", 0.08)   # span-merge knobs
     cg = cfg.get("contact_gate", {})
     cg.setdefault("window_s", 0.35); cg.setdefault("still_m", 0.025)
     return cc, cg
@@ -201,8 +199,8 @@ def run_one(pred_dir: str, config_path: Path, device: str, source=None,
 
     Returns a per-person list of ``{clip, oid, valid, grid}`` where ``grid`` maps
     ``(close_thresh_m, still_m) -> _score(...)`` (per-coarse-joint + overall confusion).
-    ``merge_dist > 0`` applies the §4 span-merge; ``gate_source='pre'`` feeds the stillness
-    gate the persisted refine-start ``drift_pre`` (§5) instead of the final-body drift.
+    ``merge_dist > 0`` applies the span-merge; ``gate_source='pre'`` feeds the stillness
+    gate the persisted refine-start ``drift_pre`` instead of the final-body drift.
     """
     pred = Path(pred_dir)
     cc, cg = _load_contact_cfg(config_path)
@@ -246,7 +244,7 @@ def run_one(pred_dir: str, config_path: Path, device: str, source=None,
         scale = float(kin["scale"][p]) if "scale" in kin else 1.0
         jw, gsdf, _jsdf, drift = _readout_signals(mid, betas, q, scale, scene_pts, scene_normals, scene_conf,
                                                   fps=fps, cc=cc, cg=cg)
-        # §5 gate source: read the persisted refine-start drift_pre (pre-enforcement) instead of
+        # gate source: read the persisted refine-start drift_pre (pre-enforcement) instead of
         # the final-body drift. Per-person fallback to computed drift if absent / NaN (old npz).
         gate_drift = drift
         if gate_source == "pre" and "drift_pre" in kin:
@@ -299,7 +297,7 @@ def _print_pooled(all_res: list[dict], exclude: set[str]) -> None:
     print("\n=== POOLED across clips (overall P / R / F1 / FPR per grid cell) ===")
     if dropped:
         print(f"  (excluded from the pool as fit outliers, shown per-clip above: {', '.join(dropped)})")
-    print(f"  round-1 detector reference: {_ROUND1_DETECTOR}")
+    print(f"  SDF-only detector reference: {_SDF_DETECTOR_REF}")
     for close in _CLOSE_GRID:
         print(f"  close_thresh={close * 100:.0f}cm")
         for still in _STILL_GRID:
@@ -316,10 +314,10 @@ def _print_per_joint(all_res: list[dict], close: float, still: float) -> None:
                 print(f"    {c:12s} {_fmt(sc[c])}")
 
 
-# ─────────────────────── the miss / FP funnel (round-4 §3) ────────────────
+# ─────────────────────── the miss / FP funnel ────────────────
 # For every annotated positive coarse-joint-frame the standard readout MISSES, walk the
 # chain and charge the FIRST failing stage; split false positives into still-hover vs smear.
-# The categories partition 1 − recall, so the table says which round-4 move buys what recall.
+# The categories partition 1 − recall, so the table says which move buys what recall.
 # Coarse joints are OR-folded, so each signal is judged by its BEST member: closest gsdf,
 # stillest drift (optimistic — "even the best member fails here"). invisible / unlabeled are
 # span-level (a hold never in the cloud / never pulled); the rest are per-frame.
@@ -382,7 +380,7 @@ def _classify_person(gsdf_t, gsdf_l, drift, jc, auto_lab, ann, ann_names, valid,
     """Walk each missed annotated-positive coarse-joint-frame to its first-failing stage.
 
     Returns ``{per, tot, hover_gaps, still_ext_gsdf}``: per-coarse + overall confusion/category
-    counts, the finite hovering gaps (m, feeds §6), and gsdf at still-extremity frames (m).
+    counts, the finite hovering gaps (m), and gsdf at still-extremity frames (m).
     """
     two_still = 2.0 * float(still_m)
     adj = max(1, int(round(0.2 * float(fps))))            # ±0.2 s = annotation-adjacent (smear)
@@ -405,7 +403,7 @@ def _classify_person(gsdf_t, gsdf_l, drift, jc, auto_lab, ann, ann_names, valid,
         cj = {"pos": int(pos.sum()), "hit": int((pos & pred).sum()),
               "neg": int(neg.sum()), "fp": int((neg & pred).sum())}
         cj.update({k: 0 for k in _FUNNEL_CATS})
-        if c in _EXTREMITIES:                              # §6 hover evidence: still + visible extremity frames
+        if c in _EXTREMITIES:                              # hover evidence: still + visible extremity frames
             sel = valid & (dr < two_still) & (gt < _INF)
             still_ext.extend(gt[sel].tolist())
         fp = neg & pred
@@ -446,7 +444,7 @@ def _funnel_one(pred_dir: str, config_path: Path, device: str, source=None,
     bpath = Path(body_path) if body_path is not None else paths.body_path(pred, "kinematic_1")
     kin = dict(np.load(bpath, allow_pickle=True))
     if "auto_labels" not in kin:
-        raise SystemExit(f"{bpath} has no 'auto_labels' — re-run kinematics_1 with round-4 Task 0 first")
+        raise SystemExit(f"{bpath} has no 'auto_labels' — re-run kinematics_1 with auto-contact labels first")
     tr = dict(np.load(pred / "geometry" / "transform.npz", allow_pickle=True))
     N, P = int(kin["num_frames"]), int(kin["num_people"])
     object_ids = np.asarray(kin["object_ids"], np.int32)
@@ -558,7 +556,7 @@ def _print_funnel(all_res: list[dict], exclude: set[str]) -> None:
         print(f"    {c:11s} pos {cj['pos']:4d}  R {_frac(cj['hit'], cj['pos']):.2f}  | {_miss_line(cj)}")
 
 
-# ─────────────────── confidence reliability (round-5 T3) ──────────────────
+# ─────────────────── confidence reliability ──────────────────
 # Recompute the readout AND its per-joint label_confidence at one operating point, then
 # check the confidence against the manual annotation: does accuracy rise with confidence
 # (per predicted class), and do the two monotonicities hold (faster ⇒ surer no-contact;
@@ -717,14 +715,14 @@ def main(argv=None) -> int:
     ap.add_argument("--exclude-from-pool", nargs="*", default=["sport_climb"],
                     help="clip names shown per-clip but dropped from the POOLED row (fit outliers)")
     ap.add_argument("--funnel", action="store_true",
-                    help="run the round-4 miss/FP funnel (needs auto_labels in the body npz) instead of the grid")
+                    help="run the miss/FP funnel (needs auto_labels in the body npz) instead of the grid")
     ap.add_argument("--reliability", action="store_true",
-                    help="round-5 T3: check per-joint label_confidence against the annotation "
+                    help="check per-joint label_confidence against the annotation "
                          "(accuracy per confidence bin + monotonicity) instead of the grid")
     ap.add_argument("--merge-dist", type=float, default=0.0,
-                    help="§4 span-merge distance (m) applied to the grid readout; 0 = off")
+                    help="span-merge distance (m) applied to the grid readout; 0 = off")
     ap.add_argument("--gate-source", choices=["final", "pre"], default="final",
-                    help="§5 stillness-gate drift source: final-body (default) or persisted refine-start drift_pre")
+                    help="stillness-gate drift source: final-body (default) or persisted refine-start drift_pre")
     args = ap.parse_args(argv)
     body_path = Path(args.body_path) if args.body_path else None
     if body_path is not None and len(args.predictions) != 1:
