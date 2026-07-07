@@ -52,6 +52,7 @@ from tools.human_optim import (  # noqa: E402
     vertex_to_joint, world_from_cam,
 )
 from tools.human_optim import paths  # noqa: E402
+from tools.human_optim.confidence import CONTACT_CONFIDENCE_DEFAULTS, contact_confidence  # noqa: E402
 from tools.human_optim.qmath import normalize_q  # noqa: E402
 from tools.smplx_robot import load_smplx_mid  # noqa: E402
 
@@ -79,6 +80,11 @@ def _load_config(path: Path) -> dict:
     g = cfg.setdefault("contact_gate", {})
     g.setdefault("window_s", 0.35)         # drift window (s) for the stillness gate
     g.setdefault("still_m", 0.025)         # net drift (m) at which stillness = 0.5 (gate kills frames >= 2·still_m)
+    # T3: per-joint label confidence (readout-only; NOT registered in config.py). Defaults +
+    # semantics live in tools/human_optim/confidence.py, shared with the scorer's --reliability.
+    k = cfg.setdefault("contact_confidence", {})
+    for key, val in CONTACT_CONFIDENCE_DEFAULTS.items():
+        k.setdefault(key, val)
     cfg.setdefault("runtime", {}).setdefault("device", "cuda")
     return cfg
 
@@ -155,6 +161,9 @@ def run(source, predictions_dir, config_path, *, device_override=None, overlay=T
     joint_contact = np.zeros((P, N, J), dtype=bool)
     joint_sdf_cm = np.full((P, N, J), np.nan, dtype=np.float32)
     joints_2d = np.full((P, N, J, 2), np.nan, dtype=np.float32)
+    p_contact_all = np.zeros((P, N, J), np.float32)         # T3: geometry+motion contact-likeness
+    observability_all = np.zeros((P, N, J), np.float32)     # T3: how much the scene saw the joint
+    label_conf_all = np.zeros((P, N, J), np.float32)        # T3: confidence in the final binary label
 
     for p in range(P):
         betas = torch.as_tensor(kin["betas"][p], dtype=torch.float32, device=device)
@@ -204,12 +213,21 @@ def run(source, predictions_dir, config_path, *, device_override=None, overlay=T
         joint_contact[p] = jc_np
         joint_sdf_cm[p] = jsdf.cpu().numpy()
         joints_2d[p] = px.cpu().numpy()
+        # T3: per-joint confidence in the FINAL label (both classes; occlusion ⇒ honest low conf).
+        jc_final = torch.as_tensor(jc_np, dtype=torch.bool, device=device)
+        pc, obs_c, lconf = contact_confidence(
+            jc_final, gsdf, drift, jw, px, scene_pts, scene_conf, H, W,
+            cfg=cfg["contact_confidence"], window_s=float(cg["window_s"]), fps=fps)
+        for arr, val in ((p_contact_all, pc), (observability_all, obs_c), (label_conf_all, lconf)):
+            val[~valid_mask[p]] = 0.0
+            arr[p] = val
         n_cf = int(jc_np.any(1).sum())
         print(f"[estimate_contacts] obj_id={int(object_ids[p])}: {n_cf}/{N} frames with "
               f"≥1 joint in contact ({int(jc_np.sum())} joint-frame contact instances)")
 
     save = dict(
         joint_contact=joint_contact, joint_sdf_cm=joint_sdf_cm,
+        p_contact=p_contact_all, observability=observability_all, label_confidence=label_conf_all,
         object_ids=object_ids, joint_names=kin["joint_names"], parents=parents,
         valid_mask=kin["valid_mask"],
         num_people=np.int32(P), num_frames=np.int32(N),
@@ -228,7 +246,8 @@ def run(source, predictions_dir, config_path, *, device_override=None, overlay=T
     if overlay:
         from tools.human_optim.overlay import render_contact_overlay
         ov = render_contact_overlay(source, paths.overlay_path(pred, f"contacts_{tag}"),
-                                    joints_2d, joint_contact, parents, valid_mask, H, W, fps)
+                                    joints_2d, joint_contact, parents, valid_mask, H, W, fps,
+                                    label_confidence=label_conf_all)
         print(f"[estimate_contacts] wrote {ov}")
     return out_path
 

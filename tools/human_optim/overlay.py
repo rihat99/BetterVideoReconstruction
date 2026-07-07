@@ -41,13 +41,15 @@ def _project_person(mid, q, betas, fvids, corr, extr, K, device, scale=1.0, chun
 
 
 def render_contact_overlay(source, out_path, joints_2d, joint_contact, parents,
-                           valid_mask, H, W, fps):
+                           valid_mask, H, W, fps, label_confidence=None):
     """Write an mp4 of the projected SMPL-X skeleton coloured by scene contact.
 
     One skeleton per tracked person: bones (parent→child) are drawn as neutral
     grey lines and each joint as a dot — **red** when that joint is in contact
-    with the scene, **green** otherwise. Everything is precomputed by the stage;
-    this only rasterizes.
+    with the scene, **green** otherwise. When ``label_confidence (P, N, J)`` (the
+    round-5 T3 field) is given, a **contact** dot's radius grows with the confidence
+    in its label — a small red dot is an uncertain contact. Everything is
+    precomputed by the stage; this only rasterizes.
 
     ``joints_2d (P, N, J, 2)`` are the projected joint pixels, ``joint_contact
     (P, N, J)`` the per-joint contact flags, ``parents (J,)`` the kinematic-tree
@@ -86,8 +88,12 @@ def render_contact_overlay(source, out_path, joints_2d, joint_contact, parents,
                         uv = pts[j]
                         if not ok(uv):
                             continue
-                        col = (0, 0, 255) if joint_contact[p, i, j] else (0, 255, 0)
-                        cv2.circle(bgr, (int(uv[0]), int(uv[1])), 3, col, -1, cv2.LINE_AA)
+                        contact = bool(joint_contact[p, i, j])
+                        col = (0, 0, 255) if contact else (0, 255, 0)
+                        r = 3
+                        if contact and label_confidence is not None:   # confident contact ⇒ bigger dot
+                            r = 2 + int(round(4.0 * float(np.clip(label_confidence[p, i, j], 0.0, 1.0))))
+                        cv2.circle(bgr, (int(uv[0]), int(uv[1])), r, col, -1, cv2.LINE_AA)
                 writer.write(bgr)
         finally:
             writer.release()

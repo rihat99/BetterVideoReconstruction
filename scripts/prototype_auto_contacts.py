@@ -43,9 +43,10 @@ import torch  # noqa: E402
 from tools.geometry.normals import estimate_point_normals  # noqa: E402
 from tools.human_optim import (  # noqa: E402
     drift_gated_contact, joint_drift, joint_guarded_min_sdf, merge_contact_spans,
-    scene_sdf, vertex_to_joint, world_from_cam,
+    project, scene_sdf, transform_points, vertex_to_joint, world_from_cam,
 )
 from tools.human_optim import paths  # noqa: E402
+from tools.human_optim.confidence import CONTACT_CONFIDENCE_DEFAULTS, contact_confidence  # noqa: E402
 from tools.human_optim.qmath import normalize_q  # noqa: E402
 from tools.human_optim.stages import _ANN_TO_SMPLX, resolve_annotation_path  # noqa: E402
 from tools.smplx_robot import load_smplx_mid  # noqa: E402
@@ -556,6 +557,152 @@ def _print_funnel(all_res: list[dict], exclude: set[str]) -> None:
         print(f"    {c:11s} pos {cj['pos']:4d}  R {_frac(cj['hit'], cj['pos']):.2f}  | {_miss_line(cj)}")
 
 
+# ─────────────────── confidence reliability (round-5 T3) ──────────────────
+# Recompute the readout AND its per-joint label_confidence at one operating point, then
+# check the confidence against the manual annotation: does accuracy rise with confidence
+# (per predicted class), and do the two monotonicities hold (faster ⇒ surer no-contact;
+# closer ⇒ surer contact). Confidence is folded to coarse by the closest-to-wall member,
+# matching the funnel's best-member convention.
+
+def _reliability_one(pred_dir: str, config_path: Path, device: str, source=None,
+                     body_path: Path | None = None, close: float = 0.03, still: float = 0.03,
+                     merge_dist: float = 0.03, gate_source: str = "pre") -> list[dict]:
+    """Per-annotated-person records for the reliability curve at ``(close, still)``."""
+    pred = Path(pred_dir)
+    cc, cg = _load_contact_cfg(config_path)
+    raw = tomllib.load(config_path.open("rb")) if config_path.exists() else {}
+    cf = {**CONTACT_CONFIDENCE_DEFAULTS, **raw.get("contact_confidence", {})}
+    bpath = Path(body_path) if body_path is not None else paths.body_path(pred, "kinematic_1")
+    kin = dict(np.load(bpath, allow_pickle=True))
+    tr = dict(np.load(pred / "geometry" / "transform.npz", allow_pickle=True))
+    N, P = int(kin["num_frames"]), int(kin["num_people"])
+    H, W = int(kin["video_height"]), int(kin["video_width"])
+    object_ids = np.asarray(kin["object_ids"], np.int32)
+    fps = float(tr.get("fps", kin.get("fps", 30.0)))
+    extr = torch.as_tensor(tr["extrinsics"], dtype=torch.float32, device=device)
+    K = torch.as_tensor(tr["intrinsics_px_orig"], dtype=torch.float32, device=device)
+    cam_centers = world_from_cam(extr)[:, :3, 3]
+    scene_pts, scene_normals, scene_conf = _load_scene_readout(pred, cc, cam_centers, device)
+    mid = load_smplx_mid(_DEFAULT_SMPLX_MODEL, device)
+    member_cols = {c: _members(list(mid.joint_names), c) for c in _COARSE}
+    exit_below = max(float(cc["exit_thresh_m"]), close); min_frames = int(cc["min_frames"])
+
+    ann_path = resolve_annotation_path(source or pred, None)
+    if not ann_path.exists():
+        return []
+    a = dict(np.load(ann_path, allow_pickle=True))
+    ann_all = np.asarray(a["contacts"]); ann_names = [str(x) for x in a["joint_names"]]
+    ann_oids = [int(x) for x in np.asarray(a["object_ids"]).ravel()]
+    ann_ignored = (np.asarray(a["ignored"]).ravel().astype(bool)
+                   if "ignored" in a else np.zeros(len(ann_oids), bool))
+    ann_idx = {n: i for i, n in enumerate(ann_names)}
+
+    out = []
+    for p in range(P):
+        oid = int(object_ids[p])
+        vmask = np.asarray(kin["valid_mask"][p], bool)
+        if oid not in ann_oids or bool(ann_ignored[ann_oids.index(oid)]):
+            continue
+        betas = torch.as_tensor(kin["betas"][p], dtype=torch.float32, device=device)
+        q = torch.as_tensor(kin["q"][p], dtype=torch.float32, device=device)
+        scale = float(kin["scale"][p]) if "scale" in kin else 1.0
+        jw, gsdf, drift = _readout_signals(mid, betas, q, scale, scene_pts, scene_normals, scene_conf,
+                                           fps=fps, cc=cc, cg=cg)
+        gate_drift = drift
+        if gate_source == "pre" and "drift_pre" in kin:
+            dp = np.asarray(kin["drift_pre"])[p]
+            if np.isfinite(dp).all():
+                gate_drift = torch.as_tensor(dp, dtype=drift.dtype, device=drift.device)
+        jc_t = drift_gated_contact(gsdf, gate_drift, close_thresh_m=close, exit_thresh_m=exit_below,
+                                   min_frames=min_frames, still_m=still)
+        if merge_dist > 0.0:
+            jc_t = merge_contact_spans(jc_t, jw, gsdf, merge_dist_m=merge_dist,
+                                       max_gap_s=float(cc["merge_max_gap_s"]),
+                                       gap_sdf_m=float(cc["merge_sdf_m"]), fps=fps)
+        jc = jc_t.cpu().numpy(); jc[~vmask] = False
+        px = project(transform_points(jw, extr), K)
+        _, _, lconf = contact_confidence(torch.as_tensor(jc, dtype=torch.bool, device=device),
+                                         gsdf, gate_drift, jw, px, scene_pts, scene_conf, H, W,
+                                         cfg=cf, window_s=float(cg["window_s"]), fps=fps)
+        speed = (gate_drift / max(float(cg["window_s"]), 1e-6)).cpu().numpy()
+        gsdf_np = gsdf.cpu().numpy(); rows = np.arange(N)
+        rec: dict[str, list] = {k: [] for k in ("conf", "pred", "ann_pos", "speed", "gsdf")}
+        for c, M in member_cols.items():
+            if c not in ann_idx or not M:
+                continue
+            a_c = ann_all[ann_oids.index(oid)][ann_idx[c]]          # (N,) tri-state
+            gt = gsdf_np[:, M]; jstar = gt.argmin(axis=1)           # closest-to-wall member
+            m = vmask & ((a_c == 0) | (a_c == 1))
+            if not m.any():
+                continue
+            rec["conf"].append(lconf[:, M][rows, jstar][m])
+            rec["pred"].append(jc[:, M][rows, jstar][m])
+            rec["ann_pos"].append((a_c == 1)[m])
+            rec["speed"].append(speed[:, M][rows, jstar][m])
+            rec["gsdf"].append(gt[rows, jstar][m])
+        if rec["conf"]:
+            out.append(dict(clip=pred.name, oid=oid,
+                            **{k: np.concatenate(v) for k, v in rec.items()}))
+    return out
+
+
+def _bin_table(conf: np.ndarray, correct: np.ndarray, nbins: int = 10) -> str:
+    """10-bin conf → accuracy table string (accuracy should rise with confidence)."""
+    edges = np.linspace(0.0, 1.0, nbins + 1)
+    lines = []
+    for b in range(nbins):
+        lo, hi = edges[b], edges[b + 1]
+        sel = (conf >= lo) & (conf < hi) if b < nbins - 1 else (conf >= lo) & (conf <= hi)
+        n = int(sel.sum())
+        acc = float(correct[sel].mean()) if n else float("nan")
+        bar = "#" * int(round(acc * 20)) if n else ""
+        lines.append(f"      [{lo:.1f},{hi:.1f})  acc={acc:5.3f}  n={n:5d}  {bar}")
+    return "\n".join(lines)
+
+
+def _decile_trend(x: np.ndarray, conf: np.ndarray, label: str) -> str:
+    """Mean conf per decile of x — for the two monotonicity checks."""
+    if x.size < 10:
+        return f"    {label}: n={x.size} (too few)"
+    q = np.quantile(x, np.linspace(0, 1, 11))
+    means = []
+    for b in range(10):
+        sel = (x >= q[b]) & (x <= q[b + 1]) if b == 9 else (x >= q[b]) & (x < q[b + 1])
+        means.append(conf[sel].mean() if sel.any() else float("nan"))
+    return f"    {label}: " + " ".join(f"{m:.2f}" for m in means)
+
+
+def _print_reliability(all_rec: list[dict], exclude: set[str], close: float, still: float) -> None:
+    from scipy.stats import spearmanr
+    pooled = [r for r in all_rec if r["clip"] not in exclude]
+    dropped = sorted({r["clip"] for r in all_rec if r["clip"] in exclude})
+    cat = lambda k: np.concatenate([r[k] for r in pooled]) if pooled else np.zeros(0)
+    conf, pred, ann_pos = cat("conf"), cat("pred").astype(bool), cat("ann_pos").astype(bool)
+    speed, gsdf = cat("speed"), cat("gsdf")
+    correct = (pred == ann_pos)
+    print(f"\n=== CONFIDENCE RELIABILITY  (close={close*100:.0f}cm still={still:.3f}, gate=pre)"
+          f"{'  excl ' + ', '.join(dropped) if dropped else ''} ===")
+    print(f"  scored coarse-joint-frames: {conf.size}  (pred-contact {int(pred.sum())}, "
+          f"pred-no-contact {int((~pred).sum())})")
+    for name, cls in (("PRED CONTACT (label_confidence should track precision)", pred),
+                      ("PRED NO-CONTACT (label_confidence should track true-negative rate)", ~pred)):
+        c, ok = conf[cls], correct[cls]
+        if c.size == 0:
+            continue
+        rho = spearmanr(c, ok).correlation if c.size > 2 and c.std() > 0 else float("nan")
+        print(f"\n  {name}\n    overall accuracy {ok.mean():.3f} (n={c.size})  Spearman(conf,correct)={rho:+.3f}")
+        print(_bin_table(c, ok))
+    print("\n  monotonicity (mean confidence per decile — should be monotone):")
+    print(_decile_trend(speed[~pred], conf[~pred], "conf(no-contact) vs speed↑ (want ↑)"))
+    print(_decile_trend(gsdf[pred], conf[pred], "conf(contact)    vs gsdf↑  (want ↓)"))
+    missed = (~pred) & ann_pos                                    # annotated contacts we called no-contact
+    if missed.any():
+        mc = conf[missed]
+        print(f"\n  missed contacts (pred=no-contact, ann=contact): n={int(missed.sum())}  "
+              f"mean conf={mc.mean():.3f}  frac in lowest conf bin (<0.1)={float((mc < 0.1).mean()):.2f} "
+              f"(want most low = honest unknown)")
+
+
 def main(argv=None) -> int:
     ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     ap.add_argument("--predictions", nargs="+", required=True, help="one or more clip dirs")
@@ -570,6 +717,9 @@ def main(argv=None) -> int:
                     help="clip names shown per-clip but dropped from the POOLED row (fit outliers)")
     ap.add_argument("--funnel", action="store_true",
                     help="run the round-4 miss/FP funnel (needs auto_labels in the body npz) instead of the grid")
+    ap.add_argument("--reliability", action="store_true",
+                    help="round-5 T3: check per-joint label_confidence against the annotation "
+                         "(accuracy per confidence bin + monotonicity) instead of the grid")
     ap.add_argument("--merge-dist", type=float, default=0.0,
                     help="§4 span-merge distance (m) applied to the grid readout; 0 = off")
     ap.add_argument("--gate-source", choices=["final", "pre"], default="final",
@@ -587,6 +737,18 @@ def main(argv=None) -> int:
             print("no annotated people found in the given clips")
             return 1
         _print_funnel(all_res, set(args.exclude_from_pool))
+        return 0
+
+    if args.reliability:
+        all_rec: list[dict] = []
+        for pd in args.predictions:
+            all_rec.extend(_reliability_one(pd, args.config, args.device, source=args.source,
+                                            body_path=body_path, close=args.ref_close, still=args.ref_still,
+                                            merge_dist=args.merge_dist, gate_source=args.gate_source))
+        if not all_rec:
+            print("no annotated people found in the given clips")
+            return 1
+        _print_reliability(all_rec, set(args.exclude_from_pool), args.ref_close, args.ref_still)
         return 0
 
     all_res = []

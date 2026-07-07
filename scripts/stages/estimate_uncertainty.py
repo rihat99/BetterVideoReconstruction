@@ -26,28 +26,25 @@ it reads an optimized body (``kinematic_2`` if present, else
    the init-anchor reprojection). When independent observations conflict,
    uncertainty is high — no ground truth needed.
 
-And, **per contact** (every ``contacts_*`` joint-contact), a confidence in [0, 1]
-from the SDF **margin** past the contact threshold (``joint_sdf_cm`` — a contact
-right at the boundary is uncertain, a deeply-inside one is not) × the contacting
-joint's **speed** (a planted grip is slow; a fast "contact" is a limb clipping the
-wall) × its **visibility** (front-facing fraction of its vertices) × temporal
-**persistence** (a 1-frame flicker is less certain than a sustained grip).
+Per-contact **label confidence** now lives in ``estimate_contacts`` (round-5 T3,
+covering BOTH the contact and no-contact classes); this stage only **reads**
+``label_confidence`` from the contacts npz for its plot / overlay. Its own output
+is the per-frame body trust above.
 
 The reprojection / chamfer are recomputed with the optimizer's exact correspondence
-+ projection + GM code, so the numbers match the kinematic stage; the per-contact
-SDF margin is read straight from ``estimate_contacts`` (no recompute).
++ projection + GM code, so the numbers match the kinematic stage.
 
 Reads (under ``out/<stem>/``)::
 
     human_optim/<bodies>.npz  optimized body (q, betas, scale, valid_mask)
     sam3d/smplx_params.npz    converter init pose (the init-anchor 2D target)
-    human_optim/<cnt>.npz     per-joint contact + joint_sdf_cm (for per-contact)
+    human_optim/<cnt>.npz     per-joint contact + label_confidence (read for the viz)
     sapiens/pose.npz          Goliath-308 keypoints + scores
     geometry/{transform,human}.npz  cameras + per-frame metric human depth cloud
 
 Writes::
 
-    human_optim/uncertainty_<tag>.npz                 per-frame + per-contact arrays
+    human_optim/uncertainty_<tag>.npz                 per-frame body-trust arrays
     human_optim/diagnostics/uncertainty_person<oid>.png   the four-axis plot per person
 
 Standalone CLI::
@@ -79,7 +76,7 @@ import torch  # noqa: E402
 
 from tools.human_optim import (  # noqa: E402
     build_correspondence, fold_root_to_world, geman_mcclure, project,
-    subsample_indices, transform_points, vertex_to_joint, world_from_cam,
+    subsample_indices, transform_points, world_from_cam,
 )
 from tools.human_optim.qmath import normalize_q  # noqa: E402
 from tools.human_optim import paths  # noqa: E402
@@ -109,13 +106,6 @@ OBS_REF_PCT = 90.0
 RELIABLE_REPROJ_PX = 15.0
 RELIABLE_CHAMFER_CM = 40.0
 RELIABLE_OBS = 0.3
-# Per-contact confidence references.
-MARGIN_REF_CM = 2.0   # sdf depth past the contact threshold for full margin-confidence
-SPEED_REF_MS = 0.5    # joint speed at which speed-confidence falls to 1/e
-PERSIST_WIN = 2       # ± frames for the persistence window (a 1-frame flicker scores 1/(2W+1))
-VIS_FLOOR = 0.5       # an occluded contact keeps this much confidence (a grip presses
-                      # into the wall, so it is *expected* to face away — visibility only
-                      # gently modulates; the SDF margin carries the "is it touching")
 
 
 # ─────────────────────────────── io helpers ──────────────────────────────────
@@ -212,47 +202,6 @@ def _chamfer_per_frame(vw, sub, faces, extr, depth_list):
     return cham
 
 
-@torch.no_grad()
-def _joint_visibility(vw, faces, extr, v2j_full, J):
-    """Per-frame, per-joint front-facing vertex fraction ``(T, J)`` ∈ [0,1]."""
-    n = vertex_normals(vw, faces)
-    vcam = transform_points(vw, extr)
-    ncam = torch.einsum("tij,tvj->tvi", extr[:, :3, :3], n)
-    ff = front_facing_mask(vcam, ncam).float()                              # (T, V)
-    vis = vw.new_zeros(vw.shape[0], J)
-    for j in range(J):
-        m = v2j_full == j
-        if bool(m.any()):
-            vis[:, j] = ff[:, m].mean(1)
-    return vis
-
-
-@torch.no_grad()
-def _joint_speed(jw, fps):
-    """Per-frame, per-joint world speed ``(T, J)`` (m/s), central finite-difference.
-
-    Its magnitude equals the BetterRobot-Jacobian LOCAL linear speed (the rotation
-    preserves norm — see ``tools/human_optim/velocity.py``), so no model is needed."""
-    T = jw.shape[0]
-    speed = jw.new_zeros(T, jw.shape[1])
-    if T >= 3:
-        speed[1:-1] = (jw[2:] - jw[:-2]).norm(dim=-1) * (fps / 2.0)
-    if T >= 2:
-        speed[0] = (jw[1] - jw[0]).norm(dim=-1) * fps
-        speed[-1] = (jw[-1] - jw[-2]).norm(dim=-1) * fps
-    return speed
-
-
-def _persistence(jc, win):
-    """Per-(frame,joint) fraction of a ±win window also in contact ``(N, J)`` ∈ [0,1]."""
-    N = jc.shape[0]
-    acc = np.zeros_like(jc, dtype=np.float32)
-    for d in range(-win, win + 1):
-        lo, hi = max(0, d), min(N, N + d)
-        acc[max(0, -d):min(N, N - d)] += jc[lo:hi].astype(np.float32)
-    return acc / (2 * win + 1)
-
-
 # ─────────────────────────────── scoring ─────────────────────────────────────
 
 def _score_person(rep, cham_cm, depth_cnt, mean_conf, valid, weights):
@@ -298,22 +247,6 @@ def _score_person(rep, cham_cm, depth_cnt, mean_conf, valid, weights):
     return dict(fit_loss=fit_loss, fit_score=fit_score, fit_score_robust=fit_score_robust,
                 obs_score=obs_score, disagreement_px=disagreement_px, combined=combined,
                 reliable=reliable, fit_loss_min=np.float32(Lmin), fit_loss_p5=np.float32(Lp5))
-
-
-def _score_contacts(jc, jsdf_cm, close_thresh_cm, speed, vis, valid):
-    """Per-(frame,joint) contact confidence in [0,1], NaN where not in contact."""
-    N, J = jc.shape
-    conf_margin = np.clip((close_thresh_cm - jsdf_cm) / MARGIN_REF_CM, 0, 1).astype(np.float32)
-    conf_speed = np.exp(-np.clip(speed, 0, None) / SPEED_REF_MS).astype(np.float32)
-    conf_vis = (VIS_FLOOR + (1.0 - VIS_FLOOR) * np.clip(vis, 0, 1)).astype(np.float32)
-    conf_persist = _persistence(jc, PERSIST_WIN).astype(np.float32)
-    conf = (conf_margin * conf_speed * conf_vis * conf_persist).astype(np.float32)
-    on = jc & valid[:, None]
-    nan = np.full((N, J), np.nan, np.float32)
-    pack = lambda a: np.where(on, a, nan)
-    return dict(contact_conf=pack(conf), contact_conf_margin=pack(conf_margin),
-                contact_conf_speed=pack(conf_speed), contact_conf_vis=pack(conf_vis),
-                contact_conf_persist=pack(conf_persist), joint_speed_ms=speed.astype(np.float32))
 
 
 # ─────────────────────────────── plotting ────────────────────────────────────
@@ -564,11 +497,8 @@ def run(predictions_dir, *, source=None, overlay=False, bodies="kinematic_2",
               "n_kp", "n_depth", "mean_conf")}
     store["reliable"] = np.zeros((P, N), bool)
     store["valid"] = np.zeros((P, N), bool)
-    cstore = {k: np.full((P, N, J), np.nan, np.float32) for k in
-              ("contact_conf", "contact_conf_margin", "contact_conf_speed",
-               "contact_conf_vis", "contact_conf_persist", "joint_speed_ms")}
-    cstore["joint_contact"] = np.zeros((P, N, J), bool)
-    cstore["joint_sdf_cm"] = np.full((P, N, J), np.nan, np.float32)
+    jc_all = np.zeros((P, N, J), bool)                    # per-contact label + T3 confidence, viz only:
+    lconf_all = np.full((P, N, J), np.nan, np.float32)    # read from contacts_<tag>.npz (not recomputed)
     loss_min = np.full(P, np.nan, np.float32)
     loss_p5 = np.full(P, np.nan, np.float32)
     joints_2d = np.full((P, N, J, 2), np.nan, np.float32)   # projected skeleton (for the overlay)
@@ -630,25 +560,16 @@ def run(predictions_dir, *, source=None, overlay=False, bodies="kinematic_2",
         loss_min[pk] = pf["fit_loss_min"]
         loss_p5[pk] = pf["fit_loss_p5"]
 
-        # ── per-contact ──
-        pc = None
+        # ── per-contact label + T3 confidence (read from the contacts npz; not recomputed) ──
         jc = np.zeros((N, J), bool)
-        if cnt is not None:
+        cc_arr = np.full((N, J), np.nan, np.float32)
+        if cnt is not None and oid in [int(x) for x in cnt["object_ids"]]:
             cpi = _idx(cnt["object_ids"], oid)
             jc = np.asarray(cnt["joint_contact"][cpi], bool)
-            jsdf_cm = np.asarray(cnt["joint_sdf_cm"][cpi], np.float32)
-            close_cm = float(cnt["close_thresh_m"]) * 100.0
-            speed = _joint_speed(jw, fps).detach().cpu().numpy()
-            v_rest, j_rest = mid.forward_shape(betas_mean[None])
-            v2j_full = vertex_to_joint(v_rest[0], j_rest[0])
-            vis = _joint_visibility(vw, mid.faces, extr, v2j_full, J).detach().cpu().numpy()
-            pc = _score_contacts(jc, jsdf_cm, close_cm, speed, vis, valid)
-            for k, v in pc.items():
-                cstore[k][pk] = v
-            cstore["joint_contact"][pk] = jc
-            cstore["joint_sdf_cm"][pk] = jsdf_cm
-
-        cc_arr = pc["contact_conf"] if pc is not None else np.full((N, J), np.nan, np.float32)
+            if "label_confidence" in cnt:
+                cc_arr = np.asarray(cnt["label_confidence"][cpi], np.float32)
+        jc_all[pk] = jc
+        lconf_all[pk] = cc_arr
         out_png = diag_dir / f"uncertainty_person{oid:02d}.png"
         _plot_person(oid, valid, pf["combined"], rep["reproj_sap_px"], cham_cm, jc, cc_arr, out_png)
         print(f"[uncertainty] wrote {out_png}")
@@ -666,12 +587,12 @@ def run(predictions_dir, *, source=None, overlay=False, bodies="kinematic_2",
         print(_worst("worst chamfer (cm)", cham_cm, valid, unit="cm"))
         print(_worst("worst disagreement (px)", pf["disagreement_px"], valid, unit="px"))
         print(_worst("lowest obs_score", pf["obs_score"], valid, low=True))
-        if pc is not None and jc.any():
-            cc = pc["contact_conf"]
+        if jc.any():
+            on = jc & valid[:, None]
             with np.errstate(invalid="ignore"):
-                m = float(np.nanmean(cc))
-            n_low = int(np.nansum(cc < 0.3))
-            print(f"    contacts: {int(jc.sum())} total, mean conf={m:.2f}, {n_low} low (<0.3)")
+                m = float(np.nanmean(np.where(on, cc_arr, np.nan)))
+            n_low = int((on & (cc_arr < 0.3)).sum())
+            print(f"    contacts: {int(jc.sum())} total, mean label-conf={m:.2f}, {n_low} low (<0.3)")
 
     out_npz = paths.uncertainty_path(pred, tag)
     np.savez(
@@ -684,7 +605,7 @@ def run(predictions_dir, *, source=None, overlay=False, bodies="kinematic_2",
         bodies=np.str_(bodies), contacts=np.str_(cnt_name if cnt is not None else "none"),
         fit_loss_min=loss_min, fit_loss_p5=loss_p5,
         weights=np.asarray(weights, np.float32),
-        **store, **cstore,
+        **store,
     )
     print(f"[uncertainty] wrote {out_npz}")
 
@@ -694,10 +615,10 @@ def run(predictions_dir, *, source=None, overlay=False, bodies="kinematic_2",
         H, W = int(body["video_height"]), int(body["video_width"])
         panel = dict(oid=object_ids[0], valid=store["valid"][0], combined=store["combined"][0],
                      reproj=store["reproj_sap_px"][0], cham=store["chamfer_cm"][0],
-                     jc=cstore["joint_contact"][0], cc=cstore["contact_conf"][0])
+                     jc=jc_all[0], cc=lconf_all[0])
         ov = paths.overlay_path(pred, f"uncertainty_{tag}")
-        _render_overlay(source, ov, joints_2d=joints_2d, joint_contact=cstore["joint_contact"],
-                        contact_conf=cstore["contact_conf"], valid_mask=store["valid"],
+        _render_overlay(source, ov, joints_2d=joints_2d, joint_contact=jc_all,
+                        contact_conf=lconf_all, valid_mask=store["valid"],
                         parents=np.asarray(body["parents"]), panel=panel, H=H, W=W, fps=fps)
         print(f"[uncertainty] wrote {ov}" + ("" if P == 1 else f"  (side panels = person {object_ids[0]})"))
     return 0
