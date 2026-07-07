@@ -17,11 +17,11 @@ person, which **joints** are in contact with the scene:
 
 The stillness gate reads the body's persisted pre-enforcement drift (``drift_pre``,
 round 4) when present, and a **span-merge** bridges short flicker gaps behind a
-re-grip guard. Each joint-frame then gets a **label confidence** in [0,1] (round-5
-T3, :mod:`tools.human_optim.confidence`) — for BOTH the contact and no-contact
-classes, from the signed distance, that drift, scene observability and temporal
-persistence — saved as ``label_confidence`` (with its ``p_contact`` /
-``observability`` components).
+re-grip guard (the bridged frames flagged in ``merged``). Each joint-frame then gets
+a **label confidence** in [0,1] (:mod:`tools.human_optim.confidence`) — for BOTH the
+contact and no-contact classes, from the guarded signed distance, that drift, scene
+observability and (for the far-from-wall no-contact branch) the *unguarded* distance
+— saved as ``label_confidence`` (with its ``p_contact`` / ``observability`` components).
 
 Renders ``contacts_1_overlay.mp4``: the projected SMPL-X skeleton, joints **red**
 in contact (dot size ∝ confidence) / **green** otherwise.
@@ -32,7 +32,7 @@ Run from CLI::
         --source video.mp4 --predictions out/video/ [--no-overlay]
 
 Reads:  human_optim/kinematic_1.npz, geometry/scene.npz, geometry/transform.npz
-Writes: human_optim/contacts_1.npz          (joint_contact (P,N,J) bool + joint_sdf_cm
+Writes: human_optim/contacts_1.npz          (joint_contact (P,N,J) bool + joint_sdf_cm + merged
                                              + p_contact / observability / label_confidence)
         human_optim/contacts_1_overlay.mp4  (--overlay; default on)
 """
@@ -170,6 +170,7 @@ def run(source, predictions_dir, config_path, *, device_override=None, overlay=T
     joint_contact = np.zeros((P, N, J), dtype=bool)
     joint_sdf_cm = np.full((P, N, J), np.nan, dtype=np.float32)
     joints_2d = np.full((P, N, J, 2), np.nan, dtype=np.float32)
+    merged_all = np.zeros((P, N, J), dtype=bool)            # T3: frames the span-merge bridged
     p_contact_all = np.zeros((P, N, J), np.float32)         # T3: geometry+motion contact-likeness
     observability_all = np.zeros((P, N, J), np.float32)     # T3: how much the scene saw the joint
     label_conf_all = np.zeros((P, N, J), np.float32)        # T3: confidence in the final binary label
@@ -208,13 +209,14 @@ def run(source, predictions_dir, config_path, *, device_override=None, overlay=T
             dp = np.asarray(kin["drift_pre"])[p]
             if np.isfinite(dp).all():
                 drift = torch.as_tensor(dp, dtype=jw.dtype, device=jw.device)
-        jc = drift_gated_contact(gsdf, drift, close_thresh_m=float(cc["close_thresh_m"]),
-                                 exit_thresh_m=float(cc["exit_thresh_m"]), min_frames=int(cc["min_frames"]),
-                                 still_m=float(cg["still_m"]))
+        jc_pre = drift_gated_contact(gsdf, drift, close_thresh_m=float(cc["close_thresh_m"]),
+                                     exit_thresh_m=float(cc["exit_thresh_m"]), min_frames=int(cc["min_frames"]),
+                                     still_m=float(cg["still_m"]))
         # §4 span-merge: bridge short same-joint gaps the joint barely moved across AND stayed near
         # the wall throughout (flicker / brief re-settle); the re-grip guard blocks leave-and-return.
-        jc = merge_contact_spans(jc, jw, gsdf, merge_dist_m=float(cc["merge_dist_m"]),
+        jc = merge_contact_spans(jc_pre, jw, gsdf, merge_dist_m=float(cc["merge_dist_m"]),
                                  max_gap_s=float(cc["merge_max_gap_s"]), gap_sdf_m=float(cc["merge_sdf_m"]), fps=fps)
+        merged_bool = jc & ~jc_pre     # T3: frames the merge bridged — confidence stays honest, the flag marks them
         px = project(transform_points(jw, extr), K)                  # (N,J,2)
 
         jc_np = jc.cpu().numpy()
@@ -222,10 +224,13 @@ def run(source, predictions_dir, config_path, *, device_override=None, overlay=T
         joint_contact[p] = jc_np
         joint_sdf_cm[p] = jsdf.cpu().numpy()
         joints_2d[p] = px.cpu().numpy()
+        merged_np = merged_bool.cpu().numpy(); merged_np[~valid_mask[p]] = False
+        merged_all[p] = merged_np
         # T3: per-joint confidence in the FINAL label (both classes; occlusion ⇒ honest low conf).
+        # p_far reads the UNGUARDED distance jsdf (cm→m); gsdf saturates at max_dist and can't see "far".
         jc_final = torch.as_tensor(jc_np, dtype=torch.bool, device=device)
         pc, obs_c, lconf = contact_confidence(
-            jc_final, gsdf, drift, jw, px, scene_pts, scene_conf, H, W,
+            jc_final, gsdf, jsdf / 100.0, drift, jw, px, scene_pts, scene_conf, H, W,
             cfg=cfg["contact_confidence"], window_s=float(cg["window_s"]), fps=fps)
         for arr, val in ((p_contact_all, pc), (observability_all, obs_c), (label_conf_all, lconf)):
             val[~valid_mask[p]] = 0.0
@@ -235,7 +240,7 @@ def run(source, predictions_dir, config_path, *, device_override=None, overlay=T
               f"≥1 joint in contact ({int(jc_np.sum())} joint-frame contact instances)")
 
     save = dict(
-        joint_contact=joint_contact, joint_sdf_cm=joint_sdf_cm,
+        joint_contact=joint_contact, joint_sdf_cm=joint_sdf_cm, merged=merged_all,
         p_contact=p_contact_all, observability=observability_all, label_confidence=label_conf_all,
         object_ids=object_ids, joint_names=kin["joint_names"], parents=parents,
         valid_mask=kin["valid_mask"],

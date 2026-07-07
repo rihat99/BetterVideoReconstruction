@@ -42,8 +42,8 @@ import torch  # noqa: E402
 
 from tools.geometry.normals import estimate_point_normals  # noqa: E402
 from tools.human_optim import (  # noqa: E402
-    drift_gated_contact, joint_drift, joint_guarded_min_sdf, merge_contact_spans,
-    project, scene_sdf, transform_points, vertex_to_joint, world_from_cam,
+    drift_gated_contact, joint_drift, joint_guarded_min_sdf, lift_joint_contact,
+    merge_contact_spans, project, scene_sdf, transform_points, vertex_to_joint, world_from_cam,
 )
 from tools.human_optim import paths  # noqa: E402
 from tools.human_optim.confidence import CONTACT_CONFIDENCE_DEFAULTS, contact_confidence  # noqa: E402
@@ -161,8 +161,9 @@ def _readout_signals(mid, betas, q, scale, scene_pts, scene_normals, scene_conf,
                                 prune_margin_m=float(cc["prune_margin_m"]))
     gsdf = joint_guarded_min_sdf(sdf, dmin, conf, v2j, J,
                                  max_dist_m=float(cc["max_dist_m"]), conf_thresh=float(cc["conf_thresh"]))
+    _, jsdf = lift_joint_contact(torch.zeros_like(sdf, dtype=torch.bool), sdf, v2j, J)   # unguarded per-joint min sdf (cm)
     drift = joint_drift(jw, fps=fps, window_s=float(cg["window_s"]))
-    return jw, gsdf, drift
+    return jw, gsdf, jsdf, drift
 
 
 def _load_scene_readout(pred: Path, cc: dict, cam_centers: torch.Tensor, device: str):
@@ -243,8 +244,8 @@ def run_one(pred_dir: str, config_path: Path, device: str, source=None,
         betas = torch.as_tensor(kin["betas"][p], dtype=torch.float32, device=device)
         q = torch.as_tensor(kin["q"][p], dtype=torch.float32, device=device)
         scale = float(kin["scale"][p]) if "scale" in kin else 1.0
-        jw, gsdf, drift = _readout_signals(mid, betas, q, scale, scene_pts, scene_normals, scene_conf,
-                                           fps=fps, cc=cc, cg=cg)
+        jw, gsdf, _jsdf, drift = _readout_signals(mid, betas, q, scale, scene_pts, scene_normals, scene_conf,
+                                                  fps=fps, cc=cc, cg=cg)
         # §5 gate source: read the persisted refine-start drift_pre (pre-enforcement) instead of
         # the final-body drift. Per-person fallback to computed drift if absent / NaN (old npz).
         gate_drift = drift
@@ -606,8 +607,8 @@ def _reliability_one(pred_dir: str, config_path: Path, device: str, source=None,
         betas = torch.as_tensor(kin["betas"][p], dtype=torch.float32, device=device)
         q = torch.as_tensor(kin["q"][p], dtype=torch.float32, device=device)
         scale = float(kin["scale"][p]) if "scale" in kin else 1.0
-        jw, gsdf, drift = _readout_signals(mid, betas, q, scale, scene_pts, scene_normals, scene_conf,
-                                           fps=fps, cc=cc, cg=cg)
+        jw, gsdf, jsdf, drift = _readout_signals(mid, betas, q, scale, scene_pts, scene_normals, scene_conf,
+                                                 fps=fps, cc=cc, cg=cg)
         gate_drift = drift
         if gate_source == "pre" and "drift_pre" in kin:
             dp = np.asarray(kin["drift_pre"])[p]
@@ -622,7 +623,7 @@ def _reliability_one(pred_dir: str, config_path: Path, device: str, source=None,
         jc = jc_t.cpu().numpy(); jc[~vmask] = False
         px = project(transform_points(jw, extr), K)
         _, _, lconf = contact_confidence(torch.as_tensor(jc, dtype=torch.bool, device=device),
-                                         gsdf, gate_drift, jw, px, scene_pts, scene_conf, H, W,
+                                         gsdf, jsdf / 100.0, gate_drift, jw, px, scene_pts, scene_conf, H, W,
                                          cfg=cf, window_s=float(cg["window_s"]), fps=fps)
         speed = (gate_drift / max(float(cg["window_s"]), 1e-6)).cpu().numpy()
         gsdf_np = gsdf.cpu().numpy(); rows = np.arange(N)

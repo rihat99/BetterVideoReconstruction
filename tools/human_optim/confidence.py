@@ -11,11 +11,15 @@ already computes:
 - **label_confidence** — confidence in the binary label. For a *contact*:
   ``persist · observability · p_contact``. For a *no-contact*: either the joint is
   moving fast (confident from motion alone, even occluded — you cannot grip while
-  flying) or we saw its neighbourhood and it is **clearly far** past the ambiguous
-  hover band (``p_far``). A joint just outside a visible wall (the hover-miss zone,
-  ~3–8 cm) or slow + occluded ⇒ low confidence: the honest unknown. (``p_far``
-  replaces an earlier ``1 − p_contact`` that scored visible near-wall hovers as
-  *confident* no-contact — the round-5 reliability curve's headline failure.)
+  flying) or it is **clearly far** from the wall past the ambiguous hover band
+  (``p_far``, from the *unguarded* distance ``jsdf``). A joint just outside a visible
+  wall (the hover-miss zone, ~3–8 cm) or slow + occluded ⇒ low confidence: the honest
+  unknown. (``p_far`` reads the unguarded ``jsdf`` — finite out to ~1.6 m — because the
+  guarded ``gsdf`` saturates at ``max_dist_m`` and cannot tell 15 cm from 40 cm; and
+  its threshold ``far_ref_m`` sits beyond any plausible hold protrusion, so a hand on a
+  carved-out hold stays *uncertain* while a hand far in open space reads confidently free.
+  This replaces round-5's ``obs · (1 − p_contact)``, which scored visible near-wall
+  hovers as *confident* no-contact — the reliability curve's headline failure.)
 
 One no-grad pass, consumed by :mod:`scripts.stages.estimate_contacts` after the
 labels are final (post span-merge). Every factor stays in ``[0, 1]`` and monotone.
@@ -31,7 +35,7 @@ import torch
 CONTACT_CONFIDENCE_DEFAULTS = dict(
     close_ref_m=0.03,    # p_contact = 0.5 at this signed distance to the wall
     ramp_m=0.03,         # close/far sat ramp half-width (m)
-    far_ref_m=0.10,      # p_far = 0.5 here; a still no-contact is confident only PAST the hover band
+    far_ref_m=0.25,      # p_far = 0.5 at this UNGUARDED distance (jsdf); beyond any hold protrusion ⇒ carve-safe
     still_ref_m=0.03,    # p_still = 0 at drift ≥ 2× this
     obs_radius_m=0.15,   # scene points within this of a joint count as "seen"
     obs_min_pts=20,      # n_near for full observability
@@ -80,15 +84,17 @@ def _persistence(labels: np.ndarray, window: int) -> np.ndarray:
     return np.where(l > 0.5, frac_ones, 1.0 - frac_ones).astype(np.float32)
 
 
-def contact_confidence(jc: torch.Tensor, gsdf: torch.Tensor, drift: torch.Tensor,
+def contact_confidence(jc: torch.Tensor, gsdf: torch.Tensor, jsdf: torch.Tensor, drift: torch.Tensor,
                        jw: torch.Tensor, px: torch.Tensor,
                        scene_pts: torch.Tensor, scene_conf: torch.Tensor,
                        height: int, width: int, *, cfg: dict, window_s: float, fps: float):
     """Per-(frame,joint) confidence in the final contact label. All inputs are one person's.
 
     :param jc: ``(N,J)`` bool final contact label (post-merge).
-    :param gsdf: ``(N,J)`` guarded per-joint min signed distance to the wall (m); ``+inf`` = no
-        scene support (occluded / out of range).
+    :param gsdf: ``(N,J)`` GUARDED per-joint min signed distance to the wall (m), saturated at
+        ``max_dist_m`` — used for the contact-likeness ``p_close``.
+    :param jsdf: ``(N,J)`` UNGUARDED per-joint min signed distance (m), finite out to ~1.6 m
+        (``NaN`` = no near-surface vertex) — used for the far-from-wall ``p_far``.
     :param drift: ``(N,J)`` net window drift (m) — the SAME (pre-enforcement) source as the gate.
     :param jw: ``(N,J,3)`` world joint positions; ``px`` ``(N,J,2)`` their image projection.
     :param scene_pts: ``(M,3)`` / ``scene_conf`` ``(M,)`` the conf-gated scene cloud.
@@ -103,7 +109,8 @@ def contact_confidence(jc: torch.Tensor, gsdf: torch.Tensor, drift: torch.Tensor
 
     gsdf_f = torch.nan_to_num(gsdf, nan=float("inf"), posinf=float("inf"))
     p_close = _sat((close_ref + ramp - gsdf_f) / (2.0 * ramp))      # 0.5 at close_ref; +inf ⇒ 0
-    p_far = _sat((gsdf_f - far_ref) / (2.0 * ramp))                 # 1 only PAST the hover band; +inf ⇒ 1
+    jsdf_f = torch.nan_to_num(jsdf, nan=0.0, posinf=0.0, neginf=0.0)  # non-finite / penetrating ⇒ not far
+    p_far = _sat((jsdf_f - far_ref + ramp) / (2.0 * ramp))          # mirror of p_close: 0.5 at far_ref, 1 by far_ref+ramp
     p_still = _sat(1.0 - drift / (2.0 * still_ref))                 # 1 at drift 0
     p_contact = p_close * p_still
     speed = drift / max(window_s, 1e-6)
@@ -117,7 +124,7 @@ def contact_confidence(jc: torch.Tensor, gsdf: torch.Tensor, drift: torch.Tensor
     persist = torch.as_tensor(_persistence(jc.detach().cpu().numpy().astype(bool),
                                            int(round(window_s * fps))), device=jw.device)
     conf_pos = persist * obs * p_contact                           # sure contact: seen, close, still, persistent
-    conf_neg = persist * torch.maximum(p_fast, obs * p_far)        # sure no-contact: moving, OR seen + clearly far
+    conf_neg = persist * torch.maximum(p_fast, in_img * p_far)     # sure no-contact: moving, OR in-frame + clearly far
     label_conf = torch.where(jc.bool(), conf_pos, conf_neg)
     to_np = lambda t: t.detach().cpu().numpy().astype(np.float32)
     return to_np(p_contact), to_np(obs), to_np(label_conf)
