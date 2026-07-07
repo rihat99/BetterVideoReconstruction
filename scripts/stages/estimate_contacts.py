@@ -48,7 +48,8 @@ import torch  # noqa: E402
 from tools.geometry.normals import estimate_point_normals  # noqa: E402
 from tools.human_optim import (  # noqa: E402
     contact_from_sdf, drift_gated_contact, joint_drift, joint_guarded_min_sdf,
-    lift_joint_contact, project, scene_sdf, transform_points, vertex_to_joint, world_from_cam,
+    lift_joint_contact, merge_contact_spans, project, scene_sdf, transform_points,
+    vertex_to_joint, world_from_cam,
 )
 from tools.human_optim import paths  # noqa: E402
 from tools.human_optim.qmath import normalize_q  # noqa: E402
@@ -72,6 +73,9 @@ def _load_config(path: Path) -> dict:
     c.setdefault("conf_drop_q", 0.1)       # quantile confidence gate: drop the lowest fraction of scene voxels
     c.setdefault("normal_k", 16)           # kNN for PCA scene-normal estimation
     c.setdefault("prune_margin_m", 0.10)   # per-frame scene-AABB margin for the SDF nearest-neighbour
+    c.setdefault("merge_dist_m", 0.03)     # §4 span-merge: bridge a flicker gap the joint barely moved across
+    c.setdefault("merge_max_gap_s", 2.0)   # …only gaps shorter than this
+    c.setdefault("merge_sdf_m", 0.08)      # …re-grip guard: it stayed within this of the wall the whole gap
     g = cfg.setdefault("contact_gate", {})
     g.setdefault("window_s", 0.35)         # drift window (s) for the stillness gate
     g.setdefault("still_m", 0.025)         # net drift (m) at which stillness = 0.5 (gate kills frames >= 2·still_m)
@@ -178,9 +182,21 @@ def run(source, predictions_dir, config_path, *, device_override=None, overlay=T
         gsdf = joint_guarded_min_sdf(sdf, dmin, conf, v2j, J,
                                      max_dist_m=float(cc["max_dist_m"]), conf_thresh=float(cc["conf_thresh"]))
         drift = joint_drift(jw, fps=fps, window_s=float(cg["window_s"]))
+        # §5 honest gate: when the body carries the refine-start drift_pre (kinematics_1, round 4),
+        # the stillness gate reads it (the pre-enforcement measurement) instead of re-measuring the
+        # final body — the damper can then no longer manufacture false stillness. Fall back per
+        # person to the computed final-body drift (kinematics_2 / old npz / NaN).
+        if "drift_pre" in kin:
+            dp = np.asarray(kin["drift_pre"])[p]
+            if np.isfinite(dp).all():
+                drift = torch.as_tensor(dp, dtype=jw.dtype, device=jw.device)
         jc = drift_gated_contact(gsdf, drift, close_thresh_m=float(cc["close_thresh_m"]),
                                  exit_thresh_m=float(cc["exit_thresh_m"]), min_frames=int(cc["min_frames"]),
                                  still_m=float(cg["still_m"]))
+        # §4 span-merge: bridge short same-joint gaps the joint barely moved across AND stayed near
+        # the wall throughout (flicker / brief re-settle); the re-grip guard blocks leave-and-return.
+        jc = merge_contact_spans(jc, jw, gsdf, merge_dist_m=float(cc["merge_dist_m"]),
+                                 max_gap_s=float(cc["merge_max_gap_s"]), gap_sdf_m=float(cc["merge_sdf_m"]), fps=fps)
         px = project(transform_points(jw, extr), K)                  # (N,J,2)
 
         jc_np = jc.cpu().numpy()

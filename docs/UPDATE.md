@@ -1,160 +1,194 @@
-# UPDATE — contacts inside `kinematics_1`, take two
+# UPDATE — contacts inside `kinematics_1`, round 5
 
-*2026-07-06, rev 4. Covers only `root` + `kinematics_1`. Rewritten after the first
-implementation round: the detector worked, the enforcement did not. This version
-explains why, and replaces the enforcement design.*
+*2026-07-07, rev 7. Covers the betas that shape the body, the `estimate_scale`
+stage, the contact readout and its new confidence, a kinematics_2-on-auto-labels
+experiment, and a code polish pass. Rounds 1–4 history: revs 4–6 in git.*
 
-## What the experiment taught us
+## Round 4 worked — where we are now
 
-Round one built a detector (find contacts on the settled body) and an enforcement
-phase (pull the detected joints onto the wall, damp their velocity). Results:
+All of round 4 landed and was measured. Two separate gains: the methods
+themselves (at the fixed round-3 readout point), then the operating point you
+picked.
 
-- **The detector is good.** Precision 0.83–0.97, false-positive rate far below
-  the plain distance readout, and it costs under a second. This part we keep.
-- **The enforcement hurt.** Chamfer and penetration got worse on every clip, for
-  almost no label improvement, at 2.3× runtime.
+| step (readout close 0.02 / still 0.025) | P | R | F1 | FPR | grip speed |
+|---|---|---|---|---|---|
+| round-3 winner | 0.906 | 0.565 | 0.696 | 0.049 | 11.5 cm/s |
+| + span-merge + pre-enforcement gate | 0.905 | 0.608 | 0.727 | 0.053 | 11.5 |
+| + target smoothing (0.35 s) | 0.902 | 0.622 | 0.736 | 0.056 | 11.5 |
+| + velocity damper (500) | 0.906 | 0.618 | 0.735 | 0.054 | **7.3** |
 
-Three reasons, all now understood:
+At your chosen operating point (close 0.03 / still 0.03): **P 0.896 / R 0.678 /
+F1 0.772 / FPR 0.066**, leave-one-clip-out stable, and you confirmed the motion
+looks visibly better. The damper is back and honest — because the readout now
+judges stillness from the body *before* enforcement, damping can no longer fake
+a still contact.
 
-1. **It enforced only what was already right.** The detector is precise, so the
-   pulled joints were mostly real contacts sitting a few cm off. Pulling them in
-   changed almost no labels — but it dragged the body against its depth cloud
-   (chamfer up) and wedged vertices into the wall (penetration up).
-2. **It could never fix recall.** A missed contact has no label, so it feels no
-   pull. All the cost went to joints that didn't need help.
-3. **The damping loss poisoned its own well.** We damped the velocity of labeled
-   joints — but stillness is exactly the signal detection reads. The optimizer
-   learned to make joints *look* still instead of fitting better. Lesson, now a
-   rule: **motion is a signal we read, never something we optimize.**
+Round 4 also closed some questions for good:
 
-We also understand the low recall (0.19–0.65) now. The detector vetoed any joint
-moving faster than 0.2 m/s. But a gripping hand in our fit is not perfectly
-still — it jitters a few millimetres per frame, and a few mm × 30 fps is
-0.1–0.3 m/s of *instantaneous* speed. Real grips tripped the veto and their
-spans broke. Meanwhile a hand slowly passing the wall moves at a similar
-instantaneous speed, slipped under the veto, and became exactly the false
-contacts you saw visually. **Instantaneous speed cannot tell a jittering grip
-from a slow pass.** Net movement over about a third of a second can: a grip
-drifts under ~2 cm in that window, a passing hand covers 3–7 cm.
+- **A global scale cannot fix the hovering.** Still hands/feet already
+  *penetrate* the wall by ~3 cm on average while the missed ones hover +4 cm —
+  one number can't move both ways at once. The problem is per-limb, i.e.
+  **body proportions**, not scale.
+- The remaining misses are mostly **moving contacts** (excluded by design) and
+  **occluded holds** (never in the scene cloud). Target smoothing recovered a
+  little; the camera is not the culprit (3 of 4 cameras are static).
+- The optimizer itself is healthy: the two kinematic trees agree on quaternion
+  conventions; no hidden graph bug.
 
-## The new idea
+## Round 5 — what it is about
 
-One physical rule, applied everywhere near the wall:
+You named the two things still standing, and this round attacks exactly them,
+plus the groundwork for learning from these labels:
 
-> **A still joint belongs ON the wall. A moving joint belongs OFF it.**
+1. **Limbs come out short** (worst on competition_2), so the hand stops a few
+   centimetres before the wall. Proportions live in the **betas** — the ten
+   shape numbers each frame's body model predicts. Today we take a plain
+   *average* of them over all frames, good and bad alike. When the person is
+   small in the image or half cut off, the per-frame betas collapse toward the
+   average human — which, for a tall climber, means shorter limbs — and those
+   bad frames dilute the good ones. So: measure how noisy the per-frame betas
+   really are, then replace the average with a robust, quality-weighted
+   estimate. The metric scale gets the same noise treatment (details below) —
+   scale and betas together decide where the fingertips end up.
+2. **Occluded contacts can't be recovered — but they can be honestly labeled.**
+   The plan is a full rewrite of contact confidence: every joint in every frame
+   gets a confidence in its label, **whether that label is contact or
+   no-contact**. A fast-moving joint is a near-certain no-contact. A slow joint
+   far from the wall is a certain no-contact. A still joint pressed into the
+   wall is a certain contact. A slow joint where the scene cloud has *no
+   points* (the occluded case) is a low-confidence unknown — for either label.
+   That "unknown" is the honest answer to occlusion, and it is what makes these
+   labels usable for training later: a learner can be told which labels to
+   trust. The current per-contact confidence was machine-generated and only
+   covers positives; it gets deleted and rebuilt from named signals.
+3. **Try kinematics_2 with our auto labels.** kinematics_2 with manual
+   annotations produces the most natural motion we have. Feed it the automatic
+   labels instead (weighted by the new confidence) and see how close it gets —
+   the first turn of the self-training loop you described.
+4. **Polish.** We are heading toward the final iteration: dead code out, big
+   scripts split, war-story comments compressed, no behavior change, runtime
+   not a hair slower.
 
-From this rule we get one measurement and one loss.
+## The plan — five moves
 
-**The measurement — a stillness weight.** For every joint and frame, compute the
-net drift over a short window (~11 frames): how far did the joint actually
-travel? Map that to a weight `w` between 1 (still) and 0 (moving). This replaces
-the speed veto everywhere. It is robust to jitter (jitter cancels out over a
-window), and it catches slow passes (they keep accumulating distance). It is
-computed from the current pose and **never optimized** — no gradients flow
-through it, per the rule above.
+**1. Robust betas (the proportions lever).** First a diagnostic, then the fix.
+Diagnostic: per clip, how much do the per-frame betas move, and do they
+correlate with how large the person is in the image? Also plot the limb lengths
+they imply over time — if competition_2's far-away frames systematically imply
+shorter arms, we have the mechanism in hand. Fix: one small function that
+aggregates per-frame betas into one per-person vector using a **weighted
+median** — frames where the person is big, well-tracked and confidently
+detected count more; outlier frames stop mattering at all. The optimizer uses
+it (today it uses the plain mean); the scale stage A/Bs it as its ruler.
+This is *not* the rejected "optimize betas in the fit" — betas stay frozen in
+the optimizer; only how we summarize what the upstream model already predicted
+changes.
 
-**The loss — two branches blended by `w`.** For vertices near the wall:
+**2. A noise pass on `estimate_scale`.** Three suspects, each cheap to test:
+(a) **Mask edge bleed** — the person's mask includes a rim of pixels whose
+VGGT depth is really the *background wall*, farther than the body. Those pixels
+drag the scale down, which pushes the whole scene slightly toward the camera —
+and matches the measured symptom (still hands *penetrating* by ~3 cm). Fix:
+erode the mask a few pixels before use. (b) **Frame quality** — pool per-frame
+scale estimates weighted by how well that frame saw the body (mask size, depth
+confidence), not just how many pixels it had. (c) **Extremity emphasis** — the
+scale stage weights hands/feet ×10, but VGGT depth is at its *worst* exactly on
+thin fast limbs; A/B whether that emphasis helps or hurts the scale estimate.
+Order matters: fix betas first, then scale, then re-measure the
+penetration-vs-hover balance — once proportions are right, one clean global
+scale may finally be able to center both.
 
-- **Still branch** (`w` high): pull the vertex onto the surface — the existing
-  attraction math, now gated by stillness instead of by detected labels.
-- **Moving branch** (`w` low): push the vertex out to a small clearance
-  (~4 cm). This is your "a moving hand should be repelled from the wall"
-  insight, and it earns its place twice: it *prevents* the slow-pass false
-  contacts instead of merely not rewarding them, and it keeps the attraction
-  from ever grabbing a passing hand.
+**3. Contact confidence, rewritten.** Deleted: the old positives-only formula
+in the uncertainty stage. Built instead, at the point where labels are made
+(the contact readout): per person, frame and joint, three numbers —
 
-Both branches reuse losses that already exist (`scene_attraction`,
-`clearance_repulsion`); the only new machinery is the drift computation and the
-blending.
+- **p_contact** — how contact-like the *geometry and motion* look: rises as the
+  joint gets closer to the wall and stiller (using the honest pre-enforcement
+  drift, so enforcement can't inflate it).
+- **observability** — how much we actually *saw*: are there scene points near
+  the joint at all (occlusion check), how confident is VGGT depth there, is the
+  joint in frame.
+- **label confidence** — confidence in the final binary label. For a *contact*:
+  observability × p_contact × persistence. For a *no-contact*: either the joint
+  is moving fast (confident from motion alone, even when occluded — you can't
+  grip while flying) or we saw the space near it and it wasn't contact-like.
+  Slow + occluded ⇒ low confidence: the honest unknown.
 
-**No labels, no extra phase, no damping.** The weight `w` is recomputed every
-iteration directly inside the normal `refine` phase — contacts in the loop, in
-the simplest possible form. The separate contact phase is deleted (runtime
-returns to normal), the discrete-label plumbing in the optimizer is deleted, the
-damping term is deleted, and the old generic attraction ("pull anything near the
-wall") is retired — the still branch is its principled replacement.
+Every ingredient is something we already compute (signed distance, drift, VGGT
+confidence, Sapiens score, persistence) — one shot, no optimizer cost.
+Validation: against the manual annotations, bin the labels by confidence and
+check accuracy rises with confidence (a reliability curve), plus the two
+monotonicity checks straight from your examples (faster ⇒ more confident
+no-contact; closer ⇒ more confident contact).
 
-**Labels are read off once, at the end.** `estimate_contacts` stays the single
-readout: distance thresholds with hysteresis, now with the same stillness gate
-added. The in-loop losses make the geometry unambiguous — still hands seated on
-the wall, passing hands clear of it — and the readout just reports what it sees.
-Both precision and recall improve through the same mechanism: true contacts get
-pulled inside the readout distance (recall up), passes get pushed outside it
-(precision up).
+**4. kinematics_2 on auto labels.** Run the existing kinematics_2 machinery
+with `contacts_1` labels instead of the manual file. Three safety rails:
+(a) **positives only** — an auto "no contact" is not a real negative (it may be
+occlusion), so the repulsion term stays off; only attraction and the velocity
+damper act, each scaled by the new label confidence; (b) the honest drift from
+kinematics_1 is carried through into the kinematics_2 output, so the readout on
+the refined body still judges stillness pre-enforcement (this also fixes a
+latent gap for *manual* kinematics_2, which today loses that field); (c) the
+final judge stays external — scored against manual annotations, same gates.
+If confident negatives prove trustworthy in move 3's reliability curve, a
+second variant may cautiously enable repulsion on them.
 
-## What changes, term by term
+**5. The polish pass.** Now that the method is settling: remove what brings
+nothing (the orphaned velocity helper of a long-removed loss; the old
+confidence block; anything a grep proves dead), rename the "prototype" scorer
+to what it is (the evaluation harness) and move its reusable parts into tools,
+split oversized scripts, and cut the long war-story comments in the config and
+code down to one line each — history lives in git and these docs. Hard rule:
+behavior-preserving. After cleanup, one clip re-runs bit-identical and no
+slower. This lands last, once the round's experiments have settled, so we don't
+polish code that changes the next day.
 
-| Term | Was | Now |
-|---|---|---|
-| `auto_velocity` (damping) | 150, contact phase | **delete** — it optimized the detection signal |
-| `auto_attraction` + labels + contact phase | 20, phase off by default | **delete** — replaced by the in-loop still branch |
-| `contact_attraction` (generic "near ⇒ pull") | 10 | **retire** — the still branch is the gated replacement |
-| `still_attraction` — new | — | ~15, band ~12 cm, inside `refine`, weighted by `w` |
-| `motion_clearance` — new | — | ~1000, clearance ~4 cm, inside `refine`, weighted by `1−w` |
-| speed veto (detector + readout) | hard 0.2 m/s cut | **replace with the drift/stillness gate** |
-| reproj, chamfer, priors, smoothness, penetration | — | unchanged |
+## How we judge it
+
+- **Labels**: P / R / F1 / FPR per clip + pooled (4 clips; sport_climb
+  separate), against the round-4 final point (P 0.896 / R 0.678 / F1 0.772 /
+  FPR 0.066). Recall up, precision ≥ ~0.88, FPR not above ~0.07.
+- **The funnel, re-run** after betas + scale: the hovering category should
+  shrink and the penetration/hover imbalance should center; competition_2 is
+  the bellwether clip.
+- **Reprojection gate** unchanged: vs **raw** targets, within +0.5 px of the
+  round-4 winner. Chamfer / penetration reported, not gated.
+- **Confidence**: the reliability curve must be monotone-ish per class, and the
+  known occluded misses must land in low-confidence no-contact (that is the
+  whole point).
+- **kinematics_2-auto**: judged against manual annotations *and* your eyes in
+  the viewer — naturalness (grip speed, jitter) is the reason to run it.
+- **Runtime**: optimizer untouched except the kin2 experiment; everything else
+  is one-shot. Cleanup must not cost a millisecond.
+- **Leave-one-clip-out** at the final operating point, as before.
 
 ## Honest limits
 
-- **Carved-out holds stay invisible.** Where the scene cloud has no points (the
-  human carve), nothing can be detected or pulled. That is the recall ceiling;
-  the carve-hole probe measures it per clip.
-- **A smearing foot** is "moving + touching", which the rule reads as no-contact
-  and pushes off. Rare in our clips; accepted.
-- **A dyno catch registers a few frames late** — the drift window needs a moment
-  to see that the hand has stopped. The readout hysteresis mostly hides this.
-
-## How we judge it (hard gates this time)
-
-Everything compared against the current HEAD run on the local clips:
-
-1. **Fit must stay flat**: reprojection, chamfer, penetration within noise of
-   HEAD. Round one failed exactly this — now it is a gate, not a hope.
-2. **Runtime** within ~15 % of HEAD (the new work is one blended scene term).
-3. **Labels must beat the honest baseline.** Run the new readout on the *old*
-   (HEAD) bodies first — that is the baseline. Then on the new bodies: precision
-   AND recall against the annotations must improve or hold, and the
-   false-positive rate must not rise.
-4. **Slow-pass spot check**: the visually-found false contacts (hand moving past
-   the wall) should be gone or clearly reduced.
-
-**Decision point, stated up front:** if the fit cannot stay flat at any weight
-where the labels improve, we stop enforcing and keep the detector + readout
-alone. That is an acceptable outcome — the labels are the product, and the
-geometry already fits well without contact losses.
+- Occluded contacts stay unrecovered — they become *honestly uncertain* instead
+  of confidently wrong. That is the deliverable, not recall on them.
+- Moving contacts stay excluded by design; recall 0.9 remains capped by that
+  category unless the definition changes (not this round).
+- Robust betas can only recover what the per-frame model *sometimes* saw — if
+  every frame of a clip under-predicts limb length, no aggregation fixes it.
+- kinematics_2-auto learns from labels made on kinematics_1's body — the
+  external judge (manual annotations) is what keeps that loop honest.
 
 ## Order of work
 
-1. **Readout first, optimizer untouched.** Add the drift gate to
-   `estimate_contacts`, sweep its two or three knobs on the *current* bodies,
-   score precision/recall against the annotations. Gate: an operating point that
-   recovers the recall the old veto destroyed, without giving up precision.
-2. **The in-loop term.** Delete the label/phase/damping machinery, add the two
-   blended branches to `refine`, verify parity with the new weights at zero.
-3. **Evaluate** against the gates above; a small weight grid (two values per
-   branch); you review and pick.
-4. DB re-run stays where it was: once, at the very end, folded into the pending
-   Issue-22 re-run.
+1. **Commit round 4 first** (12 files, working tree → main) so every round-5
+   diff is separable.
+2. Betas diagnostic → robust betas → scale noise pass → re-run
+   scale→fuse→kinematics_1→contacts on the locals → funnel + scores.
+3. Confidence rewrite (readout-only; no bodies change) → reliability curves.
+4. kinematics_2-on-auto experiment (uses 2's bodies + 3's confidence).
+5. Polish pass, then the final combined tables + leave-one-out.
 
 ## Still not doing
 
-- No labels inside the optimizer, no extra phase, no damping of any joint.
-- No triangulation cue; smoothness weights stay (standing decisions).
-- Frozen anchors, per-clip adaptive distance thresholds, handing chamfer off to
-  contacts locally: all deferred until the simple version's numbers ask for them.
-
-## Outcome
-
-Built and measured on four clips. The readout idea — a joint counts as contact only if it is
-both near the wall *and* barely moving over about a third of a second — works. On the plain
-fit body it gives precision 0.91 with a false-positive rate of 0.04, against 0.83 / 0.12 for
-the old distance-only readout: it roughly triples the precision-to-false-alarm margin, and it
-needs no change to the body at all. How much recall you keep is one knob (the stillness scale);
-the default favours precision because the contacts feed things that *act* on a positive.
-
-The in-loop part — pulling the still joints onto the wall during the fit — was tried again in
-this new continuous form and failed the same way round one did. The fit got worse (the body
-wants to sit on the human depth points, which are a few centimetres in front of the wall), the
-contact labels got worse too, and it ran about a third slower. No weight setting escaped it. So
-the in-loop term was removed and only the readout was kept — which is exactly the fallback this
-plan allowed for.
+- No per-body scale, no betas optimization inside the fit (aggregation only).
+- No auto negative *enforcement* by default (repulsion off for auto labels;
+  a confidence-gated variant only if the reliability curve earns it).
+- No reduction of any smoothness weight; no camera-pose modification.
+- No new per-iteration work inside the optimizer loop.
+- dynamics, the viewer, and the DB stay untouched (the DB re-run still folds
+  into the pending Issue-22 pass at the very end).

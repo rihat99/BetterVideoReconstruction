@@ -9,9 +9,14 @@ run = ["root", "kinematics_1"]   # default chain; kinematics_2 (needs annotation
 iters = { root = 150 }
 
 [stages.kinematics_1]
-# The bistable contact terms (still_attraction / motion_clearance below) live INSIDE
-# refine + lbfgs, reweighted every iteration by a per-vertex stillness weight — no
-# separate contact phase. Set their weights to 0 to disable them (pure fit).
+# Auto contacts run INSIDE kinematics_1 (docs/UPDATE_AGENT.md round 3): contact labels are detected
+# ONCE at the refine phase from the settled pose (the readout at the [auto_contact] operating point)
+# and FROZEN, then drive an attraction pulling in-contact-joint verts onto the wall (ann_attraction,
+# kin1 column). Trajectory-smoothness terms (radial_velocity + snap) run alongside — they damp real
+# depth jitter, which also makes the body sit stiller for the drift-gated readout. Chamfer is allowed
+# to worsen; reprojection (init anchor) is the fit gate. ann_attraction[kin1]=0 gives pure fit.
+# Round-3 eval DROPPED the ann_velocity damper (kin1=0): it made false contacts stiller too, raising
+# readout FPR with no F1 gain — see [loss_weights.annotation].
 iters = { full = 300, refine = 200, lbfgs = 30 }
 
 [stages.kinematics_2]
@@ -33,21 +38,30 @@ accel_root          = [  24,   24,   24,    0 ]
 accel_joint         = [  48,   48,   48,    0 ]
 jerk_root           = [ 300,  300,  300,    0 ]
 jerk_joint          = [ 500,  500,  500,    0 ]
+snap_root           = [ 300,  300,    0,    0 ]   # 4th-diff snap ON TOP of accel/jerk — kills the highest-freq root jitter
+snap_joint          = [ 500,  500,    0,    0 ]
+radial_velocity     = [   0,  100,    0,    0 ]   # damp joint velocity along the viewing ray (depth is the worst-constrained axis); kin1 only
 
 [loss_weights.scene]
 penetration         = [   0, 4000, 4000,    0 ]
-# NOTE: an in-loop contact term (pull the body onto the scene wall during kinematics_1) was
-# tried TWICE — round 1 discrete detect→enforce, round 2 continuous drift-blend — and removed
-# both times. It structurally can't work: chamfer wants the body on the human depth cloud,
-# contact wants it on the scene wall, and those disagree by a few cm, so any weight degrades
-# fit (chamfer +1-2.8cm) AND the readout labels (P 0.909→0.885, FPR up) at ~1.3x runtime. The
-# drift-gated READOUT ([contact_gate] below) is the win and needs no body change. Full design +
-# measured gate tables in docs/UPDATE_AGENT.md; do not re-add without new evidence.
+# Round 3 (docs/UPDATE_AGENT.md): contacts are back in kinematics_1, but as FROZEN auto-detected
+# labels driving an attraction + velocity damper (see [loss_weights.annotation] + [auto_contact]) —
+# NOT the removed round-1/2 in-loop bistable terms. The trade is deliberate: chamfer may rise a few
+# cm (the body sits on the human depth cloud, a bit in front of the merged scene wall). Chamfer +
+# penetration are REPORTED; reprojection (init anchor) is the only fit gate; agreement with the
+# manual contact annotation is the objective.
 
 [loss_weights.annotation]
-ann_attraction      = [   0,    0,   20,    0 ]
-ann_repulsion       = [   0,    0, 4000,    0 ]
-ann_velocity        = [   0,    0,  500,    0 ]
+# ann_* are LABEL-DRIVEN terms — labels are AUTO-detected in kinematics_1 (once, frozen), MANUAL
+# in kinematics_2. Same rows, different label source (see [auto_contact] vs the manual annotation).
+# kin1 values are the round-3 eval pick (4 clips): attraction 10 is the label win; ann_velocity is
+# 0 there — damping in-contact joints made FALSE contacts stiller too (readout FPR up, no F1 gain).
+ann_attraction      = [   0,   10,   20,    0 ]   # pull in-contact-joint verts onto the wall
+ann_repulsion       = [   0,    0, 4000,    0 ]   # push no-contact verts off — MANUAL only (auto labels carry no negatives)
+ann_velocity        = [   0,  500,  500,    0 ]   # damp in-contact joints' world velocity. kin1 REVIVED (round 4):
+                                                  # the readout now reads pre-enforcement drift_pre, so the damper can
+                                                  # no longer manufacture false stillness — it is readout/fit-neutral,
+                                                  # a pure naturalness win (in-contact grips 11.5→7.3 cm/s at 500).
 
 [loss_weights.dynamics]
 base_wrench         = [   0,    0,    0,  1.0 ]
@@ -66,14 +80,22 @@ conf_drop_q = 0.3      # PER-FRAME quantile: drop each frame's lowest-confidence
 max_points = 1500
 vertex_subsample = 1000
 chunk = 16
+emphasis_lo = 0.1      # per-vertex chamfer weight floor (torso); log-mapped. Defaults (0.1/10.0/1.0) reproduce the base field
+emphasis_hi = 10.0     # per-vertex chamfer weight ceiling (hands/feet)
+emphasis_radius = 1.0  # geodesic falloff scale (m); smaller = emphasis hugs the extremities
 
 [keypoints]
 score_thresh = 0.3
 include_hands = false
 gm_scale_px = 40.0
+smooth_window_s = 0.35  # §7: Savitzky-Golay-smooth the Sapiens TARGET tracks over this window (s) within
+                        # score-valid runs before optimization (order 2, dyno-preserving); 0 = off (parity).
+                        # 0.35 is the round-4 pick (0.5 breached the reproj gate on 2 clips for no gain).
 
 [reproj_init]
 gm_scale_px = 30.0
+smooth_window_s = 0.35  # §7: same SG smoothing for the init-anchor TARGET tracks (validity = frame_valid);
+                        # the reproj_init GATE is still measured vs the RAW target. 0 = off (parity)
 
 [penetration]
 conf_thresh = 0.1      # residual absolute floor (VGGT conf ≥~1 ⇒ non-binding); the quantile gate below does the work
@@ -98,6 +120,25 @@ max_dist_m = 0.15
 max_pen_m = 0.10
 huber_m = 0.02
 
+# kinematics_1 auto-contact: the frozen-label DETECTOR + the attraction pull band. Detection is
+# the same readout the stage uses, but with LOOSER enter/exit thresholds (a still joint within
+# detect_thresh_m becomes a label) so the attraction has something to pull; the final contact
+# labels are still read off by estimate_contacts at its own tight thresholds. Stillness (window_s /
+# still_m) is shared with [contact_gate] — one notion of "still" everywhere. Guards: max_dist_m
+# MUST exceed band_m and detect_exit_m, and prune_margin_m >= max_dist_m, or detections die silently.
+[auto_contact]
+groups = ["left_hand", "right_hand", "left_foot", "right_foot"]
+detect_thresh_m = 0.08   # enter: a still joint within this of the wall becomes a label (round-3 eval pick; 0.08≈0.12 on labels)
+detect_exit_m   = 0.12   # stay (hysteresis); >= detect_thresh_m
+min_frames = 3
+band_m = 0.15            # attraction pull range for a labeled joint's vertices
+max_dist_m = 0.25        # guard; > band_m and > detect_exit_m
+prune_margin_m = 0.30    # scene_sdf AABB prune; >= max_dist_m
+conf_thresh = 0.1
+still_m = 0.025          # DETECTOR stillness (round 4): pinned here, DECOUPLED from the readout's
+                         # [contact_gate].still_m, so moving the readout recall knob doesn't shift the
+                         # frozen labels / bodies. Omit to inherit [contact_gate] (round-3 shared behaviour).
+
 # drift / stillness gate for the estimate_contacts contact READOUT. A joint is "still"
 # when its NET displacement over a ~1/3 s window is small: instantaneous speed can't
 # separate a gripping hand's mm-jitter (0.1-0.3 m/s) from a slow near-wall pass — net
@@ -108,10 +149,13 @@ huber_m = 0.02
 # attraction, dynamics), where a false positive costs more than a missed one.
 [contact_gate]
 window_s = 0.35        # drift window (~11 frames at 30 fps)
-still_m  = 0.025       # net drift at which stillness = 0.5; raise toward ~0.05 for more recall
+still_m  = 0.03        # READOUT net-drift knob (round-4 operating point 0.03/0.03; was 0.025 in round 3).
+                       # The kin1 label DETECTOR pins its own 0.025 in [auto_contact], so this moves only
+                       # the estimate_contacts recall/precision trade, not the bodies. Raise → more recall.
 
 [contacts]
-close_thresh_m = 0.02  # enter: "just outside" distance counted as contact
+close_thresh_m = 0.03  # enter: "just outside" distance counted as contact (round-4 operating point;
+                       # was 0.02 in round 3 — the user picked the 0.03/still 0.03 middle cell)
 exit_thresh_m = 0.035  # stay: looser hysteresis exit (holds a span, kills 1-frame boundary flicker)
 min_frames = 3         # drop contact spans shorter than this many frames
 max_dist_m = 0.10
@@ -119,6 +163,13 @@ conf_thresh = 0.1      # residual absolute floor (VGGT conf ≥~1 ⇒ non-bindin
 conf_drop_q = 0.1      # quantile gate applied once at scene load: drop the lowest-confidence scene voxels
 normal_k = 16
 prune_margin_m = 0.10
+# §4 span-merge (round 4): bridge a short same-joint contact gap the joint barely moved across AND
+# stayed near the wall throughout — real climbing rarely re-grips, so such a gap is detection flicker.
+# The re-grip guard (merge_sdf_m) blocks leave-and-return: a hand that left the wall spikes gsdf past
+# it mid-gap. merge_dist_m = 0 disables. Pooled 4-clip win: R +0.02 at ΔFPR +0.004 (gate ≤ +0.005).
+merge_dist_m = 0.03    # max endpoint displacement across the gap (m)
+merge_max_gap_s = 2.0  # only bridge gaps shorter than this (s)
+merge_sdf_m = 0.08     # re-grip guard: it stayed within this signed distance of the wall the whole gap
 
 [contact]
 groups = ["left_hand", "right_hand", "left_foot", "right_foot"]

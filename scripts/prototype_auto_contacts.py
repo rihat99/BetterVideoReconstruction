@@ -42,8 +42,8 @@ import torch  # noqa: E402
 
 from tools.geometry.normals import estimate_point_normals  # noqa: E402
 from tools.human_optim import (  # noqa: E402
-    drift_gated_contact, joint_drift, joint_guarded_min_sdf, scene_sdf,
-    vertex_to_joint, world_from_cam,
+    drift_gated_contact, joint_drift, joint_guarded_min_sdf, merge_contact_spans,
+    scene_sdf, vertex_to_joint, world_from_cam,
 )
 from tools.human_optim import paths  # noqa: E402
 from tools.human_optim.qmath import normalize_q  # noqa: E402
@@ -77,7 +77,9 @@ def _rates(tp: int, fp: int, fn: int, tn: int) -> dict:
     prec = tp / (tp + fp) if (tp + fp) else float("nan")
     rec = tp / (tp + fn) if (tp + fn) else float("nan")
     fpr = fp / (fp + tn) if (fp + tn) else float("nan")
-    return dict(tp=tp, fp=fp, fn=fn, tn=tn, precision=prec, recall=rec, fpr=fpr,
+    f1_den = 2 * tp + fp + fn                                      # the user's "correlation" headline
+    f1 = (2 * tp / f1_den) if f1_den else float("nan")            # 0 on all-miss; nan only if nothing scored
+    return dict(tp=tp, fp=fp, fn=fn, tn=tn, precision=prec, recall=rec, fpr=fpr, f1=f1,
                n_pos=tp + fn, n_neg=fp + tn)
 
 
@@ -112,7 +114,7 @@ def _score(pred_coarse: dict[str, np.ndarray], ann: np.ndarray, ann_names: list[
 def _fmt(r: dict) -> str:
     def g(x):
         return "  n/a" if x != x else f"{x:5.3f}"
-    return (f"P={g(r['precision'])} R={g(r['recall'])} FPR={g(r['fpr'])}  "
+    return (f"P={g(r['precision'])} R={g(r['recall'])} F1={g(r['f1'])} FPR={g(r['fpr'])}  "
             f"(pos={r['n_pos']:4d} neg={r['n_neg']:4d})")
 
 
@@ -144,10 +146,11 @@ def _pose_world(mid, betas: torch.Tensor, q: torch.Tensor, scale: float, *, chun
 @torch.no_grad()
 def _readout_signals(mid, betas, q, scale, scene_pts, scene_normals, scene_conf, *,
                      fps: float, cc: dict, cg: dict):
-    """Grid-invariant readout signals for one person: ``(guarded_min_sdf, drift)`` (T,J).
+    """Grid-invariant readout signals for one person: ``(joints_world, guarded_min_sdf, drift)``.
 
     Everything the (close_thresh_m, still_m) sweep does NOT change — the pose, the scene
-    SDF, the guarded per-joint min, and the net window drift — computed once.
+    SDF, the guarded per-joint min, and the net window drift — computed once. ``joints_world``
+    is returned for the §4 span-merge (its distance guard).
     """
     J = mid.num_joints
     v_rest, j_rest = mid.forward_shape(betas[None])
@@ -158,7 +161,7 @@ def _readout_signals(mid, betas, q, scale, scene_pts, scene_normals, scene_conf,
     gsdf = joint_guarded_min_sdf(sdf, dmin, conf, v2j, J,
                                  max_dist_m=float(cc["max_dist_m"]), conf_thresh=float(cc["conf_thresh"]))
     drift = joint_drift(jw, fps=fps, window_s=float(cg["window_s"]))
-    return gsdf, drift
+    return jw, gsdf, drift
 
 
 def _load_scene_readout(pred: Path, cc: dict, cam_centers: torch.Tensor, device: str):
@@ -181,18 +184,23 @@ def _load_contact_cfg(path: Path) -> tuple[dict, dict]:
     cc.setdefault("max_dist_m", 0.10); cc.setdefault("conf_thresh", 0.1)
     cc.setdefault("conf_drop_q", 0.1); cc.setdefault("normal_k", 16)
     cc.setdefault("prune_margin_m", 0.10)
+    cc.setdefault("close_thresh_m", 0.02)   # standard-readout enter distance (funnel reads it; grid sweeps it)
     cc.setdefault("exit_thresh_m", 0.035); cc.setdefault("min_frames", 3)
+    cc.setdefault("merge_max_gap_s", 2.0); cc.setdefault("merge_sdf_m", 0.08)   # §4 span-merge knobs
     cg = cfg.get("contact_gate", {})
     cg.setdefault("window_s", 0.35); cg.setdefault("still_m", 0.025)
     return cc, cg
 
 
 def run_one(pred_dir: str, config_path: Path, device: str, source=None,
-            body_path: Path | None = None) -> list[dict]:
+            body_path: Path | None = None, merge_dist: float = 0.0,
+            gate_source: str = "final") -> list[dict]:
     """Score the readout grid on one clip's ``kinematic_1`` body (or ``body_path``).
 
     Returns a per-person list of ``{clip, oid, valid, grid}`` where ``grid`` maps
     ``(close_thresh_m, still_m) -> _score(...)`` (per-coarse-joint + overall confusion).
+    ``merge_dist > 0`` applies the §4 span-merge; ``gate_source='pre'`` feeds the stillness
+    gate the persisted refine-start ``drift_pre`` (§5) instead of the final-body drift.
     """
     pred = Path(pred_dir)
     cc, cg = _load_contact_cfg(config_path)
@@ -213,11 +221,14 @@ def run_one(pred_dir: str, config_path: Path, device: str, source=None,
 
     ann_path = resolve_annotation_path(source or pred, None)
     ann_all = ann_names = ann_oids = None
+    ann_ignored = None
     if ann_path.exists():
         a = dict(np.load(ann_path, allow_pickle=True))
         ann_all = np.asarray(a["contacts"])                       # (Pa, J_ann, N)
         ann_names = [str(x) for x in a["joint_names"]]
         ann_oids = [int(x) for x in np.asarray(a["object_ids"]).ravel()]
+        ann_ignored = (np.asarray(a["ignored"]).ravel().astype(bool)
+                       if "ignored" in a else np.zeros(len(ann_oids), bool))
 
     results = []
     for p in range(P):
@@ -225,18 +236,33 @@ def run_one(pred_dir: str, config_path: Path, device: str, source=None,
         vmask = np.asarray(kin["valid_mask"][p], bool)
         if ann_all is None or oid not in ann_oids:
             continue                                              # score only annotated people
+        if bool(ann_ignored[ann_oids.index(oid)]):
+            print(f"  [skip] {pred.name} oid={oid}: annotation flagged 'ignored'")
+            continue
         betas = torch.as_tensor(kin["betas"][p], dtype=torch.float32, device=device)
         q = torch.as_tensor(kin["q"][p], dtype=torch.float32, device=device)
         scale = float(kin["scale"][p]) if "scale" in kin else 1.0
-        gsdf, drift = _readout_signals(mid, betas, q, scale, scene_pts, scene_normals, scene_conf,
-                                       fps=fps, cc=cc, cg=cg)
+        jw, gsdf, drift = _readout_signals(mid, betas, q, scale, scene_pts, scene_normals, scene_conf,
+                                           fps=fps, cc=cc, cg=cg)
+        # §5 gate source: read the persisted refine-start drift_pre (pre-enforcement) instead of
+        # the final-body drift. Per-person fallback to computed drift if absent / NaN (old npz).
+        gate_drift = drift
+        if gate_source == "pre" and "drift_pre" in kin:
+            dp = np.asarray(kin["drift_pre"])[p]
+            if np.isfinite(dp).all():
+                gate_drift = torch.as_tensor(dp, dtype=drift.dtype, device=drift.device)
         ann = ann_all[ann_oids.index(oid)]                        # (J_ann, N)
         grid = {}
         for close in _CLOSE_GRID:
             exit_below = max(exit_default, close)
             for still in _STILL_GRID:
-                jc = drift_gated_contact(gsdf, drift, close_thresh_m=close, exit_thresh_m=exit_below,
-                                         min_frames=min_frames, still_m=still).cpu().numpy()
+                jc_t = drift_gated_contact(gsdf, gate_drift, close_thresh_m=close, exit_thresh_m=exit_below,
+                                           min_frames=min_frames, still_m=still)
+                if merge_dist > 0.0:
+                    jc_t = merge_contact_spans(jc_t, jw, gsdf, merge_dist_m=merge_dist,
+                                               max_gap_s=float(cc["merge_max_gap_s"]),
+                                               gap_sdf_m=float(cc["merge_sdf_m"]), fps=fps)
+                jc = jc_t.cpu().numpy()
                 jc[~vmask] = False
                 pred_coarse = {c: _coarse_pred(jc[:, member_cols[c]]) for c in _COARSE}
                 grid[(close, still)] = _score(pred_coarse, ann, ann_names, vmask)
@@ -265,13 +291,17 @@ def _pool(all_res: list[dict], close: float, still: float) -> dict:
     return _rates(**tot)
 
 
-def _print_pooled(all_res: list[dict]) -> None:
-    print("\n=== POOLED across clips (overall P / R / FPR per grid cell) ===")
+def _print_pooled(all_res: list[dict], exclude: set[str]) -> None:
+    pooled = [r for r in all_res if r["clip"] not in exclude]
+    dropped = sorted({r["clip"] for r in all_res if r["clip"] in exclude})
+    print("\n=== POOLED across clips (overall P / R / F1 / FPR per grid cell) ===")
+    if dropped:
+        print(f"  (excluded from the pool as fit outliers, shown per-clip above: {', '.join(dropped)})")
     print(f"  round-1 detector reference: {_ROUND1_DETECTOR}")
     for close in _CLOSE_GRID:
         print(f"  close_thresh={close * 100:.0f}cm")
         for still in _STILL_GRID:
-            print(f"    still={_still_tag(still):>6s}  {_fmt(_pool(all_res, close, still))}")
+            print(f"    still={_still_tag(still):>6s}  {_fmt(_pool(pooled, close, still))}")
 
 
 def _print_per_joint(all_res: list[dict], close: float, still: float) -> None:
@@ -284,6 +314,248 @@ def _print_per_joint(all_res: list[dict], close: float, still: float) -> None:
                 print(f"    {c:12s} {_fmt(sc[c])}")
 
 
+# ─────────────────────── the miss / FP funnel (round-4 §3) ────────────────
+# For every annotated positive coarse-joint-frame the standard readout MISSES, walk the
+# chain and charge the FIRST failing stage; split false positives into still-hover vs smear.
+# The categories partition 1 − recall, so the table says which round-4 move buys what recall.
+# Coarse joints are OR-folded, so each signal is judged by its BEST member: closest gsdf,
+# stillest drift (optimistic — "even the best member fails here"). invisible / unlabeled are
+# span-level (a hold never in the cloud / never pulled); the rest are per-frame.
+
+_FUNNEL_LOOSE_GUARD_M = 0.15   # invisible test: no scene point within this on EVERY span frame = carve gap
+_INF = 1e30                    # joint_guarded_min_sdf's +inf sentinel (finfo.max) reads as this in float32
+_FUNNEL_CATS = ("invisible", "unlabeled", "hovering", "hovering_blind", "moving", "flicker")
+_EXTREMITIES = ("left_hand", "right_hand", "left_foot", "right_foot")
+
+
+@torch.no_grad()
+def _funnel_signals(mid, betas, q, scale, scene_pts, scene_normals, scene_conf, *,
+                    fps: float, cc: dict, cg: dict):
+    """Per-person funnel signals ``(gsdf_tight, gsdf_loose, drift)`` (T,J) torch tensors.
+
+    ``gsdf_tight`` uses the readout's ``[contacts] max_dist_m`` guard (the miss chain's
+    distance test), ``gsdf_loose`` uses :data:`_FUNNEL_LOOSE_GUARD_M` (the visibility test),
+    ``drift`` is the same net window drift the stillness gate consumes.
+    """
+    J = mid.num_joints
+    v_rest, j_rest = mid.forward_shape(betas[None])
+    v2j = vertex_to_joint(v_rest[0], j_rest[0])
+    jw, vw = _pose_world(mid, betas, q, scale)
+    sdf, dmin, conf = scene_sdf(vw, scene_pts, scene_normals, scene_conf,
+                                prune_margin_m=float(cc["prune_margin_m"]))
+    ct = float(cc["conf_thresh"])
+    gsdf_tight = joint_guarded_min_sdf(sdf, dmin, conf, v2j, J, max_dist_m=float(cc["max_dist_m"]), conf_thresh=ct)
+    gsdf_loose = joint_guarded_min_sdf(sdf, dmin, conf, v2j, J, max_dist_m=_FUNNEL_LOOSE_GUARD_M, conf_thresh=ct)
+    drift = joint_drift(jw, fps=fps, window_s=float(cg["window_s"]))
+    return gsdf_tight, gsdf_loose, drift
+
+
+def _spans(mask: np.ndarray) -> list[tuple[int, int]]:
+    """Contiguous ``True`` runs of a 1-D bool array → list of ``(start, end)`` half-open."""
+    out, t, T = [], 0, len(mask)
+    while t < T:
+        if mask[t]:
+            s = t
+            while t < T and mask[t]:
+                t += 1
+            out.append((s, t))
+        else:
+            t += 1
+    return out
+
+
+def _dilate(mask: np.ndarray, k: int) -> np.ndarray:
+    """Dilate a 1-D bool mask by ±``k`` frames (annotation-adjacency for the smear split)."""
+    out = mask.copy()
+    idx = np.flatnonzero(mask)
+    T = len(mask)
+    for d in range(1, k + 1):
+        out[np.clip(idx - d, 0, T - 1)] = True
+        out[np.clip(idx + d, 0, T - 1)] = True
+    return out
+
+
+def _classify_person(gsdf_t, gsdf_l, drift, jc, auto_lab, ann, ann_names, valid,
+                     member_cols, *, close: float, still_m: float, fps: float) -> dict:
+    """Walk each missed annotated-positive coarse-joint-frame to its first-failing stage.
+
+    Returns ``{per, tot, hover_gaps, still_ext_gsdf}``: per-coarse + overall confusion/category
+    counts, the finite hovering gaps (m, feeds §6), and gsdf at still-extremity frames (m).
+    """
+    two_still = 2.0 * float(still_m)
+    adj = max(1, int(round(0.2 * float(fps))))            # ±0.2 s = annotation-adjacent (smear)
+    ann_idx = {n: i for i, n in enumerate(ann_names)}
+    per, hover_gaps, still_ext = {}, [], []
+    for c, M in member_cols.items():
+        if c not in ann_idx or not M:
+            continue
+        a = ann[ann_idx[c]]                                # (N,) tri-state
+        gt_all = gsdf_t[:, M]                               # (N, |M|) tight guard, per member
+        jstar = gt_all.argmin(axis=1)                      # best (closest-to-wall) member per frame
+        rows = np.arange(gt_all.shape[0])
+        gt = gt_all[rows, jstar]                            # (N,) closest member's tight gsdf
+        dr = drift[:, M][rows, jstar]                       # (N,) THAT member's drift (not a stiller sibling's)
+        gl = gsdf_l[:, M].min(axis=1)                       # (N,) any member visible? (loose guard)
+        lab = (auto_lab[:, M] == 1).any(axis=1)            # (N,) any member frozen-labeled
+        pred = jc[:, M].any(axis=1)                        # (N,) standard readout OR-fold
+        pos = valid & (a == 1)
+        neg = valid & (a == 0)
+        cj = {"pos": int(pos.sum()), "hit": int((pos & pred).sum()),
+              "neg": int(neg.sum()), "fp": int((neg & pred).sum())}
+        cj.update({k: 0 for k in _FUNNEL_CATS})
+        if c in _EXTREMITIES:                              # §6 hover evidence: still + visible extremity frames
+            sel = valid & (dr < two_still) & (gt < _INF)
+            still_ext.extend(gt[sel].tolist())
+        fp = neg & pred
+        adj_mask = _dilate(pos, adj)
+        cj["smear"] = int((fp & adj_mask).sum())
+        cj["still_hover"] = int((fp & ~adj_mask).sum())
+        for s, e in _spans(pos):
+            span_invis = bool((gl[s:e] >= _INF).all())     # never any scene point near the joint, whole span
+            span_unlab = bool(not lab[s:e].any())          # the in-loop detector never fired here
+            for t in range(s, e):
+                if pred[t]:
+                    continue                               # a hit, not a miss
+                if span_invis:
+                    cat = "invisible"
+                elif span_unlab:
+                    cat = "unlabeled"
+                elif gt[t] >= close:
+                    cat = "hovering_blind" if gt[t] >= _INF else "hovering"
+                    if cat == "hovering":
+                        hover_gaps.append(float(gt[t]))
+                elif dr[t] >= two_still:
+                    cat = "moving"
+                else:
+                    cat = "flicker"
+                cj[cat] += 1
+        per[c] = cj
+    tot = _merge(list(per.values()))
+    return dict(per=per, tot=tot, hover_gaps=hover_gaps, still_ext_gsdf=still_ext)
+
+
+def _funnel_one(pred_dir: str, config_path: Path, device: str, source=None,
+                body_path: Path | None = None) -> list[dict]:
+    """Run the funnel on one clip's ``kinematic_1`` body (or ``body_path``) → per-person dicts."""
+    pred = Path(pred_dir)
+    cc, cg = _load_contact_cfg(config_path)
+    close = float(cc["close_thresh_m"]); still_m = float(cg["still_m"])
+    exit_below = max(float(cc["exit_thresh_m"]), close); min_frames = int(cc["min_frames"])
+    bpath = Path(body_path) if body_path is not None else paths.body_path(pred, "kinematic_1")
+    kin = dict(np.load(bpath, allow_pickle=True))
+    if "auto_labels" not in kin:
+        raise SystemExit(f"{bpath} has no 'auto_labels' — re-run kinematics_1 with round-4 Task 0 first")
+    tr = dict(np.load(pred / "geometry" / "transform.npz", allow_pickle=True))
+    N, P = int(kin["num_frames"]), int(kin["num_people"])
+    object_ids = np.asarray(kin["object_ids"], np.int32)
+    fps = float(tr.get("fps", kin.get("fps", 30.0)))
+    extr = torch.as_tensor(tr["extrinsics"], dtype=torch.float32, device=device)
+    cam_centers = world_from_cam(extr)[:, :3, 3]
+    scene_pts, scene_normals, scene_conf = _load_scene_readout(pred, cc, cam_centers, device)
+
+    mid = load_smplx_mid(_DEFAULT_SMPLX_MODEL, device)
+    member_cols = {c: _members(list(mid.joint_names), c) for c in _COARSE}
+
+    ann_path = resolve_annotation_path(source or pred, None)
+    if not ann_path.exists():
+        return []
+    a = dict(np.load(ann_path, allow_pickle=True))
+    ann_all = np.asarray(a["contacts"])
+    ann_names = [str(x) for x in a["joint_names"]]
+    ann_oids = [int(x) for x in np.asarray(a["object_ids"]).ravel()]
+    ann_ignored = (np.asarray(a["ignored"]).ravel().astype(bool)
+                   if "ignored" in a else np.zeros(len(ann_oids), bool))
+
+    results = []
+    for p in range(P):
+        oid = int(object_ids[p])
+        vmask = np.asarray(kin["valid_mask"][p], bool)
+        if oid not in ann_oids:
+            continue
+        if bool(ann_ignored[ann_oids.index(oid)]):
+            print(f"  [skip] {pred.name} oid={oid}: annotation flagged 'ignored'")
+            continue
+        betas = torch.as_tensor(kin["betas"][p], dtype=torch.float32, device=device)
+        q = torch.as_tensor(kin["q"][p], dtype=torch.float32, device=device)
+        scale = float(kin["scale"][p]) if "scale" in kin else 1.0
+        gt_t, gl_t, dr_t = _funnel_signals(mid, betas, q, scale, scene_pts, scene_normals,
+                                           scene_conf, fps=fps, cc=cc, cg=cg)
+        jc = drift_gated_contact(gt_t, dr_t, close_thresh_m=close, exit_thresh_m=exit_below,
+                                 min_frames=min_frames, still_m=still_m).cpu().numpy()
+        jc[~vmask] = False
+        auto_lab = np.asarray(kin["auto_labels"][p], np.int8)
+        ann = ann_all[ann_oids.index(oid)]
+        cls = _classify_person(gt_t.cpu().numpy(), gl_t.cpu().numpy(), dr_t.cpu().numpy(),
+                               jc, auto_lab, ann, ann_names, vmask, member_cols,
+                               close=close, still_m=still_m, fps=fps)
+        results.append(dict(clip=pred.name, oid=oid, valid=int(vmask.sum()), n=N, **cls))
+    return results
+
+
+def _merge(dicts: list[dict]) -> dict:
+    """Sum the integer entries of several confusion/category dicts key-wise."""
+    out: dict[str, int] = {}
+    for d in dicts:
+        for k, v in d.items():
+            if isinstance(v, (int, np.integer)):
+                out[k] = out.get(k, 0) + int(v)
+    return out
+
+
+def _frac(n: int, d: int) -> float:
+    return (n / d) if d else float("nan")
+
+
+def _pct(n: int, d: int) -> float:
+    return (100.0 * n / d) if d else float("nan")
+
+
+def _stat(xs: list) -> str:
+    if not xs:
+        return "n=0"
+    a = np.asarray(xs)
+    return (f"median {np.median(a) * 100:.1f}cm "
+            f"[p25 {np.percentile(a, 25) * 100:.1f}, p75 {np.percentile(a, 75) * 100:.1f}] n={len(a)}")
+
+
+def _miss_line(t: dict) -> str:
+    def pc(k):
+        return f"{_pct(t.get(k, 0), t['pos']):.0f}%"
+    hb = f" (blind {pc('hovering_blind')})" if t.get("hovering_blind", 0) else ""
+    return (f"invisible {pc('invisible')}  unlabeled {pc('unlabeled')}  "
+            f"hovering {pc('hovering')}{hb}  moving {pc('moving')}  flicker {pc('flicker')}")
+
+
+def _print_funnel_block(t: dict, gaps: list, sext: list) -> None:
+    miss = t["pos"] - t["hit"]
+    print(f"  positives {t['pos']}  recall {_frac(t['hit'], t['pos']):.3f}  (hit {t['hit']}, miss {miss})")
+    print(f"  miss causes (% of positives): {_miss_line(t)}")
+    print(f"  hovering gap:            {_stat(gaps)}")
+    print(f"  still-extremity gsdf:    {_stat(sext)}")
+    print(f"  FP: neg {t['neg']}  fp {t['fp']}  fpr {_frac(t['fp'], t['neg']):.3f}  "
+          f"= still-hover {_pct(t.get('still_hover', 0), t['fp']):.0f}%  smear {_pct(t.get('smear', 0), t['fp']):.0f}%")
+
+
+def _print_funnel(all_res: list[dict], exclude: set[str]) -> None:
+    for res in all_res:
+        print(f"\n### FUNNEL — {res['clip']} oid={res['oid']} ({res['valid']}/{res['n']} valid) ###")
+        _print_funnel_block(res["tot"], res["hover_gaps"], res["still_ext_gsdf"])
+    pooled = [r for r in all_res if r["clip"] not in exclude]
+    dropped = sorted({r["clip"] for r in all_res if r["clip"] in exclude})
+    tot = _merge([r["tot"] for r in pooled])
+    gaps = [g for r in pooled for g in r["hover_gaps"]]
+    sext = [g for r in pooled for g in r["still_ext_gsdf"]]
+    print(f"\n### FUNNEL POOLED{' (excl ' + ', '.join(dropped) + ')' if dropped else ''} ###")
+    _print_funnel_block(tot, gaps, sext)
+    print("  per-coarse (pooled extremities):")
+    for c in _EXTREMITIES:
+        cjs = [r["per"][c] for r in pooled if c in r["per"]]
+        if not cjs:
+            continue
+        cj = _merge(cjs)
+        print(f"    {c:11s} pos {cj['pos']:4d}  R {_frac(cj['hit'], cj['pos']):.2f}  | {_miss_line(cj)}")
+
+
 def main(argv=None) -> int:
     ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     ap.add_argument("--predictions", nargs="+", required=True, help="one or more clip dirs")
@@ -292,18 +564,44 @@ def main(argv=None) -> int:
     ap.add_argument("--device", default="cuda")
     ap.add_argument("--ref-close", type=float, default=0.02, help="per-joint report cell: close_thresh_m")
     ap.add_argument("--ref-still", type=float, default=0.025, help="per-joint report cell: still_m")
+    ap.add_argument("--body-path", default=None,
+                    help="score this body npz instead of kinematic_1.npz (requires a single --predictions)")
+    ap.add_argument("--exclude-from-pool", nargs="*", default=["sport_climb"],
+                    help="clip names shown per-clip but dropped from the POOLED row (fit outliers)")
+    ap.add_argument("--funnel", action="store_true",
+                    help="run the round-4 miss/FP funnel (needs auto_labels in the body npz) instead of the grid")
+    ap.add_argument("--merge-dist", type=float, default=0.0,
+                    help="§4 span-merge distance (m) applied to the grid readout; 0 = off")
+    ap.add_argument("--gate-source", choices=["final", "pre"], default="final",
+                    help="§5 stillness-gate drift source: final-body (default) or persisted refine-start drift_pre")
     args = ap.parse_args(argv)
+    body_path = Path(args.body_path) if args.body_path else None
+    if body_path is not None and len(args.predictions) != 1:
+        raise SystemExit("--body-path requires exactly one --predictions")
 
-    all_res: list[dict] = []
+    if args.funnel:
+        all_res: list[dict] = []
+        for pd in args.predictions:
+            all_res.extend(_funnel_one(pd, args.config, args.device, source=args.source, body_path=body_path))
+        if not all_res:
+            print("no annotated people found in the given clips")
+            return 1
+        _print_funnel(all_res, set(args.exclude_from_pool))
+        return 0
+
+    all_res = []
     for pd in args.predictions:
-        all_res.extend(run_one(pd, args.config, args.device, source=args.source))
+        all_res.extend(run_one(pd, args.config, args.device, source=args.source, body_path=body_path,
+                               merge_dist=args.merge_dist, gate_source=args.gate_source))
     if not all_res:
         print("no annotated people found in the given clips")
         return 1
+    if args.merge_dist > 0.0 or args.gate_source != "final":
+        print(f"[readout: merge_dist={args.merge_dist} gate_source={args.gate_source}]")
     for res in all_res:
         _print_clip_grid(res)
     _print_per_joint(all_res, args.ref_close, args.ref_still)
-    _print_pooled(all_res)
+    _print_pooled(all_res, set(args.exclude_from_pool))
     return 0
 
 

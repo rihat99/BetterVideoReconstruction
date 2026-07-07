@@ -21,6 +21,7 @@ chunked-batched machinery the per-iteration losses need.
 
 from __future__ import annotations
 
+import numpy as np
 import torch
 
 
@@ -299,3 +300,66 @@ def drift_gated_contact(
     gated = torch.where(w > 0.0, guarded_min_sdf, torch.full_like(guarded_min_sdf, INF))
     return hysteresis_spans(gated, enter_below=close_thresh_m,
                             exit_below=exit_thresh_m, min_frames=min_frames)
+
+
+def _bool_spans(col) -> list[tuple[int, int]]:
+    """Contiguous ``True`` runs of a 1-D numpy bool array → list of ``(start, end)`` half-open."""
+    out, t, T = [], 0, len(col)
+    while t < T:
+        if col[t]:
+            s = t
+            while t < T and col[t]:
+                t += 1
+            out.append((s, t))
+        else:
+            t += 1
+    return out
+
+
+def merge_contact_spans(
+    jc: torch.Tensor,               # (T, J) bool contact readout
+    joints_world: torch.Tensor,     # (T, J, 3) posed world-frame joints
+    guarded_min_sdf: torch.Tensor,  # (T, J) guarded per-joint min signed distance (m)
+    *,
+    merge_dist_m: float,
+    max_gap_s: float,
+    gap_sdf_m: float,
+    fps: float,
+) -> torch.Tensor:
+    """Bridge short same-joint contact gaps where the joint stayed put **and** near the wall.
+
+    Real climbing has few contact switches: when a joint's two contact spans are separated
+    by a brief gap that the joint barely moved across *and* stayed near the wall throughout,
+    it never left the hold and the gap is detection flicker. Per joint, for consecutive
+    spans (last contact frame ``t1``, next span's first contact frame ``t2``) with
+    ``(t2 − t1) / fps ≤ max_gap_s``, the gap ``[t1+1, t2)`` is filled iff:
+
+      * ``‖p[t2] − p[t1]‖ ≤ merge_dist_m`` — the joint returns to where it left, **and**
+      * ``max(guarded_min_sdf[t1 … t2]) < gap_sdf_m`` — the **re-grip guard**: it stayed
+        near the wall the whole gap. A hand that leaves a hold, wanders, and re-grips the
+        *same* hold also ends where it started, but was genuinely off the wall in between
+        (its mid-gap ``gsdf`` spikes past ``gap_sdf_m`` / to ``+inf``) — so it is not filled.
+
+    Pure per-joint temporal post-process, no gradients. ``merge_dist_m ≤ 0`` disables it.
+    """
+    if merge_dist_m <= 0.0:
+        return jc
+    T, J = jc.shape
+    max_gap = int(round(float(max_gap_s) * float(fps)))
+    out = jc.clone()
+    jc_np = jc.detach().cpu().numpy()
+    jw = joints_world.detach().cpu().numpy()
+    gs = guarded_min_sdf.detach().cpu().numpy()
+    for j in range(J):
+        spans = _bool_spans(jc_np[:, j])
+        for a in range(len(spans) - 1):
+            t1 = spans[a][1] - 1            # last contact frame of span a
+            t2 = spans[a + 1][0]           # first contact frame of span b
+            if (t2 - t1) > max_gap:
+                continue                   # gap too long to be flicker
+            if float(np.linalg.norm(jw[t2, j] - jw[t1, j])) > merge_dist_m:
+                continue                   # the joint really moved between grips
+            if float(gs[t1:t2 + 1, j].max()) >= gap_sdf_m:
+                continue                   # re-grip guard: it left the wall in between
+            out[t1 + 1:t2, j] = True
+    return out

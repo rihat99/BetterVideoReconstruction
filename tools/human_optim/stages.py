@@ -149,12 +149,14 @@ def _append_classic(out: dict, mid, betas_T: torch.Tensor, q_opt: torch.Tensor) 
 
 
 def _save_body(out_path: Path, mid, out: dict, betas_out: list, object_ids: np.ndarray,
-               valid_mask: np.ndarray, N: int, P: int, H: int, W: int, fps: float) -> dict:
+               valid_mask: np.ndarray, N: int, P: int, H: int, W: int, fps: float,
+               extra: dict | None = None) -> dict:
     """Assemble + write the refined-body npz (the shared kinematic_1 / kinematic_2 schema).
 
     Body optimized at native (converter) size — no per-body scale now that the metric
     geometry is human-anchored upstream. ``scale`` is kept as ones so the consumers that
-    re-apply it about the pelvis stay a no-op.
+    re-apply it about the pelvis stay a no-op. ``extra`` (optional) is merged in as extra
+    arrays — ``kinematics_1`` uses it to persist ``drift_pre`` / ``auto_labels`` (round 4).
     """
     nb = mid.num_joints
     parents = [-1] + [int(mid.parent_tree[0, i]) for i in range(1, nb)]
@@ -175,6 +177,8 @@ def _save_body(out_path: Path, mid, out: dict, betas_out: list, object_ids: np.n
         fps=np.float32(fps), frame=np.array("world", dtype="U8"),
         model_type=np.array("smplx_mid", dtype="U16"), num_betas=np.int32(10),
     )
+    if extra:
+        save.update(extra)
     np.savez(out_path, **save)
     return save
 
@@ -243,21 +247,47 @@ def run_kinematic(source, pred: Path, cfg: HumanOptimConfig, stages_to_run,
     extr = torch.as_tensor(tr["extrinsics"], dtype=torch.float32, device=device)       # (N,4,4)
     K = torch.as_tensor(tr["intrinsics_px_orig"], dtype=torch.float32, device=device)  # (N,3,3)
     wfc = world_from_cam(extr)
+    cam_centers = wfc[:, :3, 3]                     # (N,3) world camera centers (radial-velocity damper)
     scene_pts, scene_normals, scene_conf = _load_scene(pred, knobs, wfc, device, tag)
 
     mid = load_smplx_mid(_DEFAULT_SMPLX_MODEL, device)
     fvids = torch.as_tensor([int(x) for x in mid.frame_vertex_ids], dtype=torch.long, device=device)
     corr = build_correspondence(list(mid.frame_names), include_hands=bool(knobs["keypoints"]["include_hands"]), device=device)
     sub = subsample_indices(mid.num_vertices, int(knobs["chamfer"]["vertex_subsample"]), device=device)
-    # Per-vertex body-part emphasis for chamfer (geodesic linear·r1.0): extremities ×10, torso ÷10.
+    # Per-vertex body-part emphasis for chamfer (geodesic linear, log-mapped to [lo, hi] over
+    # radius m): extremities ×hi, torso ×lo. Defaults (0.1 / 10.0 / 1.0) reproduce the base field.
     chamfer_w = torch.as_tensor(
-        geodesic_endeffector_weights(mid.vertices_template, mid.faces, mid.lbs_weights, mid.joint_names),
+        geodesic_endeffector_weights(
+            mid.vertices_template, mid.faces, mid.lbs_weights, mid.joint_names,
+            lo=float(knobs["chamfer"].get("emphasis_lo", 0.1)),
+            hi=float(knobs["chamfer"].get("emphasis_hi", 10.0)),
+            radius=float(knobs["chamfer"].get("emphasis_radius", 1.0))),
         dtype=torch.float32, device=device)[sub]                                   # (Ns,)
     torch.manual_seed(0)
     phases = _kinematic_phases(cfg, stages_to_run)
 
+    # kinematics_1 auto-contact: resolve the [auto_contact] groups → SMPLXMid joint indices and
+    # fold in the shared [contact_gate] stillness. optimize_person detects labels once at the
+    # refine phase, guarded on ann_attraction[kinematics_1] > 0, so this is inert at weight 0.
+    auto_cfg = None
+    if "auto_contact" in knobs and "kinematics_1" in stages_to_run:
+        ac = dict(knobs["auto_contact"])
+        # Detector stillness: [auto_contact] may pin its OWN window_s / still_m — decoupled from the
+        # readout's [contact_gate] so the readout recall knob (round-4 operating point) can move
+        # WITHOUT changing the frozen labels / bodies; otherwise it inherits [contact_gate] (one
+        # shared notion of "still", the round-3 behaviour).
+        ac.setdefault("window_s", float(knobs["contact_gate"]["window_s"]))
+        ac.setdefault("still_m", float(knobs["contact_gate"]["still_m"]))
+        idx = {n: i for i, n in enumerate(mid.joint_names)}
+        members = {g: [idx[j] for j in _ANN_TO_SMPLX.get(g, []) if j in idx]
+                   for g in ac.get("groups", [])}
+        ac["group_members"] = members
+        ac["group_joints"] = sorted({i for v in members.values() for i in v})
+        auto_cfg = ac
+
     out = _new_out()
     betas_out = []
+    drift_pre_p, auto_labels_p = [], []   # round-4 §2: refine-start drift + frozen labels, per person
     for p in range(P):
         oid = int(object_ids[p])
         vmask = np.asarray(sp["valid_mask"][p], dtype=bool)
@@ -284,19 +314,29 @@ def run_kinematic(source, pred: Path, cfg: HumanOptimConfig, stages_to_run,
         frame_valid = torch.as_tensor(vmask, dtype=torch.bool, device=device)
 
         print(f"[{tag}] person obj_id={oid} ({int(vmask.sum())}/{N} valid) …")
-        q_opt, before, after = optimize_person(
+        q_opt, before, after, aux = optimize_person(
             mid, betas_mean, q_world, extrinsics=extr, K=K, depth_points=depth,
             target_kp=target_kp, scores=scores, corr=corr, frame_vertex_ids=fvids,
             sub=sub, knobs=knobs, phases=phases,
             scene_pts=scene_pts, scene_normals=scene_normals, scene_conf=scene_conf, fps=fps,
-            chamfer_weights=chamfer_w, frame_valid=frame_valid)
+            chamfer_weights=chamfer_w, frame_valid=frame_valid,
+            cam_centers=cam_centers, auto_contact=auto_cfg)
         print(f"    before: {before}\n    after:  {after}")
         _append_classic(out, mid, betas_T, q_opt)
         betas_out.append(betas_mean.cpu().numpy().astype(np.float32))
+        # Persist the detection-time signals (round-4 §2). None ⇒ detection did not run
+        # for this person (no scene / weight 0): write NaN drift + -1 labels; consumers
+        # then fall back to computing drift from the body.
+        dp, al = aux["drift_pre"], aux["auto_labels"]
+        drift_pre_p.append(dp.cpu().numpy().astype(np.float32) if dp is not None
+                           else np.full((N, mid.num_joints), np.nan, np.float32))
+        auto_labels_p.append(al.cpu().numpy().astype(np.int8) if al is not None
+                             else np.full((N, mid.num_joints), -1, np.int8))
 
     body = "kinematic_1" if "kinematics_1" in stages_to_run else "root"
     out_path = paths.body_path(pred, body)
-    save = _save_body(out_path, mid, out, betas_out, object_ids, sp["valid_mask"], N, P, H, W, fps)
+    extra = dict(drift_pre=np.stack(drift_pre_p, 0), auto_labels=np.stack(auto_labels_p, 0))
+    save = _save_body(out_path, mid, out, betas_out, object_ids, sp["valid_mask"], N, P, H, W, fps, extra=extra)
     print(f"[{tag}] wrote {out_path}")
 
     if overlay and body == "kinematic_1":
@@ -379,6 +419,7 @@ def run_kinematics_2(source, pred: Path, cfg: HumanOptimConfig, device: str, *,
     extr = torch.as_tensor(tr["extrinsics"], dtype=torch.float32, device=device)
     K = torch.as_tensor(tr["intrinsics_px_orig"], dtype=torch.float32, device=device)
     wfc = world_from_cam(extr)
+    cam_centers = wfc[:, :3, 3]                     # (N,3) world camera centers (radial-velocity damper)
     scene_pts, scene_normals, scene_conf = _load_scene(pred, knobs, wfc, device, tag)
 
     ann_path = resolve_annotation_path(source, annotations)
@@ -393,9 +434,14 @@ def run_kinematics_2(source, pred: Path, cfg: HumanOptimConfig, device: str, *,
     fvids = torch.as_tensor([int(x) for x in mid.frame_vertex_ids], dtype=torch.long, device=device)
     corr = build_correspondence(list(mid.frame_names), include_hands=bool(knobs["keypoints"]["include_hands"]), device=device)
     sub = subsample_indices(mid.num_vertices, int(knobs["chamfer"]["vertex_subsample"]), device=device)
-    # Per-vertex body-part emphasis for chamfer (geodesic linear·r1.0): extremities ×10, torso ÷10.
+    # Per-vertex body-part emphasis for chamfer (geodesic linear, log-mapped to [lo, hi] over
+    # radius m): extremities ×hi, torso ×lo. Defaults (0.1 / 10.0 / 1.0) reproduce the base field.
     chamfer_w = torch.as_tensor(
-        geodesic_endeffector_weights(mid.vertices_template, mid.faces, mid.lbs_weights, mid.joint_names),
+        geodesic_endeffector_weights(
+            mid.vertices_template, mid.faces, mid.lbs_weights, mid.joint_names,
+            lo=float(knobs["chamfer"].get("emphasis_lo", 0.1)),
+            hi=float(knobs["chamfer"].get("emphasis_hi", 10.0)),
+            radius=float(knobs["chamfer"].get("emphasis_radius", 1.0))),
         dtype=torch.float32, device=device)[sub]                                   # (Ns,)
     torch.manual_seed(0)
     phases = _kinematics_2_phases(cfg)
@@ -432,12 +478,13 @@ def run_kinematics_2(source, pred: Path, cfg: HumanOptimConfig, device: str, *,
             print(f"[{tag}] person obj_id={oid}: NO annotation (re-refine only)")
 
         print(f"[{tag}] person obj_id={oid} ({int(vmask.sum())}/{N} valid) …")
-        q_opt, before, after = optimize_person(
+        q_opt, before, after, _ = optimize_person(
             mid, betas_mean, q_world, extrinsics=extr, K=K, depth_points=depth,
             target_kp=target_kp, scores=scores, corr=corr, frame_vertex_ids=fvids,
             sub=sub, knobs=knobs, phases=phases,
             scene_pts=scene_pts, scene_normals=scene_normals, scene_conf=scene_conf, fps=fps,
-            contact_labels=contact_labels, chamfer_weights=chamfer_w, frame_valid=frame_valid)
+            contact_labels=contact_labels, chamfer_weights=chamfer_w, frame_valid=frame_valid,
+            cam_centers=cam_centers)
         print(f"    before: {before}\n    after:  {after}")
         _append_classic(out, mid, betas_T, q_opt)
         betas_out.append(betas_mean.cpu().numpy().astype(np.float32))

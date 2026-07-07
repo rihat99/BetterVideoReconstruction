@@ -30,7 +30,9 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
+import numpy as np
 import torch
+from scipy.signal import savgol_filter
 
 # (SMPL-X-mid joint index, Goliath-308 index) — joint centres.
 _BODY_PAIRS: tuple[tuple[int, int], ...] = (
@@ -88,3 +90,49 @@ def build_correspondence(
 
     long = lambda x: torch.tensor(x, dtype=torch.long, device=device)
     return Correspondence(joint_model=long(joint_model), lm_frame=long(lm_frame), sap=long(sap))
+
+
+def smooth_tracks(x: np.ndarray, valid: np.ndarray, *, window_s: float, fps: float,
+                  order: int = 2) -> np.ndarray:
+    """Savitzky–Golay-smooth 2D tracks within runs of consecutive valid frames (round-4 §7).
+
+    ``x`` ``(T, K, C)`` and ``valid`` ``(T, K)`` bool → a smoothed **copy** of ``x``. A local
+    degree-``order`` polynomial fit over ~``window_s`` seconds (an odd frame window) is applied
+    **independently within each maximal run of consecutive valid frames** of each track ``k`` —
+    never across a tracking gap, so a keypoint dropping below score (or an untracked frame) does
+    not bleed a held value into its neighbours. Runs shorter than ``order + 1`` frames are left
+    unchanged; a run shorter than the full window uses a shrunk odd window; ends of a run use SG's
+    polynomial edge interpolation. ``order = 2`` preserves quadratic (accelerating / dyno) motion,
+    so real fast moves survive while per-frame jitter is removed. ``window_s <= 0`` is a no-op.
+
+    These are *measurements* (fixed optimizer inputs); smoothing one is not the round-1 circularity
+    (nothing optimized feeds back into ``x``). The caller keeps the raw tensor for the gate metric.
+    """
+    if window_s <= 0.0:
+        return x
+    T = x.shape[0]
+    w_full = int(round(float(window_s) * float(fps)))
+    if w_full % 2 == 0:
+        w_full += 1
+    if w_full <= order:
+        return x
+    out = x.copy()
+    for k in range(x.shape[1]):
+        vk = valid[:, k]
+        t = 0
+        while t < T:
+            if not vk[t]:
+                t += 1
+                continue
+            s = t
+            while t < T and vk[t]:
+                t += 1
+            L = t - s
+            if L <= order:
+                continue                                  # too short to fit the polynomial
+            w = min(w_full, L if L % 2 == 1 else L - 1)
+            if w <= order:
+                continue
+            out[s:t, k] = savgol_filter(x[s:t, k], window_length=w, polyorder=order,
+                                        axis=0, mode="interp")
+    return out

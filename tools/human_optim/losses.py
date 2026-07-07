@@ -186,6 +186,113 @@ def chamfer_loss(
     return terms.sum() / fvalid.sum().clamp_min(1)
 
 
+def scene_signed_distance(
+    vertices_sub: torch.Tensor,    # (T, Ns, 3) subsampled posed vertices (grad through q)
+    scene_padded: torch.Tensor,    # (T, Mc, 3) per-frame candidate scene points, padded
+    normal_padded: torch.Tensor,   # (T, Mc, 3) outward unit normals, padded
+    conf_padded: torch.Tensor,     # (T, Mc) point confidence, padded
+    scene_valid: torch.Tensor,     # (T, Mc) bool — real (vs padding) candidates
+    *,
+    chunk: int = 16,
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+    """One detached nearest-neighbour pass, shared by the three scene losses.
+
+    For each subsampled body vertex, find its nearest *candidate* scene point ``p``
+    (with outward normal ``n``) and return the point-cloud SDF signed distance
+    ``s = (v − p)·n`` — negative behind the surface — plus that point's Euclidean
+    distance and confidence. The nearest-neighbour search is detached (an argmin is
+    not differentiable); gradients flow through ``v`` in ``s`` only. Penetration,
+    contact attraction and clearance repulsion differ *only* in the penalty they put
+    on ``s`` (:func:`penetration_penalty` / :func:`attraction_penalty` /
+    :func:`clearance_penalty`), so running several on the same vertices (the round-3
+    default: penetration + contact attraction) shares this one ``cdist`` instead of
+    repeating it per loss.
+
+    Chunked over frames — one batched ``cdist`` + gather per chunk — so the distance
+    tensor stays bounded by ``chunk`` while the returned signals span the clip.
+    Returns ``(sgn, dmin, conf, has)``: ``sgn (T, Ns)`` signed distance (grad through
+    ``vertices_sub``), detached ``dmin (T, Ns)`` Euclidean NN distance + ``conf
+    (T, Ns)`` NN-point confidence, and ``has (T, 1)`` bool = the frame has any
+    candidate. An empty candidate cloud (``Mc == 0``) returns all-far / no-candidate
+    signals, so every penalty head reduces to zero.
+    """
+    T, Ns = vertices_sub.shape[0], vertices_sub.shape[1]
+    dev, dt = vertices_sub.device, vertices_sub.dtype
+    INF = torch.finfo(dt).max
+    if scene_padded.shape[1] == 0:            # no candidates in any frame
+        return (vertices_sub.new_zeros((T, Ns)),
+                torch.full((T, Ns), INF, device=dev, dtype=dt),
+                torch.zeros((T, Ns), device=dev, dtype=conf_padded.dtype),
+                torch.zeros((T, 1), device=dev, dtype=torch.bool))
+    sgns, dmins, confs = [], [], []
+    for s0 in range(0, T, chunk):
+        e0 = min(s0 + chunk, T)
+        V = vertices_sub[s0:e0]                                       # (b, Ns, 3)
+        with torch.no_grad():
+            d = torch.cdist(V, scene_padded[s0:e0])
+            d = d.masked_fill(~scene_valid[s0:e0][:, None, :], INF)
+            dmin, idx = d.min(dim=2)                                  # (b, Ns) — detached NN
+        gi = idx[..., None].expand(-1, -1, 3)
+        p = torch.gather(scene_padded[s0:e0], 1, gi)                  # (b, Ns, 3)
+        n = torch.gather(normal_padded[s0:e0], 1, gi)
+        c = torch.gather(conf_padded[s0:e0], 1, idx)                  # (b, Ns)
+        sgns.append(((V - p) * n).sum(dim=-1))                        # (b, Ns) signed, diff through V
+        dmins.append(dmin)
+        confs.append(c)
+    return (torch.cat(sgns, 0), torch.cat(dmins, 0), torch.cat(confs, 0),
+            scene_valid.any(dim=1, keepdim=True))
+
+
+def _huber(excess: torch.Tensor, huber_m: float) -> torch.Tensor:
+    """Huber ramp on a non-negative ``excess``: quadratic ``≤ huber_m``, linear beyond."""
+    return torch.where(excess <= huber_m, 0.5 * excess * excess,
+                       huber_m * (excess - 0.5 * huber_m))
+
+
+def penetration_penalty(
+    sgn: torch.Tensor,     # (T, Ns) signed distance (grad through the posed vertex)
+    dmin: torch.Tensor,    # (T, Ns) detached Euclidean NN distance
+    conf: torch.Tensor,    # (T, Ns) detached NN-point confidence
+    has: torch.Tensor,     # (T, 1) bool — frame has a candidate
+    *,
+    conf_thresh: float,
+    margin_m: float,
+    max_dist_m: float,
+    max_pen_m: float,
+    huber_m: float,
+    active_mask: torch.Tensor | None = None,  # (T, Ns) bool — restrict to these verts
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    """Soft repulsion pushing the body mesh out of the scene (penalty head on the SDF).
+
+    Penalty = dead-zone + robust kernel on the penetration excess ``e =
+    relu(−s − margin_m)``: no cost until penetration exceeds ``margin_m`` (tolerates
+    soft tissue + depth/keypoint error), then a Huber ramp (quadratic ``≤ huber_m``,
+    linear beyond — one deeply-buried vertex can't dominate). A vertex is gated out
+    when its matched scene point is low confidence (``conf_thresh``), farther than
+    ``max_dist_m`` (not near a surface / cloud hole), or "penetrating" deeper than
+    ``max_pen_m`` (almost always a wrong correspondence behind an occluder).
+    ``active_mask`` further restricts which vertices repel (kinematics_2 uses it for a
+    stronger repulsion on no-contact joints). The gradient through ``s`` pushes the
+    vertex out along the surface normal. Returns ``(loss, mean_depth_cm,
+    n_penetrating)`` — ``loss`` the mean robust penalty over all active
+    vertex-instances jointly (Σ ÷ total active count), the latter two detached."""
+    active = (conf > conf_thresh) & (dmin < max_dist_m) & (sgn.detach() > -max_pen_m) & has
+    if active_mask is not None:
+        active = active & active_mask
+    rho = _huber(torch.relu(-sgn - margin_m), huber_m)               # dead-zone + Huber
+    a = active.to(rho.dtype)
+    n_active = a.sum()
+    if not bool(n_active > 0):
+        z = sgn.new_zeros(())
+        return z, z, sgn.new_zeros((), dtype=torch.long)
+    loss = (rho * a).sum() / n_active.clamp_min(1)                   # joint mean over all active verts
+    with torch.no_grad():
+        pen = active & (sgn < 0)                                     # actually-penetrating verts
+        depth_cm = ((-sgn[pen]).sum() / pen.sum().clamp_min(1)) * 100.0
+        n_pen = pen.sum()
+    return loss, depth_cm.detach(), n_pen
+
+
 def scene_penetration(
     vertices_sub: torch.Tensor,    # (T, Ns, 3) subsampled posed vertices (all — not vis-gated)
     scene_padded: torch.Tensor,    # (T, Mc, 3) per-frame candidate scene points, padded
@@ -201,77 +308,58 @@ def scene_penetration(
     active_mask: torch.Tensor | None = None,  # (T, Ns) bool — restrict to these verts
     chunk: int = 16,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-    """Soft repulsion pushing the body mesh out of the static scene cloud.
+    """Penetration loss = :func:`scene_signed_distance` + :func:`penetration_penalty`.
 
-    A point-cloud SDF: for each subsampled body vertex, the nearest *candidate*
-    scene point gives a signed distance ``s = (v − p)·n`` (``n`` the scene
-    normal). ``s < 0`` ⇒ the vertex is behind the surface (penetrating). The
-    nearest-neighbour search is detached (an argmin is not differentiable);
-    gradients flow through ``v`` in the signed distance, so the repulsion pushes
-    the vertex out **along the surface normal** (the SDF gradient).
+    Kept as a standalone entry point (the diagnostics pass + external callers); the
+    per-iteration optimizer shares one :func:`scene_signed_distance` across the scene
+    penalties instead of calling this per loss."""
+    sgn, dmin, conf, has = scene_signed_distance(
+        vertices_sub, scene_padded, normal_padded, conf_padded, scene_valid, chunk=chunk)
+    return penetration_penalty(sgn, dmin, conf, has, conf_thresh=conf_thresh, margin_m=margin_m,
+                               max_dist_m=max_dist_m, max_pen_m=max_pen_m, huber_m=huber_m,
+                               active_mask=active_mask)
 
-    Penalty = dead-zone + robust kernel: no cost until penetration exceeds
-    ``margin_m`` (tolerates soft tissue + depth/keypoint error), then a Huber
-    ramp on the excess ``e = relu(−s − margin_m)`` — quadratic for ``e ≤
-    huber_m`` (small penetration → small force) and linear beyond (one
-    deeply-buried vertex can't dominate). A vertex is gated out when its matched
-    scene point is low confidence (``conf_thresh``), when it is farther than
-    ``max_dist_m`` from any scene point (not near a surface / cloud hole), or
-    when the "penetration" is deeper than ``max_pen_m`` (almost always a wrong
-    correspondence behind an occluder, not a real collision). ``active_mask``
-    (optional ``(T, Ns)`` bool) further restricts which vertices repel — used by
-    the kinematics_2 stage to apply a *stronger* repulsion only to the vertices of
-    joints a human annotated as NOT in contact.
 
-    The candidate cloud is padded (:func:`pad_frames`) and processed in
-    frame-chunks — one batched ``cdist`` + gather per chunk rather than ``T``
-    per-frame searches. Returns ``(loss, mean_depth_cm, n_penetrating)``; the
-    latter two are detached diagnostics. ``loss`` is the mean of the robust
-    penalty over **all active vertex-instances jointly** (Σ over frames ÷ total
-    active count), so a frame left with a single active vertex no longer carries
-    the same weight as a frame with hundreds.
-    """
-    T = vertices_sub.shape[0]
-    if scene_padded.shape[1] == 0:        # no scene candidates near the body in any frame
-        z = vertices_sub.new_zeros(())
-        return z, z, vertices_sub.new_zeros((), dtype=torch.long)
-    INF = torch.finfo(vertices_sub.dtype).max
-    tot_depth = vertices_sub.new_zeros(())
-    tot_count = vertices_sub.new_zeros((), dtype=torch.long)
-    parts, nas = [], []
-    for s0 in range(0, T, chunk):
-        e0 = min(s0 + chunk, T)
-        V = vertices_sub[s0:e0]                                       # (b, Ns, 3)
-        with torch.no_grad():
-            d = torch.cdist(V, scene_padded[s0:e0])
-            d = d.masked_fill(~scene_valid[s0:e0][:, None, :], INF)
-            dmin, idx = d.min(dim=2)                                  # (b, Ns) — detached NN
-        gi = idx[..., None].expand(-1, -1, 3)
-        p = torch.gather(scene_padded[s0:e0], 1, gi)                  # (b, Ns, 3)
-        n = torch.gather(normal_padded[s0:e0], 1, gi)
-        c = torch.gather(conf_padded[s0:e0], 1, idx)                  # (b, Ns)
-        sgn = ((V - p) * n).sum(dim=-1)                               # (b, Ns) signed, diff through V
-        has = scene_valid[s0:e0].any(dim=1, keepdim=True)             # frame has any candidate
-        active = (c > conf_thresh) & (dmin < max_dist_m) & (sgn.detach() > -max_pen_m) & has
-        if active_mask is not None:
-            active = active & active_mask[s0:e0]
-        excess = torch.relu(-sgn - margin_m)                         # penetration beyond the dead-zone
-        rho = torch.where(excess <= huber_m, 0.5 * excess * excess,
-                          huber_m * (excess - 0.5 * huber_m))
-        a = active.to(rho.dtype)
-        parts.append((rho * a).sum(1))                               # (b,) Σ robust penalty over active verts
-        nas.append(a.sum(1))                                         # (b,) active verts / frame
-        with torch.no_grad():
-            pen = active & (sgn < 0)                                  # actually-penetrating verts
-            tot_depth = tot_depth + (-sgn[pen]).sum()
-            tot_count = tot_count + pen.sum()
-    n_active = torch.cat(nas).sum()                                  # total active vertex-instances
+def clearance_penalty(
+    sgn: torch.Tensor,     # (T, Ns) signed distance (grad through the posed vertex)
+    dmin: torch.Tensor,    # (T, Ns) detached Euclidean NN distance
+    conf: torch.Tensor,    # (T, Ns) detached NN-point confidence
+    has: torch.Tensor,     # (T, 1) bool — frame has a candidate
+    *,
+    conf_thresh: float,
+    clearance_m: float,
+    max_dist_m: float,
+    max_pen_m: float,
+    huber_m: float,
+    active_mask: torch.Tensor | None = None,  # (T, Ns) bool — restrict to these verts
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    """Push active vertices out to a CLEARANCE outside the scene (penalty head).
+
+    Where :func:`penetration_penalty` only acts behind the surface, this pushes any
+    active vertex whose signed distance ``s`` is below ``clearance_m`` out to that
+    clearance — so a part a human marked NOT in contact ends up more than the contact
+    threshold clear of the wall and stops registering as contact. Penalty = Huber of
+    the shortfall ``e = relu(clearance_m − s)``; the gradient w.r.t. ``v`` is the
+    outward normal, so descending pushes the vertex out. Same confidence /
+    ``max_dist_m`` / ``max_pen_m`` gates as :func:`penetration_penalty`, plus
+    ``active_mask`` (the no-contact verts). Returns ``(loss, mean_shortfall_cm,
+    n_pushed)`` — the latter two detached diagnostics."""
+    active = (conf > conf_thresh) & (dmin < max_dist_m) & (sgn.detach() > -max_pen_m) & has
+    if active_mask is not None:
+        active = active & active_mask
+    excess = torch.relu(clearance_m - sgn)                           # shortfall below the clearance
+    rho = _huber(excess, huber_m)
+    a = active.to(rho.dtype)
+    n_active = a.sum()
     if not bool(n_active > 0):
-        z = vertices_sub.new_zeros(())
-        return z, z, tot_count
-    loss = torch.cat(parts).sum() / n_active.clamp_min(1)            # joint mean over all active verts
-    depth_cm = (tot_depth / tot_count.clamp_min(1)) * 100.0
-    return loss, depth_cm.detach(), tot_count
+        z = sgn.new_zeros(())
+        return z, z, sgn.new_zeros((), dtype=torch.long)
+    loss = (rho * a).sum() / n_active.clamp_min(1)                   # joint mean over all active verts
+    with torch.no_grad():
+        pushed = active & (excess > 0)
+        gap_cm = ((sgn.detach() * pushed).sum() / pushed.sum().clamp_min(1)) * 100.0
+        n_pushed = pushed.sum()
+    return loss, gap_cm.detach(), n_pushed
 
 
 def clearance_repulsion(
@@ -289,62 +377,52 @@ def clearance_repulsion(
     active_mask: torch.Tensor | None = None,  # (T, Ns) bool — restrict to these verts
     chunk: int = 16,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-    """Push vertices to a CLEARANCE outside the scene (for annotated no-contact parts).
+    """Clearance repulsion = :func:`scene_signed_distance` + :func:`clearance_penalty`
+    (standalone entry point; the optimizer shares the signed-distance pass)."""
+    sgn, dmin, conf, has = scene_signed_distance(
+        vertices_sub, scene_padded, normal_padded, conf_padded, scene_valid, chunk=chunk)
+    return clearance_penalty(sgn, dmin, conf, has, conf_thresh=conf_thresh, clearance_m=clearance_m,
+                             max_dist_m=max_dist_m, max_pen_m=max_pen_m, huber_m=huber_m,
+                             active_mask=active_mask)
 
-    Where :func:`scene_penetration` only acts once a vertex is *behind* the surface
-    (signed distance ``s = (v−p)·n < 0``), this pushes any active vertex whose ``s``
-    is below ``clearance_m`` out to that clearance — so a body part a human marked
-    NOT in contact ends up more than the contact threshold clear of the wall and
-    stops registering as contact (the gap :func:`scene_penetration` left: a part
-    hovering 0–``close_thresh`` cm outside the wall is "no contact" to this loss but
-    "in contact" to the contact readout). Penalty = Huber of the shortfall
-    ``e = relu(clearance_m − s)`` (quadratic ``≤ huber_m`` then linear); gradient
-    w.r.t. ``v`` is the outward normal, so descending pushes the vertex out. Same
-    confidence / ``max_dist_m`` / ``max_pen_m`` gates as :func:`scene_penetration`,
-    plus ``active_mask`` (the no-contact verts). Chunked-batched ``cdist`` (its own
-    NN pass). Returns ``(loss, mean_shortfall_cm, n_pushed)`` — the latter two
-    detached diagnostics."""
-    T = vertices_sub.shape[0]
-    if scene_padded.shape[1] == 0:
-        z = vertices_sub.new_zeros(())
-        return z, z, vertices_sub.new_zeros((), dtype=torch.long)
-    INF = torch.finfo(vertices_sub.dtype).max
-    tot_gap = vertices_sub.new_zeros(())
-    tot_count = vertices_sub.new_zeros((), dtype=torch.long)
-    parts, nas = [], []
-    for s0 in range(0, T, chunk):
-        e0 = min(s0 + chunk, T)
-        V = vertices_sub[s0:e0]                                       # (b, Ns, 3)
-        with torch.no_grad():
-            d = torch.cdist(V, scene_padded[s0:e0])
-            d = d.masked_fill(~scene_valid[s0:e0][:, None, :], INF)
-            dmin, idx = d.min(dim=2)                                  # (b, Ns) — detached NN
-        gi = idx[..., None].expand(-1, -1, 3)
-        p = torch.gather(scene_padded[s0:e0], 1, gi)                  # (b, Ns, 3)
-        n = torch.gather(normal_padded[s0:e0], 1, gi)
-        c = torch.gather(conf_padded[s0:e0], 1, idx)                  # (b, Ns)
-        sgn = ((V - p) * n).sum(dim=-1)                               # (b, Ns) signed, diff through V
-        has = scene_valid[s0:e0].any(dim=1, keepdim=True)
-        active = (c > conf_thresh) & (dmin < max_dist_m) & (sgn.detach() > -max_pen_m) & has
-        if active_mask is not None:
-            active = active & active_mask[s0:e0]
-        excess = torch.relu(clearance_m - sgn)                       # shortfall below the clearance
-        rho = torch.where(excess <= huber_m, 0.5 * excess * excess,
-                          huber_m * (excess - 0.5 * huber_m))
-        a = active.to(rho.dtype)
-        parts.append((rho * a).sum(1))                               # (b,) Σ robust penalty over active verts
-        nas.append(a.sum(1))
-        with torch.no_grad():
-            pushed = active & (excess > 0)
-            tot_gap = tot_gap + (sgn.detach() * pushed).sum()
-            tot_count = tot_count + pushed.sum()
-    n_active = torch.cat(nas).sum()                                  # total active vertex-instances
+
+def attraction_penalty(
+    sgn: torch.Tensor,     # (T, Ns) signed distance (grad through the posed vertex)
+    dmin: torch.Tensor,    # (T, Ns) detached Euclidean NN distance
+    conf: torch.Tensor,    # (T, Ns) detached NN-point confidence
+    has: torch.Tensor,     # (T, 1) bool — frame has a candidate
+    *,
+    conf_thresh: float,
+    band_m: float,
+    max_dist_m: float,
+    active_mask: torch.Tensor | None = None,  # (T, Ns) bool — restrict to these verts
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    """Soft attraction pulling near-wall vertices ONTO the scene (penalty head).
+
+    The inverse of :func:`penetration_penalty`: a vertex hovering *just outside* the
+    surface within the band — ``0 < s < band_m`` — and near a confident surface
+    (``conf_thresh`` / ``max_dist_m``) is pulled in. The loss is the mean of ``s`` over
+    those vertices, so its gradient w.r.t. ``v`` is the outward normal and descending
+    moves the vertex inward, onto the wall — until ``s`` reaches 0, where the band's
+    lower bound switches it off and the penetration dead-zone takes over (so the two
+    never fight: attraction owns ``s∈(0, band)``, penetration ``s<−margin``).
+    ``active_mask`` restricts which vertices are attracted — the kinematics_1
+    auto-detected contact joints, or the kinematics_2 manually-annotated ones. Returns
+    ``(loss, mean_gap_cm, n_attracted)`` — the latter two detached."""
+    sd = sgn.detach()
+    active = (conf > conf_thresh) & (dmin < max_dist_m) & (sd > 0.0) & (sd < band_m) & has
+    if active_mask is not None:
+        active = active & active_mask
+    a = active.to(sgn.dtype)
+    n_active = a.sum()
     if not bool(n_active > 0):
-        z = vertices_sub.new_zeros(())
-        return z, z, tot_count
-    loss = torch.cat(parts).sum() / n_active.clamp_min(1)            # joint mean over all active verts
-    gap_cm = (tot_gap / tot_count.clamp_min(1)) * 100.0
-    return loss, gap_cm.detach(), tot_count
+        z = sgn.new_zeros(())
+        return z, z, sgn.new_zeros((), dtype=torch.long)
+    loss = (sgn * a).sum() / n_active.clamp_min(1)               # grad pulls each attracted v inward (−n)
+    with torch.no_grad():
+        gap_cm = ((sd * a).sum() / active.sum().clamp_min(1)) * 100.0
+        n_attr = active.sum()
+    return loss, gap_cm.detach(), n_attr
 
 
 def scene_attraction(
@@ -360,74 +438,12 @@ def scene_attraction(
     active_mask: torch.Tensor | None = None,  # (T, Ns) bool — restrict to these verts
     chunk: int = 16,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-    """Soft attraction pulling near-wall body vertices ONTO the static scene.
-
-    The inverse of :func:`scene_penetration`: where penetration pushes vertices
-    that are *behind* the surface back out, this draws vertices that hover *just
-    outside* the surface onto it — so a body part a few cm off the wall (e.g. a
-    climbing hand whose monocular human-depth lands a little in front of the merged
-    scene wall, the common "close but not touching" case) is pulled into contact.
-
-    Same point-cloud SDF as the penetration loss: the nearest *candidate* scene
-    point gives a signed distance ``s = (v − p)·n`` (``n`` outward), the
-    nearest-neighbour search detached, gradients flowing through ``v``. A vertex is
-    **attracted** when it sits just outside the surface within the band —
-    ``0 < s < band_m`` — and is confident / near a surface (``conf_thresh`` /
-    ``max_dist_m``). The loss is the mean of ``s`` over those vertices, so its
-    gradient w.r.t. ``v`` is the outward normal and **descending it moves the
-    vertex inward, onto the wall** — until ``s`` reaches 0, where the band's lower
-    bound switches the term off and the penetration dead-zone takes over (so the
-    two never fight: attraction owns ``s∈(0, band)``, penetration ``s<−margin``).
-    Vertices already inside (``s ≤ 0``) or farther than ``band_m`` are left to the
-    penetration / chamfer terms; band-gating alone selects the genuinely near-wall
-    parts (hands/feet) since the bulk torso usually sits beyond the band.
-    ``active_mask`` (optional ``(T, Ns)`` bool) further restricts which vertices are
-    attracted — used by the kinematics_2 stage to do a *real* attraction (with a
-    wide ``band_m``) only on the vertices of joints a human annotated as in contact.
-
-    Chunked-batched ``cdist`` (its own NN pass, mirroring the penetration loop).
-    Returns ``(loss, mean_gap_cm, n_attracted)`` — the latter two detached
-    diagnostics (the mean outside-gap of the attracted verts, shrinking as they are
-    drawn in, and how many are in-band).
-    """
-    T = vertices_sub.shape[0]
-    if scene_padded.shape[1] == 0:        # no scene candidates near the body in any frame
-        z = vertices_sub.new_zeros(())
-        return z, z, vertices_sub.new_zeros((), dtype=torch.long)
-    INF = torch.finfo(vertices_sub.dtype).max
-    tot_gap = vertices_sub.new_zeros(())
-    tot_count = vertices_sub.new_zeros((), dtype=torch.long)
-    parts, nas = [], []
-    for s0 in range(0, T, chunk):
-        e0 = min(s0 + chunk, T)
-        V = vertices_sub[s0:e0]                                   # (b, Ns, 3)
-        with torch.no_grad():
-            d = torch.cdist(V, scene_padded[s0:e0])
-            d = d.masked_fill(~scene_valid[s0:e0][:, None, :], INF)
-            dmin, idx = d.min(dim=2)                              # (b, Ns) — detached NN
-        gi = idx[..., None].expand(-1, -1, 3)
-        p = torch.gather(scene_padded[s0:e0], 1, gi)              # (b, Ns, 3)
-        n = torch.gather(normal_padded[s0:e0], 1, gi)
-        c = torch.gather(conf_padded[s0:e0], 1, idx)              # (b, Ns)
-        sgn = ((V - p) * n).sum(dim=-1)                           # (b, Ns) signed, diff through V
-        has = scene_valid[s0:e0].any(dim=1, keepdim=True)
-        sd = sgn.detach()
-        active = (c > conf_thresh) & (dmin < max_dist_m) & (sd > 0.0) & (sd < band_m) & has
-        if active_mask is not None:
-            active = active & active_mask[s0:e0]
-        a = active.to(sgn.dtype)
-        parts.append((sgn * a).sum(1))                           # (b,) Σ gap over attracted verts; grad pulls v inward (−n)
-        nas.append(a.sum(1))                                     # (b,) attracted verts / frame
-        with torch.no_grad():
-            tot_gap = tot_gap + (sd * a).sum()
-            tot_count = tot_count + active.sum()
-    n_active = torch.cat(nas).sum()                              # total attracted vertex-instances
-    if not bool(n_active > 0):
-        z = vertices_sub.new_zeros(())
-        return z, z, tot_count
-    loss = torch.cat(parts).sum() / n_active.clamp_min(1)        # joint mean over all attracted verts
-    gap_cm = (tot_gap / tot_count.clamp_min(1)) * 100.0
-    return loss, gap_cm.detach(), tot_count
+    """Scene attraction = :func:`scene_signed_distance` + :func:`attraction_penalty`
+    (standalone entry point; the optimizer shares the signed-distance pass)."""
+    sgn, dmin, conf, has = scene_signed_distance(
+        vertices_sub, scene_padded, normal_padded, conf_padded, scene_valid, chunk=chunk)
+    return attraction_penalty(sgn, dmin, conf, has, conf_thresh=conf_thresh, band_m=band_m,
+                              max_dist_m=max_dist_m, active_mask=active_mask)
 
 
 def joint_velocity_loss(
@@ -508,6 +524,37 @@ def root_orient_prior_loss(
     return (1.0 - cos.square()).mean()
 
 
+def radial_velocity_loss(
+    joints_world: torch.Tensor,   # (T, J, 3) posed world joints — grad through q
+    cam_centers: torch.Tensor,    # (T, 3) world-frame camera centers
+    *,
+    frame_valid: torch.Tensor | None = None,   # (T,) bool
+) -> torch.Tensor:
+    """Damp joint velocity **along the per-frame viewing ray** — the depth jitter.
+
+    Depth along the camera ray is the direction monocular evidence constrains worst,
+    so that is where trajectory jitter concentrates. For each step ``t → t+1`` the
+    world velocity ``v = p_{t+1} − p_t`` is projected onto the unit viewing ray
+    ``r = normalize(p_t − C_t)`` (camera center ``C_t`` to the joint) and only that
+    radial component is penalized — image-plane motion is left to reprojection. The
+    ray is **detached**: the loss damps motion *along* the ray, it must never rotate
+    the ray to cut the cost; using the camera *position* (never a camera derivative)
+    makes the moving camera a non-issue. The constant ``fps²`` folds into the weight,
+    as in :func:`joint_velocity_loss` / :func:`smoothness_loss`. A step counts only if
+    ``frame_valid`` at BOTH ends (the fpair convention). ``T<2`` ⇒ 0.
+    """
+    if joints_world.shape[0] < 2:
+        return joints_world.new_zeros(())
+    v = joints_world[1:] - joints_world[:-1]                    # (T-1, J, 3) world velocity / step
+    r = joints_world[:-1] - cam_centers[:-1, None, :]           # (T-1, J, 3) camera → joint
+    r = (r / r.norm(dim=-1, keepdim=True).clamp_min(1e-6)).detach()   # unit ray, detached
+    sq = (v * r).sum(dim=-1).square()                          # (T-1, J) squared radial speed (×fps²→weight)
+    if frame_valid is None:
+        return sq.mean()
+    gate = (frame_valid[1:] & frame_valid[:-1]).to(sq.dtype)[:, None]  # (T-1, 1) step valid at both ends
+    return (sq * gate).sum() / gate.expand_as(sq).sum().clamp_min(1.0)
+
+
 def smoothness_loss(
     q: torch.Tensor,   # (T, nq) normalized, better_human order
     num_joints: int,
@@ -516,30 +563,37 @@ def smoothness_loss(
     accel_joint: float,
     jerk_root: float,
     jerk_joint: float,
+    snap_root: float = 0.0,
+    snap_joint: float = 0.0,
 ) -> torch.Tensor:
-    """Acceleration + jerk penalty via the exact batched Lie tangent.
+    """Acceleration + jerk (+ optional snap) penalty via the exact batched Lie tangent.
 
     Penalizes raw frame-to-frame tangent finite-differences (the constant
     ``dt`` factors are folded into the weights — equivalent for a fixed-fps
     clip and far better conditioned than ``/dt³`` jerk on a jittery init):
     ``d1 = q_{t+1} ⊖ q_t`` (velocity, :func:`tangent_difference`),
-    ``accel = Δd1`` (2nd diff), ``jerk = Δaccel``. Root tangent is the first 6
-    components (se3), joints the remaining ``3·(num_joints-1)`` — weighted
-    separately since the root carries the global trajectory and the joints the
-    articulation. A clip too short for a difference (``T<3`` accel, ``T<4`` jerk)
-    contributes 0 for that term, not NaN.
+    ``accel = Δd1`` (2nd diff), ``jerk = Δaccel`` (3rd), ``snap = Δjerk`` (4th). Root
+    tangent is the first 6 components (se3), joints the remaining ``3·(num_joints-1)``
+    — weighted separately since the root carries the global trajectory and the joints
+    the articulation. Snap adds a heavier penalty on the highest-frequency jitter
+    (defaults 0 = the accel/jerk-only field). A clip too short for a difference (``T<3``
+    accel, ``T<4`` jerk, ``T<5`` snap) contributes 0 for that term, not NaN.
     """
     d1 = tangent_difference(q, num_joints)             # (T-1, nv) — velocity
     accel = d1[1:] - d1[:-1]                            # (T-2, nv) — acceleration
     jerk = accel[1:] - accel[:-1]                       # (T-3, nv) — jerk
+    snap = jerk[1:] - jerk[:-1]                         # (T-4, nv) — snap
 
     ar, aj = accel[:, :6], accel[:, 6:]
     jr, jj = jerk[:, :6], jerk[:, 6:]
+    sr, sj = snap[:, :6], snap[:, 6:]
     z = q.new_zeros(())
-    msq = lambda x: x.square().mean() if x.numel() > 0 else z   # empty diff (T<3 accel / T<4 jerk) → 0, not NaN
+    msq = lambda x: x.square().mean() if x.numel() > 0 else z   # empty diff (short clip) → 0, not NaN
     return (
         accel_root * msq(ar)
         + accel_joint * msq(aj)
         + jerk_root * msq(jr)
         + jerk_joint * msq(jj)
+        + snap_root * msq(sr)
+        + snap_joint * msq(sj)
     )

@@ -25,14 +25,19 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
+import numpy as np
 import torch
 
 from .camera import project, transform_points
-from .contacts import vertex_to_joint
+from .contacts import (
+    drift_gated_contact, joint_drift, joint_guarded_min_sdf, scene_sdf, vertex_to_joint,
+)
+from .keypoints import smooth_tracks
 from .losses import (
-    chamfer_loss, clearance_repulsion, init_reprojection_gm, joint_velocity_loss,
-    pad_frames, pose_prior_loss, root_orient_prior_loss, sapiens_reprojection_gm,
-    scene_attraction, scene_penetration, smoothness_loss,
+    attraction_penalty, chamfer_loss, clearance_penalty, init_reprojection_gm,
+    joint_velocity_loss, pad_frames, penetration_penalty, pose_prior_loss,
+    radial_velocity_loss, root_orient_prior_loss, sapiens_reprojection_gm,
+    scene_penetration, scene_signed_distance, smoothness_loss,
 )
 from .motion import tangent_difference
 from .qmath import normalize_q
@@ -46,17 +51,20 @@ class Metrics:
     chamfer_m: float
     accel: float
     jerk: float
+    snap: float           # ‖snap‖ (4th tangent difference) — the highest-frequency jitter
     pen_cm: float = float("nan")  # mean penetration depth into the scene cloud (nan = no scene)
     pen_n: int = 0                # number of penetrating vertex-instances (summed over frames)
     depth_m: float = float("nan")  # mean pelvis camera-frame depth (diagnostic)
+    radial_cms: float = float("nan")  # mean per-joint radial (viewing-ray) speed, cm/s
 
     def __str__(self) -> str:
         ini = "n/a" if self.reproj_init_px != self.reproj_init_px else f"{self.reproj_init_px:.2f}px"
         dep = "" if self.depth_m != self.depth_m else f"  depth={self.depth_m:.2f}m"
         pen = "" if self.pen_cm != self.pen_cm else f"  pen={self.pen_cm:.2f}cm/{self.pen_n}v"
+        rad = "" if self.radial_cms != self.radial_cms else f"  radial={self.radial_cms:.1f}cm/s"
         return (f"reproj_sap={self.reproj_sap_px:.2f}px  reproj_init={ini}  "
                 f"chamfer={self.chamfer_m * 100:.2f}cm  "
-                f"‖accel‖={self.accel:.4f}  ‖jerk‖={self.jerk:.4f}{dep}{pen}")
+                f"‖accel‖={self.accel:.4f}  ‖jerk‖={self.jerk:.4f}  ‖snap‖={self.snap:.4f}{dep}{pen}{rad}")
 
 
 @dataclass
@@ -142,7 +150,8 @@ def _padded_scene_candidates(vertices_sub_det: torch.Tensor, scene_pts: torch.Te
 def _metrics(mid, betas, q_world, *, extrinsics, K, depth_pad, depth_valid, target_kp,
             scores, corr, frame_vertex_ids, sub, score_thresh, chunk=16,
             body_idx=None, init_target=None,
-            scene_pts=None, scene_normals=None, scene_conf=None, pen=None) -> Metrics:
+            scene_pts=None, scene_normals=None, scene_conf=None, pen=None,
+            cam_centers=None, fps=30.0, frame_valid=None) -> Metrics:
     qn = normalize_q(q_world, mid.num_joints)
     out = mid.forward(betas, qn)
     jw = out.joints_world.tensor()[..., :3]
@@ -183,12 +192,25 @@ def _metrics(mid, betas, q_world, *, extrinsics, K, depth_pad, depth_valid, targ
     fhd = depth_valid.any(dim=1)
     depth_m = (float((pelvis_z * fhd).sum() / fhd.sum().clamp_min(1))
                if bool(fhd.any()) else float(pelvis_z.mean()))
-    # accel / jerk norms (raw tangent diffs)
+    # accel / jerk / snap norms (raw tangent diffs)
     d1 = tangent_difference(qn, mid.num_joints)
     accel = d1[1:] - d1[:-1]
     jerk = accel[1:] - accel[:-1]
+    snap = jerk[1:] - jerk[:-1]
+    # mean per-joint radial (viewing-ray) speed cm/s — the depth-jitter diagnostic
+    radial_cms = float("nan")
+    if cam_centers is not None and jw.shape[0] > 1:
+        vstep = jw[1:] - jw[:-1]                                # (T-1, J, 3)
+        ray = jw[:-1] - cam_centers[:-1, None, :]
+        ray = ray / ray.norm(dim=-1, keepdim=True).clamp_min(1e-6)
+        radial = (vstep * ray).sum(dim=-1).abs()               # (T-1, J) per-step radial speed
+        if frame_valid is not None:                            # match the loss: both-ends-valid steps only
+            g = frame_valid[1:] & frame_valid[:-1]
+            radial_cms = (float(radial[g].mean()) * float(fps) * 100.0) if bool(g.any()) else float("nan")
+        else:
+            radial_cms = float(radial.mean()) * float(fps) * 100.0
     return Metrics(reproj_sap, reproj_init, cham, float(accel.norm()), float(jerk.norm()),
-                   pen_cm, pen_n, depth_m)
+                   float(snap.norm()), pen_cm, pen_n, depth_m, radial_cms)
 
 
 def optimize_person(
@@ -201,8 +223,17 @@ def optimize_person(
     contact_labels: torch.Tensor | None = None,
     chamfer_weights: torch.Tensor | None = None,
     frame_valid: torch.Tensor | None = None,
-) -> tuple[torch.Tensor, Metrics, Metrics]:
-    """Optimize one person over ``phases``. Returns ``(q_world_opt, before, after)``.
+    cam_centers: torch.Tensor | None = None,
+    auto_contact: dict | None = None,
+) -> tuple[torch.Tensor, Metrics, Metrics, dict]:
+    """Optimize one person over ``phases``. Returns ``(q_world_opt, before, after, aux)``.
+
+    ``aux`` carries the round-4 detection-time signals the caller persists into the body
+    npz (docs/UPDATE_AGENT.md §2): ``drift_pre (T, num_joints)`` — ``joint_drift`` of the
+    refine-start (pre-attraction) body, the honest pre-enforcement stillness measurement —
+    and ``auto_labels (T, num_joints)`` int8 — the frozen labels the attraction used. Both
+    are ``None`` when auto detection did not run (manual ``kinematics_2``, no scene, or a
+    zero ``ann_attraction`` weight); the caller then writes NaN / ``-1`` for that person.
 
     Priors (pose / root-orientation) and the init-projection anchor are pinned to
     ``q_world_init`` — the *call's input* pose — and held across every phase, so
@@ -217,6 +248,15 @@ def optimize_person(
     repulsion pushing the vertices of no-contact joints off it, and a velocity
     damper on in-contact joints (weights ``ann_*``). It defaults to the plain
     kinematics behaviour (no annotation terms).
+
+    ``auto_contact`` (optional dict) enables **kinematics_1** auto-contact mode: when
+    ``contact_labels`` is not supplied and the ``ann_attraction`` weight is > 0, labels
+    are detected **once** from the detached pose at the first scene phase (the contact
+    readout at the ``[auto_contact]`` operating point) and **frozen** — positive-only
+    (``1`` on detected group joints, ``-1`` elsewhere, never ``0``), so only the
+    attraction + velocity terms fire, never the clearance repulsion. ``cam_centers``
+    (``(T, 3)`` world camera centers) drives the radial-velocity damper + its
+    diagnostic; both default off.
 
     ``frame_valid`` (optional ``(T,)`` bool) excludes untracked frames — whose
     converter pose was held from the nearest valid frame and so is glued to the
@@ -247,24 +287,42 @@ def optimize_person(
     use_init = _wmax("reproj_init") > 0.0
     init_gm_px = float(knobs["reproj_init"]["gm_scale_px"]) if use_init else 0.0
     use_pen = scene_pts is not None
-    use_ann = contact_labels is not None
-    ann_at_cfg = knobs["ann_attraction"] if use_ann else None
-    ann_rep_cfg = knobs["ann_repulsion"] if use_ann else None
+    use_ann = contact_labels is not None          # manual labels present from the start (kinematics_2)
+    # kinematics_1 auto-contact mode: detect labels once at the first scene phase (below) then
+    # freeze. Guarded on the ann_attraction weight-max, so a 0-weight column never detects
+    # (keeps parity with HEAD). Auto attraction reads its band from [auto_contact]; the manual
+    # (kinematics_2) path keeps [ann_attraction].
+    use_auto = auto_contact is not None and not use_ann and _wmax("ann_attraction") > 0.0
+    ann_at_cfg = auto_contact if use_auto else (knobs["ann_attraction"] if use_ann else None)
+    ann_rep_cfg = knobs["ann_repulsion"] if use_ann else None   # clearance repulsion is manual-only
 
     depth_pad, depth_valid = pad_frames(depth_points, channels=3,
                                         device=q_world_init.device, dtype=q_world_init.dtype)
 
-    # `v2j_sub` maps each subsampled vertex to its nearest rest-pose joint — needed by
-    # the kinematics_2 annotation terms to inherit each vertex's joint contact label.
-    v2j_sub = None
-    if use_ann:
+    # `v2j_full` / `v2j_sub` map each (subsampled) vertex to its nearest rest-pose joint. The
+    # subsampled map inherits joint contact labels onto vertices (attraction / repulsion masks);
+    # the full map lifts the auto-detection per-vertex SDF to per-joint. Built once from the
+    # shaped rest mesh (label-independent).
+    v2j_full = v2j_sub = None
+    if use_ann or use_auto:
         with torch.no_grad():
             v_rest, j_rest = mid.forward_shape(betas_mean[None])
-        v2j_sub = vertex_to_joint(v_rest[0], j_rest[0])[sub]   # (Ns,) nearest joint per subsampled vert
+        v2j_full = vertex_to_joint(v_rest[0], j_rest[0])      # (V,) nearest joint per vertex
+        v2j_sub = v2j_full[sub]                               # (Ns,) subsampled
+    auto_group_mask = None
+    if use_auto:
+        auto_group_mask = torch.zeros(mid.num_joints, dtype=torch.bool, device=q_world_init.device)
+        auto_group_mask[auto_contact["group_joints"]] = True   # only these joints may be labeled 1
+
     incontact_v = nocontact_v = None
-    if use_ann:
-        vlabel = contact_labels[:, v2j_sub]                   # (T, Ns) tri-state
+    def _bind_labels(labels: torch.Tensor) -> None:
+        """Set ``contact_labels`` + the per-subsampled-vertex in/no-contact masks (from v2j_sub)."""
+        nonlocal contact_labels, incontact_v, nocontact_v
+        contact_labels = labels
+        vlabel = labels[:, v2j_sub]                           # (T, Ns) tri-state per vertex
         incontact_v, nocontact_v = (vlabel == 1), (vlabel == 0)
+    if use_ann:
+        _bind_labels(contact_labels)                          # manual labels bind now (kinematics_2)
 
     # Init-projection 2D anchor target: each BODY joint's projection at the call's
     # input pose. body_idx excludes the 30 finger joints (tiny in image space, they
@@ -282,12 +340,33 @@ def optimize_person(
             jw0i = o0i.joints_world.tensor()[..., :3]
             init_target = project(transform_points(jw0i[:, body_idx, :], extrinsics), K)
 
+    # Round-4 §7: smooth the 2D TARGET tracks (not the trajectory) so converter / Sapiens per-frame
+    # jitter is not imprinted into the objective and the smoothness terms stop fighting the targets.
+    # Only the LOSS sees the smoothed targets; the gate metric (reproj_init) is reported vs the RAW
+    # init target and reproj_sap vs the raw Sapiens keypoints, so smoothing cannot flatter the numbers.
+    # Validity gates the SG filter within runs (frame_valid for init; score >= thresh for Sapiens);
+    # the scores themselves are untouched. window_s = 0 ⇒ no-op (round-3 parity).
+    kp_smooth_s = float(kp.get("smooth_window_s", 0.0))
+    init_smooth_s = float(knobs["reproj_init"].get("smooth_window_s", 0.0)) if use_init else 0.0
+    target_kp_loss = target_kp
+    if kp_smooth_s > 0.0:
+        vkp = (scores >= score_thresh).detach().cpu().numpy()
+        sm = smooth_tracks(target_kp.detach().cpu().numpy(), vkp, window_s=kp_smooth_s, fps=fps)
+        target_kp_loss = torch.as_tensor(sm, dtype=target_kp.dtype, device=target_kp.device)
+    init_target_loss = init_target
+    if init_smooth_s > 0.0 and init_target is not None:
+        vin = (frame_valid.detach().cpu().numpy() if frame_valid is not None else np.ones(T, dtype=bool))
+        vin = np.broadcast_to(vin[:, None], init_target.shape[:2])
+        sm = smooth_tracks(init_target.detach().cpu().numpy(), vin, window_s=init_smooth_s, fps=fps)
+        init_target_loss = torch.as_tensor(sm, dtype=init_target.dtype, device=init_target.device)
+
     mk = lambda q: _metrics(
         mid, betas, q, extrinsics=extrinsics, K=K, depth_pad=depth_pad, depth_valid=depth_valid,
         target_kp=target_kp, scores=scores, corr=corr, frame_vertex_ids=frame_vertex_ids,
         sub=sub, score_thresh=score_thresh, chunk=chunk,
         body_idx=body_idx, init_target=init_target,
-        scene_pts=scene_pts, scene_normals=scene_normals, scene_conf=scene_conf, pen=pen_cfg)
+        scene_pts=scene_pts, scene_normals=scene_normals, scene_conf=scene_conf, pen=pen_cfg,
+        cam_centers=cam_centers, fps=fps, frame_valid=frame_valid)
     before = mk(q_world_init)
 
     q_init = q_world_init.detach().clone()   # the anchor (priors + init reprojection)
@@ -314,6 +393,38 @@ def optimize_person(
             cand = (pad_p, pad_n, pad_c, valid & frame_valid[:, None])
         return cand
 
+    def _detect_auto_labels() -> tuple[torch.Tensor, torch.Tensor]:
+        """Detect frozen kinematics_1 contact labels once from the current detached pose.
+
+        Runs the contact readout at the ``[auto_contact]`` operating point (scene SDF →
+        guarded per-joint min → drift/stillness gate → hysteresis), keeps only joints in the
+        configured groups on valid frames. Returns ``(labels, drift)``: ``labels (T, num_joints)``
+        int8 with ``1`` on detected group joints / ``-1`` everywhere else — never ``0``, so
+        ``nocontact_v`` stays empty and the clearance repulsion can never fire in auto mode; and
+        ``drift (T, num_joints)`` — the refine-start net window drift the detection gated on, kept
+        so the caller can persist it as the honest pre-enforcement stillness measurement (round 4,
+        docs/UPDATE_AGENT.md §2). No gradient path (``no_grad`` forward from the detached leaf), run
+        once per stage — the round-1 circularity cannot re-open."""
+        ac = auto_contact
+        with torch.no_grad():
+            o = mid.forward(betas, normalize_q(q, mid.num_joints))
+            jw_full = o.joints_world.tensor()[..., :3]
+            vw_full = o.vertices
+        sdf, dmin, conf = scene_sdf(vw_full, scene_pts, scene_normals, scene_conf,
+                                    prune_margin_m=float(ac["prune_margin_m"]))
+        gsdf = joint_guarded_min_sdf(sdf, dmin, conf, v2j_full, mid.num_joints,
+                                     max_dist_m=float(ac["max_dist_m"]), conf_thresh=float(ac["conf_thresh"]))
+        drift = joint_drift(jw_full, fps=fps, window_s=float(ac["window_s"]))
+        jc = drift_gated_contact(gsdf, drift, close_thresh_m=float(ac["detect_thresh_m"]),
+                                 exit_thresh_m=float(ac["detect_exit_m"]), min_frames=int(ac["min_frames"]),
+                                 still_m=float(ac["still_m"]))          # (T, J) bool
+        keep = jc & auto_group_mask[None, :]                           # only configured group joints
+        if frame_valid is not None:
+            keep = keep & frame_valid[:, None]
+        lab = torch.full((jc.shape[0], mid.num_joints), -1, dtype=torch.int8, device=q.device)
+        lab[keep] = 1
+        return lab, drift
+
     def _forward_losses(w: dict, scene_cand):
         """Forward the posed mesh and assemble the phase-weighted loss. Returns
         ``(loss, components)`` — ``components`` carries the per-term tensors +
@@ -328,9 +439,11 @@ def optimize_person(
         w_ann_attract = float(w.get("ann_attraction", 0.0))
         w_ann_repel = float(w.get("ann_repulsion", 0.0))
         w_ann_vel = float(w.get("ann_velocity", 0.0))
-        L_sap = sapiens_reprojection_gm(jw, vw, extrinsics, K, target_kp, scores, corr,
+        w_radial = float(w.get("radial_velocity", 0.0))
+        have_labels = contact_labels is not None      # manual (kinematics_2) or auto-detected (kinematics_1)
+        L_sap = sapiens_reprojection_gm(jw, vw, extrinsics, K, target_kp_loss, scores, corr,
                                         frame_vertex_ids, score_thresh=score_thresh, gm_scale_px=sap_gm_px)
-        L_init = (init_reprojection_gm(jw, body_idx, extrinsics, K, init_target,
+        L_init = (init_reprojection_gm(jw, body_idx, extrinsics, K, init_target_loss,
                                        gm_scale_px=init_gm_px, frame_mask=frame_valid)
                   if (use_init and w_init > 0.0) else jw.new_zeros(()))
         L_ch = chamfer_loss(vw[:, sub], vismask, depth_pad, depth_valid, chunk=chunk,
@@ -339,46 +452,54 @@ def optimize_person(
         L_ro = root_orient_prior_loss(qn, q_init)
         L_sm = smoothness_loss(qn, mid.num_joints, accel_root=float(w["accel_root"]),
                                accel_joint=float(w["accel_joint"]), jerk_root=float(w["jerk_root"]),
-                               jerk_joint=float(w["jerk_joint"]))
-        if scene_cand is not None:
-            L_pen, pen_cm, pen_n = scene_penetration(
-                vw[:, sub], *scene_cand, conf_thresh=float(pen_cfg["conf_thresh"]),
-                margin_m=float(pen_cfg["margin_m"]), max_dist_m=float(pen_cfg["max_dist_m"]),
-                max_pen_m=float(pen_cfg["max_pen_m"]), huber_m=float(pen_cfg["huber_m"]), chunk=chunk)
-        else:
-            L_pen, pen_cm, pen_n = vw.new_zeros(()), float("nan"), 0
-        # kinematics_2 annotation-driven terms. The attraction (in-contact verts →
-        # ONTO the wall) and the strong repulsion (no-contact verts → OFF the wall)
-        # both need the scene candidates, so run in the scene phases; the velocity
-        # damper (slow in-contact joints) needs only the world joints, so it runs
-        # in every phase the labels are supplied.
+                               jerk_joint=float(w["jerk_joint"]), snap_root=float(w.get("snap_root", 0.0)),
+                               snap_joint=float(w.get("snap_joint", 0.0)))
+        L_radial = (radial_velocity_loss(jw, cam_centers, frame_valid=frame_valid)
+                    if (w_radial > 0.0 and cam_centers is not None) else jw.new_zeros(()))
+        # Scene terms share ONE detached nearest-neighbour pass (scene_signed_distance):
+        # penetration + contact attraction + clearance repulsion are penalty heads on it, so
+        # the round-3 default (penetration + attraction) costs one cdist, not two.
+        L_pen, pen_cm, pen_n = vw.new_zeros(()), float("nan"), 0
         L_ann_at = L_ann_rep = vw.new_zeros(())
         ann_at_cm = ann_rep_cm = float("nan"); ann_at_n = ann_rep_n = 0
-        if scene_cand is not None and use_ann:
-            if w_ann_attract > 0.0:
-                L_ann_at, ann_at_cm, ann_at_n = scene_attraction(
-                    vw[:, sub], *scene_cand, conf_thresh=float(ann_at_cfg["conf_thresh"]),
-                    band_m=float(ann_at_cfg["band_m"]), max_dist_m=float(ann_at_cfg["max_dist_m"]),
-                    active_mask=incontact_v, chunk=chunk)
-            if w_ann_repel > 0.0:
-                L_ann_rep, ann_rep_cm, ann_rep_n = clearance_repulsion(
-                    vw[:, sub], *scene_cand, conf_thresh=float(ann_rep_cfg["conf_thresh"]),
-                    clearance_m=float(ann_rep_cfg["clearance_m"]), max_dist_m=float(ann_rep_cfg["max_dist_m"]),
-                    max_pen_m=float(ann_rep_cfg["max_pen_m"]), huber_m=float(ann_rep_cfg["huber_m"]),
-                    active_mask=nocontact_v, chunk=chunk)
+        if scene_cand is not None:
+            sig = scene_signed_distance(vw[:, sub], *scene_cand, chunk=chunk)
+            L_pen, pen_cm, pen_n = penetration_penalty(
+                *sig, conf_thresh=float(pen_cfg["conf_thresh"]), margin_m=float(pen_cfg["margin_m"]),
+                max_dist_m=float(pen_cfg["max_dist_m"]), max_pen_m=float(pen_cfg["max_pen_m"]),
+                huber_m=float(pen_cfg["huber_m"]))
+            # Contact attraction pulls in-contact-joint verts ONTO the wall (kinematics_1 auto
+            # labels read their band from [auto_contact]; kinematics_2 from [ann_attraction]).
+            # Clearance repulsion pushes no-contact-joint verts off — kinematics_2 only, since
+            # auto labels carry no 0s (nocontact_v is empty).
+            if have_labels:
+                if w_ann_attract > 0.0:
+                    L_ann_at, ann_at_cm, ann_at_n = attraction_penalty(
+                        *sig, conf_thresh=float(ann_at_cfg["conf_thresh"]),
+                        band_m=float(ann_at_cfg["band_m"]), max_dist_m=float(ann_at_cfg["max_dist_m"]),
+                        active_mask=incontact_v)
+                if w_ann_repel > 0.0 and ann_rep_cfg is not None:   # manual-only; auto has no ann_rep_cfg
+                    L_ann_rep, ann_rep_cm, ann_rep_n = clearance_penalty(
+                        *sig, conf_thresh=float(ann_rep_cfg["conf_thresh"]),
+                        clearance_m=float(ann_rep_cfg["clearance_m"]), max_dist_m=float(ann_rep_cfg["max_dist_m"]),
+                        max_pen_m=float(ann_rep_cfg["max_pen_m"]), huber_m=float(ann_rep_cfg["huber_m"]),
+                        active_mask=nocontact_v)
+        # velocity damper (slow in-contact joints) needs only the world joints, so it runs in
+        # every phase the labels are present (refine + lbfgs for auto, all phases for manual).
         L_ann_vel = vw.new_zeros(()); ann_vel_cms = float("nan"); ann_vel_n = 0
-        if use_ann and w_ann_vel > 0.0:
+        if have_labels and w_ann_vel > 0.0:
             L_ann_vel, ann_vel_cms, ann_vel_n = joint_velocity_loss(jw, contact_labels, fps=fps)
         loss = (float(w["reproj_sapiens"]) * L_sap + w_init * L_init + float(w["chamfer"]) * L_ch
                 + float(w["pose_prior"]) * L_pp + float(w["orient_prior"]) * L_ro + L_sm
-                + float(w["penetration"]) * L_pen
+                + float(w["penetration"]) * L_pen + w_radial * L_radial
                 + w_ann_attract * L_ann_at + w_ann_repel * L_ann_rep + w_ann_vel * L_ann_vel)
         return loss, dict(sap=L_sap, init=L_init, ch=L_ch, pp=L_pp, sm=L_sm,
                           pen=L_pen, pen_cm=pen_cm, pen_n=pen_n, has_pen=scene_cand is not None,
+                          radial=L_radial, radial_w=w_radial,
                           ann_at=L_ann_at, ann_at_cm=ann_at_cm, ann_at_n=ann_at_n,
                           ann_rep=L_ann_rep, ann_rep_cm=ann_rep_cm, ann_rep_n=ann_rep_n,
                           ann_vel=L_ann_vel, ann_vel_cms=ann_vel_cms, ann_vel_n=ann_vel_n,
-                          has_ann=use_ann and scene_cand is not None)
+                          has_ann=have_labels and scene_cand is not None)
 
     def _log(tag, it, loss, c, w):
         w_pen = float(w["penetration"])
@@ -392,10 +513,12 @@ def optimize_person(
                    if c["has_ann"] else "")
         init_str = (f"rep_init={c['init'].item():.4f}·{w_rep_init:g}={w_rep_init * c['init'].item():.2f} "
                     if w_rep_init > 0.0 else "")
+        w_rad = float(c.get("radial_w", 0.0))
+        rad_str = (f" rad·{w_rad:g}={w_rad * c['radial'].item():.3f}" if w_rad > 0.0 else "")
         print(f"    [{tag:9s}] it {it:4d}  loss={loss.item():.4f}  "
               f"(rep_sap={c['sap'].item():.4f}·{w_rep_sap:g}={w_rep_sap * c['sap'].item():.2f} "
               f"{init_str}ch={c['ch'].item() * 100:.1f}cm pose={c['pp'].item():.4f} "
-              f"smooth={c['sm'].item():.3f}{pen_str}{ann_str})")
+              f"smooth={c['sm'].item():.3f}{pen_str}{rad_str}{ann_str})")
 
     # ── run the phases in order ──────────────────────────────────────────────
     # Adam (per-coordinate steps) tolerates the very different gradient scales here
@@ -403,8 +526,16 @@ def optimize_person(
     # that would stall L-BFGS cold; the final L-BFGS phase (all DOFs free, strong-
     # Wolfe) then sharpens the already-close fit. A fresh optimizer per phase, so
     # no stale momentum leaks across an unfreeze; DOFs frozen by zeroing the grad.
+    auto_drift_pre = None    # (T, num_joints) refine-start drift, persisted by the caller (round-4 §2)
     for ph in phases:
         scene_cand = _build_scene_cand() if ph.scene else None
+        if use_auto and contact_labels is None and scene_cand is not None:
+            lab, auto_drift_pre = _detect_auto_labels()   # detect once at the first scene phase, then freeze
+            _bind_labels(lab)
+            per_g = " ".join(f"{g}={int((lab[:, m] == 1).any(1).sum())}"
+                             for g, m in auto_contact["group_members"].items() if m)
+            print(f"    [auto-contact] frozen labels @ {ph.name}: "
+                  f"{int((lab == 1).any(1).sum())}/{lab.shape[0]} frames w/ contact  ({per_g})")
         if ph.optimizer == "lbfgs":
             opt = torch.optim.LBFGS([q], lr=float(oc["lr_lbfgs"]), max_iter=int(ph.iters),
                                     history_size=int(oc["lbfgs_history"]), line_search_fn="strong_wolfe")
@@ -437,4 +568,6 @@ def optimize_person(
 
     with torch.no_grad():
         q_opt = normalize_q(q.detach(), mid.num_joints)
-    return q_opt, before, mk(q_opt)
+    aux = {"drift_pre": auto_drift_pre,                            # (T, J) refine-start drift, or None
+           "auto_labels": contact_labels if use_auto else None}   # (T, J) int8 frozen labels, or None
+    return q_opt, before, mk(q_opt), aux
