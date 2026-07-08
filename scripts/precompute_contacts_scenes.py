@@ -6,13 +6,13 @@ The contact readout (``estimate_contacts``) is a ``--predictions`` stage, not a
 per-scene **symlink farm** rather than a JSON manifest: for each target scene we
 stitch the optimized body (``features/human_optim/<...>/<body>.npz``) and the fused
 geometry (``features/geometry/<...>/{scene,transform}.npz``) into a throwaway
-``--predictions`` dir, run the stage, and move its ``contacts_<tag>.npz`` into the
-stage-first feature tree::
+``--predictions`` dir, run the stage, and move its ``contacts_<tag>.npz`` next to the
+body it scores, in that body's own ``human_optim`` scene dir::
 
-    features/contacts/<aa>/<bb>/<scene_id>/contacts_<tag>.npz
+    features/human_optim/<aa>/<bb>/<scene_id>/contacts_<tag>.npz
 
-The DB feature trees are otherwise READ-ONLY — nothing here writes into ``human_optim``
-or ``geometry``; the only output is the new ``contacts`` tree. Scenes are split across
+(mirroring the local ``out/<stem>/human_optim/`` layout). Every other DB tree stays
+READ-ONLY — the only output is that one ``contacts_<tag>.npz`` file. Scenes are split across
 the configured GPUs (one worker process per GPU over a disjoint stride shard); per-scene
 failures are reported and skipped, never fatal. Resumable with ``--skip-existing``.
 
@@ -44,7 +44,7 @@ _DEFAULT_CONFIG = _REPO_ROOT / "configs" / "human_optimization.toml"
 
 
 def _out_path(paths: scene_db.ScenePaths, scene_id: str, tag: str) -> Path:
-    return paths.feature_dir("contacts", scene_id) / f"contacts_{tag}.npz"
+    return paths.feature_dir("human_optim", scene_id) / f"contacts_{tag}.npz"
 
 
 def _process_scene(paths: scene_db.ScenePaths, out_paths: scene_db.ScenePaths, row, gpu: int,

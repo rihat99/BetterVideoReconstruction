@@ -7,17 +7,18 @@ back from the matching contacts npz for its plot. Like ``estimate_contacts`` it 
 ``--predictions`` stage, so — same as the contacts driver — it runs on a per-scene
 **symlink farm** rather than a JSON manifest: for each scene we stitch the optimized
 body (``features/human_optim/<...>/<body>.npz``), its contacts
-(``features/contacts/<...>/contacts_<tag>.npz``), the converter body
+(``features/human_optim/<...>/contacts_<tag>.npz``), the converter body
 (``features/sam3d/<...>/smplx_params.npz``), Sapiens pose, and the fused geometry
 into a throwaway ``--predictions`` dir, run the stage, and move its
-``uncertainty_<tag>.npz`` into the stage-first feature tree::
+``uncertainty_<tag>.npz`` next to the body it scores, in that body's ``human_optim``
+scene dir::
 
-    features/uncertainty/<aa>/<bb>/<scene_id>/uncertainty_<tag>.npz
+    features/human_optim/<aa>/<bb>/<scene_id>/uncertainty_<tag>.npz
 
 Run the contacts driver first — the per-contact confidence axis reads
-``contacts_<tag>.npz``; a scene without it still scores (that axis is just skipped).
-Everything else (bodies, sam3d, sapiens, geometry) is READ-ONLY; the only output is
-the new ``uncertainty`` tree. Scenes are split across the configured GPUs (one worker
+``contacts_<tag>.npz`` (now alongside the body); a scene without it still scores (that
+axis is just skipped). Everything else (bodies, sam3d, sapiens, geometry) is READ-ONLY;
+the only output is that one ``uncertainty_<tag>.npz`` file. Scenes are split across the configured GPUs (one worker
 per GPU over a disjoint stride shard); per-scene failures are reported and skipped,
 never fatal. Resumable with ``--skip-existing``.
 
@@ -53,7 +54,7 @@ _SIBLING_STAGES = ("sam3d", "sapiens", "geometry")
 
 
 def _out_path(paths: scene_db.ScenePaths, scene_id: str, tag: str) -> Path:
-    return paths.feature_dir("uncertainty", scene_id) / f"uncertainty_{tag}.npz"
+    return paths.feature_dir("human_optim", scene_id) / f"uncertainty_{tag}.npz"
 
 
 def _process_scene(paths: scene_db.ScenePaths, out_paths: scene_db.ScenePaths, row, gpu: int,
@@ -69,7 +70,7 @@ def _process_scene(paths: scene_db.ScenePaths, out_paths: scene_db.ScenePaths, r
     if skip_existing and out.is_file():
         return "skip"
     body = paths.feature_dir("human_optim", sid) / f"{bodies}.npz"
-    contacts = paths.feature_dir("contacts", sid) / f"contacts_{tag}.npz"
+    contacts = paths.feature_dir("human_optim", sid) / f"contacts_{tag}.npz"
     sam3d = paths.feature_dir("sam3d", sid)
     sapiens = paths.feature_dir("sapiens", sid)
     geom = paths.feature_dir("geometry", sid)
@@ -180,7 +181,7 @@ def main(argv: list[str] | None = None) -> int:
         for row in rows:
             sid = row["scene_id"]
             body = paths.feature_dir("human_optim", sid) / f"{a.bodies}.npz"
-            cnt = paths.feature_dir("contacts", sid) / f"contacts_{tag}.npz"
+            cnt = paths.feature_dir("human_optim", sid) / f"contacts_{tag}.npz"
             have = body.is_file() and (paths.feature_dir("geometry", sid) / "transform.npz").is_file()
             done = _out_path(out_paths, sid, tag).is_file()
             print(f"  {sid:24s} inputs={'OK' if have else 'MISSING'}"

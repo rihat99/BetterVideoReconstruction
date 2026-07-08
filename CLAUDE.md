@@ -31,7 +31,9 @@ branch" behavior for this repo).
   (`--stage vggt|sapiens|sam3d|smplx`, GPU-sharded) over the scene DB, writing
   `features/<stage>/<aa>/<bb>/<scene>/`. The `--predictions` stages that don't fit
   the manifest fan-out run on a symlink farm instead: `scripts/precompute_contacts_scenes.py`
-  (the contact readout → `features/contacts/`, `--out-root` redirects for smoke tests).
+  and `scripts/precompute_uncertainty_scenes.py` (the contact + trust readouts, written
+  **alongside the body** into `features/human_optim/<scene>/` to mirror the local
+  `out/<stem>/human_optim/` layout; `--out-root` redirects for smoke tests).
   Shared DB access + row selection live in `scripts/scene_db.py`.
 
 Both reuse the same per-stage CLIs in `scripts/stages/` and the `tools/` library.
