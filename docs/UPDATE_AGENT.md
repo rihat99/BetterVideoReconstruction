@@ -1,195 +1,276 @@
-# UPDATE_AGENT — round 8: confidence final form (simplify, recalibrate, freeze)
+# UPDATE_AGENT — round 9: VGGT depth streaks (measure → robustify → rescale)
 
-*2026-07-08, rev 8. You are the implementing agent. `docs/UPDATE.md` rev 10 is
+*2026-07-08, rev 9. You are the implementing agent. `docs/UPDATE.md` rev 11 is
 the human-facing plan — read it first. This file is the handoff: verified
-state, code anchors, task specs, gates. Rounds 1–7: git history. Trust
-function/key names over line numbers. This is the LAST round that may change
-confidence — after it, the schema is a frozen interface for a learning
-pipeline.*
+state, code anchors, task specs, gates. Rounds 1–8: git history. Trust
+function/key names over line numbers (the planning session verified them at
+HEAD `cc92cdb`, they will drift as you edit).*
 
 ## §0 State (verified 2026-07-08 by the planning session)
 
-**Repo**: HEAD `a6c009f` on `main` (round 7 complete: `ecaeb0d` layout,
-`487e567` audit, `7a6796f` autopsy, `596ab76` confidence v2, `a6c009f` wrap).
-Working tree clean EXCEPT the user's uncommitted edits in
-`tools/viewer/{app,loading,scene}.py` (preserve, never revert) and the new
-untracked `docs/contact_confidence.md` (the explainer the planning session
-wrote — commit it with your first commit, and keep it in sync with every
-formula change you ship).
+**Repo**: HEAD `cc92cdb` on `main`. Working tree: one modified file,
+`scripts/render_vertex_weights.py` — the user's kept "extreme" montage
+candidate set (viz-only, no optimization wiring). Preserve it; you may commit
+it as-is in your first commit, labeled viz-only.
+
+**Local clips**: `out/<stem>/` for the 5 labeled clips — `boulder_1`,
+`boulder_3`, `competition_1`, `competition_2`, `sport_climb` — are at HEAD
+state. Annotations `data/<stem>.npz` are SACRED: bit-identical all round.
+Label baseline (unchanged since round 4): pooled P 0.896 / R 0.678 /
+F1 0.772 / FPR 0.066 (scorer pools exclude sport_climb by default).
+**Re-derive the baseline at HEAD yourself before any change** (§2).
 
 **Corpus** (DB root `/data3/rikhat.akizhanov/better/data/ClimbingVideos`):
-361 scenes, post-T1 layout — `features/human_optim/<aa>/<bb>/<scene>/`
-holds `kinematic_1.npz` + `contacts_1.npz` + `uncertainty_1.npz`. Contacts
-re-scored with confidence v2 (596ab76) 361/361. Audit artifacts:
-`features/audit/{bodies,autopsy,cloud_gap}.csv` + histograms. Round-7
-verdicts: 80/363 bodies flagged floating; causes 65% cloud-off-wall / 22%
-body-off-own-cloud / 10% broken upstream / 2% limbs; "buried" bodies were a
-distance-sign artifact (seated, not behind the wall); the limb thread is
-CLOSED (conversion loses ~2 cm forearm / ~5 cm thigh vs MHR but uniformly —
-floaters are no shorter than healthy bodies; knee-definition mismatch, not
-recoverable length).
+361 scenes, round-8 frozen state — `features/human_optim/` holds
+`kinematic_1.npz` + `contacts_1.npz` (confidence `confidence_schema=1`, a
+frozen interface for the learning pipeline) + `uncertainty_1.npz`. The
+canonical `features/` trees are a deliverable. **Never leave experimental
+outputs there** — redirect experimental runs (§2), or if a driver can't
+redirect, restore the touched scenes with a baseline-config re-run before you
+finish.
 
-**Labeled clips** for validation: the 4 hand-annotated tuning clips in
-`out/<stem>/` + `data/<stem>.npz` (sport_climb excluded from pools by the
-scorer default). Label baseline (unchanged since round 4): pooled P 0.896 /
-R 0.678 / F1 0.772 / FPR 0.066. Labels are SACRED this round: bit-identical
-throughout — everything is readout.
+**Showcase scenes** (user-picked, presumed bad-depth; verify with T0):
+`PfwFWSoPF_k_0026, 2nwG1Qa5k_c_0115, 9RvrpYoWDoo_0000, CRquJ8H1QLI_0001,
+3DAgLpPXVCs_0132, gtIGgs_y2nY_0024, vcRBT9Q9jXM_0029`. No contact labels →
+qualitative evidence only (streak meter, overlays, `view_3d --scenes`).
 
-**Confidence v2 behavior — planning-session probes on the re-scored corpus
-(re-derive anything you build on):**
+**Round-9 scope guards**: do NOT touch the contact-confidence formula or the
+`estimate_contacts` readout knobs — only the BODY (and the geometry it is fit
+to) may improve. `kinematics_2`/`dynamics` stay frozen. Commit directly to
+`main` (repo rule).
 
-- conf(L=1): mean **0.674** (was 0.465), >0.5: 71%; penetrating (<−1 cm,
-  46% of contacts): **0.853**. The contact class is healthy — this round
-  is mostly the no-contact class.
-- Still no-contact joint-frames (speed < v_lo, 1.88 M total), by cause:
-  - far ≥25 cm, healthy body (h ≥ 0.8): 20.0%, mean **0.94**, <0.3: 0% —
-    the round-7 far branch WORKS; its rare low scores are out-of-image
-    joints (verified: their persistence is 1.00, so `in_img` is the only
-    possible zero).
-  - far ≥25 cm, muted body (h < 0.8): 10.5% (197 k), mean **0.15** — the
-    recovery target for relative clearance (T2a).
-  - hover band 0–25 cm: **67.1%**, mean **0.02** — the real mass behind
-    "non-contact joints get low confidence" (T2b decides how much is
-    recoverable).
-  - jsdf NaN (no scene within reach): 2.3%, mean 0.00 (T2c).
-  - Fast (≥0.5 m/s) reference: mean 0.97.
-- `body_health`: 310/363 persons ≥0.8, 17 in 0.3–0.8, 36 <0.3.
+## §1 Verified code anchors
 
-**Code map** (anchors verified today):
-- `tools/human_optim/confidence.py` — `CONTACT_CONFIDENCE_DEFAULTS` :44
-  (14 knobs incl. round-7 `pen_ref_m`, `health_cr`, `health_hover_cm`);
-  `_sat` :62; `_scene_neighbourhood` :66 (memory-bounded chunked cdist);
-  `_persistence` :90; `compute_body_health` :102 (h = h_contact · h_hover;
-  contact_rate/0.1 and 1 − med_hover/15 cm); `contact_confidence` :131 —
-  p_close :156, `jsdf_f` nan/±inf→0 :157, p_far :158, p_still :159,
-  p_pen :163, `p_contact = p_close · max(p_still, p_pen)` :164,
-  p_fast :166, obs :171 (= sat(n_near/20) · sat(conf_near/0.3) · in_img),
-  persist :173, conf_pos :175, `conf_neg = persist · max(p_fast,
-  in_img · h · p_far)` :179.
-- `scripts/stages/estimate_contacts.py` — imports `compute_body_health` +
-  `contact_confidence` :64–65; `[contact_confidence]` TOML pass-through
-  :93–95; unguarded jsdf :198; drift_pre preference :210–213; gate :214;
-  `merged` :221; body_health_all :178. Saved fields: joint_contact,
-  joint_sdf_cm, merged, p_contact, observability, label_confidence,
-  body_health, object_ids, joint_names, parents, valid_mask, fps + knob
-  scalars.
-- `scripts/score_contacts.py` — `--reliability` :719, `_reliability_one`
-  :566. VERIFY it imports the confidence module rather than duplicating
-  formulas before you change anything; if it duplicates, unify first.
-- `scripts/audit_scenes.py` (round 7): per-(scene,person) metrics + flags —
-  reuse its loaders/conventions for corpus sweeps.
-- Guarded vs unguarded distance: `tools/human_optim/contacts.py:148`
-  `joint_guarded_min_sdf` (guard `(dmin < max_dist_m=0.10) & (conf >
-  thresh)`, else `torch.finfo.max` — `nan_to_num(posinf=…)` does NOT catch
-  finfo.max; the `_sat` clamps are why current code is safe). Unguarded
-  `lift_joint_contact` jsdf: finite to ~1.6 m, NaN = no near-surface vertex.
+- **`chamfer_loss`** `tools/human_optim/losses.py:135-186`: bidirectional,
+  RAW L2 via `torch.cdist` + `min` — no robust kernel, no cap. The ONLY
+  unrobustified data term (reprojection = Geman-McClure `gmof`,
+  `losses.py:26-36`; penetration/attraction = Huber `_huber`).
+  `vertex_weights` enters ONLY the vertex→depth mean (`losses.py:181-182`,
+  normalized weighted mean — wiring is correct); the depth→vertex mean
+  (`d2v`, `losses.py:177,183`) is uniform. Streaks pull mainly through `d2v`
+  and by winning `v2d` nearest-neighbour races.
+- **Cloud loading at optim time** `_person_depth_points`
+  `tools/human_optim/stages.py:50-81`: per-frame conf quantile
+  (`[chamfer].conf_drop_q=0.3`), stride cap `max_points=1500`, no distance
+  cap, no body gate. Per-point conf IS stored in `geometry/human.npz`; pixel
+  provenance is NOT.
+- **Fuse** `scripts/stages/fuse_geometry.py:135-146`: human cloud =
+  `clean_depth(depth, edge_rtol=0.04)` (NO conf arg) ∩ tight person mask;
+  scene = conf-gated (`conf_drop_q=0.3`) + dilated-human-subtracted +
+  voxel-merged + CC-filtered. `tools/geometry/clean.py:27-35` = the only
+  depth-map filter (utils3d `depth_map_edge` flying-pixel filter); its
+  `normal_map_edge` path is inert (no caller passes normals).
+- **Scale stage** `scripts/stages/estimate_scale.py`: per-frame
+  `weighted_median(log_ratio, w)` with `w = conf × vertex_weight`
+  (`:116-117`); vertex weights hardcoded extremity-UP
+  (`geodesic_endeffector_weights` defaults lo 0.1 / hi 10.0 / r 1.0,
+  `:176-177`) — no config knob; NO edge filter applied to the sampled depth.
+  Clip pooling `combine_log_scales` `tools/geometry/human_scale.py:44-83`
+  (MAD gate 3.0 → conf-weighted mean of per-frame log-scales).
+- **Init body precedes cloud load** `stages.py:299-307` (`q_world` built at
+  `:299-301`, `_person_depth_points` at `:307`): a body-derived gate can be
+  inserted with no reordering. SAM-3D metric depth witnesses: `pred_cam_t`
+  in `sam3d/params.npz`, `transl` in `sam3d/smplx_params.npz`.
+- **Normals** `tools/geometry/normals.py:43-51`: k-NN (k=16) covariance
+  `eigh`, camera-oriented; eigenvalues currently discarded (T2b would return
+  them).
+- **Scorer** `scripts/score_contacts.py`: `--predictions <clip dirs>`,
+  `--body-path` to score a variant body npz without touching `out/`,
+  `--exclude-from-pool` default `sport_climb`. Reports P/R/F1 + FPR per clip,
+  per coarse joint, pooled, over a close/still grid.
+- **Corpus drivers** (all take `--scenes` comma-list, `--devices`):
+  `precompute_geometry_scenes.py` (scale+fuse, symlink farm),
+  `precompute_human_optim_scenes.py`, `precompute_contacts_scenes.py`. Only
+  the contacts driver has `--out-root`. For experimental corpus runs, add a
+  matching `--out-root` to the geometry + human-optim drivers (mirror the
+  contacts driver's farm redirection) — or restore touched scenes afterward.
+- **Doc rot** (fix in your wrap commit): CLAUDE.md still mentions a
+  "depth-push" term; `grep -rn depth_push` = zero hits, the term is gone.
 
-**The user's asks this round** (do not re-litigate): (1) the explainer doc —
-written at `docs/contact_confidence.md`, keep it exact; (2) simplify —
-remove factors that do not contribute; (3) still-far no-contact joints
-should be confident, using a *relative* (to other joints) metric so
-floating-body corruption is excluded; (4) confidence ships to a learning
-pipeline after this round — LAST chance for schema changes.
+## §2 Eval protocol
 
-## §1 Process
+**Baseline first.** Before any code change:
+`uv run python scripts/score_contacts.py --predictions out/boulder_1 out/boulder_3 out/competition_1 out/competition_2 out/sport_climb --device cuda`
+Record the full table → `out/_round9/results.md`. This is the number every
+variant is judged against; do not quote the memory baseline unverified.
 
-One task = one commit (with the explainer-doc sync folded in), user
-go-ahead before each; commit directly to `main`. Labels bit-identical —
-assert it in every validation. Corpus re-scores via
-`precompute_contacts_scenes.py` WITHOUT `--skip-existing` (overwrite is the
-point) + `precompute_uncertainty_scenes.py` if its plot consumes changed
-fields; smoke to scratch (`--out-root`) first. GPUs: ask the user. Plain
-language in reports. Re-derive my §0 numbers before building on them.
+**Variant runs, locals.** Never clobber `out/<stem>` HEAD outputs. Per
+variant, build `out/_round9/<variant>/<stem>/` as a symlink farm (pattern:
+the corpus drivers): symlink the unchanged upstream stage dirs, make real
+dirs only for what the variant regenerates —
+- optimizer-side variants (T1a/T1b): real `human_optim/`; symlink `sam3d`,
+  `sapiens`, `geometry`, `sam3`, `vggt`.
+- scale-side variants (T1c): real `geometry/` + `human_optim/` (rerun
+  `estimate_scale` → `fuse_geometry` → `human_optimization` → 
+  `estimate_contacts`).
+Then score with `--predictions out/_round9/<variant>/<stem> ...`.
 
-## §2 T1 — factor-contribution audit (read-only)
+**Metrics logged per variant** (raw, in `results.md`): pooled + per-clip
+P/R/F1/FPR at the reference cell, the reproj/chamfer guard numbers (mean
+Sapiens-reproj px and chamfer cm from `diagnose_human_optim.py` or the
+optimizer's logged final losses), per-clip scale factor + per-frame scale
+spread (T1c), and the T0 streak-slice metrics (below). One change at a time;
+combined config only after singles are read.
 
-For each factor, measure whether it earns its complexity. Factors:
-`obs`'s three sub-factors (n_near, conf_near, in_img) at L=1; `persist`
-both classes; `p_close` vs `p_pen` overlap (is a single monotone
-gsdf-function equivalent?); `h_contact` vs `h_hover` (does one alone
-reproduce h?); the `v_lo/v_hi` ramp vs the `still_ref` ramp (two motion
-scales — necessary?).
+**Gates** (adopt a knob only if all hold on the 4-clip pool):
+- pooled F1 ≥ baseline + 0.01 (the round-6 "robust" bar) — OR the streak
+  slice improves markedly while the pool is flat AND the corpus showcase
+  visibly improves (say so explicitly; the user owns that call);
+- pooled precision ≥ baseline − 0.005 and FPR ≤ baseline + 0.005;
+- no single clip loses > 0.01 F1;
+- reproj guard within noise (< +0.3 px pooled mean);
+- parity: every new knob at its neutral default reproduces HEAD outputs to
+  fp tolerance (assert on one clip before sweeping).
 
-Method: recompute corpus confidence with each factor ablated (set to 1) —
-report the conf-distribution delta per class and population (use the §0
-bucket structure), plus the labeled-clip reliability delta. A factor whose
-ablation moves nothing measurable in BOTH is a drop candidate. My going-in
-candidates: `conf_near` (obs averages 0.96 at L=1 — at least one sub-factor
-is near-inert on dense DB clouds; check the sparse LOCAL clips before
-concluding), possibly one health sub-factor. Deliverable: a keep/drop table
-with numbers; NO code drops yet (they land in T3 on the final formula).
-Commit 1 (the report + `docs/contact_confidence.md` initial commit).
+**Corpus showcase.** After a winner exists locally:
+`uv run python scripts/precompute_geometry_scenes.py --scenes <7> --devices …`
+(only if T1c adopted) → `precompute_human_optim_scenes.py --scenes <7>` →
+`precompute_contacts_scenes.py --scenes <7>`, all REDIRECTED (§1). Compare
+before/after with the T0 meter + `view_3d --scenes` + overlay mp4s; capture
+screenshots/notes in `results.md`. Canonical `features/` gets the winner only
+when the user approves a corpus re-run (not this round unless asked).
 
-## §3 T2 — no-contact recalibration
+## §3 Tasks
 
-Four changes in `confidence.py`, threaded through `estimate_contacts`:
+### T0 — streak meter + go/no-go slice (`scripts/diagnose_depth_streaks.py`)
 
-- **(a) Relative clearance** (the user's idea). Per frame: `rel_j =
-  jsdf_j − min_j' jsdf_j'` (unguarded, finite mins only). A whole-body
-  placement error cancels in the difference, so this witness needs NO
-  health gate. `p_far_rel = sat((rel − rel_ref + ramp)/(2·ramp))`,
-  rel_ref grid start 0.25 m (same carve logic — the closest joint may
-  itself be on a carved hold). Distance witness becomes
-  `in_img · max(h · p_far, p_far_rel)`; motion branch untouched.
-  Edge cases: all-NaN frames (rel undefined ⇒ p_far_rel 0); the closest
-  joint itself (rel = 0 ⇒ no self-boost, correct); multi-person scenes
-  (per person, as everything is). Target: muted-body still joints with
-  rel ≥ ~0.4 m go 0.15 → ≥0.6; healthy scenes: p_far_rel ≈ p_far where
-  someone touches (min ≈ 0), so distributions barely move — verify.
-- **(b) Hover band, decided by measurement.** On the 4 labeled clips,
-  measure P(true contact | still, jsdf ∈ [12,25] cm, in_img, healthy) —
-  the actual carve/hover risk in the band. If small (report the number;
-  think <~3%), grid `far_ref_m ∈ {0.15, 0.20, 0.25}` and pick by
-  reliability + the safety gate below; if not small, keep 0.25 and record
-  why. This is the 67%-population lever — treat it with respect.
-- **(c) NaN = beyond reach.** jsdf NaN currently ⇒ p_far 0. Change to:
-  NaN counts as maximally far IFF the scene cloud is non-degenerate
-  (point count above a floor; reuse the audit's degenerate criterion) AND
-  the body is healthy (h) — else 0 as today. 2.3% of still negatives.
-- **(d) Health composition** per T1's finding (keep both sub-factors or
-  simplify) — whatever T1's table says.
+New diagnostic, no optimization change. Per `--predictions` clip dir, per
+person, per frame: load the human cloud exactly as the optimizer does
+(`_person_depth_points`, same conf gate), pose the INIT body (converter
+params — independent of VGGT), assign each cloud point to a coarse part
+(the 10 annotated groups, `_ANN_TO_SMPLX`) **in image space** (nearest
+projected init-body joint; streaks share the part's pixel footprint, so 3-D
+assignment would misfile them), then per part-frame compute the along-ray
+extent = p95 − p5 of point depth along the camera ray, and the offset of the
+point median from the init-body part depth. Flag "streaked" when extent >
+max(3 × nominal part thickness, 0.30 m) — calibrate the threshold so healthy
+clips flag ≈ few %.
 
-Safety gate (hard, both sub-tasks): on the labeled clips, the
-**confident-wrong-negative rate** — true (annotated) contacts receiving
-conf(L=0) > 0.7 — must NOT rise vs HEAD. Plus: reliability monotone both
-classes, top-decile accuracy not worse, labels bit-identical, corpus
-spot-check (5–10 scenes incl. muted + healthy + degenerate) in the expected
-directions and nowhere else. Then user go-ahead → full corpus re-score.
-Commit 2 (incl. explainer-doc formula sync).
+Outputs: per-clip CSV (`frame, person, part, n_pts, ray_extent_m,
+median_offset_m, streaked`) under `out/<stem>/geometry/diagnostics/`, a
+per-clip histogram PNG, and a pooled summary table printed + saved.
 
-## §4 T3 — simplify, freeze, ship
+**The go/no-go slice** (the round's most important number): on the labeled
+clips, split annotated joint-frames into streaked vs clean by the flag and
+report contact FP/FN rates in each. If contact errors do NOT concentrate in
+streaked part-frames, say so loudly — T1 then can't move the pooled numbers
+and the round's weight shifts to the corpus showcase + scale stability.
+Run the meter on the 7 showcase scenes too (symlink farms) to confirm they
+actually exhibit streaks. Commit T0 with its numbers in the message.
 
-- Apply T1's drop list to the post-T2 formula; delete the corresponding
-  knobs from `CONTACT_CONFIDENCE_DEFAULTS` + the TOML table; re-verify
-  parity of what remains (dropping a factor that measured inert must not
-  move reliability — re-run the labeled-clip check on the final form).
-- Schema freeze: final field list in `contacts_1.npz` (add a
-  `confidence_schema` version scalar, e.g. `1`); update
-  `docs/contact_confidence.md` to match the shipped formula EXACTLY
-  (formulas, constants, corpus table re-measured post-ship) — it is the
-  document of record for the learning pipeline; sync CLAUDE.md's contacts
-  row.
-- Final corpus re-score (no `--skip-existing`), 361/361 verified; refresh
-  `features/audit/bodies.csv` confidence columns if it carries any.
-- UPDATE.md round-8 outcome section. Commit 3.
+### T1a — robust chamfer kernel
 
-## §5 Gotchas
+`chamfer_loss`: apply a Geman-McClure kernel to the per-point min-distances
+in BOTH directions before averaging (reuse the `gmof` pattern;
+`gm(d) = ρ²·d²/(d²+ρ²)` — note current chamfer averages raw distance, not
+squared; keep the kernel's scale in meters and preserve the current
+magnitude at small d so the `[loss_weights]` chamfer weight keeps meaning:
+e.g. `d_robust = d·ρ/(d+ρ)` (a saturating first-order kernel) is acceptable
+too — pick one, justify in the commit).
 
-- The carved-hold ambiguity is PHYSICAL: a hand on an unreconstructed hold
-  and a hand hovering in open space are geometrically identical. Do not
-  "fix" it — measure the band risk (T2b) and trade consciously.
-- Out-of-image joints stay low-confidence BY DESIGN (extrapolated
-  positions). Do not add recovery paths for them.
-- Relative clearance certifies FREE joints on floaters; it must never
-  boost conf near the body's own closest level (rel small) — a floater's
-  near-wall joints stay uncertain.
-- `jsdf` NaN also occurs on degenerate scenes (`vcRBT9Q9jXM_0053` is
-  all-NaN) — T2c's cloud-floor gate is what keeps those honest.
-- `nan_to_num(posinf=…)` does not catch `torch.finfo.max` (the guarded
-  channel's sentinel) — keep the `_sat` clamps.
-- Labels +1 attraction / 0 repulsion / −1 unlabeled in the OPTIMIZER
-  (`optimizer.py:334`) — irrelevant to the readout but a standing trap.
-- Corpus re-score must OMIT `--skip-existing`; smoke to scratch first.
-- The scorer's `--reliability` must share `confidence.py` (verify, unify
-  if not) — two implementations of a frozen interface is how it rots.
-- Preserve the user's uncommitted viewer edits.
+Knob: `[chamfer] robust_scale_m` (0.0 = off = parity default). **Phase
+hazard**: the `root` phase needs long-range chamfer pull to seat depth from a
+distant init. Make the kernel phase-aware — off (or ≥ 0.5 m) during `root`,
+target scale in `full`/`refine`. Implementation freedom: a second knob
+(`robust_from_phase = "full"`) or a per-phase scale list; keep it simple.
+
+Sweep ρ ∈ {0.10, 0.15, 0.25} on the locals. Log the fraction of cloud points
+whose pull is > 50 % attenuated (healthy clips should sit low — if a healthy
+clip attenuates half its cloud, ρ is too tight). Gate per §2.
+
+### T1b — per-point weights on the cloud side (`d2v`)
+
+Give each human-cloud point a reliability weight
+`w = conf_norm × clip(edge_dist_px / edge_ref_px, ·, 1)`:
+- `conf_norm`: per-frame normalized VGGT conf (already stored per point).
+- `edge_dist_px`: distance from the point's source pixel to the person-mask
+  boundary. Pixel provenance is not stored in `human.npz` — preferred:
+  compute at fuse time (`cv2.distanceTransform` on the person mask) and save
+  per-point `edge_dist_px` into `human.npz` (schema addition; re-run fuse on
+  the 5 locals + farms — cheap). Alternative (no schema change): reproject
+  points with the saved cameras at load time and sample the mask's distance
+  transform; pick one and say why.
+
+Use `w` as a weighted mean over `d2v` (mirror of the existing
+`vertex_weights` weighted mean on `v2d`); optional sweep arm: also hard-drop
+points with `w < w_min` from the cloud entirely (they then can't win `v2d`
+races either — partially overlaps T1a; measure the marginal effect).
+Knobs in `[chamfer]` with neutral defaults = parity (uniform `w≡1`).
+Sweep `edge_ref_px` ∈ {4, 8} × conf on/off. Gate per §2.
+
+### T1c — scale stage: weighting flip + edge filter
+
+`estimate_scale.py`:
+- `--vertex-weighting {extremity_up|uniform|extremity_down}` (default
+  `extremity_up` = parity; `extremity_down` = swap lo/hi of the geodesic
+  field — read the ruler at the torso).
+- `--edge-rtol` (default 0.0 = off): apply `depth_map_edge` (as in
+  `clean.py`) to invalidate flying pixels in `depth_rel` before sampling
+  vertices against it (`_frame_log_scale`'s `valid`).
+
+Report per variant, per clip: clip scale factor vs HEAD, per-frame log-scale
+spread (std + MAD — the stability early-warning), n frames MAD-gated out.
+Then run the downstream chain (fuse → human_optim → contacts → score) for
+the best 1–2 variants only (6 variants × full chain is wasteful; pick on
+scale-stability + sane factor movement first). Gate per §2 on the downstream
+numbers; a scale that moves > ~5 % on a healthy clip with unchanged spread is
+suspicious — flag rather than adopt.
+
+### T1d — combine + confirm
+
+Combine the adopted knobs, one confirmation run over all 5 locals + the 7
+showcase scenes (redirected), full table into `results.md`, per-task commits
+already landed; wrap commit updates CLAUDE.md (config knob docs + kill the
+"depth-push" mention) and this file's §0. Set the winning values as TOML
+defaults only if the user's gates passed unambiguously; otherwise leave
+neutral defaults and present the table.
+
+## §4 Second wave (run ONLY what T0/T1 evidence justifies; one at a time)
+
+- **T2a init-body depth corridor** (preprocessing "squeeze"): in
+  `_person_depth_points` (init body is in scope upstream — pass it in),
+  soft-clamp each point's along-ray coordinate into
+  `[init_part_depth − τ, init_part_depth + τ]`, τ ∈ {0.3, 0.4} m — clamp,
+  don't delete (keeps lateral signal). Guards: skip untracked/invalid frames
+  (`_fill_invalid_frames` provenance); log per-frame clamped fraction and
+  alarm > 50 % (init body may be the wrong one there). Strongest candidate if
+  T0 shows large `median_offset_m` (whole-part displacement), which T1a/T1b
+  (outlier-shaped fixes) treat poorly.
+- **T2b per-point streak score**: `estimate_point_normals` optionally
+  returns eigenvalues; score = elongation (λ1 ≫ λ2) × |dominant axis · ray|;
+  fold into T1b's `w`. Run if T1b helps but mask-edge distance proves a weak
+  proxy.
+- **T2c wall-contamination drop**: drop human points within ε of the scene
+  cloud AND ≥ 20 cm behind the init-body part depth (both conditions — hands
+  genuinely touch the wall in this data; naive proximity dropping will eat
+  true contact evidence and inflate precision while killing recall — watch
+  the contact metrics specifically).
+- **T3a along-ray anisotropic chamfer**: decompose residuals into along-ray
+  (compress: log-depth or ×α < 1) + lateral (keep metric) using per-point ray
+  dirs (point − camera center, cameras in `transform.npz`). The principled
+  version of T2a's squeeze inside the loss; try if T1a helps but costs
+  healthy-clip depth seating (gate: chamfer-cm guard).
+- **T3b per-part chamfer gating**: T0 flags → zero that part's vertices'
+  chamfer contribution in flagged frames (vertex→part via the existing
+  nearest-joint lift machinery); smoothness/init-anchor carry the part.
+  Cheap and surgical; needs T0 flags to be precise (validate visually first).
+- **T3c render-and-compare log-depth + free-space** — sketch only this
+  round; escalate to the user before building (differentiable depth render =
+  real scope).
+
+## §5 Discipline
+
+- Per-task commits on `main` (`Round 9 T0: …`), numbers in commit messages.
+- Parity green before every sweep (neutral knob ⇒ HEAD-identical outputs on
+  one clip, fp tolerance).
+- Raw metrics + trajectory into `out/_round9/results.md` as you go; the user
+  owns the verdict — report nulls plainly (this project ships nulls).
+- Self-confirmation trap (standing): recall is inflatable by any stronger
+  pull toward the wall; precision + FPR are the honest signals. Any variant
+  that raises recall AND FPR together is doing the wrong thing.
+- Skepticism: treat this file's claims as leads, not ground truth — re-verify
+  an anchor before building on it; the planning session verified at
+  `cc92cdb` only.
+- Don't touch: annotations, contact-confidence/readout code and knobs,
+  kinematics_2/dynamics, canonical corpus `features/` (redirect/restore),
+  the user's `render_vertex_weights.py` edit (preserve/commit, never revert).

@@ -42,14 +42,20 @@ _GROUP_ORDER = ("hand", "foot", "forearm", "shin", "upper_arm", "thigh", "chest"
 # ``_GEO_HI`` (×10), the neutral ``1.0`` at the log-midpoint.
 _GEO_LO, _GEO_HI = 0.1, 10.0
 
+# Extreme set: crush the core to a near-zero floor and shrink the falloff radius so
+# mass concentrates on hands/feet with a sharp transition. Lower floor than _GEO_LO.
+_EXT_LO, _EXT_HI = 0.01, 10.0
+
 
 def build_candidates(verts, faces, lbs, names, seg, which: str = "geodesic") -> dict[str, np.ndarray]:
     """The weight fields to compare.
 
     ``which='geodesic'`` sweeps the geodesic-to-endeffector falloff (log-mapped to
     ``[0.1, 10]`` so a wide multiplicative range separates tips from core, with **no**
-    mean-normalization so the core reaches the floor). ``which='all'`` is the full
-    method menu, mean-normalized. Returns ``{name: (V,) weights}``.
+    mean-normalization so the core reaches the floor). ``which='extreme'`` is the same
+    idea pushed further — a near-zero floor (``0.01``) and a short radius so almost all
+    the weight mass lands on hands/feet with a sharp transition. ``which='all'`` is the
+    full method menu, mean-normalized. Returns ``{name: (V,) weights}``.
     """
     geo = vw.geodesic_endeffector_field(verts, faces, lbs, names)
 
@@ -66,6 +72,21 @@ def build_candidates(verts, faces, lbs, names, seg, which: str = "geodesic") -> 
             "quadratic · r1.3": field("power", 1.3),
             "smoothstep · r1.1": field("smoothstep", 1.1),
             "gaussian · r0.7": field("gaussian", 0.7),
+        }
+
+    if which == "extreme":
+        def field(kind: str, radius: float, lo: float, gamma: float = 2.0) -> np.ndarray:
+            x = vw.falloff(geo, kind=kind, radius=radius, gamma=gamma)
+            return vw.scale_to_range(x, lo=lo, hi=_EXT_HI, mode="log")
+        # Ordered softest → sharpest. A shorter radius + a power/smoothstep shape pulls
+        # the forearm/shin gradient down toward the floor so only the true hands/feet
+        # stay high; the ×÷ range widens to [0.01, 10] so the core is genuinely near-zero.
+        return {
+            "linear · r0.6 · lo.02": field("linear", 0.6, 0.02),
+            "smoothstep · r0.5 · lo.02": field("smoothstep", 0.5, 0.02),
+            "quadratic · r0.6 · lo.02": field("power", 0.6, 0.02),
+            "quadratic · r0.4 · lo.02": field("power", 0.4, 0.02),
+            "quadratic · r0.4 · lo.01": field("power", 0.4, 0.01),
         }
 
     up, down = vw.PROFILES["extremity_up"], vw.PROFILES["extremity_down"]
@@ -149,8 +170,9 @@ def main(argv: list[str] | None = None) -> int:
                    help="output dir for the montage PNG + weights npz + table (default: out/vertex_weights).")
     p.add_argument("--model", type=Path, default=_DEFAULT_MODEL,
                    help=f"SMPL-X-mid .npz (default: {_DEFAULT_MODEL}).")
-    p.add_argument("--set", dest="cand_set", choices=("geodesic", "all"), default="geodesic",
-                   help="candidate set: 'geodesic' falloff sweep (default) or the full 'all' menu.")
+    p.add_argument("--set", dest="cand_set", choices=("geodesic", "extreme", "all"), default="geodesic",
+                   help="candidate set: 'geodesic' falloff sweep (default), 'extreme' near-zero-core "
+                        "sweep, or the full 'all' menu.")
     p.add_argument("--dpi", type=int, default=160, help="montage PNG dpi (default: 160).")
     p.add_argument("--no-npz", action="store_true", help="skip saving the candidate weights npz.")
     args = p.parse_args(argv)
@@ -177,6 +199,9 @@ def main(argv: list[str] | None = None) -> int:
     if args.cand_set == "geodesic":
         vmin, vmax, log, cmap = _GEO_LO, _GEO_HI, True, "RdBu_r"
         title = "SMPL-X geodesic weight — falloff sweep  (log scale · core ÷10 … tip ×10)"
+    elif args.cand_set == "extreme":
+        vmin, vmax, log, cmap = _EXT_LO, _EXT_HI, True, "RdBu_r"
+        title = "SMPL-X geodesic weight — EXTREME sweep  (near-zero core · mass on hands/feet)"
     else:
         allw = np.concatenate(list(cands.values()))
         vmin, vmax, log, cmap = float(allw.min()), float(allw.max()), False, "turbo"
