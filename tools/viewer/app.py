@@ -19,6 +19,7 @@ from .loading import ClipData, load_clip_data
 from .scene import ClipScene, _SKEL_ALPHA
 
 _LAYER_LABELS = (("body", "SMPL-X body"), ("skeleton", "body skeleton"),
+                 ("confidence", "contact confidence"),
                  ("human", "human points"), ("scene", "scene points"),
                  ("cameras", "cameras"), ("gravity", "gravity"), ("ground", "ground plane"))
 # scene rendering choices; the label lower-cases to the internal method name
@@ -47,8 +48,9 @@ class Viewer:
         self.opts = dict(camera_stride=camera_stride, device=device,
                          show_smplx=show_smplx, human_max_points=human_max_points,
                          video_dir=video_dir)
-        self.layers = {"body": show_smplx, "skeleton": False, "human": True,
-                       "scene": True, "cameras": True, "gravity": False, "ground": True}
+        self.layers = {"body": show_smplx, "skeleton": False, "confidence": True,
+                       "human": True, "scene": True, "cameras": True,
+                       "gravity": False, "ground": True}
         self._surface = scene_surface    # scene rendering: "points" / "bpa" / "poisson"
         self.cache: dict[Path, ClipData] = {}
         self.scene: ClipScene | None = None
@@ -160,7 +162,7 @@ class Viewer:
                     return
                 if key in ("scene", "cameras", "gravity", "ground"):
                     self.scene.set_static_layer(key, self.layers[key])
-                else:  # body / skeleton / human are per-frame → re-apply the current frame
+                else:  # body / skeleton / confidence / human are per-frame → re-apply the frame
                     self.scene.apply_frame(self._cur())
         return cb
 

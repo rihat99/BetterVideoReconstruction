@@ -27,8 +27,13 @@ _DYN_R0, _DYN_RB, _DYN_MAXS, _DYN_FSCALE = 0.022, 0.012, 3.0, 5e-4
 # body-skeleton overlay: fixed joint-sphere radius / bone radius (m) and the
 # default kinematic mesh opacity while the skeleton shows over it (slider-tunable).
 _SKEL_R, _SKEL_RB, _SKEL_ALPHA = 0.028, 0.012, 0.7
-# joint-sphere colours — red in scene contact / green free (matches estimate_contacts)
+# joint-sphere colours — red in scene contact / green free (matches estimate_contacts);
+# the flat fallback when the "contact confidence" layer is off (or no confidence was written).
 _CONTACT_RGB, _FREE_RGB = (235, 45, 45), (60, 200, 90)
+# With the confidence layer on, the sphere is ramped by the per-joint label confidence
+# (contacts_1.npz ``label_confidence`` ∈ [0, 1], both classes): a neutral grey at ~0 →
+# these darker, saturated endpoints at ~1, so a more-certain label reads darker + bolder.
+_CONTACT_HI, _FREE_HI, _CONF_GREY = (150, 12, 12), (14, 120, 42), (150, 150, 150)
 # (``_FINGER_TOKENS`` — the hand joints excluded from the body skeleton — is imported
 # from ``loading`` so the skeleton build and the finger→wrist contact fold agree.)
 # cap on drawn camera frustums, so a long clip isn't a dense wire mess
@@ -46,6 +51,15 @@ def _unit_cylinder():
     cyl = trimesh.creation.cylinder(radius=1.0, height=1.0, sections=10)
     cyl.visual.vertex_colors = np.array([235, 235, 235, 255], np.uint8)
     return cyl
+
+
+def _conf_color(hot: bool, conf: float) -> tuple[int, int, int]:
+    """Joint-sphere RGB ramped by label confidence: neutral grey at 0 → a dark, saturated
+    red (contact) / green (free) at 1. ``conf`` clamped to [0, 1] (non-finite → grey)."""
+    hi = _CONTACT_HI if hot else _FREE_HI
+    c = float(conf)
+    t = min(max(c, 0.0), 1.0) if c == c else 0.0     # c == c is False for NaN
+    return tuple(int(round(g + (h - g) * t)) for g, h in zip(_CONF_GREY, hi))
 
 
 class ClipScene:
@@ -169,6 +183,7 @@ class ClipScene:
         self.skel = data.skeleton
         self.skel_nodes: dict[int, dict] = {}
         self._contact: dict[int, np.ndarray] = {}
+        self._conf: dict[int, np.ndarray] = {}   # oid -> (N, J) label confidence, folded like contact
         self._skel_shown = False          # any skeleton node currently visible
         self._kin_translucent = False     # last-applied kinematic-mesh transparency
         kin = data.skinned.get("kinematics")
@@ -182,6 +197,8 @@ class ClipScene:
                 c_oids = (self.skel["contact_oids"] if self.skel["contact_oids"] is not None
                           else np.arange(self.skel["contact"].shape[0]))
                 self._contact = {int(o): self.skel["contact"][i] for i, o in enumerate(c_oids)}
+                if self.skel.get("confidence") is not None:
+                    self._conf = {int(o): self.skel["confidence"][i] for i, o in enumerate(c_oids)}
             cyl = _unit_cylinder()
             for p, person in enumerate(people):
                 if person is None:
@@ -454,6 +471,8 @@ class ClipScene:
         hidden and already torn down, so idle playback stays cheap.
         """
         on = self.layers.get("skeleton", False) and self.active == "kinematics"
+        # Confidence shading (on by default): grey→saturated red/green by label confidence.
+        use_conf = self.layers.get("confidence", True)
         if on != self._kin_translucent:
             for hp in self.skinned.get("kinematics", []):
                 if hp is not None:
@@ -471,11 +490,15 @@ class ClipScene:
                 live = on and f < len(person["valid"]) and bool(person["valid"][f])
                 bp = person["bone_pos"][f]                    # (J, 3) world joints
                 con = self._contact.get(int(kin_oids[p]))     # (N, J) bool or None
+                cf = self._conf.get(int(kin_oids[p]))         # (N, J) confidence or None
                 for j, sp in nd["spheres"].items():
                     if live:
                         sp.position = (float(bp[j, 0]), float(bp[j, 1]), float(bp[j, 2]))
                         hot = con is not None and f < len(con) and bool(con[f, j])
-                        sp.color = _CONTACT_RGB if hot else _FREE_RGB
+                        if use_conf and cf is not None and f < len(cf):
+                            sp.color = _conf_color(hot, cf[f, j])
+                        else:
+                            sp.color = _CONTACT_RGB if hot else _FREE_RGB
                         sp.visible = True
                     else:
                         sp.visible = False

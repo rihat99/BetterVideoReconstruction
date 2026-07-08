@@ -72,12 +72,13 @@ def _load_dynamics(pred: Path) -> dict | None:
 
 
 def _load_skeleton(pred: Path) -> dict | None:
-    """Body-skeleton topology + per-joint scene contact for the kinematic body.
+    """Body-skeleton topology + per-joint scene contact (and its confidence) for the kinematic body.
 
     The joint tree (``parents`` / ``joint_names``, 52-joint ``SMPLXMid`` order) comes
     from ``human_optim/kinematic_1.npz`` so the skeleton can be drawn even without a
-    contact pass; the per-joint contact flags come from ``human_optim/contacts_1.npz``
-    when present (same joint order), driving the joint-sphere colour. ``None`` when no
+    contact pass; the per-joint contact flags — and the round-5 T3 per-joint
+    ``label_confidence`` ∈ [0, 1] (both classes) that shades the sphere — come from
+    ``human_optim/contacts_1.npz`` when present (same joint order). ``None`` when no
     kinematic body exists.
     """
     kin = pred / "human_optim" / "kinematic_1.npz"
@@ -88,24 +89,38 @@ def _load_skeleton(pred: Path) -> dict | None:
         "parents": np.asarray(kd["parents"], np.int32),          # (J,)
         "joint_names": [str(x) for x in kd["joint_names"]],      # (J,)
         "contact": None,                                         # (P, N, J) bool or None
+        "confidence": None,                                      # (P, N, J) float or None
         "contact_oids": None,                                    # (P,) or None
     }
     cf = pred / "human_optim" / "contacts_1.npz"
     if cf.exists():
         cd = np.load(cf, allow_pickle=True)
         contact = cd["joint_contact"].astype(bool)           # (P, N, J), fresh copy
+        conf = (cd["label_confidence"].astype(np.float32)    # (P, N, J) or None (older pass)
+                if "label_confidence" in cd.files else None)
         # OR-fold each hand's finger contact into its wrist: the skeleton draws only
         # the wrist (fingers are excluded), and a hand on the wall touches through the
-        # fingers — the same "resolve hand contact at the wrist" convention the
-        # dynamics stage uses. Mutates the copy; on-disk contacts_1.npz is untouched.
+        # fingers — the same "resolve hand contact at the wrist" convention the dynamics
+        # stage uses. Fold the confidence to match the OR: when the folded label is
+        # contact, take the strongest touching vote (max over in-contact members); when
+        # free, the mean certainty across the hand. Mutates the copies; the npz is untouched.
         names = out["joint_names"]
         for side in ("left", "right"):
             wrist = names.index(f"{side}_wrist")
             fingers = [j for j, nm in enumerate(names)
                        if nm.startswith(f"{side}_") and any(t in nm for t in _FINGER_TOKENS)]
-            if fingers:
-                contact[..., wrist] |= contact[..., fingers].any(-1)
+            if not fingers:
+                continue
+            members = [wrist] + fingers                       # incl. the wrist's own state
+            mcon = contact[..., members]                      # (P, N, M) — read before the wrist write
+            folded = mcon.any(-1)                             # (P, N)
+            if conf is not None:
+                mconf = conf[..., members]                    # (P, N, M)
+                c_hit = np.where(mcon, mconf, -np.inf).max(-1)  # strongest touching vote
+                conf[..., wrist] = np.where(folded, c_hit, mconf.mean(-1))
+            contact[..., wrist] = folded
         out["contact"] = contact
+        out["confidence"] = conf
         out["contact_oids"] = (np.asarray(cd["object_ids"], np.int32)
                                if "object_ids" in cd.files else None)
     return out
