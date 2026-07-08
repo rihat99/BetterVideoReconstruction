@@ -150,6 +150,7 @@ v_hi         = 0.5     # speed at which no-contact is motion-certain
 img_margin_px = 10     # in-frame margin (px) for the visibility gate
 health_cr    = 0.1     # contact_rate below which a body reads as never-touching (floated) => mute far branch
 health_hover_cm = 15.0 # median closest-joint dist (cm) at which hover-health -> 0 (round-7 T4)
+nan_scene_min_pts = 1000  # a NaN distance counts as "far" only if the scene cloud has >= this many points (round-8 T2c)
 
 [contact]
 groups = ["left_hand", "right_hand", "left_foot", "right_foot"]

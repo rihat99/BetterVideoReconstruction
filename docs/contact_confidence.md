@@ -105,11 +105,13 @@ however plausible the geometry.
 For a joint labelled *no-contact*:
 
 ```
-conf(no-contact) = persistence × max(p_fast, in_image × h × p_far)
+conf(no-contact) = persistence × max(p_fast, in_image × far)
+far              = max( h × max(p_far, p_far_nan),  p_far_rel )
 ```
 
-There are two independent ways to be sure a joint is *not* touching, and we
-take the stronger one.
+There are two kinds of evidence that a joint is *not* touching — motion and
+distance — and we take the stronger. Distance itself has three witnesses,
+combined by `max`.
 
 **The motion witness.** You cannot grip while flying:
 
@@ -121,7 +123,7 @@ A fast-moving joint is a confident no-contact *even if we never saw the
 space around it* — occlusion does not matter, and (deliberately) neither
 does body health: motion evidence survives a broken reconstruction.
 
-**The distance witness.** The joint is clearly far from everything:
+**Distance witness 1 — absolute.** The joint is clearly far from everything:
 
 ```
 p_far = clamp((D − 0.22) / 0.06)          0 at 22 cm, 0.5 at 25 cm, 1 beyond 28 cm
@@ -132,11 +134,38 @@ purpose — beyond the size of any climbing hold. If a hand rests on a hold
 that the 3-D reconstruction failed to capture (a real and common failure,
 "the carved-out hold"), the nearest *reconstructed* wall may be 10–20 cm
 behind the physical hold. A 25 cm threshold means such a hand reads
-*uncertain* rather than *confidently free*. The price is honesty everywhere
-else: a still joint hovering 10–20 cm off a well-reconstructed wall also
-stays uncertain, because from geometry alone we cannot tell these two
-situations apart. The distance witness additionally requires the joint to
-project inside the image, and is scaled by body health `h`.
+*uncertain* rather than *confidently free*. This threshold was checked
+against the annotation: among still, in-frame joints, the fraction actually
+touching is still 29% at 12–25 cm and only 1% past 25 cm — so 25 cm is where
+the ambiguity ends, and lowering it would mislabel real contacts as free. The
+absolute witness requires the joint to project inside the image and is scaled
+by body health `h`.
+
+**Distance witness 2 — relative clearance.** The absolute distance is
+useless on a *floating* body — a reconstruction placed 30 cm off the wall
+makes every joint look far. But the joint's distance *above the body's own
+closest joint* is not corrupted, because the whole-body error cancels in the
+difference:
+
+```
+rel      = D − max(0, D_closest)          how far this joint sits above the nearest one
+p_far_rel = clamp((rel − 0.22) / 0.06)    same 25 cm carve threshold as p_far
+```
+
+A dangling foot 60 cm above a floating body's own closest point is provably
+free even when its absolute distance means nothing. The closest level is
+clamped at the wall surface (0) so a firmly-pressed contact elsewhere on the
+body cannot inflate the clearance. This witness carries **no** health gate —
+it is immune to the whole-body error by construction — but it is immune only
+to *whole-body* error, not *per-limb* error: a floater's own near-wall joints
+(small `rel`) stay uncertain, which is correct.
+
+**Distance witness 3 — nothing within reach.** If no scene point lies within
+about 1.6 m of the joint at all, that is the strongest far evidence there is —
+but only when the scene is real (at least 1000 reconstructed points, so an
+empty cloud does not qualify) and the body is healthy. Like the absolute
+witness, it is scaled by `h`, so a floater does not benefit from its own
+missing geometry.
 
 ## Body health: why a floating body loses its distance witness
 
@@ -162,21 +191,25 @@ essentially never touching (rate below 10%) is treated as floated.
 the clip gets `h = 0`. A healthy body — touching regularly, seated on the
 wall — gets `h = 1` and is completely unaffected.
 
-`h` multiplies only the distance witness, never the motion witness. On the
-current corpus, 310 of 363 bodies have `h ≥ 0.8`; the ~50 muted ones are
-floaters found by the corpus audit.
+`h` multiplies the *absolute* and *nothing-within-reach* distance witnesses,
+never the motion witness and never the *relative*-clearance witness (relative
+clearance already cancels the floating-body error, so it needs no gate — it is
+what lets a floater's genuinely-free joints still score high). On the current
+corpus, 310 of 363 bodies have `h ≥ 0.8`; the ~50 muted ones are floaters
+found by the corpus audit.
 
 ## What stays deliberately uncertain
 
 The design keeps confidence low where the evidence genuinely cannot decide.
 A slow joint 3–25 cm from the wall (the hover band — a missed contact and a
-near-miss look identical there); a slow joint whose surroundings were never
-reconstructed (occlusion); a joint outside the image; frames whose contact
-label was bridged across a gap by the span-merge step (these carry a
-`merged` flag so a consumer can treat them separately). For all of these,
-low confidence is the correct answer, not a failure to be fixed — a learner
-should be able to *ignore* them cheaply, which is the point of shipping
-confidence at all.
+near-miss look identical there); a slow, occluded joint on a *floating* body
+or a degenerate scene, where neither the absolute distance nor the
+"nothing-within-reach" test can be trusted; a joint outside the image; frames
+whose contact label was bridged across a gap by the span-merge step (these
+carry a `merged` flag so a consumer can treat them separately). For all of
+these, low confidence is the correct answer, not a failure to be fixed — a
+learner should be able to *ignore* them cheaply, which is the point of
+shipping confidence at all.
 
 ## Does it behave?
 
@@ -184,12 +217,14 @@ Measured on the full 361-scene corpus after the latest calibration:
 
 | population | mean confidence |
 |---|---|
-| contacts, all (1.42 M joint-frames) | 0.67 |
+| contacts, all (1.44 M joint-frames) | 0.67 |
 | contacts with firm penetration (46% of contacts) | 0.85 |
 | no-contact, fast joints | 0.97 |
-| no-contact, still + far, healthy body | 0.94 |
-| no-contact, still + far, floating body | 0.15 (muted, by design) |
+| no-contact, still + far, healthy body | 0.95 |
+| no-contact, still + far, floating body | 0.48 (recovered by relative clearance) |
 | no-contact, still, hover band 0–25 cm | 0.02 (honest unknown) |
+| no-contact, still, nothing within reach, healthy | 0.94 |
+| no-contact, still, nothing within reach, floating | 0.03 (muted, by design) |
 
 On the four hand-annotated clips, reliability curves are monotone for both
 classes — higher confidence means a higher chance the label matches the

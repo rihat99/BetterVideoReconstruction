@@ -14,19 +14,24 @@ already computes:
 - **label_confidence** — confidence in the binary label. For a *contact*:
   ``persist · observability · p_contact``. For a *no-contact*: either the joint is
   moving fast (confident from motion alone, even occluded — you cannot grip while
-  flying) or it is **clearly far** from the wall past the ambiguous hover band
-  (``p_far``, from the *unguarded* distance ``jsdf``). A joint just outside a visible
-  wall (the hover-miss zone, ~3–8 cm) or slow + occluded ⇒ low confidence: the honest
-  unknown. (``p_far`` reads the unguarded ``jsdf`` — finite out to ~1.6 m — because the
-  guarded ``gsdf`` saturates at ``max_dist_m`` and cannot tell 15 cm from 40 cm; and
-  its threshold ``far_ref_m`` sits beyond any plausible hold protrusion, so a hand on a
-  carved-out hold stays *uncertain* while a hand far in open space reads confidently free.
-  This replaces round-5's ``obs · (1 − p_contact)``, which scored visible near-wall
-  hovers as *confident* no-contact — the reliability curve's headline failure.)
-  The far branch is additionally scaled by a per-person **body_health** scalar
-  (:func:`compute_body_health`): a floating body — one that almost never touches or
-  hovers everywhere — has meaningless distances, so its "clearly far ⇒ confident
-  no-contact" is muted toward 0; the *motion* branch is left untouched (round-7 T4).
+  flying) or it is **clearly far** from the wall. "Far" has three witnesses, combined by
+  ``max``: the **absolute** distance ``p_far`` (from the *unguarded* ``jsdf``, past the
+  hover band), a **relative** clearance ``p_far_rel`` (round-8 T2a: how far the joint sits
+  ABOVE the body's own closest joint — a whole-body depth error cancels, so it certifies
+  free joints on a *floating* body where the absolute distance is corrupt), and a
+  **nothing-within-reach** flag ``p_far_nan`` (round-8 T2c: a NaN distance on a
+  non-degenerate scene). A joint just outside a visible wall (the hover-miss zone, ~3–25 cm)
+  or slow + occluded ⇒ low confidence: the honest unknown. (``p_far`` reads the unguarded
+  ``jsdf`` — finite out to ~1.6 m — because the guarded ``gsdf`` saturates at ``max_dist_m``
+  and cannot tell 15 cm from 40 cm; and its threshold ``far_ref_m`` sits beyond any plausible
+  hold protrusion, so a hand on a carved-out hold stays *uncertain* while a hand far in open
+  space reads confidently free. This replaces round-5's ``obs · (1 − p_contact)``, which
+  scored visible near-wall hovers as *confident* no-contact — the reliability curve's headline
+  failure.) The **absolute** and **NaN** witnesses are scaled by a per-person **body_health**
+  scalar (:func:`compute_body_health`): a floating body — one that almost never touches or
+  hovers everywhere — has meaningless distances, so its "clearly far ⇒ confident no-contact"
+  is muted toward 0 (round-7 T4); the **relative** clearance and the *motion* branch are left
+  unmuted (relative clearance is immune to the whole-body error by construction).
 
 One no-grad pass, consumed by :mod:`scripts.stages.estimate_contacts` after the
 labels are final (post span-merge). Every factor stays in ``[0, 1]`` and monotone.
@@ -56,6 +61,7 @@ CONTACT_CONFIDENCE_DEFAULTS = dict(
     img_margin_px=10,    # in-frame margin (px) for the visibility gate
     health_cr=0.1,       # contact_rate below which a body reads as never-touching (floated) ⇒ mute far branch
     health_hover_cm=15.0,  # median closest-joint dist (cm) at which hover-health → 0
+    nan_scene_min_pts=1000,  # a NaN distance counts as "far" only if the scene cloud has ≥ this many points
 )
 
 
@@ -156,6 +162,22 @@ def contact_confidence(jc: torch.Tensor, gsdf: torch.Tensor, jsdf: torch.Tensor,
     p_close = _sat((close_ref + ramp - gsdf_f) / (2.0 * ramp))      # 0.5 at close_ref; +inf ⇒ 0
     jsdf_f = torch.nan_to_num(jsdf, nan=0.0, posinf=0.0, neginf=0.0)  # non-finite / penetrating ⇒ not far
     p_far = _sat((jsdf_f - far_ref + ramp) / (2.0 * ramp))          # mirror of p_close: 0.5 at far_ref, 1 by far_ref+ramp
+    # Relative clearance (round-8 T2a): a joint's distance ABOVE the body's OWN closest joint.
+    # A whole-body depth-placement error (a floating body) cancels in the difference, so this
+    # witness needs NO health gate — a joint dangling far above a floater's own closest point
+    # is provably free even though its absolute distance is corrupt. The closest level is
+    # clamped at the surface (0) so a penetrating contact can't inflate the clearance (measured:
+    # the signed min leaks +0.17 onto healthy scenes; the surface-clamped min leaks +0.00).
+    finite = torch.isfinite(jsdf)
+    jbig = torch.where(finite, jsdf, torch.full_like(jsdf, float("inf")))
+    closest = torch.clamp(jbig.min(dim=1, keepdim=True).values, min=0.0)   # (N,1) surface-clamped
+    rel = torch.nan_to_num(jsdf - closest, nan=0.0, posinf=0.0, neginf=0.0)  # NaN joint / all-NaN frame ⇒ 0
+    p_far_rel = _sat((rel - far_ref + ramp) / (2.0 * ramp))        # same carve threshold as p_far
+    # "Nothing within reach" (round-8 T2c): a NaN distance (no scene vertex within ~1.6 m) is the
+    # strongest far evidence there is — but counts only when the scene is non-degenerate (else NaN
+    # just means an empty cloud) and, like p_far, the body is healthy (a floater's distances lie).
+    scene_ok = 1.0 if int(scene_pts.shape[0]) >= int(cfg["nan_scene_min_pts"]) else 0.0
+    p_far_nan = (~finite).float() * scene_ok
     p_still = _sat(1.0 - drift / (2.0 * still_ref))                 # 1 at drift 0
     # p_pen rises with penetration (gsdf below the surface): firm penetration is the strongest
     # contact evidence, so motion doubt (p_still) must not throttle it. 0 at close_ref (the touch
@@ -173,10 +195,12 @@ def contact_confidence(jc: torch.Tensor, gsdf: torch.Tensor, jsdf: torch.Tensor,
     persist = torch.as_tensor(_persistence(jc.detach().cpu().numpy().astype(bool),
                                            int(round(window_s * fps))), device=jw.device)
     conf_pos = persist * obs * p_contact                           # sure contact: seen, close, still/penetrating, persistent
-    # body_health mutes the distance-based no-contact branch on floating bodies (their far
-    # distances are meaningless); the motion branch survives — a fast joint is a confident
-    # no-contact even on a broken reconstruction.
-    conf_neg = persist * torch.maximum(p_fast, in_img * float(body_health) * p_far)
+    # No-contact = motion OR distance witness. body_health mutes the ABSOLUTE + NaN distance
+    # witnesses on floating bodies (their far distances are meaningless); the RELATIVE-clearance
+    # witness is health-free (it already cancels the floater's whole-body error); the motion
+    # branch survives regardless — a fast joint is a confident no-contact even on a broken scene.
+    far = torch.maximum(float(body_health) * torch.maximum(p_far, p_far_nan), p_far_rel)
+    conf_neg = persist * torch.maximum(p_fast, in_img * far)
     label_conf = torch.where(jc.bool(), conf_pos, conf_neg)
     to_np = lambda t: t.detach().cpu().numpy().astype(np.float32)
     return to_np(p_contact), to_np(obs), to_np(label_conf)
