@@ -61,7 +61,8 @@ from tools.human_optim import (  # noqa: E402
     vertex_to_joint, world_from_cam,
 )
 from tools.human_optim import paths  # noqa: E402
-from tools.human_optim.confidence import CONTACT_CONFIDENCE_DEFAULTS, contact_confidence  # noqa: E402
+from tools.human_optim.confidence import (  # noqa: E402
+    CONTACT_CONFIDENCE_DEFAULTS, compute_body_health, contact_confidence)
 from tools.human_optim.qmath import normalize_q  # noqa: E402
 from tools.smplx_robot import load_smplx_mid  # noqa: E402
 
@@ -174,6 +175,7 @@ def run(source, predictions_dir, config_path, *, device_override=None, overlay=T
     p_contact_all = np.zeros((P, N, J), np.float32)         #geometry+motion contact-likeness
     observability_all = np.zeros((P, N, J), np.float32)     #how much the scene saw the joint
     label_conf_all = np.zeros((P, N, J), np.float32)        #confidence in the final binary label
+    body_health_all = np.ones(P, np.float32)                #per-person health gating the far no-contact branch
 
     for p in range(P):
         betas = torch.as_tensor(kin["betas"][p], dtype=torch.float32, device=device)
@@ -229,9 +231,11 @@ def run(source, predictions_dir, config_path, *, device_override=None, overlay=T
         #per-joint confidence in the FINAL label (both classes; occlusion ⇒ honest low conf).
         # p_far reads the UNGUARDED distance jsdf (cm→m); gsdf saturates at max_dist and can't see "far".
         jc_final = torch.as_tensor(jc_np, dtype=torch.bool, device=device)
+        health = compute_body_health(jc_np, jsdf.cpu().numpy(), valid_mask[p], cfg=cfg["contact_confidence"])
+        body_health_all[p] = health
         pc, obs_c, lconf = contact_confidence(
             jc_final, gsdf, jsdf / 100.0, drift, jw, px, scene_pts, scene_conf, H, W,
-            cfg=cfg["contact_confidence"], window_s=float(cg["window_s"]), fps=fps)
+            cfg=cfg["contact_confidence"], window_s=float(cg["window_s"]), fps=fps, body_health=health)
         for arr, val in ((p_contact_all, pc), (observability_all, obs_c), (label_conf_all, lconf)):
             val[~valid_mask[p]] = 0.0
             arr[p] = val
@@ -242,6 +246,7 @@ def run(source, predictions_dir, config_path, *, device_override=None, overlay=T
     save = dict(
         joint_contact=joint_contact, joint_sdf_cm=joint_sdf_cm, merged=merged_all,
         p_contact=p_contact_all, observability=observability_all, label_confidence=label_conf_all,
+        body_health=body_health_all,
         object_ids=object_ids, joint_names=kin["joint_names"], parents=parents,
         valid_mask=kin["valid_mask"],
         num_people=np.int32(P), num_frames=np.int32(N),

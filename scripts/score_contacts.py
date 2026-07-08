@@ -44,7 +44,8 @@ from tools.human_optim import (  # noqa: E402
     merge_contact_spans, project, scene_sdf, transform_points, vertex_to_joint, world_from_cam,
 )
 from tools.human_optim import paths  # noqa: E402
-from tools.human_optim.confidence import CONTACT_CONFIDENCE_DEFAULTS, contact_confidence  # noqa: E402
+from tools.human_optim.confidence import (  # noqa: E402
+    CONTACT_CONFIDENCE_DEFAULTS, compute_body_health, contact_confidence)
 from tools.human_optim.qmath import normalize_q  # noqa: E402
 from tools.human_optim.stages import _ANN_TO_SMPLX, resolve_annotation_path  # noqa: E402
 from tools.smplx_robot import load_smplx_mid  # noqa: E402
@@ -620,9 +621,10 @@ def _reliability_one(pred_dir: str, config_path: Path, device: str, source=None,
                                        gap_sdf_m=float(cc["merge_sdf_m"]), fps=fps)
         jc = jc_t.cpu().numpy(); jc[~vmask] = False
         px = project(transform_points(jw, extr), K)
+        health = compute_body_health(jc, jsdf.cpu().numpy(), vmask, cfg=cf)
         _, _, lconf = contact_confidence(torch.as_tensor(jc, dtype=torch.bool, device=device),
                                          gsdf, jsdf / 100.0, gate_drift, jw, px, scene_pts, scene_conf, H, W,
-                                         cfg=cf, window_s=float(cg["window_s"]), fps=fps)
+                                         cfg=cf, window_s=float(cg["window_s"]), fps=fps, body_health=health)
         speed = (gate_drift / max(float(cg["window_s"]), 1e-6)).cpu().numpy()
         gsdf_np = gsdf.cpu().numpy(); rows = np.arange(N)
         rec: dict[str, list] = {k: [] for k in ("conf", "pred", "ann_pos", "speed", "gsdf")}
