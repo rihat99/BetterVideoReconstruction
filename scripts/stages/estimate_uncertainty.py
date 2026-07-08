@@ -81,7 +81,7 @@ from tools.human_optim import (  # noqa: E402
 from tools.human_optim.qmath import normalize_q  # noqa: E402
 from tools.human_optim import paths  # noqa: E402
 from tools.human_optim.config import load_config  # noqa: E402
-from tools.human_optim.stages import _person_depth_points  # noqa: E402  # shared chamfer-target loader
+from tools.human_optim.stages import _fill_invalid_frames, _person_depth_points  # noqa: E402  # shared chamfer-target loader + invalid-frame fill
 from tools.human_optim.visibility import front_facing_mask, vertex_normals  # noqa: E402
 from tools.smplx_robot import load_smplx_mid  # noqa: E402
 
@@ -522,7 +522,10 @@ def run(predictions_dir, *, source=None, overlay=False, bodies="kinematic_2",
 
         # Init-anchor target: the converter-pose body projection (the trusted 2D).
         spi = _idx(params["object_ids"], oid)
-        tt = lambda k: torch.as_tensor(params[k][spi], dtype=torch.float32, device=device)
+        # Converter writes NaN for untracked frames; hold nearest valid (as kinematics_1
+        # does) so the init-anchor forward's mat2SE3 doesn't reject a non-finite rotation.
+        tt = lambda k: torch.as_tensor(_fill_invalid_frames(params[k][spi], valid),
+                                       dtype=torch.float32, device=device)
         q_cam = mid.from_classic(betas_T, tt("body_pose"), tt("transl"), tt("global_orient"),
                                  tt("left_hand_pose"), tt("right_hand_pose"))
         q_init = normalize_q(fold_root_to_world(q_cam, wfc), J)
