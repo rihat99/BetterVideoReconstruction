@@ -234,7 +234,7 @@ def run(source, predictions_dir, config_path, *, device_override=None, overlay=T
         health = compute_body_health(jc_np, jsdf.cpu().numpy(), valid_mask[p], cfg=cfg["contact_confidence"])
         body_health_all[p] = health
         pc, obs_c, lconf = contact_confidence(
-            jc_final, gsdf, jsdf / 100.0, drift, jw, px, scene_pts, scene_conf, H, W,
+            jc_final, gsdf, jsdf / 100.0, drift, jw, px, scene_pts, H, W,
             cfg=cfg["contact_confidence"], window_s=float(cg["window_s"]), fps=fps, body_health=health)
         for arr, val in ((p_contact_all, pc), (observability_all, obs_c), (label_conf_all, lconf)):
             val[~valid_mask[p]] = 0.0
@@ -247,6 +247,7 @@ def run(source, predictions_dir, config_path, *, device_override=None, overlay=T
         joint_contact=joint_contact, joint_sdf_cm=joint_sdf_cm, merged=merged_all,
         p_contact=p_contact_all, observability=observability_all, label_confidence=label_conf_all,
         body_health=body_health_all,
+        confidence_schema=np.int32(1),   # frozen round-8 label-confidence schema (see docs/contact_confidence.md)
         object_ids=object_ids, joint_names=kin["joint_names"], parents=parents,
         valid_mask=kin["valid_mask"],
         num_people=np.int32(P), num_frames=np.int32(N),

@@ -143,8 +143,6 @@ still_ref_m  = 0.03    # p_still = 0 at drift >= 2x this
 pen_ref_m    = -0.01   # p_pen = 1 by this signed penetration depth (m); firm penetration overrides motion doubt
 obs_radius_m = 0.15    # scene points within this of a joint count as "seen"
 obs_min_pts  = 20      # n_near for full observability
-obs_k        = 8       # k nearest scene points averaged for conf_near
-conf_ref     = 0.3     # VGGT depth conf for full observability
 v_lo         = 0.15    # joint speed (m/s) below which motion says nothing about contact
 v_hi         = 0.5     # speed at which no-contact is motion-certain
 img_margin_px = 10     # in-frame margin (px) for the visibility gate

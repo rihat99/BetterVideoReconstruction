@@ -92,13 +92,14 @@ design error this rule fixes.)
 Observability is itself a product:
 
 ```
-observability = clamp(n_15cm / 20) × clamp(depth_conf / 0.3) × in_image
+observability = clamp(n_15cm / 20) × in_image
 ```
 
-— at least 20 reconstructed points within 15 cm of the joint, decent depth
-confidence on the nearest of them, and the joint inside the image (with a
-10 px margin). A contact we could not see cannot be a confident contact,
-however plausible the geometry.
+— at least 20 reconstructed points within 15 cm of the joint, and the joint
+inside the image (with a 10 px margin). A contact we could not see cannot be a
+confident contact, however plausible the geometry. (A depth-confidence third
+factor was dropped in round 8: it was measured inert — the reconstructed points
+near a contact always carried enough depth confidence to leave it at 1.)
 
 ## Confidence that a no-contact is real
 
@@ -247,5 +248,10 @@ and can be overridden in the `[contact_confidence]` table of
 | `merged` | (P, N, J) bool | label was bridged by span-merge |
 | `joint_sdf_cm` | (P, N, J) | unguarded signed distance, cm |
 | `body_health` | (P,) | the per-person health scalar `h` |
+| `confidence_schema` | scalar int | version of this field set — **frozen at 1** |
 
 (P = people, N = frames, J = 52 joints.)
+
+The field set above is the frozen interface for the learning pipeline;
+`confidence_schema = 1` stamps it. A future change to the fields or their
+meaning increments this number.

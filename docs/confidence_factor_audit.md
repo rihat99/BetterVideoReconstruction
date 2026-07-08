@@ -57,18 +57,20 @@ with confidence > 0.7 — lower is safer).
 
 ## Verdicts
 
-**Drop — `conf_near` (the depth-quality half of observability).** Zero change in
-every corpus population, bit-identical reliability. Wherever a joint is labelled
-*contact*, the depth confidence of the nearby scene points is already above the 0.3
-threshold, so this factor never lowers anything. Removing it also makes two knobs
-dead: `conf_ref` and `obs_k`. The drop lands in T3.
+**Dropped in T3 — `conf_near` (the depth-quality half of observability).** Zero
+change in every corpus population, bit-identical reliability. Wherever a joint is
+labelled *contact*, the depth confidence of the nearby scene points is already above
+the 0.3 threshold, so this factor never lowers anything. Removed in T3 along with its
+two now-dead knobs `conf_ref` and `obs_k` and its top-k neighbour compute; the
+re-score confirmed the confidence was bit-identical before and after.
 
-**Simplification candidate — `h_contact` (the "almost never touches" half of
-body-health).** Switching off `h_hover` lifts the floating-body far-confidence by
-+0.222; switching off `h_contact` lifts it by only +0.012. So `h_hover` alone
-reproduces ~95% of what body-health does. `h_contact` is nearly redundant, but the
-final call waits for T3: T2 gives body-health a new job (gating the "nothing near"
-rule), so its composition is re-decided on the post-T2 formula.
+**Kept in T3 — `h_contact` (the "almost never touches" half of body-health).** On the
+v2 formula it looked nearly redundant: switching off `h_hover` lifts the floating-body
+far-confidence by +0.222, switching off `h_contact` by only +0.012, so `h_hover` alone
+reproduced ~95% of body-health. But T2 gave body-health a new job — gating the
+"nothing within reach" witness — and on that final formula, dropping `h_contact` lifts
+the floating-body *NaN* bucket by +0.142 and un-mutes near-wall never-touch bodies. It
+is no longer dead weight, so the freeze keeps both health sub-factors.
 
 **Keep — everything else**, each with a population where it clearly bites:
 

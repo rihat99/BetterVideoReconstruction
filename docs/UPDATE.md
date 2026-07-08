@@ -1,244 +1,180 @@
-# UPDATE — round 7: corpus floaters, confidence v2, the limb-length lever
+# UPDATE — round 8: confidence, final form
 
-*2026-07-08, rev 9. Covers: finding every floating body in the corpus with a
-metric, understanding why they float, making the label confidence honest about
-them (and more generous on solid contacts), moving the contact / uncertainty
-outputs into `human_optim`, and the limb-length experiment. Rounds 1–6 live in
-git history (revs 4–8).*
+*2026-07-08, rev 10. Covers: the confidence explainer document, a
+simplification pass over the confidence formula, the no-contact
+recalibration (your relative-metric idea), and freezing the schema for the
+learning pipeline. This is the last round that may change confidence.
+Rounds 1–7 live in git history (revs 4–9).*
 
-## What you reported, and what I measured today
+## Where we stand
 
-You ran the full corpus (361 scenes) and saw both extremes: scenes where
-contacts, motion, and naturalness are close to perfect, and scenes where the
-body floats in the air. You named five floaters. I swept the whole corpus
-using only artifacts we already have (the contact labels, the per-joint
-distance to the wall, and the per-frame body-to-cloud error), and the problem
-is both **bigger than five scenes and very detectable**:
+Round 7 settled the floating-body question: two-thirds of floaters are VGGT
+depth placing the whole person off the wall — not fixable by the body fit —
+so they are now found (`features/audit/`), explained, and their distance
+evidence is muted in the confidence. You agreed this is the right outcome
+and set the focus: **make contact confidence right, once, and ship it.**
 
-- **21 bodies never touch anything at all** — zero contact frames across
-  hundreds of frames of climbing. Another handful sit under 2%. In total **68
-  of 363 tracked bodies (19%) have contacts in fewer than 40% of their
-  frames**, against a corpus median of 81%.
-- All five scenes you named land in the worst fifth by this simple measure,
-  and their closest joint hovers 2–16 cm off the wall on a typical frame
-  (median body has its closest joint slightly *inside* the wall, −4 cm).
-- The five you named are the tip: the never-touch scenes (e.g.
-  `gtIGgs_y2nY_0095`, hovering ~65 cm) are even worse.
+## The explainer you asked for
 
-So the detector you asked for essentially already exists: **contact
-starvation** (share of frames with at least one joint in contact) plus
-**typical distance of the closest joint to the wall**. What's missing is a
-script that reports it per scene, a validated flag threshold, and the *why*
-behind each flagged scene.
+Written: **[`docs/contact_confidence.md`](contact_confidence.md)** — a
+start-to-finish description of how the confidence is computed, in plain
+text with the real numbers in the formulas: the four witnesses (geometry,
+motion, visibility, persistence), the contact formula, the no-contact
+formula, body health, what stays deliberately uncertain, how it behaves on
+the corpus, and where every field lives. It describes the code as it is
+today; if this round changes formulas, the document is updated in the same
+commit — it is the reference you hand to your professor.
 
-Two more measurements that answer your confidence complaints directly:
+## What I measured before planning the changes
 
-- **Contact confidence is low on average — measured: 0.465.** The culprit is
-  not visibility (0.96 on the dense corpus clouds) but the **stillness
-  factor**: a gripping hand naturally drifts 2–3 cm over the measurement
-  window (micro-adjustments), which lands exactly at the half-way point of
-  the stillness ramp. Worse, a joint *penetrating* the wall — the strongest
-  possible geometric evidence of contact, and 46% of all contact labels —
-  still averages only 0.51, because motion keeps throttling it.
-- **On the floating scenes, no-contact confidence averages 0.79, with 74% of
-  labels above 0.8 — confidently wrong.** Exactly what you predicted: every
-  joint of a floating body is far from the wall, so the "clearly far ⇒
-  confident no-contact" rule fires everywhere, on the very scenes where
-  distances mean nothing.
+To ground the "simplify" and "still-far joints" asks, I decomposed every
+still no-contact joint-frame on the re-scored corpus (1.88 M of them):
 
-## Why bodies float — four diseases, one symptom
+- **Still + far (≥25 cm) on a healthy body: mean confidence 0.94.** This
+  case — your stated concern — already works after round 7. The few low
+  ones are joints projecting outside the image (their persistence is 1.0,
+  so the image gate is provably the cause; out-of-frame joints are
+  extrapolations, and low confidence there is honest).
+- **Still + far on a muted (floating) body: 197 k joint-frames at 0.15.**
+  This is where your relative-metric idea belongs, and it is a real
+  population worth recovering — a dangling foot 60 cm above a floating
+  body's own closest point is definitely free, even though the absolute
+  distances are corrupted.
+- **The hover band (0–25 cm) is the true mass: 67% of all still negatives,
+  at confidence 0.02.** Most of what *looks* like "far but low confidence"
+  in the viewer is actually this band — inside the carve-safety threshold.
+  Whether we can raise part of it is a measurable question (below), not a
+  matter of taste.
+- Joints with no scene within reach (distance = NaN): 2.3%, confidence 0 —
+  currently treated as "can't tell", though "nothing within 1.6 m" is
+  arguably the strongest far evidence there is.
 
-A floating body can come from four different places, and they need different
-responses. The autopsy task below assigns one to every flagged scene:
+And on the contact side, after round 7: overall 0.67 (was 0.47),
+penetrating contacts 0.85. The contact class is in good shape; this round
+is mostly about the no-contact class.
 
-1. **Body off its own depth cloud** — the optimizer failed; the per-frame
-   body-to-cloud error (already computed corpus-wide) is high. Fixable with
-   optimization knobs. I expect this to be rare: on the sweep, the floaters'
-   body-to-cloud error is mostly unremarkable.
-2. **The person's depth cloud is detached from the wall** — VGGT put the
-   climber's surface some distance in front of the scene behind them. The
-   body then sits correctly *on its cloud* and still touches nothing. Not
-   fixable by any body optimization; the honest response is to flag it and
-   lower confidence.
-3. **Limbs too short** — body on its cloud, cloud on the wall, but arms/legs
-   stop a few cm short of the holds. This is the competition_2 disease, and
-   the one lever we haven't fully tried (below).
-4. **Broken upstream** — near-empty scene cloud, tracking dropouts, garbage
-   masks. One named-adjacent scene has *no* usable wall distance at all.
-   Flag, don't fix.
+## The plan — three moves
 
-## The plan — six moves
+**1. Factor-contribution audit (read-only, first).** Your "remove terms
+that do not contribute": for every factor in the formula (the two scene
+sub-factors of observability, the image gate, persistence, the
+close/penetration pair, the two body-health sub-factors), measure how often
+it actually binds — how much the corpus confidences and the labeled-clip
+reliability change if it is removed. Deliverable: a keep/drop table with
+evidence. My candidates going in: the depth-confidence sub-factor of
+observability (observability averages 0.96 at contacts — at least one of
+its three sub-factors is likely dead weight), and possibly one of the two
+body-health sub-factors. Nothing is dropped in this move — it only produces
+the list; the drops happen in move 3 on the final formula.
 
-**1. Layout quick fix (first, it's small).** `contacts_1.npz` and
-`uncertainty_1.npz` move from their own `features/contacts/` and
-`features/uncertainty/` trees into `features/human_optim/<scene>/`, next to
-the body they describe — the same layout local clips already use
-(`out/<stem>/human_optim/`). Migrate the 361 existing files, point both DB
-drivers there, and delete the viewer workaround that currently stitches the
-two trees together.
+**2. No-contact recalibration.** Four changes, one per finding:
 
-**2. The floater detector + corpus audit.** A small script that reads the
-existing artifacts and writes one row per (scene, person): contact rate,
-typical closest-joint distance, share of frames plausibly seated on the wall,
-body-to-cloud error, plus upstream health (cloud size, tracking coverage).
-It flags suspects (starting rule: contact rate < 0.4, or typical closest
-joint > 5 cm off the wall — thresholds validated against your five and a
-visual sample). Deliverable: a ranked CSV + the flagged list you can walk
-through in the 3D viewer to confirm.
+- **Relative clearance (your idea, adopted).** Per frame, each joint's
+  distance *above the body's own closest joint*: `rel = D_joint −
+  D_closest`. A global depth-placement error moves both terms together and
+  cancels — so on a floating body, a joint with large relative clearance is
+  definitely free even though its absolute distance means nothing. This
+  becomes a third way to earn far-confidence, alongside the (health-gated)
+  absolute distance; it needs no health gate itself. Target: the
+  definitely-free slice of the muted population recovers from 0.15 to
+  ≥0.6, without giving anything back on healthy scenes.
+- **The hover band, decided by measurement.** The 25 cm threshold exists
+  for one reason: a hand on a hold that the reconstruction failed to
+  capture looks identical to a hand hovering 15 cm in open space — geometry
+  alone cannot separate them. But the *rate* at which still joints at
+  12–25 cm are actually touching is measurable on the four hand-annotated
+  clips. If that rate is small, we lower the threshold (grid over
+  {15, 20, 25} cm) and a large part of the 67% band becomes usable; if it
+  is not small, we keep 25 cm and document why. The safety gate either
+  way: the share of *true contacts* receiving confident no-contact must
+  not increase.
+- **"Nothing within reach" becomes far evidence.** Distance = NaN (no
+  scene point within ~1.6 m) counts as maximally far — gated by the scene
+  cloud being non-degenerate and the body healthy, so broken scenes don't
+  benefit.
+- **Body health stays, possibly simplified** (per move 1) — it still
+  gates the absolute-distance witness. The motion witness stays untouched,
+  as before.
 
-**3. The autopsy.** For every flagged scene, decide which of the four
-diseases it has, using four probes: body-to-cloud error (have it), person
-cloud-to-wall gap (new, cheap), limb-length mismatch (below), upstream health
-(have it). Deliverable: a cause label per flagged scene and the counts. The
-counts decide where fixing effort goes — and which scenes we honestly
-declare unfixable-but-flagged.
-
-**4. Confidence v2.** Two calibrated changes, validated on the four
-hand-labeled clips and then re-scored over the corpus:
-- **Strong geometry beats motion doubt.** A penetrating or firmly-touching
-  joint stops being throttled by the stillness factor (the label already
-  passed a stillness gate at detection — punishing the same drift twice is
-  why solid grips score 0.5). Target: penetrating contacts go from ~0.51
-  mean confidence to ≥0.75, without hurting the reliability curve.
-- **Floaters lose their false confidence.** The "clearly far ⇒ confident
-  no-contact" branch gets multiplied by a per-body health factor computed
-  from the same signals as the detector (a body that almost never touches
-  anything, or hovers everywhere, doesn't get to be sure about distances).
-  Motion-based confidence survives — a fast-moving joint is a confident
-  no-contact even on a broken reconstruction. Target: no-contact confidence
-  on flagged floaters drops from ~0.79 to ≤0.4; healthy scenes unchanged.
-
-**5. Limb length — measure first, then maybe fix.** The one modeling lever
-left, done in a way that respects round 6's null (the fit does not *discover*
-longer limbs on its own — anything we do must be driven by a measured
-target):
-- **Measurement (read-only, corpus-wide).** MHR — the body model SAM-3D
-  predicts *before* our SMPL-X conversion — already estimates per-bone
-  skeleton scales (28 numbers per frame; I verified they are in the
-  conversion target). So we can measure, for every scene: the limb lengths
-  MHR believed, the limb lengths that survived the SMPL-X conversion, and —
-  as an independent third opinion on a few clips — limb lengths read from
-  the VGGT depth at the 2D keypoints. This tells us *where* length is lost:
-  conversion (fixable at the converter, helps every scene at once) or MHR
-  itself under-predicting (then only scene evidence can help).
-- **Fix (only if the measurement says ≥2 cm systematic deficit on flagged
-  scenes).** Depending on where the loss is: preserve limb lengths through
-  the conversion, or add four symmetric per-person limb-extension parameters
-  (upper-arm, forearm, thigh, shin — left/right shared, as you said) to the
-  kinematic fit, pulled toward the *measured* target lengths and leashed to
-  zero. Judged like every experiment: pooled contact metrics on the tuning
-  clips, plus contact rate on your five scenes, plus your visual check.
-  Null ⇒ revert and record.
-
-**6. Wrap.** Re-run the two cheap readouts (contacts + uncertainty, ~20 min
-total) over the corpus with the final confidence; sync docs; outcome section
-here. A kinematics re-run of the corpus only happens if move 5 ships a fit
-change — that's your call to schedule, like Issue-22 was.
-
-## On your ideas (you asked me to be skeptical)
-
-- **"MHR can extend limbs as translational joints" — real, and better than I
-  expected.** SAM-3D genuinely predicts 28 per-frame skeleton scales, and the
-  converter poses MHR *with* them before fitting SMPL-X — so limb-length
-  information exists upstream and betas may simply be unable to keep it.
-  That's why the measurement comes first: if conversion is where length dies,
-  the fix is cheap and benefits every scene without touching the optimizer.
-- **"Use VGGT limb lengths as a loss"** — I'd keep VGGT as the *validator*,
-  not the primary target. Depth at a 2D keypoint measures the body's front
-  surface, not the joint center, is noisy at exactly the small-in-frame
-  scenes we care about, and vanishes under occlusion. MHR-vs-SMPLX is clean,
-  already on disk, and per-frame. If the two agree limbs are short, that's a
-  strong go signal; if they disagree, VGGT noise is the first suspect.
-- **"Merge scale estimation with limb scale, maybe on MHR"** — deferred, not
-  dismissed. Global scale and limb proportions are related but separable:
-  scale is set by the whole-body depth ratio (torso-dominated), limbs are a
-  residual on top. Round 5 measured that scale changes can't close per-limb
-  hover. If the limb measurement shows the deficit is big enough to bend the
-  scale ruler (>~2%), we revisit — same flag as round 6 had.
-- **"When body floats, far-from-wall confidence should be lower" — agreed,
-  and it's the right fix.** The alternative (trying to *repair* floaters in
-  the optimizer with stronger scene attraction) is the round-2 circularity
-  trap: it manufactures contacts on bad geometry. Detect, flag, downweight.
+**3. Simplify, freeze, ship.** Apply the move-1 drop list to the
+post-move-2 formula; prune the corresponding knobs; update
+`docs/contact_confidence.md` to match exactly; declare the npz schema
+final for the learning pipeline (field list + a schema version stamp);
+re-score the corpus (~16 min); sync CLAUDE.md. After this round the
+confidence is an interface, not an experiment.
 
 ## How we judge it
 
-- **Detector**: your five all flagged; a visual sample of flagged scenes
-  confirms floating; a sample of unflagged mid-pack scenes confirms health.
-- **Confidence v2**: reliability curves on the labeled clips stay monotone
-  and at least as accurate in the top decile; penetrating-contact confidence
-  ≥0.75; floater no-contact confidence ≤0.4; labels themselves bit-identical
-  (confidence is a readout).
-- **Limb fix, if attempted**: pooled P ≥ 0.88, FPR ≤ 0.07, reprojection vs
-  raw within +0.5 px, runtime ≤1.05×, contact rate up on the five named
-  scenes, and your eye on the motion.
-- **Everything**: one commit per task, gates before merging, honest nulls
-  recorded.
+Everything runs against the four hand-annotated clips first (reliability
+curves: monotone both classes, top-decile accuracy not worse, and the
+confident-wrong-negative rate — true contacts scored as confident
+no-contact — must not rise), then the corpus re-score (distribution shifts
+in the expected directions and nowhere else), then your visual sample.
+Labels stay bit-identical throughout — everything here is readout. One
+commit per move, your go-ahead each time.
 
 ## Honest limits
 
-- Floaters from detached or broken depth (diseases 2 and 4) do not get fixed
-  this round — they get found, explained, and their confidence muted. That
-  is the correct outcome for a label corpus.
-- A low contact rate is suspicious, not damning — a fall, a dyno, walking to
-  the wall all lower it legitimately. That's why the flag threshold gets
-  validated visually before we trust the list.
-- The limb experiment may return a null like betas did. The measurement step
-  exists precisely so we can kill it cheaply if the deficit isn't real.
+- The carved-hold ambiguity is physical, not a bug: if the reconstruction
+  missed the hold, a touching hand and a hovering hand are geometrically
+  identical. Image evidence could one day separate them; distance cannot.
+  The hover-band decision is therefore a measured trade, not a fix.
+- Out-of-image joints keep low confidence on purpose — their positions are
+  extrapolated, and the honest label for an unobserved joint is "unknown".
+- Relative clearance is immune to whole-body placement error, not to
+  per-limb error: a floating body's *close* joints stay uncertain. That is
+  correct — we cannot certify no-contact 5 cm from a wall we don't trust.
 
 ## Order of work
 
-1. Layout move (small, unblocks everything else touching those files).
-2. Detector + corpus audit CSV → you eyeball the flagged list.
-3. Autopsy → cause counts.
-4. Confidence v2 → labeled-clip validation → corpus readout re-run.
-5. Limb measurement → go/no-go → experiment if go.
-6. Wrap: docs, outcome, and (if 5 shipped) you schedule the corpus
-   kinematics re-run.
+1. Factor audit (read-only) → the keep/drop table.
+2. No-contact recalibration → labeled-clip gates → corpus spot-check.
+3. Simplify + freeze: final formula, pruned knobs, explainer synced,
+   schema stamped, corpus re-scored. Confidence is done.
 
-## Outcome — round 7, 2026-07-08
+## Outcome — round 8, 2026-07-08
 
-All six moves landed. Five commits on `main` (T1–T4 plus this wrap); the limb
-experiment was measured and dropped.
+Confidence is finished and frozen. Three commits, each with your go-ahead. The
+labels never changed — everything here is the confidence score on top of them,
+and we checked that the labels stayed bit-identical after every re-score.
 
-**Layout (T1, `ecaeb0d`).** The contact and trust readouts now sit next to the
-body they describe, in `features/human_optim/<scene>/`, the same as local clips.
-722 files moved, the two old trees removed, the viewer's stopgap deleted.
+**Which signals earn their place (the audit you asked for).** We switched off
+each factor in the formula, one at a time, and measured the effect on the whole
+361-scene corpus and on the four hand-annotated clips. One signal was truly
+dead: the *depth-quality* half of "did we see this joint" — turning it off
+changed nothing, anywhere, because the reconstruction near a real contact is
+always good enough. Everything else earns its keep, with numbers. Full table:
+[`docs/confidence_factor_audit.md`](confidence_factor_audit.md).
 
-**The floater detector (T2, `487e567`).** `scripts/audit_scenes.py` reads what is
-already on disk and scores every body. It flags 80 of 363 bodies (22%) as
-floating — all five you named included. The bar had to drop to a 0.50 contact
-rate to catch the mildest (`PfwFWSoPF_k_0026`); the plan's claim that the seed
-bar already caught all five was wrong. It also settled the "buried behind the
-wall" scare: 41 of 51 such bodies are in contact 91% of the time, so the distance
-sign merely flipped — they are seated, not behind the wall.
+**Making the still-far joints confident (your main ask).** The old score judged
+a joint's distance in absolute world units, which is meaningless on a *floating*
+body — a reconstruction placed 30 cm off the wall makes every joint look far.
+The fix is your idea: measure how far a joint sits *above the body's own closest
+joint*. A whole-body placement error cancels in that difference, so a dangling
+foot 60 cm above a floating climber's nearest point reads as confidently free
+even though its absolute distance is garbage. On the corpus this lifts the
+floating-body far joints from **0.15 to 0.48** on average (and the clearly-free
+ones from 0.23 to 0.97), while healthy scenes barely move (+0.002) — the "clamp
+the closest joint at the wall surface" detail is what stops it leaking onto good
+reconstructions. We also let "no scene within 1.6 m at all" count as far, which
+recovers another slice (healthy such joints go 0.00 → 0.94), gated so broken and
+floating scenes don't benefit.
 
-**Why bodies float (T3, `7a6796f`).** `scripts/autopsy_scenes.py` gives each
-floater a cause. Two-thirds (65%) sit correctly on their own 3-D reconstruction,
-but VGGT placed that reconstruction off the wall — nothing the body fit can
-repair. Another 22% are the body sitting off its own cloud (an optimizer slip,
-in principle recoverable). 10% are broken upstream. Only 2% are short limbs.
+**The hover band — a measured trade, not a guess.** We wanted to know whether a
+still joint hovering 12–25 cm from the wall could be called free. Measured on
+the annotated clips: 29% of such joints are *actually touching* (a hand on a
+hold the reconstruction missed looks exactly like a hand hovering). Past 25 cm
+it drops to 1%. So 25 cm is where the ambiguity genuinely ends, and lowering it
+would mislabel real contacts as free. We kept it, and now we can show why.
 
-**Limb length (T5 — measured, then closed as a null).** You asked whether short
-limbs cause the floating. They do not. The SMPL-X conversion does lose limb
-length versus MHR — about 2 cm in the forearm, 5 cm in the thigh — but the loss
-is *uniform*: floaters are no shorter than healthy bodies. And the pattern (a
-short thigh but a slightly long shin) points to the two skeletons defining the
-knee differently, not to a real length loss. So we measured it, recorded it, and
-did not build the fix — it would not have moved the floaters.
+**What stayed the same, on purpose.** The confident-wrong-no-contact rate on the
+annotated clips held at 0.29 (it comes from fast-moving joints, which we didn't
+touch); the reliability curves stayed monotone; the contact side and the
+moving-joint side are unchanged. The health gate keeps both its halves — the
+"almost never touches" half looked redundant at first but turned out to matter
+once distance got its new floating-body job.
 
-**Confidence v2 (T4, `596ab76`).** Two honest calibrations, both readout-only
-(the contact labels are untouched, bit for bit):
-- A firmly *penetrating* joint is the strongest possible sign of contact, so
-  motion no longer throttles its confidence. Penetrating contacts went from 0.51
-  to 0.85 mean confidence.
-- A body that essentially never touches the wall in a climbing video has been
-  floated off it, so its "clearly far, so confidently not touching" is muted
-  toward zero. Those confidently-wrong floaters dropped from 0.79 to 0.35.
-  Healthy bodies are unchanged (293 of 363 are untouched by the gate) and the
-  reliability curves on the labeled clips are identical to before.
-The whole corpus was re-scored with the new confidence (361/361, 16 min).
-
-**Not done, on purpose.** No kinematics re-run — nothing changed the body fit
-(the limb fix was dropped). The unfixable floaters (detached or broken
-reconstructions, three-quarters of them) are now *found and their confidence
-muted*, which is the correct outcome for a label corpus.
+**Frozen.** The saved fields carry a `confidence_schema = 1` stamp, and
+[`docs/contact_confidence.md`](contact_confidence.md) describes the shipped
+formula exactly — that is the document of record for the learning pipeline. The
+corpus was re-scored end to end, 361/361.

@@ -623,7 +623,7 @@ def _reliability_one(pred_dir: str, config_path: Path, device: str, source=None,
         px = project(transform_points(jw, extr), K)
         health = compute_body_health(jc, jsdf.cpu().numpy(), vmask, cfg=cf)
         _, _, lconf = contact_confidence(torch.as_tensor(jc, dtype=torch.bool, device=device),
-                                         gsdf, jsdf / 100.0, gate_drift, jw, px, scene_pts, scene_conf, H, W,
+                                         gsdf, jsdf / 100.0, gate_drift, jw, px, scene_pts, H, W,
                                          cfg=cf, window_s=float(cg["window_s"]), fps=fps, body_health=health)
         speed = (gate_drift / max(float(cg["window_s"]), 1e-6)).cpu().numpy()
         gsdf_np = gsdf.cpu().numpy(); rows = np.arange(N)
