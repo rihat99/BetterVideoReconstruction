@@ -11,7 +11,9 @@ iters = { root = 150 }
 [stages.kinematics_1]
 # kin1 auto-contacts: labels detected ONCE at the refine phase (readout at the [auto_contact] point),
 # frozen, then drive the attraction (ann_attraction). ann_attraction[kin1]=0 gives a pure visual fit.
-iters = { full = 300, refine = 200, lbfgs = 30 }
+# `seat` (round-10 T3-B) is a rigid root-only phase between full and refine, active only when
+# [loss_weights.scene].wall_contact > 0; it seats a floating body before the free refine.
+iters = { full = 300, seat = 150, refine = 200, lbfgs = 30 }
 
 [stages.kinematics_2]
 iters = { root = 20, full = 80, refine = 250, lbfgs = 30 }
@@ -38,6 +40,7 @@ radial_velocity     = [   0,  100,    0,    0 ]   # damp joint velocity along th
 
 [loss_weights.scene]
 penetration         = [   0, 4000, 4000,    0 ]   # push posed verts out of geometry/scene.npz (reported, not a fit gate)
+wall_contact        = [   0,  200,    0,    0 ]   # round-10: seat a floating body's closest EE onto the wall (seat+refine, float-gated); 0 = off
 
 [loss_weights.annotation]
 # Label-driven; labels are AUTO-detected in kinematics_1 (frozen), MANUAL in kinematics_2.
@@ -86,6 +89,18 @@ huber_m = 0.02
 prune_margin_m = 0.30
 max_candidates = 6000
 normal_k = 16
+
+# round-10 T3-B wall-contact prior: the closest EE joint (L/R wrist, L/R foot) should touch
+# the wall. Wide prune margin — a floating body's wall sits tens of cm away, past the
+# penetration box. Off unless [loss_weights.scene].wall_contact > 0.
+[wall_contact]
+margin_m = 0.05         # joint-centre-to-surface slack: a joint within this of the wall reads as touching
+temp_m = 0.07          # soft-min temperature (m) over the 4 EE joints
+gm_scale_m = 0.4       # saturating GM scale (m): airborne / far frames cost a bounded amount
+prune_margin_m = 1.0   # AABB margin (m) around the body for wall candidates — must reach the far wall
+max_candidates = 8000
+float_gate_m = 0.15    # per-body gate: seat/wall ONLY if the closest-EE median off the wall exceeds this
+                       # (seated & dynamic bodies fall below it → left as baseline, no false contacts)
 
 [ann_attraction]
 conf_thresh = 0.1

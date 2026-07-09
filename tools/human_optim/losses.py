@@ -186,6 +186,49 @@ def chamfer_loss(
     return terms.sum() / fvalid.sum().clamp_min(1)
 
 
+def wall_contact_loss(
+    ee_world: torch.Tensor,       # (T, Nee, 3) end-effector joint centres (world)
+    wall_padded: torch.Tensor,    # (T, Mc, 3) per-frame scene candidate points, padded
+    wall_valid: torch.Tensor,     # (T, Mc) bool — real (vs padding) candidates
+    *,
+    margin_m: float,
+    temp_m: float,
+    gm_scale_m: float,
+    chunk: int = 16,
+    frame_mask: torch.Tensor | None = None,   # (T,) bool — valid frames
+) -> tuple[torch.Tensor, float, int]:
+    """Re-anchor prior (T3-B): the body's closest hand/foot should touch the wall.
+
+    Per valid frame, each EE joint's distance to its nearest scene point is soft-combined
+    across the ``Nee`` joints (``s_min = −τ·logsumexp(−d/τ)``, a smooth min over joints) and
+    penalised past ``margin_m`` with a saturating Geman-McClure kernel of scale ``gm_scale_m``,
+    so an airborne / hopeless frame costs a bounded amount instead of dominating. Gradient
+    pulls the closest EE toward its nearest scene point. Returns ``(loss, mean s_min cm, n
+    valid frames)``.
+    """
+    T = ee_world.shape[0]
+    if wall_padded.shape[1] == 0:
+        return ee_world.new_zeros(()), float("nan"), 0
+    INF = torch.finfo(ee_world.dtype).max
+    smins = []
+    for s in range(0, T, chunk):
+        e = min(s + chunk, T)
+        d = torch.cdist(ee_world[s:e], wall_padded[s:e])                   # (b, Nee, Mc)
+        d = d.masked_fill(~wall_valid[s:e][:, None, :], INF)
+        dist_j = d.min(2).values                                          # (b, Nee) nearest wall / joint
+        smins.append(-temp_m * torch.logsumexp(-dist_j / temp_m, dim=1))  # (b,) soft-min over joints
+    s_min = torch.cat(smins)                                              # (T,)
+    fvalid = wall_valid.any(1)
+    if frame_mask is not None:
+        fvalid = fvalid & frame_mask
+    s_min = torch.where(fvalid, s_min, torch.zeros_like(s_min))           # kill INF on wall-less frames
+    gap = (s_min - margin_m).clamp_min(0.0)
+    gm = geman_mcclure(gap ** 2, ee_world.new_tensor(gm_scale_m) ** 2)    # (T,) ∈ [0,1)
+    n = int(fvalid.sum())
+    mean_cm = float((s_min[fvalid].mean() * 100)) if n > 0 else float("nan")
+    return torch.where(fvalid, gm, torch.zeros_like(gm)).sum() / fvalid.sum().clamp_min(1), mean_cm, n
+
+
 def scene_signed_distance(
     vertices_sub: torch.Tensor,    # (T, Ns, 3) subsampled posed vertices (grad through q)
     scene_padded: torch.Tensor,    # (T, Mc, 3) per-frame candidate scene points, padded

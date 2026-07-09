@@ -200,8 +200,13 @@ def _kinematic_phases(cfg: HumanOptimConfig, stages_to_run) -> list[PhaseSpec]:
     if "kinematics_1" in stages_to_run:
         it = cfg.iters["kinematics_1"]
         w = cfg.weights_for("kinematics_1")
+        phases.append(PhaseSpec("full", w, it.get("full", 0), _ALL_DOF, False, "adam"))
+        # round-10 T3-B: a rigid "seat" phase (root SE3 only, scene on) before refine, so the
+        # wall-contact pull translates the WHOLE floating body onto the wall instead of bending
+        # one limb toward it. Inserted only when wall_contact is active — parity when it is off.
+        if float(w.get("wall_contact", 0.0)) > 0.0 and it.get("seat", 0) > 0:
+            phases.append(PhaseSpec("seat", w, it.get("seat", 0), _ROOT_DOF, True, "adam"))
         phases += [
-            PhaseSpec("full", w, it.get("full", 0), _ALL_DOF, False, "adam"),
             PhaseSpec("refine", w, it.get("refine", 0), _ALL_DOF, True, "adam"),
             PhaseSpec("lbfgs", w, it.get("lbfgs", 0), _ALL_DOF, True, "lbfgs"),
         ]

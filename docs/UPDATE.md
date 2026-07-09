@@ -1,160 +1,126 @@
-# UPDATE — round 9: taming bad VGGT depth on the human
+# UPDATE — round 10: seat the flying bodies
 
-*2026-07-08, rev 11. Covers: a tool that measures the bad-depth problem, three
-cheap fixes to how the optimizer and the scale stage consume VGGT depth, and a
-menu of deeper fixes for a second wave. Round 8 (contact confidence) is frozen
-and untouched. Rounds 1–8 live in git history (revs 4–10).*
+*2026-07-09, rev 12. Replaces the round-9 plan entirely. Round 9 closed as a
+set of honest nulls; this round first cleans up the debris it left, then goes
+after the actual problem — bodies that hang in the air in front of the wall
+must end up on the wall. Rounds 1–9 live in git history.*
 
-## The problem
+## What went wrong in round 9 — and what this round is actually about
 
-Sometimes VGGT gets the human's depth wrong, and when it does, the error is
-along the camera ray: at thin parts like hands and feet, the depth map smears
-across the silhouette between the body and the wall behind it, so the
-backprojected point cloud grows long "streaks" pointing away from the camera.
-The SMPL-X body physically cannot fit a hand that is stretched over a metre of
-depth, so the chamfer term (the loss that matches the body surface to those
-depth points) wrenches the pose instead. This is a known, measured property of
-learned depth models — errors concentrate at object boundaries — not a VGGT
-quirk.
+Round 9 was my mistake twice over, and the executing agent faithfully
+executed both mistakes:
 
-It matters in three places: the kinematic fit (chamfer), the metric scale
-stage (which reads VGGT depth under the body to size the world), and fuse
-(which turns the depth into the clouds everything else consumes).
+1. **Wrong failure model.** I aimed at boundary artifacts — bad pixels at
+   the edge of the person mask. Measurement showed the truth: the depth
+   error is *region-level*. VGGT places a whole hand, a whole limb,
+   sometimes the whole person at the wrong distance from the camera. Edge
+   filters and point weighting cannot touch that.
+2. **Wrong yardstick.** I judged everything by pooled contact F1 on the
+   labeled clips, where this failure barely lives (the measured ceiling was
+   +0.013 recall). The round chased crumbs by construction.
 
-## What I found in our own code before proposing anything
+What you actually want, restated so we can check I understood: **the flying
+body is the problem.** VGGT's human depth is stretched along the viewing
+ray. We should trust it *less* — stop letting it dictate where the body sits
+in depth — but not throw it away, because it still knows things reprojection
+cannot see, like which limb is in front and roughly how far. If this is
+still not your meaning, the sentence to correct is this one.
 
-I audited the whole depth path and spot-checked the important claims by hand.
-Three findings reframe the round:
+## The reframe in one paragraph
 
-1. **Chamfer has no outlier protection.** It is a plain nearest-neighbour
-   distance — no robust kernel, no cap. Every other data term already has one
-   (reprojection uses Geman-McClure, penetration uses Huber). A streak point a
-   metre down the ray pulls with its full distance. Every published system
-   that fits a body to noisy depth wraps this term in a saturating kernel; we
-   are the outlier.
-2. **Your vertex weighting is wired correctly — but it sits on the wrong side
-   of the loss.** The weights only shape the *body→cloud* direction. The
-   *cloud→body* direction, where every depth point (streak or not) pulls on
-   the body with equal weight, has no weighting at all. That is why the
-   extreme-weights sweep changed nothing: the knob isn't connected to the
-   failure. Good news: this is not a bug to fix but a lever we haven't built
-   yet.
-3. **The scale stage leans on exactly the least reliable points.** Its
-   extremity-up weighting shifts the robust median toward hand/foot vertices —
-   where the streaks live. And the flying-pixel edge filter that protects the
-   fused clouds is never applied inside the scale stage at all.
+Split what the human depth cloud is used for. Its *relative* structure (the
+arrangement of limbs in depth) stays as evidence. Its *absolute* position
+(how far the whole thing sits from the camera) gets demoted — that is
+exactly the part VGGT gets wrong. Absolute placement instead comes from the
+two witnesses we can trust: the scene cloud (walls are big, static and
+textured — VGGT does them well; the round-7 audit measured the human cloud
+floating *relative to a credible wall*), and the one fact true of every clip
+in this project: **a climber on the wall is touching it with something.**
+The deliverable is flying bodies visibly seated on the wall, verified on the
+scenes that are actually broken — not a decimal on a pooled metric.
 
-Two supporting facts. A 2026 study measured VGGT's depth-branch confidence as
-badly overconfident exactly at geometry edges — so our confidence gating,
-the current defence, is documented to be the wrong tool for streaks. And a
-small doc-rot note: CLAUDE.md still mentions a "depth-push" term that no
-longer exists in the code.
+## Cleanup first
 
-## What the field does
+Everything round 9 built that didn't work gets removed, so the codebase
+carries no dead experiment weight:
 
-The consensus recipe for fitting bodies to noisy depth (PROX and its
-descendants) is: robust kernel on both chamfer directions plus visibility —
-they do no point filtering at all and let the kernel absorb the outliers.
-Meanwhile, the world-frame video systems (TRAM, WHAM, SLAHMR) simply never
-trust per-pixel depth on a moving person. We keep the chamfer because it is
-what seats absolute depth in our pipeline — which makes robustification
-mandatory rather than optional.
+- the uncommitted T2a corridor code (discarded);
+- the three landed-but-off knob sets: the robust-chamfer knobs, the
+  cloud-side weight knobs (including the `edge_dist_px` field fuse started
+  writing), and the scale-stage weighting/edge flags;
+- the `out/_round9/` experiment trees and logs, and any redirected corpus
+  scratch.
+
+One thing stays, deliberately: `diagnose_depth_streaks.py`. Its go/no-go
+*yardstick* is retired with the rest, but the instrument itself measures the
+disease (how stretched the cloud is, per limb, per frame) and round 10's
+diagnosis reuses it. Say the word if you want it gone too. Everything
+deleted stays recoverable from git history.
+
+## The new yardstick
+
+The round-7 audit already found the target population: ~80 flagged floating
+bodies on the corpus, two-thirds of them "body faithfully follows a human
+cloud that floats off the wall". The eval set is drawn from there: roughly
+15–20 flagged scenes plus healthy controls, plus your 7 showcase scenes,
+plus the 5 labeled clips.
+
+- **Primary: seating.** Per frame, how far the body's hands and feet are
+  from the scene surface (this number already exists — the contacts stage
+  computes it). Headline numbers: the fraction of frames with at least one
+  end-effector within touching distance, and the median gap on flagged
+  scenes. Success means flagged floaters move from tens of centimetres to
+  touching distance, while healthy controls do not move.
+- **Guards, not targets: the labeled clips.** Contact precision and FPR must
+  not degrade (recall going up is welcome, but it is not the goal).
+- **Eyes, mandatory.** Before/after renders on the showcase scenes and a
+  sample of flagged scenes go into the results file. You own the verdict.
+
+One honesty note baked into the design: the new wall-contact term pulls
+bodies toward the wall, so seating metrics improve partly *by construction*.
+That is why adjudication rests on the independent legs — the labeled-clip
+precision/FPR guards, the cloud's own limb structure fitting better after
+the release, and your eyes.
 
 ## The plan
 
-**T0 — build the streak meter first.** A small diagnostic that, per frame and
-per body part, measures how stretched the human cloud is along the ray
-compared to the part's physical thickness, and flags "streaked" part-frames.
-Run it on the five labeled clips and the seven showcase corpus scenes. Its
-most important output is the go/no-go slice: on the labeled clips, are
-contact mistakes concentrated in streaked frames? That tells us how much of
-the precision/recall gap this whole round can possibly close.
+1. **Clean** (above), and close one bookkeeping item: why the re-derived
+   baseline recall (0.645) differs from the round-4 record (0.678) — explain
+   or record, time-boxed, no rabbit-holing.
+2. **Diagnose the disease on the bodies that actually have it.** On ~10
+   flagged scenes plus competition_2: measure the along-ray offset between
+   body/cloud and wall, frame by frame. Is the offset roughly constant per
+   clip, or wandering per frame? Does the cloud's limb arrangement remain
+   usable once the offset is removed? Is the wall credible where the body
+   should sit? These answers set the knobs of step 3 before any loss is
+   written.
+3. **Two levers, built to work together:**
+   - **Release** — make chamfer offset-tolerant: each frame, estimate the
+     whole-cloud depth offset robustly and subtract (a dial from "today's
+     behaviour" to "fully relative"). The cloud then still shapes the limbs
+     but no longer drags the body to its wrong absolute depth.
+   - **Re-anchor** — a wall-contact prior: each frame, the body's closest
+     hand/foot should be at touching distance from the scene; a saturating
+     penalty on the gap, so airborne moments and hopeless frames cost a
+     bounded amount instead of dominating.
+   Released depth with no new anchor drifts; a new anchor fighting the old
+   chamfer stalls — so the experiment is factorial: baseline, release only,
+   anchor only, both, and the dumb-but-honest control arm (just turn chamfer
+   down and add the anchor). The fancy version has to beat the dumb one.
+4. **Judge on the eval set** (seating + guards + eyes), then wrap: winner
+   confirmed, docs synced. Whether to re-run the full 361-scene corpus with
+   the winner (~7 h) is your call at the end.
 
-**T1a — robust chamfer.** Wrap both chamfer directions in a Geman-McClure
-kernel with a physical scale (roughly 10–20 cm): points within that range
-pull normally, points far beyond it stop pulling. One subtlety: the early
-"root" placement phase relies on chamfer to drag the body from a possibly
-distant start, so the kernel must stay soft (or off) there and tighten only
-in the later phases.
+## Risks, stated up front
 
-**T1b — weights on the cloud side.** Give each depth point a reliability
-weight — its VGGT confidence times how far its pixel sits from the person
-mask's edge (streaks are born at the mask boundary) — and use it in the
-cloud→body direction that is currently uniform. This is the mirror image of
-the weighting you already built, on the side that can actually mute streaks.
-
-**T1c — fix the scale stage.** Try uniform and extremity-*down* weighting (a
-ruler should be read at its most reliable marks — the torso), and apply the
-same flying-pixel edge filter the fused clouds get. Scale changes flow
-through fuse into everything, so each variant re-runs the downstream chain.
-
-Each fix ships behind a knob whose default reproduces today's behaviour
-exactly, gets swept on the labeled clips, and is adopted only if the numbers
-clear the gates below. Winners get combined and confirmed in one final run.
-
-## Second wave (decided after we see T1 numbers)
-
-- **Depth corridor from the init body.** SAM-3D-Body predicts its own metric
-  depth, independent of VGGT, and its reprojection is ~5 px. A hand cannot be
-  a metre behind the torso — so squeeze (softly clamp) cloud points back into
-  a ±30–40 cm corridor around the init body's depth instead of deleting them.
-- **A per-point streak score.** Our normals code already computes the local
-  shape statistics needed to detect "filament aligned with the view ray" —
-  it just throws them away. Expose them and fold the score into the T1b
-  weight.
-- **Wall-contamination filter.** Edge pixels are mixtures of hand and wall;
-  the contaminated ones sit at wall depth. Dropping human points that
-  coincide with the scene cloud sounds right — but climbers' hands genuinely
-  touch the wall, so this one needs a guard (only drop points far behind the
-  init body) and careful contact-metric watching.
-- **Along-ray-aware chamfer.** The principled version of "squeezing": measure
-  the along-ray part of each residual in log-depth (where monocular error is
-  actually well-behaved) and keep the sideways part metric. Nobody has
-  published this for body fitting — worth trying if the simple kernel leaves
-  streak damage on the table.
-- **Per-part chamfer gating.** Where T0 flags a part-frame as hopelessly
-  streaked, switch chamfer off for that part in that frame and let the
-  init-anchor, smoothness and priors carry it.
-
-## What we deliberately skip this round
-
-The second-witness ideas (Sapiens pointmap/normals as a human-specialised
-depth source, recovering VGGT's better-calibrated point-map branch) are the
-biggest levers but need adapter/schema work and corpus re-runs. They wait
-until we know how much the cheap layers recover.
-
-## How we judge
-
-The main yardstick is contact quality on the five labeled clips in `./data`
-(boulder_1, boulder_3, competition_1, competition_2, sport_climb): precision,
-recall, F1 and false-positive rate from `score_contacts.py`, against the
-long-standing baseline (pooled P 0.896 / R 0.678 / F1 0.772 / FPR 0.066;
-sport_climb excluded from the pool as always). Raising recall without paying
-precision is the goal. As in every round: recall is the number a stronger
-pull toward the wall inflates for free, so precision and FPR are the honest
-signals, and the annotation files stay bit-identical.
-
-Guards: reprojection error must not degrade, no new floaters, and the streak
-slice from T0 should visibly improve — that is the mechanism check, not just
-the headline number.
-
-The seven corpus scenes you named (PfwFWSoPF_k_0026, 2nwG1Qa5k_c_0115,
-9RvrpYoWDoo_0000, CRquJ8H1QLI_0001, 3DAgLpPXVCs_0132, gtIGgs_y2nY_0024,
-vcRBT9Q9jXM_0029) are the qualitative showcase: no labels there, so they get
-the streak meter, before/after overlays and viewer checks. Experimental runs
-on them are redirected so the canonical round-8 corpus outputs stay intact.
-
-## Honest caveats
-
-- If T0 shows the labeled clips barely contain streaked frames, the headline
-  pooled numbers won't move much even if the fix is right — then the corpus
-  scenes and the streak slice carry the verdict, and you should read the
-  round that way rather than as a null.
-- The robust kernel trades a failure mode: it protects against streaks but
-  weakens chamfer's long-range pull everywhere. The phase-aware schedule is
-  there to keep the root placement safe; if depth seating degrades on healthy
-  clips, the scale parameter is the dial.
-- Scale-stage changes shift the whole world's size slightly on every clip,
-  including healthy ones. The stability of the per-frame scale estimates
-  (their spread) is the early-warning number to watch before looking at
-  downstream metrics.
+- **Self-confirmation** is the standing trap: any pull toward the wall
+  inflates recall and seating for free. Precision, FPR and your eyes are the
+  honest signals, and the plan treats them that way.
+- **Airborne frames exist** (dynamic moves, falls). The anchor is
+  deliberately saturating and per-frame; it prefers touching but can lose
+  the argument on a frame where the image evidence says otherwise.
+- **There is no perfect witness for absolute depth here.** On the broken
+  frames, VGGT is wrong and SAM-3D's own depth proved unreliable too (round
+  9 measured both). "On the wall, limbs plausible, contacts matching the
+  annotations where we have them" is the operational definition of correct
+  this round — that is a choice, and it is yours to veto.
