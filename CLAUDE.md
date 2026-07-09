@@ -132,6 +132,7 @@ BetterVideoReconstruction/
 │   ├── audit_scenes.py            # round-7 corpus floater audit → features/audit/bodies.csv
 │   ├── autopsy_scenes.py          # round-7: assign each flagged body a cause (a/b/c/d)
 │   ├── diagnose_human_optim.py    # per-frame per-person plots of every kinematics_1 loss term
+│   ├── diagnose_depth_streaks.py  # round-9 T0: VGGT depth-streak meter + contact go/no-go slice
 │   ├── _pym_preload.py            # libstdc++ LD_PRELOAD shim for pymomentum
 │   └── stages/                    # the per-stage CLIs in the table above
 ├── tools/                         # importable library (repo root on sys.path via scripts)
@@ -176,7 +177,10 @@ BetterVideoReconstruction/
     reprojection** terms — the detector-free **init-projection anchor** (each body
     joint pinned to its OWN converter-pose projection) + a downweighted **Sapiens**
     cross-check — **chamfer** of visible posed vertices to the metric VGGT human
-    depth, a gentle **depth-push**, a **joints-only pose prior** + gentle
+    depth (with an **opt-in saturating robust kernel** `[chamfer].robust_scale_m` +
+    **opt-in per-point cloud-side reliability weights** `cloud_edge_ref_px` /
+    `cloud_use_conf`, all off by default — round-9; a null on our clips, see
+    `docs/UPDATE_AGENT.md`), a **joints-only pose prior** + gentle
     root-orientation prior, **acceleration + jerk** smoothness (exact Lie tangent,
     batched `so3`/`se3` in `tools/human_optim/motion.py`), a **scene-penetration**
     repulsion and its inverse **scene-contact attraction** (the term that *raises*

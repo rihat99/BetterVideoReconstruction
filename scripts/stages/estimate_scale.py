@@ -53,6 +53,7 @@ import cv2  # noqa: E402
 import numpy as np  # noqa: E402
 import torch  # noqa: E402
 
+from tools.geometry.clean import clean_depth  # noqa: E402
 from tools.geometry.human_scale import combine_log_scales, weighted_median  # noqa: E402
 from tools.mask_io import read_binary_mask  # noqa: E402
 from tools.human_optim import normalize_q  # noqa: E402
@@ -172,9 +173,16 @@ def estimate_scale(args: argparse.Namespace) -> None:
     device = args.device
 
     mid = load_smplx_mid(str(_DEFAULT_SMPLX_MODEL), device)
-    # Per-vertex body-part emphasis (geodesic linear·r1.0): extremities ×10, torso ÷10.
-    vert_w = geodesic_endeffector_weights(mid.vertices_template, mid.faces,
-                                          mid.lbs_weights, mid.joint_names)  # (V,)
+    # Per-vertex body-part emphasis for the ruler (T1c --vertex-weighting):
+    #   extremity_up (default, parity) — geodesic linear·r1.0, extremities ×10 torso ÷10;
+    #   uniform — read the ruler everywhere equally;
+    #   extremity_down — swap lo/hi, read it at the more reliable torso (codex's scale caveat).
+    if args.vertex_weighting == "uniform":
+        vert_w = np.ones(mid.vertices_template.shape[0], dtype=np.float32)
+    else:
+        lo, hi = (0.1, 10.0) if args.vertex_weighting == "extremity_up" else (10.0, 0.1)
+        vert_w = geodesic_endeffector_weights(mid.vertices_template, mid.faces,
+                                              mid.lbs_weights, mid.joint_names, lo=lo, hi=hi)  # (V,)
 
     n_frames = len(frame_indices)
     per_frame_scale = np.full((P, n_frames), np.nan, dtype=np.float32)
@@ -214,6 +222,8 @@ def estimate_scale(args: argparse.Namespace) -> None:
             depth = vd["depth"].astype(np.float32)
             conf = vd["depth_conf"].astype(np.float32)
             mask = cv2.resize(mask.astype(np.uint8), (wv, hv), interpolation=cv2.INTER_NEAREST) > 0
+            if args.edge_rtol > 0.0:   # T1c: drop VGGT flying-pixel edges (as fuse does) before sampling
+                mask = mask & clean_depth(depth, edge_rtol=args.edge_rtol)
             log_s, weight = _frame_log_scale(
                 verts_np[fi][front_np[fi]], vert_w[front_np[fi]], K_vggt[col], depth, conf, mask,
                 args.conf_drop_q, args.min_inlier_verts)
@@ -257,6 +267,13 @@ def main(argv: list[str] | None = None) -> int:
                    help="drop this lowest-confidence fraction of in-mask body vertices per frame (default: 0.3)")
     p.add_argument("--min-inlier-verts", type=int, default=50,
                    help="skip a frame with fewer than this many inlier vertices (default: 50)")
+    p.add_argument("--vertex-weighting", choices=["extremity_up", "uniform", "extremity_down"],
+                   default="extremity_up",
+                   help="ruler per-vertex weighting (T1c): extremity_up=parity, uniform, "
+                        "extremity_down=read the torso (default: extremity_up)")
+    p.add_argument("--edge-rtol", type=float, default=0.0,
+                   help="T1c: depth_map_edge flying-pixel rtol applied to the sampled VGGT depth; "
+                        "0 disables (default: 0.0 = off = parity)")
     p.add_argument("--mad-k", type=float, default=3.0,
                    help="reject frames beyond this many MADs from the median log-scale (default: 3.0)")
     p.add_argument("--device", default="cuda", help="cuda | cpu (default: cuda)")

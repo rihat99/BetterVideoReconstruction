@@ -65,6 +65,10 @@ chunk = 16
 emphasis_lo = 0.1      # per-vertex chamfer weight floor (torso); log-mapped. (0.1/10.0/1.0) reproduces the base field
 emphasis_hi = 10.0     # per-vertex chamfer weight ceiling (hands/feet)
 emphasis_radius = 1.0  # geodesic falloff scale (m); smaller = emphasis hugs the extremities
+robust_scale_m = 0.0   # T1a saturating chamfer kernel ρ (m): d·ρ/(d+ρ) both directions; 0 = off (parity)
+robust_from_phase = "full"  # kernel active from this phase onward (root keeps raw long-range depth-seating pull)
+cloud_edge_ref_px = 0.0  # T1b: mask-edge distance (px) for full cloud-point d2v weight; 0 = off (parity)
+cloud_use_conf = false   # T1b: also weight cloud points by per-frame-max-normalised VGGT conf
 
 [keypoints]
 score_thresh = 0.3

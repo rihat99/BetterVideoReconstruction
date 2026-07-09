@@ -140,12 +140,25 @@ def chamfer_loss(
     *,
     chunk: int = 16,
     vertex_weights: torch.Tensor | None = None,   # (Ns,) per-vertex body-part emphasis
+    depth_weights: torch.Tensor | None = None,    # (T, Md) per-cloud-point reliability (d2v)
+    robust_scale_m: float = 0.0,                  # >0 = saturating kernel scale (m); 0 = off (parity)
 ) -> torch.Tensor:
     """Bidirectional chamfer between visible vertices and depth points.
 
     Averaged over frames that have both visible vertices and depth points.
     Gradients flow through ``vertices_sub``; ``vismask`` and the (padded) depth
     cloud are constants for a given call.
+
+    ``robust_scale_m`` ``ρ > 0`` wraps each per-point min-distance ``d`` (BOTH
+    directions) in a saturating first-order kernel ``d·ρ/(d+ρ)`` before averaging:
+    ``≈ d`` for ``d ≪ ρ`` (small distances keep their magnitude, so the
+    ``[loss_weights].chamfer`` weight keeps meaning) and ``→ ρ`` for ``d ≫ ρ`` (a
+    streak point a metre down the ray stops pulling with its full distance —
+    chamfer's only unrobustified data term, matching the reprojection/penetration
+    kernels). ``0`` = the plain mean (bit-exact HEAD). The masked-min sentinel is
+    ``finfo.max`` (finite), so in ``fvalid`` frames every real min is finite and the
+    ``isfinite`` guard is a defensive no-op; the sentinel mins occur only in frames
+    ``fvalid`` discards, where robustifying them is harmless (grads there are zeroed).
 
     Computed in frame-chunks: each chunk is a single batched
     ``cdist`` over ``(chunk, Ns, Md)`` rather than ``chunk`` separate per-frame
@@ -157,10 +170,11 @@ def chamfer_loss(
     form (validated to fp tolerance).
 
     ``vertex_weights`` ``(Ns,)`` reweights the **vertex→depth** term into a *weighted*
-    mean over the visible vertices (the reverse depth→vertex term stays uniform — a
-    raw depth point carries no body-part label). It emphasizes some body regions
-    (e.g. the extremities, whose metric depth VGGT most distorts) over the torso; a
-    weight of ``None`` reproduces the plain uniform mean.
+    mean over the visible vertices (a body-part label). ``depth_weights`` ``(T, Md)``
+    does the mirror on the **depth→vertex** term: a per-cloud-point reliability (VGGT
+    confidence × mask-edge distance) that mutes streak points on the side where they
+    otherwise pull with equal weight (T1b). Either ``None`` reproduces the plain
+    uniform mean on that direction.
     """
     T = vertices_sub.shape[0]
     if depth_padded.shape[1] == 0:            # no depth in any frame (else the cdist→min(2) below crashes)
@@ -175,12 +189,20 @@ def chamfer_loss(
         d = torch.cdist(vertices_sub[s:e], depth_padded[s:e])              # (b, Ns, Md)
         v2d = d.masked_fill(~depth_valid[s:e][:, None, :], INF).min(2).values  # (b, Ns)
         d2v = d.masked_fill(~vismask[s:e][:, :, None], INF).min(1).values      # (b, Md)
+        if robust_scale_m > 0.0:
+            r = robust_scale_m
+            v2d = torch.where(torch.isfinite(v2d), v2d * r / (v2d + r), v2d)
+            d2v = torch.where(torch.isfinite(d2v), d2v * r / (d2v + r), d2v)
         if vertex_weights is None:
             v2d_mean = (v2d * vismask[s:e]).sum(1) / nv[s:e].clamp_min(1)
         else:
             vis_w = vismask[s:e] * vertex_weights                         # (b, Ns)
             v2d_mean = (v2d * vis_w).sum(1) / vis_w.sum(1).clamp_min(1e-6)
-        d2v_mean = (d2v * depth_valid[s:e]).sum(1) / nd[s:e].clamp_min(1)
+        if depth_weights is None:
+            d2v_mean = (d2v * depth_valid[s:e]).sum(1) / nd[s:e].clamp_min(1)
+        else:
+            dw = depth_valid[s:e] * depth_weights[s:e]                    # (b, Md)
+            d2v_mean = (d2v * dw).sum(1) / dw.sum(1).clamp_min(1e-6)
         parts.append(v2d_mean + d2v_mean)                                 # (b,)
     terms = torch.where(fvalid, torch.cat(parts), vertices_sub.new_zeros(()))
     return terms.sum() / fvalid.sum().clamp_min(1)

@@ -1,5 +1,38 @@
 # UPDATE_AGENT — round 9: VGGT depth streaks (measure → robustify → rescale)
 
+## Outcome (2026-07-09) — honest null on the cheap fixes; escalate to T2a
+
+Full raw table: `out/_round9/results.md`. Baseline re-derived at HEAD (reference cell =
+deployed close 3cm / still 0.03 / merge 0.03): **P 0.894 / R 0.645 / F1 0.749 / FPR 0.064**.
+
+- **T0 (shipped, committed `5cdc052`)** — `scripts/diagnose_depth_streaks.py`. Go/no-go:
+  streaks drive *missed* contacts, not false ones (streaked FPR 0.072 ≈ clean 0.077;
+  streaked FNR 0.521 vs clean 0.264). But the motion-confound split shows **~78% of
+  streaked FN are moving joints the stillness gate vetoes** — only **~51 still-joint
+  contacts** are chamfer-addressable (~+0.013 recall ceiling). The bigger streaks are on
+  the corpus showcase. Threshold-robust; codex-verified.
+- **T1a robust chamfer (NOT adopted)** — bit-exact parity; sweep ρ∈{.10,.15,.25} all
+  *reduce* F1 (−0.006…−0.022), weaken depth-seating. Knob `[chamfer].robust_scale_m` /
+  `robust_from_phase` retained, default **off**.
+- **T1b cloud-side d2v weights (NOT adopted)** — fuse adds per-point `edge_dist_px`
+  (deterministic, purely additive to `human.npz`); bit-exact parity. Best variant (edge=4
+  + conf) is +0.005 F1 with precision/FPR moving the right way, but **sub-threshold AND
+  recovers +0 of the 51 streak-addressable contacts** (the gain is incidental clean-frame
+  cleanup). Mask-edge distance misses the streak points — they are *interior* + VGGT is
+  overconfident at edges (arXiv 2606.16479). Knobs `[chamfer].cloud_edge_ref_px` /
+  `cloud_use_conf` retained, default **off**.
+- **T1c scale weighting (NOT adopted)** — `estimate_scale --vertex-weighting` /
+  `--edge-rtol`. edge_rtol a no-op for scale; uniform/extremity_down both enlarge the
+  factor +2–10% → body lifts off the wall → recall craters (ΔF1 −0.082/−0.145). Current
+  `extremity_up` is best. Flags retained, default **parity**.
+
+**Verdict: no cheap knob moves the streak-addressable slice; all three land as opt-in
+infra with neutral defaults. The evidence points to the second wave — T2a init-body depth
+corridor (VGGT-independent SAM-3D depth) is the real lever. In progress.**
+
+---
+
+
 *2026-07-08, rev 9. You are the implementing agent. `docs/UPDATE.md` rev 11 is
 the human-facing plan — read it first. This file is the handoff: verified
 state, code anchors, task specs, gates. Rounds 1–8: git history. Trust

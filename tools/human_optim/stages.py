@@ -48,7 +48,7 @@ _ROOT_DOF = ("transl", "orient")
 # ─────────────────────────────── io helpers ──────────────────────────────
 
 def _person_depth_points(human: dict, oid: int, N: int, conf_drop_q: float,
-                         max_points: int, device) -> list[torch.Tensor]:
+                         max_points: int, device, *, return_aux: bool = False):
     """Per-frame world-frame depth points for one person (conf-gated, capped).
 
     The confidence gate is a **per-frame quantile**: within each frame, drop that
@@ -62,22 +62,55 @@ def _person_depth_points(human: dict, oid: int, N: int, conf_drop_q: float,
     *every* frame by construction, matching ``clean_depth`` / ``estimate_scale``.
     The human cloud gets no confidence gate at fuse, so this is its only quality
     filter before chamfer.
+
+    ``return_aux`` also returns per-kept-point ``confidence`` and ``edge_dist_px``
+    (mask-edge distance; zeros if the npz predates the T1b schema), aligned through the
+    exact same gate — the raw ingredients of the T1b cloud-side chamfer weight.
     """
     person = human["obj_id"] == oid
     pts = human["points"][person]
     conf = human["confidence"][person]
     fr = human["frame_id"][person]
+    edge = human["edge_dist_px"][person] if "edge_dist_px" in human else None
     order = np.argsort(fr, kind="stable")
     pts, conf, fr = pts[order], conf[order], fr[order]
+    edge = edge[order] if edge is not None else None
     bnd = np.searchsorted(fr, np.arange(N + 1))
-    out = []
+    out, out_conf, out_edge = [], [], []
     for t in range(N):
         p, c = pts[bnd[t]:bnd[t + 1]], conf[bnd[t]:bnd[t + 1]]
+        e = edge[bnd[t]:bnd[t + 1]] if edge is not None else None
         if conf_drop_q > 0.0 and c.size:
-            p = p[c >= np.quantile(c, conf_drop_q)]   # per-frame: keep the top 1−q of THIS frame
+            keep = c >= np.quantile(c, conf_drop_q)   # per-frame: keep the top 1−q of THIS frame
+            p, c = p[keep], c[keep]
+            e = e[keep] if e is not None else None
         if len(p) > max_points:
-            p = p[np.linspace(0, len(p) - 1, max_points).astype(int)]
+            sel = np.linspace(0, len(p) - 1, max_points).astype(int)
+            p, c = p[sel], c[sel]
+            e = e[sel] if e is not None else None
         out.append(torch.as_tensor(p, dtype=torch.float32, device=device))
+        if return_aux:
+            out_conf.append(torch.as_tensor(c, dtype=torch.float32, device=device))
+            out_edge.append(torch.as_tensor(e if e is not None else np.zeros(len(p), np.float32),
+                                            dtype=torch.float32, device=device))
+    return (out, out_conf, out_edge) if return_aux else out
+
+
+def _cloud_weights(confs: list[torch.Tensor], edges: list[torch.Tensor],
+                   edge_ref_px: float, use_conf: bool) -> list[torch.Tensor]:
+    """Per-cloud-point reliability weight ``w = conf_norm × clip(edge/edge_ref, 0, 1)`` (T1b).
+
+    ``edge_ref_px = 0`` drops the edge factor; ``use_conf = False`` drops the confidence
+    factor (per-frame max-normalised). With both off the caller passes ``None`` instead.
+    """
+    out = []
+    for c, e in zip(confs, edges):
+        w = torch.ones_like(c)
+        if edge_ref_px > 0.0:
+            w = w * (e / edge_ref_px).clamp(0.0, 1.0)
+        if use_conf and c.numel():
+            w = w * (c / c.amax().clamp_min(1e-6)).clamp(0.0, 1.0)
+        out.append(w)
     return out
 
 
@@ -304,12 +337,25 @@ def run_kinematic(source, pred: Path, cfg: HumanOptimConfig, stages_to_run,
         kp_np, sc_np = _sapiens_for(pose, oid, N)
         target_kp = torch.as_tensor(kp_np, dtype=torch.float32, device=device)
         scores = torch.as_tensor(sc_np, dtype=torch.float32, device=device)
-        depth = _person_depth_points(human, oid, N, float(knobs["chamfer"]["conf_drop_q"]),
-                                     int(knobs["chamfer"]["max_points"]), device)
+        cdq, mp = float(knobs["chamfer"]["conf_drop_q"]), int(knobs["chamfer"]["max_points"])
+        # T1b cloud-side chamfer weights: on when either factor is enabled (else uniform = parity).
+        cw_edge_ref = float(knobs["chamfer"].get("cloud_edge_ref_px", 0.0))
+        cw_use_conf = bool(knobs["chamfer"].get("cloud_use_conf", False))
+        if cw_edge_ref > 0.0 and "edge_dist_px" not in human:
+            raise ValueError("cloud_edge_ref_px > 0 but geometry/human.npz has no edge_dist_px; "
+                             "re-run fuse_geometry to add it (else every d2v weight would be 0)")
+        if cw_edge_ref > 0.0 or cw_use_conf:
+            depth, dconf, dedge = _person_depth_points(human, oid, N, cdq, mp, device, return_aux=True)
+            depth_w = _cloud_weights(dconf, dedge, cw_edge_ref, cw_use_conf)
+        else:
+            depth = _person_depth_points(human, oid, N, cdq, mp, device)
+            depth_w = None
         for i in range(N):
             if not vmask[i]:
                 scores[i] = 0.0
                 depth[i] = depth[i][:0]
+                if depth_w is not None:
+                    depth_w[i] = depth_w[i][:0]
         frame_valid = torch.as_tensor(vmask, dtype=torch.bool, device=device)
 
         print(f"[{tag}] person obj_id={oid} ({int(vmask.sum())}/{N} valid) …")
@@ -318,7 +364,7 @@ def run_kinematic(source, pred: Path, cfg: HumanOptimConfig, stages_to_run,
             target_kp=target_kp, scores=scores, corr=corr, frame_vertex_ids=fvids,
             sub=sub, knobs=knobs, phases=phases,
             scene_pts=scene_pts, scene_normals=scene_normals, scene_conf=scene_conf, fps=fps,
-            chamfer_weights=chamfer_w, frame_valid=frame_valid,
+            chamfer_weights=chamfer_w, depth_weights=depth_w, frame_valid=frame_valid,
             cam_centers=cam_centers, auto_contact=auto_cfg)
         print(f"    before: {before}\n    after:  {after}")
         _append_classic(out, mid, betas_T, q_opt)
