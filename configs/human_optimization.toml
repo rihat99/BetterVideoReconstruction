@@ -40,7 +40,7 @@ radial_velocity     = [   0,  100,    0,    0 ]   # damp joint velocity along th
 
 [loss_weights.scene]
 penetration         = [   0, 4000, 4000,    0 ]   # push posed verts out of geometry/scene.npz (reported, not a fit gate)
-wall_contact        = [   0,  200,    0,    0 ]   # round-10: seat a floating body's closest EE onto the wall (seat+refine, float-gated); 0 = off
+wall_contact        = [   0,    0,    0,    0 ]   # round-10 wall-contact seating: opt-in (set kin1 col to 200 to enable); float-gated seat+refine. Off by default.
 
 [loss_weights.annotation]
 # Label-driven; labels are AUTO-detected in kinematics_1 (frozen), MANUAL in kinematics_2.

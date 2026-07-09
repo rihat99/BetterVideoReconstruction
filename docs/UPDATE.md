@@ -1,126 +1,107 @@
-# UPDATE — round 10: seat the flying bodies
+# UPDATE — round 11: contact confidence, made physical
 
-*2026-07-09, rev 12. Replaces the round-9 plan entirely. Round 9 closed as a
-set of honest nulls; this round first cleans up the debris it left, then goes
-after the actual problem — bodies that hang in the air in front of the wall
-must end up on the wall. Rounds 1–9 live in git history.*
+*2026-07-09, rev 13. Round 10 shipped wall-contact seating; you judged it not
+ready to run on everything, so it becomes opt-in (code kept, off by default)
+and the experiment leftovers get cleaned. The main work of this round is the
+two confidence upgrades you asked for — occlusion awareness and relative
+clearance — under one governing rule: **every term in the confidence must
+state the concrete physical assumption behind it, and the whole thing must
+get simpler, not more complicated.** This reopens the formula round 8 froze,
+so the version stamp in the output goes 1 → 2 and downstream consumers can
+tell the two apart. Rounds 1–10 live in git history.*
 
-## What went wrong in round 9 — and what this round is actually about
+## First, the cleanup
 
-Round 9 was my mistake twice over, and the executing agent faithfully
-executed both mistakes:
+- **Wall-contact seating → default off.** The pull, the rigid seat phase and
+  the float gate all stay in the code as an opt-in knob for later; the
+  default config no longer enables them. Nothing needs re-running: the float
+  gate meant healthy bodies were bit-exact anyway, and the corpus was never
+  re-run with seating on.
+- Delete the `out/_round10/` experiment trees and any redirected corpus
+  scratch. The round-10 numbers and renders survive in git history.
 
-1. **Wrong failure model.** I aimed at boundary artifacts — bad pixels at
-   the edge of the person mask. Measurement showed the truth: the depth
-   error is *region-level*. VGGT places a whole hand, a whole limb,
-   sometimes the whole person at the wrong distance from the camera. Edge
-   filters and point weighting cannot touch that.
-2. **Wrong yardstick.** I judged everything by pooled contact F1 on the
-   labeled clips, where this failure barely lives (the measured ceiling was
-   +0.013 recall). The round chased crumbs by construction.
+## Your two asks, restated so we can check I understood
 
-What you actually want, restated so we can check I understood: **the flying
-body is the problem.** VGGT's human depth is stretched along the viewing
-ray. We should trust it *less* — stop letting it dictate where the body sits
-in depth — but not throw it away, because it still knows things reprojection
-cannot see, like which limb is in front and roughly how far. If this is
-still not your meaning, the sentence to correct is this one.
+**1. Occlusion should humble the confidence.** A contact label is only as
+trustworthy as our knowledge of where the joint actually is, and there are
+two separate ways to lose that knowledge. First, the camera may simply not
+see the joint because the climber's own body is in front of it — that is
+knowable *exactly*, from the posed mesh, no detector involved. Second, the
+detector itself may be unsure (low Sapiens score) — then that keypoint never
+pinned the fit, whatever the geometry says. Either one means the joint's
+3D position came mostly from priors and smoothness, so its measured distance
+to the wall is a guess — and confidence in **both** labels (contact and
+free) should drop. The physical assumption, in one line: *an unseen or
+unpinned joint has an unverified position, and an unverified position gives
+an unverified contact.*
 
-## The reframe in one paragraph
+**2. Clearance should be judged relative to the body, not in absolute
+centimetres.** Fifteen centimetres off the wall means two different things.
+On a body whose other joints are touching the scene (distance ≈ 0), the
+scene sheet next to the body is calibrated — a still joint 15 cm above it is
+*confidently free*, and today's formula wrongly stays timid. On a body where
+nothing touches, 15 cm is meaningless — the whole body carries an unknown
+depth offset. So the "free" decision should be driven by each joint's
+clearance **relative to the body's own touching joints**, with absolute
+distance only as the fallback when no joint touches. One line: *touching
+joints anchor the scene; clearance above that anchor is trustworthy,
+clearance without an anchor is not.* (Round 8 added a relative witness as a
+third voice; this round promotes relativity to the primary decider.)
 
-Split what the human depth cloud is used for. Its *relative* structure (the
-arrangement of limbs in depth) stays as evidence. Its *absolute* position
-(how far the whole thing sits from the camera) gets demoted — that is
-exactly the part VGGT gets wrong. Absolute placement instead comes from the
-two witnesses we can trust: the scene cloud (walls are big, static and
-textured — VGGT does them well; the round-7 audit measured the human cloud
-floating *relative to a credible wall*), and the one fact true of every clip
-in this project: **a climber on the wall is touching it with something.**
-The deliverable is flying bodies visibly seated on the wall, verified on the
-scenes that are actually broken — not a decimal on a pooled metric.
+## Measure first, change second
 
-## Cleanup first
+The method that worked in rounds 6 and 8: dump the factors, measure on the
+labeled clips, only then touch the formula.
 
-Everything round 9 built that didn't work gets removed, so the codebase
-carries no dead experiment weight:
+- **Occlusion probe.** On the labeled clips, split joint-frames by
+  (self-occluded yes/no × Sapiens score) and measure how often the automatic
+  label is *wrong* in each bucket. If wrong labels really concentrate on
+  occluded / low-score joints, the witness is justified and the buckets
+  calibrate its ramp. If they don't, that is an honest null and we do not
+  ship a term that only makes confidence timid for no measured reason.
+- **Relative-clearance probe.** Among still, in-view joints near the wall,
+  does relative clearance separate annotated contact from annotated free
+  better than absolute distance does? A simple separation comparison (AUC)
+  answers it, and the same data picks the ramp scale.
 
-- the uncommitted T2a corridor code (discarded);
-- the three landed-but-off knob sets: the robust-chamfer knobs, the
-  cloud-side weight knobs (including the `edge_dist_px` field fuse started
-  writing), and the scale-stage weighting/edge flags;
-- the `out/_round9/` experiment trees and logs, and any redirected corpus
-  scratch.
+## Then the changes
 
-One thing stays, deliberately: `diagnose_depth_streaks.py`. Its go/no-go
-*yardstick* is retired with the rest, but the instrument itself measures the
-disease (how stretched the cloud is, per limb, per frame) and round 10's
-diagnosis reuses it. Say the word if you want it gone too. Everything
-deleted stays recoverable from git history.
+- **A visibility witness**: self-occlusion (a ray test against the posed
+  body, the joint's own flesh excluded) combined with detector belief (the
+  Sapiens score through a calibrated ramp). Applies to both classes.
+- **A relative-first free witness**: anchor = the body's touching joints
+  this frame; each joint judged by clearance above the anchor; the absolute
+  and nothing-within-reach witnesses demoted to fallback for anchor-less
+  frames.
+- **A simplification pass**: every surviving term gets its one-line physical
+  assumption written into `docs/contact_confidence.md` (updated in the same
+  commit, as always); any term that cannot state one, or that the ablation
+  shows inert, is dropped. The finished formula must have no more terms than
+  today's — ideally fewer.
+- Version stamp → 2, corpus re-scored (minutes — this is a pure readout
+  round, no kinematics re-runs anywhere).
 
-## The new yardstick
+## How we judge
 
-The round-7 audit already found the target population: ~80 flagged floating
-bodies on the corpus, two-thirds of them "body faithfully follows a human
-cloud that floats off the wall". The eval set is drawn from there: roughly
-15–20 flagged scenes plus healthy controls, plus your 7 showcase scenes,
-plus the 5 labeled clips.
+- The contact **labels stay bit-identical** — confidence rides on top.
+- The round-8 hard gate, now applied to both classes: the rate of
+  *confidently wrong* labels must not rise.
+- Reliability — does high confidence actually predict correctness — improves
+  or holds, pooled and per clip.
+- The two target populations move the way you asked: occluded or weakly
+  detected joints that are confidently wrong today get humbler; still, free
+  joints with touching neighbours get their confidence back.
+- Eyes: the confidence-shaded overlays and viewer, spot-checked before/after.
 
-- **Primary: seating.** Per frame, how far the body's hands and feet are
-  from the scene surface (this number already exists — the contacts stage
-  computes it). Headline numbers: the fraction of frames with at least one
-  end-effector within touching distance, and the median gap on flagged
-  scenes. Success means flagged floaters move from tens of centimetres to
-  touching distance, while healthy controls do not move.
-- **Guards, not targets: the labeled clips.** Contact precision and FPR must
-  not degrade (recall going up is welcome, but it is not the goal).
-- **Eyes, mandatory.** Before/after renders on the showcase scenes and a
-  sample of flagged scenes go into the results file. You own the verdict.
+## Honesty, up front
 
-One honesty note baked into the design: the new wall-contact term pulls
-bodies toward the wall, so seating metrics improve partly *by construction*.
-That is why adjudication rests on the independent legs — the labeled-clip
-precision/FPR guards, the cloud's own limb structure fitting better after
-the release, and your eyes.
-
-## The plan
-
-1. **Clean** (above), and close one bookkeeping item: why the re-derived
-   baseline recall (0.645) differs from the round-4 record (0.678) — explain
-   or record, time-boxed, no rabbit-holing.
-2. **Diagnose the disease on the bodies that actually have it.** On ~10
-   flagged scenes plus competition_2: measure the along-ray offset between
-   body/cloud and wall, frame by frame. Is the offset roughly constant per
-   clip, or wandering per frame? Does the cloud's limb arrangement remain
-   usable once the offset is removed? Is the wall credible where the body
-   should sit? These answers set the knobs of step 3 before any loss is
-   written.
-3. **Two levers, built to work together:**
-   - **Release** — make chamfer offset-tolerant: each frame, estimate the
-     whole-cloud depth offset robustly and subtract (a dial from "today's
-     behaviour" to "fully relative"). The cloud then still shapes the limbs
-     but no longer drags the body to its wrong absolute depth.
-   - **Re-anchor** — a wall-contact prior: each frame, the body's closest
-     hand/foot should be at touching distance from the scene; a saturating
-     penalty on the gap, so airborne moments and hopeless frames cost a
-     bounded amount instead of dominating.
-   Released depth with no new anchor drifts; a new anchor fighting the old
-   chamfer stalls — so the experiment is factorial: baseline, release only,
-   anchor only, both, and the dumb-but-honest control arm (just turn chamfer
-   down and add the anchor). The fancy version has to beat the dumb one.
-4. **Judge on the eval set** (seating + guards + eyes), then wrap: winner
-   confirmed, docs synced. Whether to re-run the full 361-scene corpus with
-   the winner (~7 h) is your call at the end.
-
-## Risks, stated up front
-
-- **Self-confirmation** is the standing trap: any pull toward the wall
-  inflates recall and seating for free. Precision, FPR and your eyes are the
-  honest signals, and the plan treats them that way.
-- **Airborne frames exist** (dynamic moves, falls). The anchor is
-  deliberately saturating and per-frame; it prefers touching but can lose
-  the argument on a frame where the image evidence says otherwise.
-- **There is no perfect witness for absolute depth here.** On the broken
-  frames, VGGT is wrong and SAM-3D's own depth proved unreliable too (round
-  9 measured both). "On the wall, limbs plausible, contacts matching the
-  annotations where we have them" is the operational definition of correct
-  this round — that is a choice, and it is yours to veto.
+- Occlusion genuinely destroys information. An occluded foot getting low
+  confidence is *correct* even when it is annoying — the fix for that is a
+  better fit or another camera, not a braver number.
+- A body that touches nothing (a real hover, a fall) has no anchor, and the
+  relative witness will correctly refuse to fire; those frames fall back to
+  the absolute witness and stay humble. That is the right behaviour, not a
+  bug.
+- Reopening a frozen schema has a real cost for anything already consuming
+  v1 — the stamp exists precisely so consumers can filter, but the cost is
+  yours to accept and you have.

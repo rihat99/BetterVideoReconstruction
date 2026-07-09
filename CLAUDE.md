@@ -222,7 +222,10 @@ BetterVideoReconstruction/
     It exists because nothing else pulls the body to the *scene* (chamfer targets the
     *human* depth cloud, penetration only pushes off).
   - **Wall-contact seating of floating bodies** (round-10, `losses.wall_contact_loss`,
-    weight `[loss_weights.scene].wall_contact`). VGGT sometimes stretches a person's
+    weight `[loss_weights.scene].wall_contact`; **off by default** as of round-11 —
+    the whole code path + `[wall_contact]` knobs are kept as opt-in, set the
+    `kinematics_1` column to `200` to re-enable; weight 0 is bit-exact pre-round-10).
+    VGGT sometimes stretches a person's
     depth so the whole body (faithfully following its own depth cloud) hangs tens of cm
     in front of a credible wall. This term pulls the body's **closest EE joint** (L/R
     wrist, L/R foot; a soft-min over the four) onto the nearest scene point with a
