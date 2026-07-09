@@ -57,12 +57,13 @@ import torch  # noqa: E402
 from tools.geometry.normals import estimate_point_normals  # noqa: E402
 from tools.human_optim import (  # noqa: E402
     contact_from_sdf, drift_gated_contact, joint_drift, joint_guarded_min_sdf,
-    lift_joint_contact, merge_contact_spans, project, scene_sdf, transform_points,
-    vertex_to_joint, world_from_cam,
+    joint_occlusion_counts, lift_joint_contact, merge_contact_spans, project, scene_sdf,
+    transform_points, vertex_to_joint, world_from_cam,
 )
 from tools.human_optim import paths  # noqa: E402
 from tools.human_optim.confidence import (  # noqa: E402
-    CONTACT_CONFIDENCE_DEFAULTS, compute_body_health, contact_confidence)
+    CONTACT_CONFIDENCE_DEFAULTS, coarse_of_joint_ids, compute_body_health, contact_confidence,
+    joint_sapiens_score)
 from tools.human_optim.qmath import normalize_q  # noqa: E402
 from tools.smplx_robot import load_smplx_mid  # noqa: E402
 
@@ -143,6 +144,12 @@ def run(source, predictions_dir, config_path, *, device_override=None, overlay=T
     kin = dict(np.load(kin_path, allow_pickle=True))
     tr = dict(np.load(pred / "geometry" / "transform.npz", allow_pickle=True))
     sc = dict(np.load(scene_path, allow_pickle=True))
+    # Sapiens scores feed the visibility witness's detector-belief factor (round-11 T3a). Optional:
+    # if absent (e.g. a farm without the sapiens tree symlinked) the factor stays neutral.
+    pose_path = pred / "sapiens" / "pose.npz"
+    pose = dict(np.load(pose_path, allow_pickle=True)) if pose_path.exists() else None
+    if pose is None:
+        print("[estimate_contacts] no sapiens/pose.npz — detector-belief witness neutral")
 
     N, P = int(kin["num_frames"]), int(kin["num_people"])
     H, W = int(kin["video_height"]), int(kin["video_width"])
@@ -167,13 +174,16 @@ def run(source, predictions_dir, config_path, *, device_override=None, overlay=T
 
     mid = load_smplx_mid(_DEFAULT_SMPLX_MODEL, device)
     J = mid.num_joints
+    mid_names = list(mid.joint_names)
+    coarse_t = torch.as_tensor(coarse_of_joint_ids(mid_names), device=device)   # joint→coarse (occlusion own-group)
+    pose_oids = [int(x) for x in pose["object_ids"]] if pose is not None else []
 
     joint_contact = np.zeros((P, N, J), dtype=bool)
     joint_sdf_cm = np.full((P, N, J), np.nan, dtype=np.float32)
     joints_2d = np.full((P, N, J, 2), np.nan, dtype=np.float32)
     merged_all = np.zeros((P, N, J), dtype=bool)            #frames the span-merge bridged
     p_contact_all = np.zeros((P, N, J), np.float32)         #geometry+motion contact-likeness
-    observability_all = np.zeros((P, N, J), np.float32)     #how much the scene saw the joint
+    observability_all = np.zeros((P, N, J), np.float32)     #vis witness: occlusion × detector × in-frame (round-11)
     label_conf_all = np.zeros((P, N, J), np.float32)        #confidence in the final binary label
     body_health_all = np.ones(P, np.float32)                #per-person health gating the far no-contact branch
 
@@ -233,8 +243,16 @@ def run(source, predictions_dir, config_path, *, device_override=None, overlay=T
         jc_final = torch.as_tensor(jc_np, dtype=torch.bool, device=device)
         health = compute_body_health(jc_np, jsdf.cpu().numpy(), valid_mask[p], cfg=cfg["contact_confidence"])
         body_health_all[p] = health
+        # visibility witness inputs: geometric self-occlusion + Sapiens detector score (round-11 T3a).
+        n_occ = joint_occlusion_counts(vw, jw, cam_centers, v2j, coarse_t)
+        oid = int(object_ids[p])
+        if pose is not None and oid in pose_oids:
+            sap = joint_sapiens_score(np.asarray(pose["keypoint_scores"][pose_oids.index(oid)], np.float32), mid_names)
+        else:
+            sap = np.full((N, J), np.nan, np.float32)
         pc, obs_c, lconf = contact_confidence(
             jc_final, gsdf, jsdf / 100.0, drift, jw, px, scene_pts, H, W,
+            n_occ=n_occ, sap_score=torch.as_tensor(sap, device=device),
             cfg=cfg["contact_confidence"], window_s=float(cg["window_s"]), fps=fps, body_health=health)
         for arr, val in ((p_contact_all, pc), (observability_all, obs_c), (label_conf_all, lconf)):
             val[~valid_mask[p]] = 0.0
@@ -247,7 +265,7 @@ def run(source, predictions_dir, config_path, *, device_override=None, overlay=T
         joint_contact=joint_contact, joint_sdf_cm=joint_sdf_cm, merged=merged_all,
         p_contact=p_contact_all, observability=observability_all, label_confidence=label_conf_all,
         body_health=body_health_all,
-        confidence_schema=np.int32(1),   # frozen round-8 label-confidence schema (see docs/contact_confidence.md)
+        confidence_schema=np.int32(2),   # round-11 confidence v3: visibility witness + relative-first far (docs/contact_confidence.md)
         object_ids=object_ids, joint_names=kin["joint_names"], parents=parents,
         valid_mask=kin["valid_mask"],
         num_people=np.int32(P), num_frames=np.int32(N),

@@ -70,6 +70,10 @@ def _process_scene(paths: scene_db.ScenePaths, out_paths: scene_db.ScenePaths, r
         (farm / "human_optim").mkdir()
         (farm / "human_optim" / f"{bodies}.npz").symlink_to(body.resolve())
         (farm / "geometry").symlink_to(geom.resolve())
+        # sapiens feeds the round-11 detector-belief factor; optional (contacts degrade to neutral).
+        sap = paths.feature_dir("sapiens", sid)
+        if sap.is_dir():
+            (farm / "sapiens").symlink_to(sap.resolve())
         cmd = [sys.executable, str(_CONTACTS_CLI), "--source", str(paths.clip_path(row)),
                "--predictions", str(farm), "--bodies", bodies, "--config", str(config),
                "--device", "cuda", "--no-overlay"]

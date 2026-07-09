@@ -100,6 +100,50 @@ def contact_from_sdf(
     return (sdf < close_thresh_m) & (dmin < max_dist_m) & (conf > conf_thresh)
 
 
+@torch.no_grad()
+def joint_occlusion_counts(
+    vertices: torch.Tensor,        # (T, V, 3) posed world-frame vertices
+    joints: torch.Tensor,          # (T, J, 3) posed world-frame joint centres
+    cam_centers: torch.Tensor,     # (T, 3) world camera centres
+    v2j: torch.Tensor,             # (V,) long vertex→joint
+    coarse_of_joint: torch.Tensor, # (J,) int coarse-group id per joint (-1 = none)
+    *,
+    perp_m: float = 0.04,
+    front_m: float = 0.05,
+    subsample: int = 2500,
+    chunk: int = 16,
+) -> torch.Tensor:
+    """Per-(frame, joint) count of body vertices that occlude the joint from the camera ``(T, J)``.
+
+    A vertex occludes joint ``j`` when it lies within ``perp_m`` of the camera→joint ray and
+    at least ``front_m`` closer to the camera than the joint (in front of it), and its nearest
+    joint is **not** in ``j``'s own coarse group — so a hand's own fingers do not count as
+    occluding the wrist, but the torso / other limbs do. The count is a monotone occlusion
+    margin: 0 = fully visible, large = deeply hidden behind other body parts. Vertices are
+    uniformly subsampled to ``subsample`` for speed (a count over a dense region is robust).
+    """
+    T, V, _ = vertices.shape
+    J = joints.shape[1]
+    if V > subsample:
+        vidx = torch.linspace(0, V - 1, subsample, device=vertices.device).long()
+        vertices, v2j = vertices[:, vidx], v2j[vidx]
+    coarse_of_v = coarse_of_joint[v2j]                                       # (Vs,)
+    valid_occ = (coarse_of_v[:, None] != coarse_of_joint[None, :])          # (Vs,J) may this vertex occlude j?
+    n_occ = torch.zeros((T, J), device=vertices.device)
+    for s in range(0, T, chunk):
+        e = min(s + chunk, T)
+        C = cam_centers[s:e]                                                 # (F,3)
+        u = joints[s:e] - C[:, None, :]                                      # (F,J,3)
+        L = u.norm(dim=-1)                                                   # (F,J) joint depth along ray
+        uhat = u / L[..., None].clamp_min(1e-9)
+        w = vertices[s:e] - C[:, None, :]                                    # (F,Vs,3)
+        depth = torch.einsum("fvc,fjc->fvj", w, uhat)                        # (F,Vs,J)
+        perp = (w[:, :, None, :] - depth[..., None] * uhat[:, None, :, :]).norm(dim=-1)
+        occ = (perp < perp_m) & (depth > 0.0) & (depth < (L[:, None, :] - front_m)) & valid_occ[None]
+        n_occ[s:e] = occ.sum(dim=1).float()
+    return n_occ
+
+
 def vertex_to_joint(vertices: torch.Tensor, joints: torch.Tensor) -> torch.Tensor:
     """Map each vertex to its **nearest joint center** ``(V,)`` (rest-pose 3D).
 
