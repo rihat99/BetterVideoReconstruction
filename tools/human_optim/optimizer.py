@@ -223,7 +223,6 @@ def optimize_person(
     contact_labels: torch.Tensor | None = None,
     contact_conf: torch.Tensor | None = None,
     chamfer_weights: torch.Tensor | None = None,
-    depth_weights: list[torch.Tensor] | None = None,
     frame_valid: torch.Tensor | None = None,
     cam_centers: torch.Tensor | None = None,
     auto_contact: dict | None = None,
@@ -284,22 +283,6 @@ def optimize_person(
     pen_cfg = knobs["penetration"]
     chunk = int(knobs["chamfer"]["chunk"])
     max_cand = int(pen_cfg["max_candidates"])
-    # Robust chamfer kernel (T1a): scale ρ (m); phase-aware — off in the `root` placement
-    # phase (which needs chamfer's long-range pull to seat depth from a distant init) and
-    # in every phase before ``robust_from_phase``. 0.0 = off = parity.
-    robust_scale_m = float(knobs["chamfer"].get("robust_scale_m", 0.0))
-    robust_from = str(knobs["chamfer"].get("robust_from_phase", "full"))
-    _PHASE_ORDER = ["root", "full", "refine", "lbfgs"]
-    if robust_scale_m > 0.0 and robust_from not in _PHASE_ORDER:
-        raise ValueError(f"robust_from_phase={robust_from!r} not in {_PHASE_ORDER}")
-
-    def _robust_scale(phase_name: str) -> float:
-        """ρ for this phase: 0 until ``robust_from`` in the phase order, then ``robust_scale_m``."""
-        if robust_scale_m <= 0.0:
-            return 0.0
-        oi = _PHASE_ORDER.index(phase_name) if phase_name in _PHASE_ORDER else 0
-        fi = _PHASE_ORDER.index(robust_from) if robust_from in _PHASE_ORDER else 1
-        return robust_scale_m if oi >= fi else 0.0
 
     # Union over the phases about to run — decides what to SET UP once (the per-iter
     # term inclusion is gated by each phase's own weight below).
@@ -320,10 +303,6 @@ def optimize_person(
 
     depth_pad, depth_valid = pad_frames(depth_points, channels=3,
                                         device=q_world_init.device, dtype=q_world_init.dtype)
-    depth_wpad = None
-    if depth_weights is not None:   # T1b: per-cloud-point d2v reliability, padded like the cloud
-        depth_wpad, _ = pad_frames(depth_weights, channels=None,
-                                   device=q_world_init.device, dtype=q_world_init.dtype)
 
     # `v2j_full` / `v2j_sub` map each (subsampled) vertex to its nearest rest-pose joint. The
     # subsampled map inherits joint contact labels onto vertices (attraction / repulsion masks);
@@ -457,11 +436,10 @@ def optimize_person(
         lab[keep] = 1
         return lab, drift
 
-    def _forward_losses(w: dict, scene_cand, robust_scale: float = 0.0):
+    def _forward_losses(w: dict, scene_cand):
         """Forward the posed mesh and assemble the phase-weighted loss. Returns
         ``(loss, components)`` — ``components`` carries the per-term tensors +
-        penetration diagnostics for logging + diagnostics. ``robust_scale`` is the
-        phase's chamfer kernel ρ (0 = off)."""
+        penetration diagnostics for logging + diagnostics."""
         qn = normalize_q(q, mid.num_joints)
         out = mid.forward(betas, qn)
         jw, vw = out.joints_world.tensor()[..., :3], out.vertices
@@ -480,8 +458,7 @@ def optimize_person(
                                        gm_scale_px=init_gm_px, frame_mask=frame_valid)
                   if (use_init and w_init > 0.0) else jw.new_zeros(()))
         L_ch = chamfer_loss(vw[:, sub], vismask, depth_pad, depth_valid, chunk=chunk,
-                            vertex_weights=chamfer_weights, depth_weights=depth_wpad,
-                            robust_scale_m=robust_scale)
+                            vertex_weights=chamfer_weights)
         L_pp = pose_prior_loss(qn, q_init, mid.num_joints)
         L_ro = root_orient_prior_loss(qn, q_init)
         L_sm = smoothness_loss(qn, mid.num_joints, accel_root=float(w["accel_root"]),
@@ -564,7 +541,6 @@ def optimize_person(
     auto_drift_pre = None    # (T, num_joints) refine-start drift, persisted by the caller
     for ph in phases:
         scene_cand = _build_scene_cand() if ph.scene else None
-        ph_robust = _robust_scale(ph.name)
         if use_auto and contact_labels is None and scene_cand is not None:
             lab, auto_drift_pre = _detect_auto_labels()   # detect once at the first scene phase, then freeze
             _bind_labels(lab)
@@ -579,7 +555,7 @@ def optimize_person(
 
             def closure():
                 opt.zero_grad()
-                loss, c = _forward_losses(ph.weights, scene_cand, ph_robust)
+                loss, c = _forward_losses(ph.weights, scene_cand)
                 loss.backward()
                 step[0] += 1
                 if step[0] == 1 or step[0] % 5 == 0:
@@ -594,7 +570,7 @@ def optimize_person(
             opt, milestones=[ph.iters // 2, 3 * ph.iters // 4], gamma=float(oc["lr_decay"]))
         for it in range(int(ph.iters)):
             opt.zero_grad()
-            loss, c = _forward_losses(ph.weights, scene_cand, ph_robust)
+            loss, c = _forward_losses(ph.weights, scene_cand)
             loss.backward()
             q.grad.mul_(mask)  # freeze the DOF groups not active this phase
             opt.step()

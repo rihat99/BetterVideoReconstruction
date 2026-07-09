@@ -177,10 +177,7 @@ BetterVideoReconstruction/
     reprojection** terms — the detector-free **init-projection anchor** (each body
     joint pinned to its OWN converter-pose projection) + a downweighted **Sapiens**
     cross-check — **chamfer** of visible posed vertices to the metric VGGT human
-    depth (with an **opt-in saturating robust kernel** `[chamfer].robust_scale_m` +
-    **opt-in per-point cloud-side reliability weights** `cloud_edge_ref_px` /
-    `cloud_use_conf`, all off by default — round-9; a null on our clips, see
-    `docs/UPDATE_AGENT.md`), a **joints-only pose prior** + gentle
+    depth, a **joints-only pose prior** + gentle
     root-orientation prior, **acceleration + jerk** smoothness (exact Lie tangent,
     batched `so3`/`se3` in `tools/human_optim/motion.py`), a **scene-penetration**
     repulsion and its inverse **scene-contact attraction** (the term that *raises*

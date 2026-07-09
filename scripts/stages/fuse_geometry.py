@@ -122,7 +122,7 @@ def fuse(args: argparse.Namespace) -> None:
     dev = args.device
 
     scene_pts, scene_conf, scene_col = [], [], []
-    human_pts, human_conf, human_obj, human_fid, human_col, human_edge = [], [], [], [], [], []
+    human_pts, human_conf, human_obj, human_fid, human_col = [], [], [], [], []
 
     with tempfile.TemporaryDirectory(prefix="fuse_frames_") as tmp:
         frame_paths, src_fps = resolve_source(Path(args.source), Path(tmp))
@@ -161,15 +161,6 @@ def fuse(args: argparse.Namespace) -> None:
                 human_obj.append(torch.from_numpy(obj_id).to(dev)[sh].to(torch.int32))
                 human_fid.append(torch.full((int(sh.sum()),), k, dtype=torch.int32, device=dev))
                 human_col.append(col_t[sh])
-                # Per-point distance (px) from its source pixel to its OWN climber's mask
-                # boundary. Streaks are born at the silhouette edge, so a small edge distance
-                # flags an unreliable point (T1b cloud-side chamfer weight; consumers may ignore).
-                edt = np.zeros(human_mask.shape, np.float32)
-                for o in climber_ids:
-                    mo = (obj_id == o) & is_human
-                    if mo.any():
-                        edt[mo] = cv2.distanceTransform(mo.astype(np.uint8), cv2.DIST_L2, 5)[mo]
-                human_edge.append(torch.from_numpy(edt).to(dev)[sh])
 
     centroids, inverse, counts, coords = voxel_downsample(torch.cat(scene_pts) * s, args.voxel_scene)
     scene_confidence = group_reduce(torch.cat(scene_conf), inverse, counts.numel(), "amax")
@@ -214,7 +205,6 @@ def fuse(args: argparse.Namespace) -> None:
         confidence=torch.cat(human_conf) if human_conf else empty[:, 0],
         frame_id=torch.cat(human_fid) if human_fid else empty[:, 0].to(torch.int32),
         obj_id=torch.cat(human_obj) if human_obj else empty[:, 0].to(torch.int32),
-        edge_dist_px=torch.cat(human_edge) if human_edge else empty[:, 0],
         frame_indices=frame_indices.astype(np.int32),
     )
     print(f"  scale={s:.4f} | scene {centroids.shape[0]} pts ({n_dropped} dropped: small clusters) | "
