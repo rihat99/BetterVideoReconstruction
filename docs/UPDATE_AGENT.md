@@ -6,6 +6,48 @@ shipped wall-contact seating; this round demotes it to opt-in). Trust
 function/key names over line numbers; re-verify every anchor before building
 on it.*
 
+## Outcome (2026-07-09) — SHIPPED (schema 2)
+
+Confidence v3 landed. 3 commits on `main`: **T1** `4aeb6ae` (wall-contact seating
+default-off, bit-exact parity, round-10 cleanup), **T3** `6b81bab` (the v3 formula +
+explainer), **T4** (this doc + CLAUDE.md + canonical re-score). Raw record +
+probe/gate scripts in `out/_round11/`.
+
+- **T3a visibility witness — the round's real change, placed ASYMMETRICALLY.** A
+  codex adversarial review corrected my first (wrong) placement. Occlusion + low
+  detector score elevate the auto-label error **on the contact class only, as a
+  RECALL effect** (occluded real contacts get missed: 66% vs 25%). So: the **free
+  side** is gated by occlusion×detector (an occluded joint we call *no-contact* may
+  be a missed hidden contact — this is where the confidently-wrong misses live); the
+  **contact side** is gated by the **detector only** (occlusion is NOT penalised — a
+  deeply-hidden predicted contact is usually a firm grip behind the body, the lowest
+  false-positive rate). Never gates the motion witness. `f_occ=clamp(1−n_occ/8)`,
+  `f_det=clamp((score−0.4)/0.35)`. Occlusion validated visually.
+- **T3b relative-first — kept schema-1's anchor (near-null).** The touching-joint
+  anchor (best Probe-B AUC 0.74) is negative 97% of the time (penetration inflation
+  → raises confidently-wrong) and anchorless on floaters (touch exists on 6% of
+  floater frames vs 86% healthy) → would strip round-8 floater recovery. The
+  surface-clamped closest joint (round-8) is the only floater-safe, inflation-safe
+  anchor; the "relative-first" reorder is cosmetic over schema-1's max.
+- **T3c — dropped the old `n_near` "seen" factor** (replaced by the visibility
+  witness); `observability` field now holds the visibility factor; `confidence_schema
+  1→2`. Term count 11→12 (net +1 = the two user-requested visibility factors minus
+  n_near; every remaining term states a one-line physical assumption and earns its
+  place — `body_health` mutes a floater to 0, relative clearance recovers it to 0.47).
+- **Gate (5 labeled clips, baseline schema-1 in []):** excl-sport rho_contact +0.205
+  [+0.204], rho_free +0.345 [+0.407], CW-miss 0.1025 [0.1025], CW-fp 0.0319 [0.0319].
+  Contact reliability + **both confidently-wrong rates HOLD**; no-contact reliability
+  dips — the honest-uncertainty cost of not trusting hidden joints, **accepted by
+  user decision** (Spearman penalises lowering confidence on correct-but-unseen free
+  labels; the confidently-wrong gate, which matters more for a learner, holds).
+- **Labels bit-identical** for unchanged bodies (readout-only round): boulder_1 + DB
+  scenes gtIGgs_y2nY_0033 (floater) / 45KmZUc0CzA_0007 (healthy). Canonical corpus
+  re-scored to schema 2 (361/361, 0 fail) + `./data` locals recomputed. Corpus
+  distribution stable (contact-conf 0.669→0.668; free-conf's >0.9 fraction 39%→37%,
+  the intended drop in over-confident hidden-free labels; body_health flat). The
+  re-score also refreshed the 5 round-10 seated-floater scenes' contacts, which were
+  stale on the old floating body (a body change, not a formula label change).
+
 ## §0 Goal, in the user's words
 
 > "When some body part [is] occluded — not just low sapiens2 score, but
