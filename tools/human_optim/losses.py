@@ -80,7 +80,6 @@ def init_reprojection_gm(
     *,
     gm_scale_px: float,
     frame_mask: torch.Tensor | None = None,  # (T,) bool — average over only these (valid) frames
-    frame_weight: torch.Tensor | None = None,  # (T,) float — per-frame contribution scale (desmear anchor relax)
 ) -> torch.Tensor:
     """Robust (Geman-McClure) reprojection of the body joints to their own INITIAL
     (converter-pose) projection — a dense, self-consistent 2D anchor.
@@ -97,16 +96,10 @@ def init_reprojection_gm(
     mean GM cost ∈ [0, 1) (0 at init — the body starts at the pose that defined the
     target). ``frame_mask`` restricts the mean to the given (valid) frames, so
     untracked frames — whose held converter pose follows the camera — do not anchor.
-    ``frame_weight`` scales each frame's contribution in the numerator only (the
-    normaliser is untouched, so relaxing some frames does not up-weight the rest) —
-    the gated_desmear anchor relax on de-smear stretch frames, where the physics gate
-    has proven the converter pose wrong. ``None`` / all-ones ⇒ the plain mean.
     """
     pred_px = project(transform_points(joints_world[:, body_idx, :], extrinsics), K)  # (T, Jb, 2)
     r2 = ((pred_px - target_px) ** 2).sum(dim=-1)                                      # (T, Jb) px²
     gm = geman_mcclure(r2, pred_px.new_tensor(gm_scale_px) ** 2)                       # (T, Jb)
-    if frame_weight is not None:
-        gm = gm * frame_weight[:, None]
     if frame_mask is None:
         return gm.mean()
     m = frame_mask.to(gm.dtype)                                                        # (T,) 1 = valid
@@ -147,7 +140,6 @@ def chamfer_loss(
     *,
     chunk: int = 16,
     vertex_weights: torch.Tensor | None = None,   # (Ns,) per-vertex body-part emphasis
-    depth_weights: torch.Tensor | None = None,  # (T, Md) per-point d2v emphasis (desmear band boost)
 ) -> torch.Tensor:
     """Bidirectional chamfer between visible vertices and depth points.
 
@@ -170,10 +162,6 @@ def chamfer_loss(
     (e.g. the extremities, whose metric depth VGGT most distorts) over the torso; a
     weight of ``None`` reproduces the plain uniform mean.
 
-    ``depth_weights`` ``(T, Md)`` is the d2v mirror of ``vertex_weights``: when given,
-    the **depth→vertex** term becomes a weighted mean over each frame's valid depth
-    points (the gated_desmear band boost gives the trimmed limb's kept wall-side band
-    extra pull). ``None`` reproduces the plain uniform d2v mean — bit-exact.
     """
     T = vertices_sub.shape[0]
     if depth_padded.shape[1] == 0:            # no depth in any frame (else the cdist→min(2) below crashes)
@@ -193,11 +181,7 @@ def chamfer_loss(
         else:
             vis_w = vismask[s:e] * vertex_weights                         # (b, Ns)
             v2d_mean = (v2d * vis_w).sum(1) / vis_w.sum(1).clamp_min(1e-6)
-        if depth_weights is None:
-            d2v_mean = (d2v * depth_valid[s:e]).sum(1) / nd[s:e].clamp_min(1)
-        else:
-            dep_w = depth_valid[s:e] * depth_weights[s:e]                 # (b, Md)
-            d2v_mean = (d2v * dep_w).sum(1) / dep_w.sum(1).clamp_min(1e-6)
+        d2v_mean = (d2v * depth_valid[s:e]).sum(1) / nd[s:e].clamp_min(1)
         parts.append(v2d_mean + d2v_mean)                                 # (b,)
     terms = torch.where(fvalid, torch.cat(parts), vertices_sub.new_zeros(()))
     return terms.sum() / fvalid.sum().clamp_min(1)
@@ -472,23 +456,17 @@ def pose_prior_loss(
     q: torch.Tensor,        # (T, nq) normalized, bh order
     q_init: torch.Tensor,   # (T, nq) normalized, bh order
     num_joints: int,
-    *,
-    frame_weight: torch.Tensor | None = None,  # (T,) float — per-frame contribution scale (desmear anchor relax)
 ) -> torch.Tensor:
     """Smooth quaternion distance ``1 − (q·q_init)²`` over joints (not root).
 
     Excludes the root SE3 (``q[:7]``): the body / hand pose stays near the
     converter's per-frame estimate while root translation + orientation move
-    freely. ``frame_weight`` scales each frame's contribution in the numerator
-    only (mean normaliser untouched) — the gated_desmear anchor relax on de-smear
-    stretch frames. ``None`` / all-ones ⇒ the plain mean.
+    freely.
     """
     shape = q.shape[:-1]
     qj = q[..., 7:].reshape(*shape, num_joints - 1, 4)
     qij = q_init[..., 7:].reshape(*shape, num_joints - 1, 4)
     vals = 1.0 - (qj * qij).sum(dim=-1).square()
-    if frame_weight is not None:
-        vals = vals * frame_weight[:, None]
     return vals.mean()
 
 

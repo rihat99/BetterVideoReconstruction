@@ -53,7 +53,7 @@ SMPL-X stages, off the default chain.
 | 4 | `estimate_body_sam3d.py` | `sam3/bboxes.npz`, `sam3/`, `vggt/camera.npz` (denormalized to orig res), frames | `sam3d/params.npz` (**all tracked people**, MHR params stacked `(P,N,…)` + `object_ids (P,)`), `sam3d/overlay.mp4` |
 | 5 | `convert_mhr_to_smplx.py` | `sam3d/params.npz` | `sam3d/smplx_params.npz` (per-person `(P,N,…)`: betas, body/hand pose, global_orient, transl, jaw/eye/expr), `sam3d/smplx_overlay.mp4` |
 | 6 | `estimate_scale.py` | `sam3d/smplx_params.npz`, `vggt/camera.npz`, `vggt/depth/`, `sam3/` | `geometry/scale.npz` (human-body-anchored metric scale + per-frame diagnostics), `geometry/diagnostics/scale_over_time.png` |
-| 7 | `fuse_geometry.py` | `vggt/`, `geometry/scale.npz`, `sam3/` | `geometry/transform.npz` (metric scale + orig-res VGGT cameras), `geometry/scene.npz`, `geometry/human.npz` — see `docs/geometry_fusion_plan.md` |
+| 7 | `fuse_geometry.py` | `vggt/`, `geometry/scale.npz`, `sam3/`, `sam3d/smplx_params.npz` | `geometry/transform.npz` (metric scale + orig-res VGGT cameras + **body-anchor** gate diagnostics), `geometry/scene.npz`, `geometry/human.npz` — see `docs/geometry_fusion_plan.md` |
 | 8 | `human_optimization.py` (`root`+`kinematics_1`) | `sam3d/smplx_params.npz`, `sapiens/pose.npz`, `geometry/{human,transform,scene}.npz` | `human_optim/kinematic_1.npz` (**all tracked people**, refined **world-frame** params `(P,N,…)` + `q (P,N,211)` + `scale (P,)`≡1 (compat), 52-joint `SMPLXMid`, `frame='world'`), `human_optim/kinematic_1_overlay.mp4` (`--overlay`) |
 | – | `human_optimization.py --stages kinematics_2` | `human_optim/kinematic_1.npz`, **`data/<stem>.npz`** (manual contact annotation), `sapiens/pose.npz`, `geometry/{human,scene,transform}.npz` | `human_optim/kinematic_2.npz` (annotation-guided refinement; same schema), `human_optim/kinematic_2_overlay.mp4` (`--overlay`) |
 | – | `estimate_contacts.py` | `human_optim/<bodies>.npz` (`--bodies`, default `kinematic_1`), `geometry/{scene,transform}.npz`, frames | `human_optim/contacts_<tag>.npz` (`joint_contact (P,N,J)` bool + `joint_sdf_cm` + `merged` (span-merge-bridged frames) + `label_confidence`/`p_contact`/`observability`/`body_health (P,)` + `confidence_schema` (**round-11 v3, =2**) — both classes; **firm penetration overrides motion doubt** on the contact side so hard grips aren't throttled; a **visibility witness** (round-11) enters the two classes asymmetrically — the contact side is gated by the **Sapiens detector score** only (a low-score contact is less precise; occlusion is NOT penalised — a deeply-hidden predicted contact is usually a firm grip behind the body), the no-contact side is gated by **occlusion × detector** (an occluded/low-score joint we call free may be a missed hidden contact); the far-from-wall no-contact witness is **relative-first** — a **relative clearance** above the body's own surface-clamped closest joint (round-8 T2a, floater-safe, primary) with **absolute distance** + a **nothing-within-reach** flag as the **`body_health`**-gated fallback (round-7 T4; the relative witness is health-free). The `observability` field now holds the visibility factor (the old scene-point-count "seen" factor was dropped). Distances are the **unguarded** per-joint min; the confidence formula + its full derivation live in [`docs/contact_confidence.md`](docs/contact_confidence.md)), `human_optim/contacts_<tag>_overlay.mp4` (skeleton; joints **red**=contact / **green**=free, dot size ∝ confidence) |
@@ -190,13 +190,12 @@ BetterVideoReconstruction/
     **per-limb quotas** (`[chamfer] sampling="limb_quota"`, default — hands/feet keep up
     to 200 points each instead of being drowned by the torso; robust/anisotropic chamfer
     kernels were tried, measured worse, and removed — the raw along-ray chamfer pull is
-    load-bearing), and a **physics-gated de-smear
-    second pass** (`[desmear]`, default on) re-runs refine on still stretches where the
-    body is provably unsupported (still + no end-effector within 8 cm of the scene):
-    the flagged limb's depth cloud is trimmed to its wall-side band and the
-    init-anchor/pose-prior are relaxed there (physics refutes the converter pose on
-    those frames). Healthy scenes skip the pass bit-exactly. See
-    [`docs/round12_depth_root_cause.md`](docs/round12_depth_root_cause.md).
+    load-bearing). Round-12's physics-gated de-smear second pass was **removed in
+    round 13** (measured +0.006 pooled F1 with a proven-closed ceiling — see
+    `docs/UPDATE.md`; history in
+    [`docs/round12_depth_root_cause.md`](docs/round12_depth_root_cause.md)).
+    Gross whole-clip depth errors are instead handled upstream by the
+    **fuse body anchor** (see the `fuse_geometry` bullet).
   - **No per-body scale** — `estimate_scale` sizes the metric geometry to the body
     upstream, so the body is used at native size (`kinematic_1.npz` writes
     `scale (P,)`≡1 for consumer compat). Frozen at 1.0; one `apply_scale` path is
@@ -234,10 +233,10 @@ BetterVideoReconstruction/
     targets the *human* depth cloud, penetration only pushes off). The readout stays
     honest: `estimate_contacts` gates stillness on `drift_pre` — measured BEFORE the
     attraction/damping acted.
-    (Round-10's wall-contact seating pull + rigid `seat` phase and the along-ray
-    depth-release lever were dropped — superseded by the round-12 physics-gated
-    de-smear, which corrects the depth *evidence* instead of pushing the body; see
-    `docs/UPDATE.md`.)
+    (Round-10's wall-contact seating pull + rigid `seat` phase were dropped, and
+    round-12's physics-gated de-smear followed in round 13 — both superseded by the
+    round-13 **fuse body anchor**, which corrects the *world* where the depth
+    evidence is refuted instead of pushing the body; see `docs/UPDATE.md`.)
 - **Scene contact is a separate one-shot stage** (`estimate_contacts`, off the
   default chain): reads the refined body + `geometry/scene.npz` and marks
   **per-joint** scene contact for every person, reusing the penetration SDF +
@@ -315,7 +314,16 @@ BetterVideoReconstruction/
   denormalizes VGGT intrinsics to the original resolution, and backprojects VGGT
   depth × `s` into a metric **scene** cloud (voxel-merged) + per-frame **human**
   points (unmerged) under `geometry/`. Needs `vggt` run with `--save-depth` and
-  `estimate_scale` first.
+  `estimate_scale` first. Round-13 **body anchor** (`--body-anchor`, default on;
+  `tools/human_optim/depth_anchor.py`): the human-ruler scale is blind to
+  human-vs-scene bias, so fuse gates every clip on the SAM-3D init body (metric from
+  apparent size, camera-frame position scale-invariant) — extremities > 0.28 m off
+  the fused scene (or buried > 0.10 m) refute the clip's human depth, and the world
+  is rescaled so the wall meets the body (exact correspondences, burial-budgeted,
+  ground-truth-verified twice, vetoed on thin evidence / no-op / person
+  disagreement); the refuted person's human cloud stays at the body-consistent
+  scale. Fired ⇒ downstream artifacts of that clip are stale (fuse warns); not
+  fired ⇒ byte-identical build + diagnostics in `transform.npz`.
 - **The SAM 3 tracker lives in its stage**, not in `tools/adapters/` — it is a
   *stateful video-tracking Step* (tracking state, chunking, overlay/IO), not a
   stateless inference wrapper like `sapiens2`/`vggt_omega`/`geocalib`.

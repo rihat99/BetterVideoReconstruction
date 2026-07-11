@@ -499,12 +499,9 @@ Consequences that any gating scheme must respect:
 
 ### Issue 19 — Deleted design doc still referenced
 
-- **Status: OPEN.** `docs/geometry_fusion_plan.md` (deleted in `2048a56`) is
-  still cited by `CLAUDE.md` and `tools/human_optim/camera.py:9`. The
-  `geometry/*.npz` contract lives only in `fuse_geometry.py` — Issues 2/3/18
-  are exactly the drift a written contract prevents. Restore a minimal contract
-  doc (keys, shapes, frames, conf semantics incl. §2.1 above, fps) or fix the
-  references.
+- **Status: CLOSED (round 13, 2026-07-12).** `docs/geometry_fusion_plan.md`
+  restored as the current `geometry/*.npz` contract (keys/shapes/fps + the
+  round-13 body-anchor fields and staleness semantics).
 
 ### Issue 20 — NEW (introduced by fix round 1): `estimate_uncertainty` crashes on the renamed config key
 

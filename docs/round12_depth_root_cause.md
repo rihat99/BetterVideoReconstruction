@@ -1,5 +1,11 @@
 # Round 12 — fixing the depth at the root (30 new labeled scenes)
 
+*Round-13 note (2026-07-12): the gated de-smear this round shipped was REMOVED in
+round 13 — re-measured at +0.006 pooled F1 on the harder test set with its only
+growth path (per-limb licensing) proven capped at R ≤ 0.446. The limb-quota
+sampling stays. This document remains as the historical record; the round-13 story
+and the replacement mechanism (the fuse body anchor) live in `docs/UPDATE.md`.*
+
 *Started 2026-07-10. This is the running log of the round: what we measured,
 what we tried, what worked. Written to be read top to bottom in plain language.
 The goal, in your words: increase contact accuracy after human optimization by
