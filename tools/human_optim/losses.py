@@ -80,6 +80,7 @@ def init_reprojection_gm(
     *,
     gm_scale_px: float,
     frame_mask: torch.Tensor | None = None,  # (T,) bool — average over only these (valid) frames
+    frame_weight: torch.Tensor | None = None,  # (T,) float — per-frame contribution scale (desmear anchor relax)
 ) -> torch.Tensor:
     """Robust (Geman-McClure) reprojection of the body joints to their own INITIAL
     (converter-pose) projection — a dense, self-consistent 2D anchor.
@@ -96,10 +97,16 @@ def init_reprojection_gm(
     mean GM cost ∈ [0, 1) (0 at init — the body starts at the pose that defined the
     target). ``frame_mask`` restricts the mean to the given (valid) frames, so
     untracked frames — whose held converter pose follows the camera — do not anchor.
+    ``frame_weight`` scales each frame's contribution in the numerator only (the
+    normaliser is untouched, so relaxing some frames does not up-weight the rest) —
+    the gated_desmear anchor relax on de-smear stretch frames, where the physics gate
+    has proven the converter pose wrong. ``None`` / all-ones ⇒ the plain mean.
     """
     pred_px = project(transform_points(joints_world[:, body_idx, :], extrinsics), K)  # (T, Jb, 2)
     r2 = ((pred_px - target_px) ** 2).sum(dim=-1)                                      # (T, Jb) px²
     gm = geman_mcclure(r2, pred_px.new_tensor(gm_scale_px) ** 2)                       # (T, Jb)
+    if frame_weight is not None:
+        gm = gm * frame_weight[:, None]
     if frame_mask is None:
         return gm.mean()
     m = frame_mask.to(gm.dtype)                                                        # (T,) 1 = valid
@@ -132,6 +139,45 @@ def pad_frames(
     return buf, valid
 
 
+# Chamfer-distance clamp guarding the ``+inf`` sentinel (masked / empty positions)
+# from overflowing inside the saturating kernel (``σ·inf`` → inf, and ``inf × 0``
+# mask = NaN would poison the mean). Real metres distances sit far below it.
+_CHAMFER_SAT_CLAMP_M = 1.0e4
+
+
+def _sat_l1(dist: torch.Tensor, sigma: float) -> torch.Tensor:
+    """Saturating-L1 kernel on a non-negative distance (m): ``ρ(d) = σ·d/(σ+d)``.
+
+    Linear ``≈ d`` for ``d ≪ σ`` — a well-matched point pulls exactly like the raw-L2
+    baseline, so the kernel is **unit-preserving** (metres in, metres out — the
+    existing chamfer weight keeps its meaning, unlike a squared GM) — and saturating
+    at ``σ`` for ``d ≫ σ`` with vanishing gradient, so a depth streak contributes a
+    bounded cost instead of wrenching the fit. The clamp guards the masked ``+inf``
+    sentinel (see :data:`_CHAMFER_SAT_CLAMP_M`).
+    """
+    d = dist.clamp(min=0.0, max=_CHAMFER_SAT_CLAMP_M)
+    return sigma * d / (sigma + d)
+
+
+def _aniso_sat(resid: torch.Tensor, ray: torch.Tensor, sigma_along: float) -> torch.Tensor:
+    """Anisotropic chamfer value: raw transverse + saturated along-ray. Returns ``(…,)``.
+
+    Decomposes the match residual ``resid`` ``(…, 3)`` about the **observed depth
+    point's** camera ray ``ray`` ``(…, 3)`` (camera centre → depth point; a constant —
+    depth points and camera centres carry no grad) and treats the components
+    asymmetrically: the transverse (image-plane) miss ``|r_t|`` stays **raw**, the
+    identical treatment to the L2 baseline (image-plane structure is trusted), while
+    only the along-ray (depth) miss gets the saturating :func:`_sat_l1` — a stretched
+    depth streak stops dragging the body along the ray. Value =
+    ``|r_t| + ρ(|r_z|; σ_along)`` in metres.
+    """
+    u = ray / ray.norm(dim=-1, keepdim=True).clamp_min(1e-6)
+    r_z = (resid * u).sum(dim=-1)                          # (…) along-ray, signed
+    r_t = resid - r_z[..., None] * u                       # (…, 3) transverse
+    t = r_t.square().sum(dim=-1).clamp_min(1e-12).sqrt()   # eps: finite grad at r_t = 0
+    return t + _sat_l1(r_z.abs(), sigma_along)
+
+
 def chamfer_loss(
     vertices_sub: torch.Tensor,   # (T, Ns, 3) subsampled posed vertices
     vismask: torch.Tensor,        # (T, Ns) bool — front-facing
@@ -140,6 +186,10 @@ def chamfer_loss(
     *,
     chunk: int = 16,
     vertex_weights: torch.Tensor | None = None,   # (Ns,) per-vertex body-part emphasis
+    kernel: str = "l2",           # "l2" | "sat" | "aniso_sat" (E2 robust chamfer)
+    sat_sigma_m: float = 0.15,    # saturation scale (m); aniso_sat applies it along-ray
+    cam_centers: torch.Tensor | None = None,  # (T, 3) world camera centres — aniso_sat only
+    depth_weights: torch.Tensor | None = None,  # (T, Md) per-point d2v emphasis (desmear band boost)
 ) -> torch.Tensor:
     """Bidirectional chamfer between visible vertices and depth points.
 
@@ -161,7 +211,29 @@ def chamfer_loss(
     raw depth point carries no body-part label). It emphasizes some body regions
     (e.g. the extremities, whose metric depth VGGT most distorts) over the torso; a
     weight of ``None`` reproduces the plain uniform mean.
+
+    ``kernel`` picks how each nearest-neighbour match enters the mean: ``"l2"``
+    (default) the raw Euclidean distance; ``"sat"`` the unit-preserving saturating-L1
+    :func:`_sat_l1` on both directions (a streaked depth point saturates instead of
+    wrenching the pose); ``"aniso_sat"`` the anisotropic :func:`_aniso_sat` — raw
+    transverse miss, saturated along-ray miss, split about the **observed depth
+    point's** camera ray on both sides — which needs the per-frame world camera
+    centres ``cam_centers``. ``sat_sigma_m`` sets the saturation scale.
+    ``vertex_weights`` stays on the vertex→depth side in every mode. In all modes
+    the correspondence itself stays the Euclidean NN — the kernel reweights a match,
+    it does not re-match, so a streak can still *capture* the NN (accepted limitation).
+
+    ``depth_weights`` ``(T, Md)`` is the d2v mirror of ``vertex_weights``: when given,
+    the **depth→vertex** term becomes a weighted mean over each frame's valid depth
+    points (the gated_desmear band boost gives the trimmed limb's kept wall-side band
+    extra pull). ``None`` reproduces the plain uniform d2v mean — bit-exact.
     """
+    if kernel not in ("l2", "sat", "aniso_sat"):   # a typo must fail, not silently run as l2
+        raise ValueError(f"chamfer_loss kernel must be 'l2', 'sat' or 'aniso_sat', got {kernel!r}")
+    if kernel in ("sat", "aniso_sat") and sat_sigma_m <= 0.0:
+        raise ValueError(f"chamfer_loss sat_sigma_m must be > 0 for kernel={kernel!r}, got {sat_sigma_m!r}")
+    if kernel == "aniso_sat" and cam_centers is None:
+        raise ValueError("chamfer_loss(kernel='aniso_sat') requires cam_centers")
     T = vertices_sub.shape[0]
     if depth_padded.shape[1] == 0:            # no depth in any frame (else the cdist→min(2) below crashes)
         return vertices_sub.new_zeros(())
@@ -173,14 +245,33 @@ def chamfer_loss(
     for s in range(0, T, chunk):
         e = min(s + chunk, T)
         d = torch.cdist(vertices_sub[s:e], depth_padded[s:e])              # (b, Ns, Md)
-        v2d = d.masked_fill(~depth_valid[s:e][:, None, :], INF).min(2).values  # (b, Ns)
-        d2v = d.masked_fill(~vismask[s:e][:, :, None], INF).min(1).values      # (b, Md)
+        if kernel == "aniso_sat":
+            # argmin (not just min): recover the matched point to split its residual about the
+            # OBSERVED depth point's ray — the depth point is what carries the streak, so its
+            # ray (not the vertex's) is the axis the artifact lives on, on both sides.
+            v2d_i = d.masked_fill(~depth_valid[s:e][:, None, :], INF).min(2).indices  # (b, Ns)
+            d2v_i = d.masked_fill(~vismask[s:e][:, :, None], INF).min(1).indices       # (b, Md)
+            cc = cam_centers[s:e][:, None, :]                             # (b, 1, 3)
+            mp = torch.gather(depth_padded[s:e], 1, v2d_i[..., None].expand(-1, -1, 3))  # (b, Ns, 3)
+            v2d = _aniso_sat(mp - vertices_sub[s:e], mp - cc, sat_sigma_m)             # (b, Ns)
+            mv = torch.gather(vertices_sub[s:e], 1, d2v_i[..., None].expand(-1, -1, 3))  # (b, Md, 3)
+            d2v = _aniso_sat(mv - depth_padded[s:e], depth_padded[s:e] - cc, sat_sigma_m)  # (b, Md)
+        else:
+            v2d = d.masked_fill(~depth_valid[s:e][:, None, :], INF).min(2).values  # (b, Ns)
+            d2v = d.masked_fill(~vismask[s:e][:, :, None], INF).min(1).values      # (b, Md)
+            if kernel == "sat":
+                v2d = _sat_l1(v2d, sat_sigma_m)
+                d2v = _sat_l1(d2v, sat_sigma_m)
         if vertex_weights is None:
             v2d_mean = (v2d * vismask[s:e]).sum(1) / nv[s:e].clamp_min(1)
         else:
             vis_w = vismask[s:e] * vertex_weights                         # (b, Ns)
             v2d_mean = (v2d * vis_w).sum(1) / vis_w.sum(1).clamp_min(1e-6)
-        d2v_mean = (d2v * depth_valid[s:e]).sum(1) / nd[s:e].clamp_min(1)
+        if depth_weights is None:
+            d2v_mean = (d2v * depth_valid[s:e]).sum(1) / nd[s:e].clamp_min(1)
+        else:
+            dep_w = depth_valid[s:e] * depth_weights[s:e]                 # (b, Md)
+            d2v_mean = (d2v * dep_w).sum(1) / dep_w.sum(1).clamp_min(1e-6)
         parts.append(v2d_mean + d2v_mean)                                 # (b,)
     terms = torch.where(fvalid, torch.cat(parts), vertices_sub.new_zeros(()))
     return terms.sum() / fvalid.sum().clamp_min(1)
@@ -543,17 +634,24 @@ def pose_prior_loss(
     q: torch.Tensor,        # (T, nq) normalized, bh order
     q_init: torch.Tensor,   # (T, nq) normalized, bh order
     num_joints: int,
+    *,
+    frame_weight: torch.Tensor | None = None,  # (T,) float — per-frame contribution scale (desmear anchor relax)
 ) -> torch.Tensor:
     """Smooth quaternion distance ``1 − (q·q_init)²`` over joints (not root).
 
     Excludes the root SE3 (``q[:7]``): the body / hand pose stays near the
     converter's per-frame estimate while root translation + orientation move
-    freely.
+    freely. ``frame_weight`` scales each frame's contribution in the numerator
+    only (mean normaliser untouched) — the gated_desmear anchor relax on de-smear
+    stretch frames. ``None`` / all-ones ⇒ the plain mean.
     """
     shape = q.shape[:-1]
     qj = q[..., 7:].reshape(*shape, num_joints - 1, 4)
     qij = q_init[..., 7:].reshape(*shape, num_joints - 1, 4)
-    return (1.0 - (qj * qij).sum(dim=-1).square()).mean()
+    vals = 1.0 - (qj * qij).sum(dim=-1).square()
+    if frame_weight is not None:
+        vals = vals * frame_weight[:, None]
+    return vals.mean()
 
 
 def root_orient_prior_loss(

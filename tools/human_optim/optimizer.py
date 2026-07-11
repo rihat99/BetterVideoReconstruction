@@ -246,6 +246,9 @@ def optimize_person(
     frame_valid: torch.Tensor | None = None,
     cam_centers: torch.Tensor | None = None,
     auto_contact: dict | None = None,
+    q_warm: torch.Tensor | None = None,
+    depth_weights: list[torch.Tensor] | None = None,
+    anchor_weight: torch.Tensor | None = None,
 ) -> tuple[torch.Tensor, Metrics, Metrics, dict]:
     """Optimize one person over ``phases``. Returns ``(q_world_opt, before, after, aux)``.
 
@@ -289,6 +292,20 @@ def optimize_person(
     the zeroed Sapiens scores / emptied depth cloud already exclude them from the
     reprojection / chamfer terms). Defaults to all-valid (a no-op on gap-free clips).
 
+    ``q_warm`` (optional ``(T, nq)``) is the gated_desmear two-pass warm start: the
+    leaf ``q`` starts from it instead of ``q_world_init`` while the priors + the
+    init-projection anchor stay pinned to ``q_world_init`` (the converter pose). It
+    defaults to ``None`` — the leaf starts at the anchor, the standard single-pass
+    behaviour (bit-exact). ``depth_weights`` (optional per-frame list matching
+    ``depth_points``) is the gated_desmear band boost: per-point d2v chamfer weights,
+    padded alongside the depth cloud and forwarded to :func:`chamfer_loss`; ``None``
+    keeps the uniform d2v mean (bit-exact). ``anchor_weight`` (optional ``(T,)``
+    float) is the gated_desmear anchor relax: it scales each frame's contribution
+    to the init-projection anchor + the joints pose prior (the two terms pinned to
+    the converter pose, which the physics gate refutes on de-smear stretches) —
+    Sapiens reprojection, smoothness, root-orientation prior and the scene terms
+    are untouched. ``None`` / all-ones ⇒ the plain means.
+
     The body is used at its native (converter) size — the metric geometry is
     already sized to it by the human-anchored ``estimate_scale`` stage upstream.
     """
@@ -303,6 +320,11 @@ def optimize_person(
     pen_cfg = knobs["penetration"]
     chunk = int(knobs["chamfer"]["chunk"])
     max_cand = int(pen_cfg["max_candidates"])
+    # E2 robust chamfer kernel: "l2" (default, bit-exact) | "sat" | "aniso_sat". aniso_sat needs
+    # cam_centers (the loss-side call passes them; the metrics diagnostic stays raw L2 cm —
+    # the per-iteration ch=…cm log is the kernelized mean ×100, saturated under sat/aniso_sat).
+    cham_kernel = str(knobs["chamfer"].get("kernel", "l2"))
+    cham_sat_sigma = float(knobs["chamfer"].get("sat_sigma_m", 0.15))
 
     # Union over the phases about to run — decides what to SET UP once (the per-iter
     # term inclusion is gated by each phase's own weight below).
@@ -323,6 +345,10 @@ def optimize_person(
 
     depth_pad, depth_valid = pad_frames(depth_points, channels=3,
                                         device=q_world_init.device, dtype=q_world_init.dtype)
+    depth_w_pad = None
+    if depth_weights is not None:   # desmear band boost: per-point d2v weights, padded like the cloud
+        depth_w_pad, _ = pad_frames(depth_weights, channels=None,
+                                    device=q_world_init.device, dtype=q_world_init.dtype)
 
     # `v2j_full` / `v2j_sub` map each (subsampled) vertex to its nearest rest-pose joint. The
     # subsampled map inherits joint contact labels onto vertices (attraction / repulsion masks);
@@ -425,10 +451,12 @@ def optimize_person(
         body_idx=body_idx, init_target=init_target,
         scene_pts=scene_pts, scene_normals=scene_normals, scene_conf=scene_conf, pen=pen_cfg,
         cam_centers=cam_centers, fps=fps, frame_valid=frame_valid)
-    before = mk(q_world_init)
+    before = mk(q_world_init if q_warm is None else q_warm)
 
     q_init = q_world_init.detach().clone()   # the anchor (priors + init reprojection)
-    q = q_init.clone().requires_grad_(True)
+    # gated_desmear pass 2 warm-starts the leaf from q_warm; the anchor stays the converter pose.
+    q_start = q_init if q_warm is None else q_warm.detach().clone()
+    q = q_start.clone().requires_grad_(True)
     nq = q.shape[1]
 
     # ── shared forward + objective ───────────────────────────────────────────
@@ -518,11 +546,14 @@ def optimize_person(
         L_sap = sapiens_reprojection_gm(jw, vw, extrinsics, K, target_kp_loss, scores, corr,
                                         frame_vertex_ids, score_thresh=score_thresh, gm_scale_px=sap_gm_px)
         L_init = (init_reprojection_gm(jw, body_idx, extrinsics, K, init_target_loss,
-                                       gm_scale_px=init_gm_px, frame_mask=frame_valid)
+                                       gm_scale_px=init_gm_px, frame_mask=frame_valid,
+                                       frame_weight=anchor_weight)
                   if (use_init and w_init > 0.0) else jw.new_zeros(()))
         L_ch = chamfer_loss(vw[:, sub], vismask, depth_pad, depth_valid, chunk=chunk,
-                            vertex_weights=chamfer_weights)
-        L_pp = pose_prior_loss(qn, q_init, mid.num_joints)
+                            vertex_weights=chamfer_weights, kernel=cham_kernel,
+                            sat_sigma_m=cham_sat_sigma, cam_centers=cam_centers,
+                            depth_weights=depth_w_pad)
+        L_pp = pose_prior_loss(qn, q_init, mid.num_joints, frame_weight=anchor_weight)
         L_ro = root_orient_prior_loss(qn, q_init)
         L_sm = smoothness_loss(qn, mid.num_joints, accel_root=float(w["accel_root"]),
                                accel_joint=float(w["accel_joint"]), jerk_root=float(w["jerk_root"]),

@@ -68,6 +68,29 @@ chunk = 16
 emphasis_lo = 0.1      # per-vertex chamfer weight floor (torso); log-mapped. (0.1/10.0/1.0) reproduces the base field
 emphasis_hi = 10.0     # per-vertex chamfer weight ceiling (hands/feet)
 emphasis_radius = 1.0  # geodesic falloff scale (m); smaller = emphasis hugs the extremities
+sampling = "limb_quota"    # E1 human-cloud cap: "limb_quota" (default — group-aware conf gate + guaranteed hand/foot quotas; grouping = nearest projected init joint in px) | "stride" (uniform, the pre-round-12 path)
+limb_quota = 200       # sampling="limb_quota": max points each hand/foot group keeps before the rest fills max_points
+kernel = "l2"          # E2 chamfer kernel: "l2" (raw m, default) | "sat" (saturating-L1 σ·d/(σ+d), unit-preserving m, both sides) | "aniso_sat" (transverse RAW, only the along-ray miss saturates; ray = observed depth point's)
+sat_sigma_m = 0.15     # saturation scale (m); aniso_sat applies it along the observed point's camera ray
+
+# E3 physics-gated limb de-smear (wave-2 "gated_desmear"): a two-pass kinematics_1. Pass 1 is
+# the standard fit; then per frame the gate flags a body that is BOTH still (median-joint
+# drift_pre < still_m) AND floating (min-over-EE contacts-style jsdf > gap_cm) — physically
+# impossible, so its depth is provably wrong. De-smearing is STRETCH-level: a contiguous still
+# run holding >= min_flag_frames flagged frames is corrected on EVERY frame (one majority-vote
+# closest-EE limb per stretch), so smoothness stops anchoring flagged frames to uncorrected
+# neighbours. The limb's points are trimmed to their deep (wall-side) band [p95(z)-band_m, max],
+# the kept band gets d2v chamfer weight band_boost, and a refine+lbfgs pass 2 re-seats the body
+# on the corrected cloud. Off by default; enabled=false is a byte-identical no-op.
+[desmear]
+enabled = true        # default on; false => single-pass kinematics_1 (bit-exact pre-round-12 path)
+still_m = 0.04         # gate: per-frame median-over-joints drift_pre below this = "still"
+gap_cm = 8.0           # gate: per-frame min-over-EE-joints signed jsdf above this = "floating"
+band_m = 0.12          # de-smear: keep g*-limb cloud points with camera depth z >= p95(z) - band_m
+min_flag_frames = 3    # a still stretch de-smears only if it holds at least this many flagged frames
+band_boost = 5.0       # d2v chamfer weight on the kept wall-side band points (others 1.0)
+anchor_relax = 0.1     # pass-2 scale on init-anchor + joints pose prior on stretch frames (gate refutes the converter pose there); 1.0 = off
+stretch_dilate = 5     # stretch = flagged span dilated this many frames each way, clipped to its still run (bounds the trim to the flagged evidence)
 
 [keypoints]
 score_thresh = 0.3

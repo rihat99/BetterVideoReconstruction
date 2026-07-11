@@ -187,7 +187,16 @@ BetterVideoReconstruction/
     `full` (all DOFs, no scene) → [`seat` — a rigid root-only phase, only when a floating
     body is detected] → `refine` (add scene terms on the seated body) → a short **L-BFGS**
     polish. Chamfer + penetration are **chunked-batched** cdists (the per-frame loop was
-    launch-bound — the real speed lever).
+    launch-bound — the real speed lever). Round-12: the human cloud is sampled with
+    **per-limb quotas** (`[chamfer] sampling="limb_quota"`, default — hands/feet keep up
+    to 200 points each instead of being drowned by the torso; opt-in robust `kernel`
+    variants exist but measured worse and stay off), and a **physics-gated de-smear
+    second pass** (`[desmear]`, default on) re-runs refine on still stretches where the
+    body is provably unsupported (still + no end-effector within 8 cm of the scene):
+    the flagged limb's depth cloud is trimmed to its wall-side band and the
+    init-anchor/pose-prior are relaxed there (physics refutes the converter pose on
+    those frames). Healthy scenes skip the pass bit-exactly. See
+    [`docs/round12_depth_root_cause.md`](docs/round12_depth_root_cause.md).
   - **No per-body scale** — `estimate_scale` sizes the metric geometry to the body
     upstream, so the body is used at native size (`kinematic_1.npz` writes
     `scale (P,)`≡1 for consumer compat). Frozen at 1.0; one `apply_scale` path is

@@ -30,8 +30,9 @@ from tools.smplx_robot.dynamics import velocity_acceleration_from_trajectory
 from tools.smplx_robot.vertex_weights import geodesic_endeffector_weights
 
 from . import paths
-from .camera import fold_root_to_world, world_from_cam
+from .camera import fold_root_to_world, project, transform_points, world_from_cam
 from .config import HumanOptimConfig
+from .contacts import lift_joint_contact, scene_sdf, vertex_to_joint
 from .keypoints import build_correspondence
 from .optimizer import PhaseSpec, optimize_person
 from .qmath import normalize_q
@@ -47,8 +48,245 @@ _ROOT_DOF = ("transl", "orient")
 
 # ─────────────────────────────── io helpers ──────────────────────────────
 
+# E1 limb-quota sampling: the four extremity groups whose depth evidence the uniform
+# stride starves (torso pixels vastly outnumber hand/foot pixels). Group id 0 = rest.
+_LIMB_GROUPS = ("left_hand", "right_hand", "left_foot", "right_foot")
+
+
+def _limb_group_ids(joint_names: list[str]) -> np.ndarray:
+    """``(J,)`` int group id per SMPLXMid joint: 0 = rest, 1.. = :data:`_LIMB_GROUPS`
+    (hand = wrist + fingers, foot = ankle + foot — the ``_ANN_TO_SMPLX`` groups)."""
+    gid = np.zeros(len(joint_names), np.int64)
+    idx = {n: i for i, n in enumerate(joint_names)}
+    for g, gname in enumerate(_LIMB_GROUPS, start=1):
+        for jn in _ANN_TO_SMPLX[gname]:
+            if jn in idx:
+                gid[idx[jn]] = g
+    return gid
+
+
+def _point_group_ids(points: np.ndarray, extr_t: np.ndarray, K_t: np.ndarray,
+                     joint_px_t: np.ndarray, joint_group: np.ndarray) -> np.ndarray:
+    """``(n,)`` group id per world point: nearest projected init joint in PIXEL space.
+
+    The human-cloud points come from this frame's own depth map, so they all project
+    in front of this frame's camera; assignment in pixels (not 3D) is deliberate — a
+    depth streak displaces a point along the ray, which barely moves its pixel, so
+    the streaked point still lands on its true limb group.
+    """
+    cam = points @ extr_t[:3, :3].T + extr_t[:3, 3]                 # (n, 3) camera frame
+    uvh = cam @ K_t.T
+    uv = uvh[:, :2] / np.clip(uvh[:, 2:3], 1e-6, None)              # (n, 2) pixels
+    d2 = ((uv[:, None, :] - joint_px_t[None, :, :]) ** 2).sum(-1)   # (n, J)
+    return joint_group[np.argmin(d2, axis=1)]
+
+
+def _limb_quota_select(p: np.ndarray, c: np.ndarray, g: np.ndarray, conf_drop_q: float,
+                       max_points: int, limb_quota: int) -> np.ndarray:
+    """One frame's ``sampling='limb_quota'`` selection: group-aware gate + limb quotas.
+
+    The ``conf_drop_q`` quantile gate runs **within each group** (a global per-frame
+    gate eats the depth-edge limbs first — limb evidence would be destroyed before any
+    quota could act). Then each limb group keeps up to ``limb_quota`` points (uniform
+    stride; everything if smaller) and the rest group fills the remaining
+    ``max_points`` budget by uniform stride. Total never exceeds ``max_points``.
+    Deterministic; kept points stay in original order.
+    """
+    n_groups = len(_LIMB_GROUPS) + 1
+    kept = np.ones(len(p), bool)
+    if conf_drop_q > 0.0:
+        for gi in range(n_groups):
+            m = g == gi
+            if m.any():
+                kept &= ~m | (c >= np.quantile(c[m], conf_drop_q))
+    idx = np.flatnonzero(kept)
+    sel, limb_total = [], 0
+    for gi in range(1, n_groups):
+        gidx = idx[g[idx] == gi]
+        if len(gidx) > limb_quota:
+            gidx = gidx[np.linspace(0, len(gidx) - 1, limb_quota).astype(int)]
+        sel.append(gidx)
+        limb_total += len(gidx)
+    rest = idx[g[idx] == 0]
+    budget = max(0, max_points - limb_total)
+    if len(rest) > budget:
+        rest = rest[np.linspace(0, len(rest) - 1, budget).astype(int)] if budget else rest[:0]
+    sel.append(rest)
+    out = np.sort(np.concatenate(sel))
+    if len(out) > max_points:            # only reachable when 4·limb_quota > max_points
+        out = out[np.linspace(0, len(out) - 1, max_points).astype(int)]
+    return p[out]
+
+
+# ─────────────────── E3 physics-gated limb de-smear (gated_desmear) ───────────────────
+
+def _load_contacts_scene(pred: Path, cc: dict, cam_centers: torch.Tensor, device):
+    """Scene cloud + PCA normals gated exactly as ``estimate_contacts`` loads it.
+
+    The gated_desmear gate is a contacts-style readout, so it must see the SAME scene
+    the contact stage / offline scorer see: the ``[contacts]`` quantile-confidence gate
+    and its ``normal_k``. Returns ``(points, normals, confidence)`` or ``(None, …)`` when
+    the clip has no ``geometry/scene.npz``.
+    """
+    scene_path = pred / "geometry" / "scene.npz"
+    if not scene_path.exists():
+        return None, None, None
+    sc = dict(np.load(scene_path, allow_pickle=True))
+    pts = torch.as_tensor(sc["points"], dtype=torch.float32, device=device)
+    conf = torch.as_tensor(sc["confidence"], dtype=torch.float32, device=device)
+    q = float(cc.get("conf_drop_q", 0.0))
+    if q > 0.0 and conf.numel():
+        keep = conf >= torch.quantile(conf, q)
+        pts, conf = pts[keep], conf[keep]
+    normals = estimate_point_normals(pts, cam_centers, k=int(cc["normal_k"]))
+    return pts, normals, conf
+
+
+def _validate_desmear(d: dict) -> None:
+    """Range-check the active ``[desmear]`` knobs (a typo must fail, not silently no-op)."""
+    if float(d["band_m"]) <= 0.0:
+        raise ValueError(f"[desmear] band_m must be > 0, got {d['band_m']!r}")
+    if float(d.get("band_boost", 5.0)) <= 0.0:
+        raise ValueError(f"[desmear] band_boost must be > 0, got {d.get('band_boost')!r}")
+    if int(d["min_flag_frames"]) < 1:
+        raise ValueError(f"[desmear] min_flag_frames must be >= 1, got {d['min_flag_frames']!r}")
+    relax = float(d.get("anchor_relax", 1.0))
+    if not (0.0 < relax <= 1.0):
+        raise ValueError(f"[desmear] anchor_relax must be in (0, 1], got {relax!r}")
+    if int(d.get("stretch_dilate", 5)) < 0:
+        raise ValueError(f"[desmear] stretch_dilate must be >= 0, got {d.get('stretch_dilate')!r}")
+
+
+@torch.no_grad()
+def _gated_desmear_cloud(mid, betas_mean: torch.Tensor, q_opt: torch.Tensor,
+                         depth: list[torch.Tensor], drift_pre: np.ndarray, vmask: np.ndarray, *,
+                         extr: torch.Tensor, K: torch.Tensor,
+                         scene_pts, scene_normals, scene_conf,
+                         desmear: dict, contacts: dict,
+                         ) -> tuple[list[torch.Tensor] | None, list[torch.Tensor] | None, dict]:
+    """Gate a floating pass-1 body and build the corrected human cloud (E3 gated_desmear).
+
+    Poses the pass-1 body ``q_opt`` and, contacts-style (``scene_sdf`` + ``lift_joint_contact``,
+    no gradients), takes the per-joint unguarded min signed distance ``jsdf`` (cm). A frame is
+    **flagged** when it is both still (``median_j drift_pre < still_m``) and floating
+    (``min_{EE} jsdf > gap_cm``) on a valid frame — physically impossible, so its depth is
+    provably wrong.
+
+    De-smearing is **stretch-level**: within a contiguous STILL run (``median_j drift_pre <
+    still_m`` on valid frames) containing at least ``min_flag_frames`` flagged frames, the
+    stretch is the flagged span ``[first_flag, last_flag]`` dilated by ``stretch_dilate``
+    frames each way and clipped to the run — bounded by the flagged evidence (a few transient
+    flags in a long still run must not rewrite the whole run) yet wide enough that smoothness
+    stops anchoring flagged frames to uncorrected still neighbours. No stretch ⇒ returns
+    ``(None, None, info)`` and pass 2 is skipped (scene byte-identical to the single-pass path).
+
+    Per stretch, ONE closest-EE limb group is chosen — the majority vote over the stretch's
+    flagged frames of the per-frame ``argmin`` over the 4 groups' min ``jsdf`` (a single group
+    per stretch avoids trim flicker). On every frame of the stretch, that group's cloud points
+    (assigned by :func:`_point_group_ids`, nearest projected pass-1 joint in pixels) are trimmed
+    to the deep, wall-side band ``z >= p95(z_group) - band_m`` (per-frame threshold); the
+    camera-side smear front is dropped, and the kept band points get d2v chamfer weight
+    ``band_boost`` (all other points 1.0) so the licensed wall-side evidence has real pull.
+    Other groups' points, unflagged still runs and moving frames stay untouched.
+
+    Returns ``(corrected_depth, depth_weights, info)`` — per-frame lists (untouched frames
+    share the pass-1 tensors / carry all-ones weights).
+    """
+    N, J = q_opt.shape[0], mid.num_joints
+    names = list(mid.joint_names)
+    gid = _limb_group_ids(names)                                  # (J,) 0 = rest, 1..4 = _LIMB_GROUPS
+    ee_cols = np.flatnonzero(gid > 0)                             # EE = wrists+fingers, ankles, feet
+    grp_cols = [[names.index(j) for j in _ANN_TO_SMPLX[g] if j in names] for g in _LIMB_GROUPS]
+    still_m, gap_cm = float(desmear["still_m"]), float(desmear["gap_cm"])
+    band_m, min_flag = float(desmear["band_m"]), int(desmear["min_flag_frames"])
+    band_boost = float(desmear.get("band_boost", 5.0))
+    dilate = int(desmear.get("stretch_dilate", 5))
+
+    betas_T = betas_mean[None].expand(N, -1)
+    v_rest, j_rest = mid.forward_shape(betas_mean[None])
+    v2j = vertex_to_joint(v_rest[0], j_rest[0])
+    out = mid.forward(betas_T, normalize_q(q_opt, J))
+    jw = out.joints_world.tensor()[..., :3]                       # (N,J,3)
+    vw = out.vertices
+    sdf, _dmin, _conf = scene_sdf(vw, scene_pts, scene_normals, scene_conf,
+                                  prune_margin_m=float(contacts["prune_margin_m"]))
+    _, jsdf_cm = lift_joint_contact(torch.zeros_like(sdf, dtype=torch.bool), sdf, v2j, J)
+    jsdf = jsdf_cm.cpu().numpy()                                  # (N,J) cm, nan = no near vertex
+
+    med_drift = np.median(drift_pre, axis=1)                      # (N,)
+    with np.errstate(all="ignore"):
+        min_ee = np.nanmin(jsdf[:, ee_cols], axis=1)             # (N,) nan if all EE joints nan
+    still = (med_drift < still_m) & vmask                         # (N,) still-run membership
+    flagged = still & (min_ee > gap_cm)                           # nan > x is False ⇒ un-flagged
+    n_flag = int(flagged.sum())
+
+    grp_min = np.full((N, len(_LIMB_GROUPS)), np.nan)
+    for gi, cols in enumerate(grp_cols):
+        with np.errstate(all="ignore"):
+            grp_min[:, gi] = np.nanmin(jsdf[:, cols], axis=1)
+
+    # stretch = within a still run holding >= min_flag flagged frames, the flagged span
+    # dilated ±stretch_dilate and clipped to the run (bounded by the flagged evidence — a few
+    # transient flags must not rewrite a long still run); one majority-vote closest-EE group
+    # per stretch (per-frame argmin flickers between groups).
+    stretches: list[tuple[int, int, int]] = []                    # (start, end) half-open + group id
+    t0 = 0
+    while t0 < N:
+        if not still[t0]:
+            t0 += 1
+            continue
+        t1 = t0
+        while t1 < N and still[t1]:
+            t1 += 1
+        fl = [t for t in range(t0, t1) if flagged[t] and not np.all(np.isnan(grp_min[t]))]
+        if len(fl) >= min_flag:
+            votes = np.bincount([int(np.nanargmin(grp_min[t])) for t in fl], minlength=len(_LIMB_GROUPS))
+            s = max(t0, fl[0] - dilate)                          # bound to flagged span ± dilate,
+            e = min(t1, fl[-1] + 1 + dilate)                     # clipped to the still run
+            stretches.append((s, e, int(votes.argmax())))        # tie → lower group index
+        t0 = t1
+    info = dict(n_flag=n_flag, min_ee=min_ee, flagged=flagged,
+                stretches=[(s, e, _LIMB_GROUPS[g]) for s, e, g in stretches], per_group={})
+    if not stretches:
+        return None, None, info
+
+    jpx = project(transform_points(jw, extr), K).cpu().numpy()    # (N,J,2) pass-1 joint pixels
+    extr_np, K_np = extr.cpu().numpy(), K.cpu().numpy()
+
+    corrected = list(depth)                                       # untouched frames share pass-1 tensors
+    weights = [torch.ones(int(d.shape[0]), dtype=torch.float32, device=d.device) for d in depth]
+    per_group: dict[str, int] = {}
+    for s0, s1, g_star in stretches:
+        gname = _LIMB_GROUPS[g_star]
+        for t in range(s0, s1):
+            pts = depth[t]
+            if pts.shape[0] == 0:
+                continue                                         # empty (e.g. untracked) — nothing to trim
+            pnp = pts.detach().cpu().numpy()
+            gids = _point_group_ids(pnp, extr_np[t], K_np[t], jpx[t], gid)   # (n,) 0..4
+            cam = pnp @ extr_np[t][:3, :3].T + extr_np[t][:3, 3]  # camera frame; z = depth along ray
+            z = cam[:, 2]
+            g_mask = gids == (g_star + 1)                        # group ids are 1-based
+            if not g_mask.any():
+                continue                                         # stretch limb has no cloud point here
+            z95 = np.percentile(z[g_mask], 95.0)
+            keep = (~g_mask) | (g_mask & (z >= z95 - band_m))    # drop only the g* camera-side smear front
+            w = np.ones(len(pnp), np.float32)
+            w[g_mask] = band_boost                               # kept g* points = the wall-side band
+            corrected[t] = torch.as_tensor(pnp[keep], dtype=pts.dtype, device=pts.device)
+            weights[t] = torch.as_tensor(w[keep], dtype=torch.float32, device=pts.device)
+            per_group[gname] = per_group.get(gname, 0) + 1
+    info["per_group"] = per_group
+    return corrected, weights, info
+
+
 def _person_depth_points(human: dict, oid: int, N: int, conf_drop_q: float,
-                         max_points: int, device) -> list[torch.Tensor]:
+                         max_points: int, device, *,
+                         sampling: str = "stride", limb_quota: int = 200,
+                         joint_px: np.ndarray | None = None,
+                         joint_group: np.ndarray | None = None,
+                         extrinsics: np.ndarray | None = None,
+                         intrinsics: np.ndarray | None = None) -> list[torch.Tensor]:
     """Per-frame world-frame depth points for one person (conf-gated, capped).
 
     The confidence gate is a **per-frame quantile**: within each frame, drop that
@@ -62,7 +300,23 @@ def _person_depth_points(human: dict, oid: int, N: int, conf_drop_q: float,
     *every* frame by construction, matching ``clean_depth`` / ``estimate_scale``.
     The human cloud gets no confidence gate at fuse, so this is its only quality
     filter before chamfer.
+
+    ``sampling='stride'`` (default) caps each frame by a uniform stride after the
+    global per-frame gate — the legacy path, bit-exact. ``'limb_quota'`` assigns each
+    point to a body-part group first (:func:`_point_group_ids`, nearest projected
+    init joint in pixel space via ``joint_px (N, J, 2)`` / ``joint_group (J,)`` /
+    the per-frame cameras), then gates + caps group-aware
+    (:func:`_limb_quota_select`) so each hand/foot keeps up to ``limb_quota`` points.
     """
+    if sampling not in ("stride", "limb_quota"):
+        raise ValueError(f"[chamfer] sampling must be 'stride' or 'limb_quota', got {sampling!r}")
+    if sampling == "limb_quota" and 4 * limb_quota > max_points:
+        raise ValueError(
+            f"[chamfer] 4*limb_quota ({4 * limb_quota}) exceeds max_points ({max_points}) — "
+            f"the limb quotas would be globally re-strided (limbs can vanish); lower limb_quota "
+            f"or raise max_points")
+    use_quota = (sampling == "limb_quota" and joint_px is not None
+                 and joint_group is not None and extrinsics is not None and intrinsics is not None)
     person = human["obj_id"] == oid
     pts = human["points"][person]
     conf = human["confidence"][person]
@@ -73,10 +327,14 @@ def _person_depth_points(human: dict, oid: int, N: int, conf_drop_q: float,
     out = []
     for t in range(N):
         p, c = pts[bnd[t]:bnd[t + 1]], conf[bnd[t]:bnd[t + 1]]
-        if conf_drop_q > 0.0 and c.size:
-            p = p[c >= np.quantile(c, conf_drop_q)]   # per-frame: keep the top 1−q of THIS frame
-        if len(p) > max_points:
-            p = p[np.linspace(0, len(p) - 1, max_points).astype(int)]
+        if use_quota and len(p):
+            g = _point_group_ids(p, extrinsics[t], intrinsics[t], joint_px[t], joint_group)
+            p = _limb_quota_select(p, c, g, conf_drop_q, max_points, limb_quota)
+        else:
+            if conf_drop_q > 0.0 and c.size:
+                p = p[c >= np.quantile(c, conf_drop_q)]   # per-frame: keep the top 1−q of THIS frame
+            if len(p) > max_points:
+                p = p[np.linspace(0, len(p) - 1, max_points).astype(int)]
         out.append(torch.as_tensor(p, dtype=torch.float32, device=device))
     return out
 
@@ -289,6 +547,24 @@ def run_kinematic(source, pred: Path, cfg: HumanOptimConfig, stages_to_run,
         ac["group_joints"] = sorted({i for v in members.values() for i in v})
         auto_cfg = ac
 
+    # E3 gated_desmear: opt-in two-pass kinematics_1. When on, load the scene the SAME way
+    # estimate_contacts does ([contacts] conf gate) — the gate is a contacts-style readout — and
+    # keep only the refine + L-BFGS phases for pass 2. Off (default) ⇒ single pass, bit-exact.
+    desmear_cfg = knobs.get("desmear", {})
+    desmear_on = (bool(desmear_cfg.get("enabled", False)) and "kinematics_1" in stages_to_run
+                  and scene_pts is not None)
+    cs_pts = cs_normals = cs_conf = None
+    refine_phases: list[PhaseSpec] = []
+    if desmear_on:
+        _validate_desmear(desmear_cfg)
+        cs_pts, cs_normals, cs_conf = _load_contacts_scene(pred, knobs["contacts"], cam_centers, device)
+        desmear_on = cs_pts is not None
+        refine_phases = [ph for ph in phases if ph.name in ("refine", "lbfgs")]
+        if desmear_on:
+            print(f"[{tag}] gated_desmear ON (still<{float(desmear_cfg['still_m'])}m, "
+                  f"gap>{float(desmear_cfg['gap_cm'])}cm, band={float(desmear_cfg['band_m'])}m, "
+                  f"min_flag={int(desmear_cfg['min_flag_frames'])}); contacts-style scene {cs_pts.shape[0]} pts")
+
     out = _new_out()
     betas_out = []
     drift_pre_p, auto_labels_p = [], []   # refine-start drift + frozen labels, per person
@@ -309,8 +585,21 @@ def run_kinematic(source, pred: Path, cfg: HumanOptimConfig, stages_to_run,
         kp_np, sc_np = _sapiens_for(pose, oid, N)
         target_kp = torch.as_tensor(kp_np, dtype=torch.float32, device=device)
         scores = torch.as_tensor(sc_np, dtype=torch.float32, device=device)
+        sampling = str(knobs["chamfer"].get("sampling", "stride"))
+        jpx = jgrp = extr_np = K_np = None
+        if sampling == "limb_quota":   # project the init body's joints once — the grouping reference
+            with torch.no_grad():
+                jw0 = mid.forward(betas_T, normalize_q(q_world, mid.num_joints)
+                                  ).joints_world.tensor()[..., :3]
+                jpx = project(transform_points(jw0, extr), K).cpu().numpy()
+            jgrp = _limb_group_ids(list(mid.joint_names))
+            extr_np, K_np = extr.cpu().numpy(), K.cpu().numpy()
         depth = _person_depth_points(human, oid, N, float(knobs["chamfer"]["conf_drop_q"]),
-                                     int(knobs["chamfer"]["max_points"]), device)
+                                     int(knobs["chamfer"]["max_points"]), device,
+                                     sampling=sampling,
+                                     limb_quota=int(knobs["chamfer"].get("limb_quota", 200)),
+                                     joint_px=jpx, joint_group=jgrp,
+                                     extrinsics=extr_np, intrinsics=K_np)
         for i in range(N):
             if not vmask[i]:
                 scores[i] = 0.0
@@ -326,12 +615,51 @@ def run_kinematic(source, pred: Path, cfg: HumanOptimConfig, stages_to_run,
             chamfer_weights=chamfer_w, frame_valid=frame_valid,
             cam_centers=cam_centers, auto_contact=auto_cfg)
         print(f"    before: {before}\n    after:  {after}")
+        # Persist drift_pre + auto_labels: pass-1's drift_pre is the honest gate source for the
+        # readout (never overwrite it with pass-2 motion); auto_labels track the FINAL body.
+        dp, al = aux["drift_pre"], aux["auto_labels"]
+
+        # E3 gated_desmear pass 2: gate the pass-1 body; if any still stretch holds enough
+        # flagged frames, re-run refine + L-BFGS on the corrected (band-boosted) cloud,
+        # warm-started from the pass-1 q.
+        if desmear_on and dp is None:
+            print("    [desmear] WARNING: enabled but drift_pre unavailable "
+                  "(auto-contact detection off, e.g. ann_attraction=0) -> pass 2 skipped")
+        if desmear_on and dp is not None:
+            corrected, dweights, dinfo = _gated_desmear_cloud(
+                mid, betas_mean, q_opt, depth, dp.cpu().numpy().astype(np.float32), vmask,
+                extr=extr, K=K, scene_pts=cs_pts, scene_normals=cs_normals, scene_conf=cs_conf,
+                desmear=desmear_cfg, contacts=knobs["contacts"])
+            if corrected is None:
+                print(f"    [desmear] {dinfo['n_flag']} flagged frame(s), no still stretch with >= "
+                      f"{int(desmear_cfg['min_flag_frames'])} → pass 2 SKIPPED (single-pass body)")
+            else:
+                spans = ", ".join(f"[{s},{e}){g}" for s, e, g in dinfo["stretches"])
+                relax = float(desmear_cfg.get("anchor_relax", 1.0))
+                print(f"    [desmear] {dinfo['n_flag']} flagged frame(s); stretches {spans}; "
+                      f"trimmed frames per group {dinfo['per_group']} → pass 2 (refine+lbfgs, "
+                      f"anchor_relax={relax:g})")
+                # anchor relax: on stretch frames the physics gate has PROVEN the converter pose
+                # wrong, so the init anchor + joints pose prior (both pinned to it) are down-scaled
+                # there; 1.0 = mathematically identical to no relax.
+                aw = torch.ones(N, dtype=torch.float32, device=device)
+                for s, e, _g in dinfo["stretches"]:
+                    aw[s:e] = relax
+                q_opt, _before2, after, aux2 = optimize_person(
+                    mid, betas_mean, q_world, extrinsics=extr, K=K, depth_points=corrected,
+                    target_kp=target_kp, scores=scores, corr=corr, frame_vertex_ids=fvids,
+                    sub=sub, knobs=knobs, phases=refine_phases,
+                    scene_pts=scene_pts, scene_normals=scene_normals, scene_conf=scene_conf, fps=fps,
+                    chamfer_weights=chamfer_w, frame_valid=frame_valid,
+                    cam_centers=cam_centers, auto_contact=auto_cfg, q_warm=q_opt,
+                    depth_weights=dweights, anchor_weight=aw)
+                print(f"    after2: {after}")
+                al = aux2["auto_labels"]   # pass-2 labels drove the final body; drift_pre stays pass-1's dp
+
         _append_classic(out, mid, betas_T, q_opt)
         betas_out.append(betas_mean.cpu().numpy().astype(np.float32))
-        # Persist the detection-time signals. None ⇒ detection did not run
-        # for this person (no scene / weight 0): write NaN drift + -1 labels; consumers
-        # then fall back to computing drift from the body.
-        dp, al = aux["drift_pre"], aux["auto_labels"]
+        # None ⇒ detection did not run for this person (no scene / weight 0): write NaN drift +
+        # -1 labels; consumers then fall back to computing drift from the body.
         drift_pre_p.append(dp.cpu().numpy().astype(np.float32) if dp is not None
                            else np.full((N, mid.num_joints), np.nan, np.float32))
         auto_labels_p.append(al.cpu().numpy().astype(np.int8) if al is not None
@@ -376,6 +704,11 @@ _ANN_TO_SMPLX: dict[str, list[str]] = {
 def _contact_labels(contacts_p: np.ndarray, ann_names: list[str],
                     mid_names: list[str], N: int) -> np.ndarray:
     """Expand one person's ``(J_ann, N_ann)`` annotation into ``(N, 52)`` SMPLXMid labels."""
+    if "left_ankle" in ann_names:   # the 14-joint schema marker (data_2 annotations)
+        raise ValueError(
+            "kinematics_2 only supports the legacy 10-joint annotation schema; this annotation "
+            "has its own ankle labels (14-joint schema, e.g. data_2/) whose 'foot' means the "
+            "toe — the 10-joint _ANN_TO_SMPLX mapping (foot = ankle+foot) would mislabel it")
     Na = contacts_p.shape[1]
     if Na != N:
         raise ValueError(f"annotation has {Na} frames but the body trajectory has {N}")
@@ -393,14 +726,17 @@ def _contact_labels(contacts_p: np.ndarray, ann_names: list[str],
 
 
 def resolve_annotation_path(source, annotations) -> Path:
-    """The annotation npz: explicit ``--annotations``, else ``<source>.npz`` / ``data/<stem>.npz``."""
+    """The annotation npz: explicit ``--annotations``, else ``<source>.npz`` / ``data/<stem>.npz`` / ``data_2/<stem>.npz``."""
     if annotations is not None:
         return Path(annotations)
     src = Path(source)
     cand = src.with_suffix(".npz")
     if cand.exists():
         return cand
-    return _REPO_ROOT / "data" / f"{src.stem}.npz"
+    legacy = _REPO_ROOT / "data" / f"{src.stem}.npz"
+    if legacy.exists():
+        return legacy
+    return _REPO_ROOT / "data_2" / f"{src.stem}.npz"
 
 
 def run_kinematics_2(source, pred: Path, cfg: HumanOptimConfig, device: str, *,
@@ -480,8 +816,21 @@ def run_kinematics_2(source, pred: Path, cfg: HumanOptimConfig, device: str, *,
         kp_np, sc_np = _sapiens_for(pose, oid, N)
         target_kp = torch.as_tensor(kp_np, dtype=torch.float32, device=device)
         scores = torch.as_tensor(sc_np, dtype=torch.float32, device=device)
+        sampling = str(knobs["chamfer"].get("sampling", "stride"))
+        jpx = jgrp = extr_np = K_np = None
+        if sampling == "limb_quota":   # project the init body's joints once — the grouping reference
+            with torch.no_grad():
+                jw0 = mid.forward(betas_T, normalize_q(q_world, mid.num_joints)
+                                  ).joints_world.tensor()[..., :3]
+                jpx = project(transform_points(jw0, extr), K).cpu().numpy()
+            jgrp = _limb_group_ids(list(mid.joint_names))
+            extr_np, K_np = extr.cpu().numpy(), K.cpu().numpy()
         depth = _person_depth_points(human, oid, N, float(knobs["chamfer"]["conf_drop_q"]),
-                                     int(knobs["chamfer"]["max_points"]), device)
+                                     int(knobs["chamfer"]["max_points"]), device,
+                                     sampling=sampling,
+                                     limb_quota=int(knobs["chamfer"].get("limb_quota", 200)),
+                                     joint_px=jpx, joint_group=jgrp,
+                                     extrinsics=extr_np, intrinsics=K_np)
         for i in range(N):
             if not vmask[i]:
                 scores[i] = 0.0
