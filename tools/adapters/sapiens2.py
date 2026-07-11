@@ -127,11 +127,13 @@ def load_sapiens2(
     cfg_rel = _TASK_CONFIG_RELS[task]
     ckpt_path = resolve_checkpoint(task, checkpoint_root)
 
+    # Build + cast on CPU first: init_model would move the fp32 model to the GPU
+    # before we can down-cast, a ~20 GB transient that OOMs a half-occupied card.
     if task == "pose":
         with _chdir(task_dir):
             from sapiens.pose.datasets import UDPHeatmap, parse_pose_metainfo
             from sapiens.pose.models import init_model
-            model = init_model(cfg_rel, ckpt_path, device=device)
+            model = init_model(cfg_rel, ckpt_path, device="cpu")
             model.pose_metainfo = parse_pose_metainfo(
                 dict(from_file="configs/_base_/keypoints308.py")
             )
@@ -143,7 +145,7 @@ def load_sapiens2(
     else:
         with _chdir(task_dir):
             from sapiens.dense.models import init_model
-            model = init_model(cfg_rel, ckpt_path, device=device)
+            model = init_model(cfg_rel, ckpt_path, device="cpu")
 
     if dtype == "bf16":
         model = model.to(dtype=torch.bfloat16)
@@ -152,7 +154,7 @@ def load_sapiens2(
     elif dtype != "fp32":
         raise ValueError(f"dtype must be one of bf16/fp16/fp32, got {dtype!r}")
 
-    return model
+    return model.to(device)
 
 
 def _model_dtype(model) -> torch.dtype:
