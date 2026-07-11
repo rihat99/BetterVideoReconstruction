@@ -459,11 +459,6 @@ def _kinematic_phases(cfg: HumanOptimConfig, stages_to_run) -> list[PhaseSpec]:
         it = cfg.iters["kinematics_1"]
         w = cfg.weights_for("kinematics_1")
         phases.append(PhaseSpec("full", w, it.get("full", 0), _ALL_DOF, False, "adam"))
-        # round-10 T3-B: a rigid "seat" phase (root SE3 only, scene on) before refine, so the
-        # wall-contact pull translates the WHOLE floating body onto the wall instead of bending
-        # one limb toward it. Inserted only when wall_contact is active — parity when it is off.
-        if float(w.get("wall_contact", 0.0)) > 0.0 and it.get("seat", 0) > 0:
-            phases.append(PhaseSpec("seat", w, it.get("seat", 0), _ROOT_DOF, True, "adam"))
         phases += [
             PhaseSpec("refine", w, it.get("refine", 0), _ALL_DOF, True, "adam"),
             PhaseSpec("lbfgs", w, it.get("lbfgs", 0), _ALL_DOF, True, "lbfgs"),
@@ -547,9 +542,10 @@ def run_kinematic(source, pred: Path, cfg: HumanOptimConfig, stages_to_run,
         ac["group_joints"] = sorted({i for v in members.values() for i in v})
         auto_cfg = ac
 
-    # E3 gated_desmear: opt-in two-pass kinematics_1. When on, load the scene the SAME way
-    # estimate_contacts does ([contacts] conf gate) — the gate is a contacts-style readout — and
-    # keep only the refine + L-BFGS phases for pass 2. Off (default) ⇒ single pass, bit-exact.
+    # Gated de-smear: two-pass kinematics_1 (default on in the config). When on, load the scene
+    # the SAME way estimate_contacts does ([contacts] conf gate) — the gate is a contacts-style
+    # readout — and keep only the refine + L-BFGS phases for pass 2. enabled=false ⇒ single
+    # pass, bit-exact.
     desmear_cfg = knobs.get("desmear", {})
     desmear_on = (bool(desmear_cfg.get("enabled", False)) and "kinematics_1" in stages_to_run
                   and scene_pts is not None)

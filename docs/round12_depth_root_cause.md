@@ -403,23 +403,6 @@ biggest value is that the road to it is now *measured*, not guessed:
 - Saturating/anisotropic chamfer — the along-ray pull is load-bearing;
   −0.05 F1 pooled.
 
-## Log (continued)
-
-## Log (continued)
-
-- 2026-07-11: codex review adopted (scoring gate fixed, E1/E2 redesigned,
-  guards added). Sapiens pointmap witness measured → null (flat people), both
-  full-frame and crop mode. Gate=pre baseline re-derived with a wider readout
-  grid. E1/E2 revised implementation landed (bit-exact neutral parity; limbs
-  now hold their 200-point quota on starved scenes). Physics support-gap
-  detector prototyped → 100% precise on the five floating scenes. The
-  pre-registered 4-arm sweep ran: A/A exact, quota +0.009 F1 (honest, on
-  target scenes, legacy suite also +0.007 — adopted), aniso −0.051 (rejected
-  — depth pull is load-bearing), quota+aniso −0.057 (rejected). Sliding-feet
-  cause isolated: Sapiens keypoint drift/left-right swaps (detector drag) —
-  wave-3 material. Wave-2 gated de-smear iteration 1: data validated,
-  consumption null; iteration 2 (stretch-level + band boost) running.
-
 ## Log
 
 - 2026-07-10: data_2/out_2 built and verified (30/30 clean). Scorer adaptation
@@ -437,3 +420,29 @@ biggest value is that the road to it is now *measured*, not guessed:
   *before* casting to bf16 (~20 GB transient → OOM on half-occupied GPUs); it
   now builds+casts on CPU and moves after. External adversarial review of the
   diagnosis + plan is running.
+- 2026-07-11: codex review adopted (scoring gate fixed, E1/E2 redesigned,
+  guards added). Sapiens pointmap witness measured → null (flat people), both
+  full-frame and crop mode. Gate=pre baseline re-derived with a wider readout
+  grid. E1/E2 revised implementation landed (bit-exact neutral parity; limbs
+  now hold their 200-point quota on starved scenes). Physics support-gap
+  detector prototyped → 100% precise on the five floating scenes. The
+  pre-registered 4-arm sweep ran: A/A exact, quota +0.009 F1 (honest, on
+  target scenes, legacy suite also +0.007 — adopted), aniso −0.051 (rejected
+  — depth pull is load-bearing), quota+aniso −0.057 (rejected). Sliding-feet
+  cause isolated: Sapiens keypoint drift/left-right swaps (detector drag) —
+  wave-3 material. Wave-2 gated de-smear iteration 1: data validated,
+  consumption null; iteration 2 (stretch-level + band boost) running.
+- 2026-07-11 (post-round cleanup): everything this round (and round 10)
+  measured as null or left off-by-default was removed from the code, at the
+  user's request to keep the repo simple. Gone: the saturating / anisotropic
+  chamfer kernels (`[chamfer] kernel` + `sat_sigma_m`), round-10's
+  wall-contact seating (the loss, the rigid `seat` phase, the float gate, the
+  `[wall_contact]` section), two orphaned loss wrappers (`scene_attraction`,
+  `clearance_repulsion` — the optimizer calls their penalty heads directly),
+  the diagnose script's dead velocity-gated-contact panel (its loss was
+  deleted long ago), and the `--set extreme` vertex-weight preset (measured
+  no-op). What ships is unchanged: limb-quota sampling + the physics-gated
+  de-smear, both default-on. Removal verified bit-exact against pre-cleanup
+  runs on a de-smear-gated scene (s-ArwEzr-2M_0021) and a healthy scene
+  (ecx75KwBCV8_0017), same GPU. Statements above about these knobs "staying
+  in the code, off" are superseded by this entry.

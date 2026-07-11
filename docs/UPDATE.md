@@ -16,7 +16,9 @@ tell the two apart. Rounds 1–10 live in git history.*
   the float gate all stay in the code as an opt-in knob for later; the
   default config no longer enables them. Nothing needs re-running: the float
   gate meant healthy bodies were bit-exact anyway, and the corpus was never
-  re-run with seating on.
+  re-run with seating on. *(Superseded 2026-07-11: the whole wall-contact
+  code path was removed in the post-round-12 cleanup — see
+  `docs/round12_depth_root_cause.md`, Log.)*
 - Delete the `out/_round10/` experiment trees and any redirected corpus
   scratch. The round-10 numbers and renders survive in git history.
 

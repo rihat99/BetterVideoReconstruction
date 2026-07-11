@@ -474,10 +474,11 @@ Consequences that any gating scheme must respect:
 
 ### Issue 16 — Two diagnostics report something other than what their names say
 
-- **Status: OPEN** (unchanged). `clearance_repulsion`'s "mean_shortfall_cm"
-  averages the raw signed distance of pushed verts, not the shortfall; the
-  velocity-gated contact diagnostic divides inside-depth by the count of all
-  in-band contacts. Log readability only.
+- **Status: HALF-GONE** (2026-07-11 cleanup). The "mean_shortfall_cm" naming
+  issue lives on in `clearance_penalty` (the `clearance_repulsion` wrapper was
+  removed): it averages the raw signed distance of pushed verts, not the
+  shortfall. Log readability only. The velocity-gated contact diagnostic was
+  removed with its long-dead loss.
 
 ### Issue 17 — Scene candidates are stale within a phase
 

@@ -180,17 +180,17 @@ BetterVideoReconstruction/
     depth, a **joints-only pose prior** + gentle
     root-orientation prior, **acceleration + jerk** smoothness (exact Lie tangent,
     batched `so3`/`se3` in `tools/human_optim/motion.py`), a **scene-penetration**
-    repulsion and its inverse **scene-contact attraction** (the term that *raises*
-    contact), plus an off-by-default velocity-gated contact repulsion, and — for a
-    **grossly floating body only** — a **wall-contact** seating pull (see below).
+    repulsion and its inverse **auto-contact attraction** (the term that *raises*
+    contact — see below).
     Quaternions are renormalised in the forward (no exp-retraction singularity). It runs
-    `full` (all DOFs, no scene) → [`seat` — a rigid root-only phase, only when a floating
-    body is detected] → `refine` (add scene terms on the seated body) → a short **L-BFGS**
-    polish. Chamfer + penetration are **chunked-batched** cdists (the per-frame loop was
+    `full` (all DOFs, no scene) → `refine` (add scene terms on the settled body) → a
+    short **L-BFGS** polish. Chamfer + penetration are **chunked-batched** cdists (the
+    per-frame loop was
     launch-bound — the real speed lever). Round-12: the human cloud is sampled with
     **per-limb quotas** (`[chamfer] sampling="limb_quota"`, default — hands/feet keep up
-    to 200 points each instead of being drowned by the torso; opt-in robust `kernel`
-    variants exist but measured worse and stay off), and a **physics-gated de-smear
+    to 200 points each instead of being drowned by the torso; robust/anisotropic chamfer
+    kernels were tried, measured worse, and removed — the raw along-ray chamfer pull is
+    load-bearing), and a **physics-gated de-smear
     second pass** (`[desmear]`, default on) re-runs refine on still stretches where the
     body is provably unsupported (still + no end-effector within 8 cm of the scene):
     the flagged limb's depth cloud is trimmed to its wall-side band and the
@@ -224,29 +224,20 @@ BetterVideoReconstruction/
     (`tools/geometry/normals.py`) sign the distance; a soft dead-zone (`margin_m`) +
     Huber ramp tolerate small penetration. Refine stage only; candidates AABB-pruned
     per frame and built once from the seated body.
-  - **Scene-contact attraction** (`losses.scene_attraction`, weight
-    `[weights].contact_attraction`) is the inverse: a vertex just outside the surface
-    (`0 < s < band_m`) is pulled onto it, so near-wall parts (a climbing hand a few
-    cm off) make contact. The two partition the signed-distance axis and never fight.
-    It exists because nothing else pulls the body to the *scene* (chamfer targets the
-    *human* depth cloud, penetration only pushes off).
-  - **Wall-contact seating of floating bodies** (round-10, `losses.wall_contact_loss`,
-    weight `[loss_weights.scene].wall_contact`; **off by default** as of round-11 —
-    the whole code path + `[wall_contact]` knobs are kept as opt-in, set the
-    `kinematics_1` column to `200` to re-enable; weight 0 is bit-exact pre-round-10).
-    VGGT sometimes stretches a person's
-    depth so the whole body (faithfully following its own depth cloud) hangs tens of cm
-    in front of a credible wall. This term pulls the body's **closest EE joint** (L/R
-    wrist, L/R foot; a soft-min over the four) onto the nearest scene point with a
-    saturating GM kernel (so airborne frames cost a bounded amount). It fires in a
-    **rigid `seat` phase** (root SE3 only — the whole body translates onto the wall
-    instead of one limb reaching) plus `refine`, and **only on a body a per-person
-    float gate flags as grossly floating** (`[wall_contact].float_gate_m`, the median
-    init closest-EE off the wall > 15 cm). A seated / dynamic body falls below the gate
-    and is left **bit-exact baseline** — so the pull can never manufacture false
-    contacts on an already-touching body (the round's contact guards held at ±0.000).
-    Knobs in `[wall_contact]`. (Round-10 also built an along-ray chamfer *depth-release*
-    lever; it added nothing on the tested floaters and was dropped — see `docs/UPDATE.md`.)
+  - **Auto-contact attraction** (kinematics_1): contact labels are detected **once**
+    at the start of the refine phase (the contact readout at the `[auto_contact]`
+    operating point), **frozen**, and the labeled joints' vertices just outside the
+    surface (`0 < s < band_m`) are pulled onto it (`losses.attraction_penalty`, weight
+    `[loss_weights.annotation].ann_attraction`; `ann_velocity` also damps the labeled
+    joints). Attraction and penetration partition the signed-distance axis and never
+    fight. It exists because nothing else pulls the body to the *scene* (chamfer
+    targets the *human* depth cloud, penetration only pushes off). The readout stays
+    honest: `estimate_contacts` gates stillness on `drift_pre` — measured BEFORE the
+    attraction/damping acted.
+    (Round-10's wall-contact seating pull + rigid `seat` phase and the along-ray
+    depth-release lever were dropped — superseded by the round-12 physics-gated
+    de-smear, which corrects the depth *evidence* instead of pushing the body; see
+    `docs/UPDATE.md`.)
 - **Scene contact is a separate one-shot stage** (`estimate_contacts`, off the
   default chain): reads the refined body + `geometry/scene.npz` and marks
   **per-joint** scene contact for every person, reusing the penetration SDF +

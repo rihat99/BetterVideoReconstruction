@@ -30,13 +30,11 @@ from .contacts import (
 from .keypoints import Correspondence, build_correspondence
 from .losses import (
     chamfer_loss,
-    clearance_repulsion,
     geman_mcclure,
     init_reprojection_gm,
     joint_velocity_loss,
     pose_prior_loss,
     sapiens_reprojection_gm,
-    scene_attraction,
     scene_penetration,
     smoothness_loss,
 )
@@ -65,13 +63,11 @@ __all__ = [
     "Correspondence",
     "build_correspondence",
     "chamfer_loss",
-    "clearance_repulsion",
     "geman_mcclure",
     "init_reprojection_gm",
     "joint_velocity_loss",
     "pose_prior_loss",
     "sapiens_reprojection_gm",
-    "scene_attraction",
     "scene_penetration",
     "smoothness_loss",
     "tangent_difference",

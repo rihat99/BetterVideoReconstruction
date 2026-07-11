@@ -37,7 +37,7 @@ from .losses import (
     attraction_penalty, chamfer_loss, clearance_penalty, init_reprojection_gm,
     joint_velocity_loss, pad_frames, penetration_penalty, pose_prior_loss,
     radial_velocity_loss, root_orient_prior_loss, sapiens_reprojection_gm,
-    scene_penetration, scene_signed_distance, smoothness_loss, wall_contact_loss,
+    scene_penetration, scene_signed_distance, smoothness_loss,
 )
 from .motion import tangent_difference
 from .qmath import normalize_q
@@ -144,26 +144,6 @@ def _padded_scene_candidates(vertices_sub_det: torch.Tensor, scene_pts: torch.Te
     pad_n, _ = pad_frames(nrm, channels=3, device=dev, dtype=dt)
     pad_c, _ = pad_frames(cnf, channels=None, device=dev, dtype=scene_conf.dtype)
     return pad_p, pad_n, pad_c, valid
-
-
-@torch.no_grad()
-def _median_closest_ee(ee_world: torch.Tensor, scene_pts: torch.Tensor,
-                       frame_valid: torch.Tensor | None, chunk: int) -> float:
-    """Median over valid frames of the closest EE joint's distance to the scene (m).
-
-    The float-gate signal: a grossly floating body has all its hands/feet tens of cm from
-    the wall every frame, a seated / dynamic body has at least one near it most frames.
-    """
-    T = ee_world.shape[0]
-    mins = []
-    for s in range(0, T, chunk):
-        e = min(s + chunk, T)
-        d = torch.cdist(ee_world[s:e].reshape(-1, 3), scene_pts)     # ((e-s)·Nee, Ms)
-        mins.append(d.min(1).values.reshape(e - s, -1).min(1).values)  # (e-s,) closest EE / frame
-    m = torch.cat(mins)
-    if frame_valid is not None:
-        m = m[frame_valid]
-    return float(m.median()) if m.numel() else float("inf")
 
 
 @torch.no_grad()
@@ -320,11 +300,6 @@ def optimize_person(
     pen_cfg = knobs["penetration"]
     chunk = int(knobs["chamfer"]["chunk"])
     max_cand = int(pen_cfg["max_candidates"])
-    # E2 robust chamfer kernel: "l2" (default, bit-exact) | "sat" | "aniso_sat". aniso_sat needs
-    # cam_centers (the loss-side call passes them; the metrics diagnostic stays raw L2 cm —
-    # the per-iteration ch=…cm log is the kernelized mean ×100, saturated under sat/aniso_sat).
-    cham_kernel = str(knobs["chamfer"].get("kernel", "l2"))
-    cham_sat_sigma = float(knobs["chamfer"].get("sat_sigma_m", 0.15))
 
     # Union over the phases about to run — decides what to SET UP once (the per-iter
     # term inclusion is gated by each phase's own weight below).
@@ -397,33 +372,6 @@ def optimize_person(
             jw0i = o0i.joints_world.tensor()[..., :3]
             init_target = project(transform_points(jw0i[:, body_idx, :], extrinsics), K)
 
-    # Round-10 T3-B wall-contact prior + a rigid seat phase, gated to floating bodies. Off (parity)
-    # unless [loss_weights.scene].wall_contact > 0.
-    use_wall = _wmax("wall_contact") > 0.0 and use_pen
-    wall_cfg = knobs.get("wall_contact", {}) if use_wall else None
-    ee_idx = None
-    if use_wall:
-        _ee_names = ("left_wrist", "right_wrist", "left_foot", "right_foot")
-        ee_idx = torch.tensor([jnames.index(n) for n in _ee_names],
-                              dtype=torch.long, device=q_world_init.device)
-        # Per-body float gate: seat/wall the body ONLY if it is grossly floating (closest EE
-        # median off the wall > gate). A seated / dynamic body (labeled clips) is left exactly
-        # as baseline — so the wall pull cannot manufacture false contacts on it (round-10).
-        gate_m = float(wall_cfg.get("float_gate_m", 0.0))
-        if gate_m > 0.0:
-            with torch.no_grad():
-                ee0 = mid.forward(betas, normalize_q(q_world_init, mid.num_joints)
-                                  ).joints_world.tensor()[..., :3][:, ee_idx]
-            closest = _median_closest_ee(ee0, scene_pts, frame_valid, chunk)
-            if closest < gate_m:
-                print(f"    [wall] body seated (closest-EE median {closest * 100:.1f}cm < gate "
-                      f"{gate_m * 100:.0f}cm) → seat+wall OFF (baseline fit)")
-                use_wall = False
-                phases = [ph for ph in phases if ph.name != "seat"]
-            else:
-                print(f"    [wall] body floating (closest-EE median {closest * 100:.1f}cm ≥ gate "
-                      f"{gate_m * 100:.0f}cm) → seat+wall ON")
-
     # Smooth the 2D TARGET tracks (not the trajectory) so converter / Sapiens per-frame
     # jitter is not imprinted into the objective and the smoothness terms stop fighting the targets.
     # Only the LOSS sees the smoothed targets; the gate metric (reproj_init) is reported vs the RAW
@@ -479,22 +427,6 @@ def optimize_person(
             cand = (pad_p, pad_n, pad_c, valid & frame_valid[:, None])
         return cand
 
-    def _build_wall_cand():
-        """Per-frame padded scene points near the body, with a WIDE margin — the wall a
-        floating body must reach sits tens of cm away, beyond the penetration prune box.
-        Returns ``(points, valid)`` or None. Built once at the scene phase like the
-        penetration candidates."""
-        if not use_wall:
-            return None
-        with torch.no_grad():
-            v0 = mid.forward(betas, normalize_q(q, mid.num_joints)).vertices
-            pad_p, _pad_n, _pad_c, valid = _padded_scene_candidates(
-                v0[:, sub], scene_pts, scene_normals, scene_conf,
-                float(wall_cfg["prune_margin_m"]), int(wall_cfg["max_candidates"]))
-        if frame_valid is not None:
-            valid = valid & frame_valid[:, None]
-        return pad_p, valid
-
     def _detect_auto_labels() -> tuple[torch.Tensor, torch.Tensor]:
         """Detect frozen kinematics_1 contact labels once from the current detached pose.
 
@@ -527,7 +459,7 @@ def optimize_person(
         lab[keep] = 1
         return lab, drift
 
-    def _forward_losses(w: dict, scene_cand, wall_cand=None):
+    def _forward_losses(w: dict, scene_cand):
         """Forward the posed mesh and assemble the phase-weighted loss. Returns
         ``(loss, components)`` — ``components`` carries the per-term tensors +
         penetration diagnostics for logging + diagnostics."""
@@ -550,9 +482,7 @@ def optimize_person(
                                        frame_weight=anchor_weight)
                   if (use_init and w_init > 0.0) else jw.new_zeros(()))
         L_ch = chamfer_loss(vw[:, sub], vismask, depth_pad, depth_valid, chunk=chunk,
-                            vertex_weights=chamfer_weights, kernel=cham_kernel,
-                            sat_sigma_m=cham_sat_sigma, cam_centers=cam_centers,
-                            depth_weights=depth_w_pad)
+                            vertex_weights=chamfer_weights, depth_weights=depth_w_pad)
         L_pp = pose_prior_loss(qn, q_init, mid.num_joints, frame_weight=anchor_weight)
         L_ro = root_orient_prior_loss(qn, q_init)
         L_sm = smoothness_loss(qn, mid.num_joints, accel_root=float(w["accel_root"]),
@@ -595,27 +525,17 @@ def optimize_person(
         if have_labels and w_ann_vel > 0.0:
             L_ann_vel, ann_vel_cms, ann_vel_n = joint_velocity_loss(jw, contact_labels, fps=fps,
                                                                     joint_weight=contact_conf)
-        # T3-B wall-contact prior: pull the closest EE joint onto the wall (refine phase).
-        w_wall = float(w.get("wall_contact", 0.0))
-        L_wall = vw.new_zeros(()); wall_cm = float("nan"); wall_n = 0
-        if wall_cand is not None and w_wall > 0.0:
-            L_wall, wall_cm, wall_n = wall_contact_loss(
-                jw[:, ee_idx], wall_cand[0], wall_cand[1], margin_m=float(wall_cfg["margin_m"]),
-                temp_m=float(wall_cfg["temp_m"]), gm_scale_m=float(wall_cfg["gm_scale_m"]),
-                chunk=chunk, frame_mask=frame_valid)
         loss = (float(w["reproj_sapiens"]) * L_sap + w_init * L_init + float(w["chamfer"]) * L_ch
                 + float(w["pose_prior"]) * L_pp + float(w["orient_prior"]) * L_ro + L_sm
                 + float(w["penetration"]) * L_pen + w_radial * L_radial
-                + w_ann_attract * L_ann_at + w_ann_repel * L_ann_rep + w_ann_vel * L_ann_vel
-                + w_wall * L_wall)
+                + w_ann_attract * L_ann_at + w_ann_repel * L_ann_rep + w_ann_vel * L_ann_vel)
         return loss, dict(sap=L_sap, init=L_init, ch=L_ch, pp=L_pp, sm=L_sm,
                           pen=L_pen, pen_cm=pen_cm, pen_n=pen_n, has_pen=scene_cand is not None,
                           radial=L_radial, radial_w=w_radial,
                           ann_at=L_ann_at, ann_at_cm=ann_at_cm, ann_at_n=ann_at_n,
                           ann_rep=L_ann_rep, ann_rep_cm=ann_rep_cm, ann_rep_n=ann_rep_n,
                           ann_vel=L_ann_vel, ann_vel_cms=ann_vel_cms, ann_vel_n=ann_vel_n,
-                          has_ann=have_labels and scene_cand is not None,
-                          wall=L_wall, wall_cm=wall_cm, wall_n=wall_n, wall_w=w_wall)
+                          has_ann=have_labels and scene_cand is not None)
 
     def _log(tag, it, loss, c, w):
         w_pen = float(w["penetration"])
@@ -631,13 +551,10 @@ def optimize_person(
                     if w_rep_init > 0.0 else "")
         w_rad = float(c.get("radial_w", 0.0))
         rad_str = (f" rad·{w_rad:g}={w_rad * c['radial'].item():.3f}" if w_rad > 0.0 else "")
-        w_wall = float(c.get("wall_w", 0.0))
-        wall_str = (f" wall={float(c['wall_cm']):.1f}cm/{int(c['wall_n'])}f·{w_wall:g}={w_wall * c['wall'].item():.3f}"
-                    if w_wall > 0.0 else "")
         print(f"    [{tag:9s}] it {it:4d}  loss={loss.item():.4f}  "
               f"(rep_sap={c['sap'].item():.4f}·{w_rep_sap:g}={w_rep_sap * c['sap'].item():.2f} "
               f"{init_str}ch={c['ch'].item() * 100:.1f}cm pose={c['pp'].item():.4f} "
-              f"smooth={c['sm'].item():.3f}{pen_str}{rad_str}{ann_str}{wall_str})")
+              f"smooth={c['sm'].item():.3f}{pen_str}{rad_str}{ann_str})")
 
     # ── run the phases in order ──────────────────────────────────────────────
     # Adam (per-coordinate steps) tolerates the very different gradient scales here
@@ -648,7 +565,6 @@ def optimize_person(
     auto_drift_pre = None    # (T, num_joints) refine-start drift, persisted by the caller
     for ph in phases:
         scene_cand = _build_scene_cand() if ph.scene else None
-        wall_cand = _build_wall_cand() if ph.scene else None
         if use_auto and contact_labels is None and scene_cand is not None:
             lab, auto_drift_pre = _detect_auto_labels()   # detect once at the first scene phase, then freeze
             _bind_labels(lab)
@@ -663,7 +579,7 @@ def optimize_person(
 
             def closure():
                 opt.zero_grad()
-                loss, c = _forward_losses(ph.weights, scene_cand, wall_cand)
+                loss, c = _forward_losses(ph.weights, scene_cand)
                 loss.backward()
                 step[0] += 1
                 if step[0] == 1 or step[0] % 5 == 0:
@@ -678,7 +594,7 @@ def optimize_person(
             opt, milestones=[ph.iters // 2, 3 * ph.iters // 4], gamma=float(oc["lr_decay"]))
         for it in range(int(ph.iters)):
             opt.zero_grad()
-            loss, c = _forward_losses(ph.weights, scene_cand, wall_cand)
+            loss, c = _forward_losses(ph.weights, scene_cand)
             loss.backward()
             q.grad.mul_(mask)  # freeze the DOF groups not active this phase
             opt.step()

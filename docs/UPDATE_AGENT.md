@@ -6,6 +6,11 @@ shipped wall-contact seating; this round demotes it to opt-in). Trust
 function/key names over line numbers; re-verify every anchor before building
 on it.*
 
+*(Historical document — the round shipped. 2026-07-11: the wall-contact code,
+`iters.seat` and the `[wall_contact]` config section referenced below were
+removed entirely in the post-round-12 cleanup; do not reintroduce them from
+these instructions.)*
+
 ## Outcome (2026-07-09) — SHIPPED (schema 2)
 
 Confidence v3 landed. 3 commits on `main`: **T1** `4aeb6ae` (wall-contact seating

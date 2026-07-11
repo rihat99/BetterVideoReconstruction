@@ -119,9 +119,10 @@ def _person_depth_and_conf(human, oid, N, conf_drop_q, max_points, device):
 
     The depth points come from the optimizer's OWN loader
     (:func:`tools.human_optim.stages._person_depth_points`, a per-frame quantile
-    gate), so the data-fit chamfer this stage scores is identical to what the
-    kinematic stage optimized — by construction, not by a parallel re-implementation
-    that can drift.
+    gate), not a parallel re-implementation that can drift. Called here in its
+    uniform-stride mode: the optimizer's default limb-quota resampling (and its
+    per-vertex chamfer emphasis) are not applied, so the scored chamfer is a
+    close proxy for — not a bit-identical replay of — the optimized objective.
 
     ``depth_cnt`` / ``mean_conf`` (the observability axis) are computed here over the
     person's **raw** per-frame points — uncapped and ungated: those channels are
@@ -440,9 +441,10 @@ def run(predictions_dir, *, source=None, overlay=False, bodies="kinematic_2",
             raise SystemExit(f"no body npz at {body_path}")
     cnt_name, tag = _BODY_TO_CONTACT[bodies]
 
-    # Data-fit loss uses the SAME weights + kernels as human_optimization's
-    # kinematics_1 stage (its data terms only — reproj + chamfer), read from the
-    # kinematics_1 column + shared knobs of the single config; else defaults.
+    # Data-fit loss uses the SAME weights + GM reprojection kernels as
+    # human_optimization's kinematics_1 stage (its data terms only — reproj +
+    # chamfer), read from the kinematics_1 column + shared knobs of the single
+    # config; else defaults.
     if Path(config_path).exists():
         hc = load_config(config_path)
         w1, knb = hc.weights_for("kinematics_1"), hc.knobs
