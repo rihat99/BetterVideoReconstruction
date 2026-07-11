@@ -49,12 +49,39 @@ from tools.human_optim.confidence import (  # noqa: E402
     CONTACT_CONFIDENCE_DEFAULTS, coarse_of_joint_ids, compute_body_health, contact_confidence,
     joint_sapiens_score)
 from tools.human_optim.qmath import normalize_q  # noqa: E402
-from tools.human_optim.stages import _ANN_TO_SMPLX, resolve_annotation_path  # noqa: E402
+from tools.human_optim.stages import _ANN_TO_SMPLX, _hand_smplx_joints, resolve_annotation_path  # noqa: E402
 from tools.smplx_robot import load_smplx_mid  # noqa: E402
 
 _DEFAULT_CONFIG = _REPO_ROOT / "configs" / "human_optimization.toml"
 _DEFAULT_SMPLX_MODEL = _REPO_ROOT.parent / "better_human" / "models" / "smplx" / "SMPLX_NEUTRAL.npz"
-_COARSE = list(_ANN_TO_SMPLX.keys())   # the 10 annotated coarse joints
+
+# The 14-joint annotation (with its own ankle labels) splits foot(toe) from ankle and adds
+# shoulders; legacy 10-joint annotations keep foot = ankle+foot union and have no ankles/shoulders.
+_ANN_TO_SMPLX_14: dict[str, list[str]] = {
+    "left_hand": _hand_smplx_joints("left"),
+    "right_hand": _hand_smplx_joints("right"),
+    "left_foot": ["left_foot"], "right_foot": ["right_foot"],
+    "left_ankle": ["left_ankle"], "right_ankle": ["right_ankle"],
+    "left_knee": ["left_knee"], "right_knee": ["right_knee"],
+    "left_elbow": ["left_elbow"], "right_elbow": ["right_elbow"],
+    "left_shoulder": ["left_shoulder"], "right_shoulder": ["right_shoulder"],
+    "left_hip": ["left_hip"], "right_hip": ["right_hip"],
+}
+_EXTREMITIES_LEGACY = ("left_hand", "right_hand", "left_foot", "right_foot")
+_EXTREMITIES_14 = _EXTREMITIES_LEGACY + ("left_ankle", "right_ankle")
+
+
+def _ann_mapping(ann_names: list[str]) -> tuple[dict[str, list[str]], list[str], tuple[str, ...]]:
+    """Pick the coarse→SMPLX mapping for one clip from its annotation joint names.
+
+    Returns ``(mapping, coarse, extremities)`` — the 14-joint mapping when the annotation
+    carries a separate ``left_ankle`` label, else the legacy 10-joint ``_ANN_TO_SMPLX``.
+    ``extremities`` (= the FOCUS joints: hands + feet [+ ankles when 14]) drive the funnel's
+    hover evidence and the pooled FOCUS row.
+    """
+    if "left_ankle" in ann_names:
+        return _ANN_TO_SMPLX_14, list(_ANN_TO_SMPLX_14.keys()), _EXTREMITIES_14
+    return _ANN_TO_SMPLX, list(_ANN_TO_SMPLX.keys()), _EXTREMITIES_LEGACY
 
 # The readout grid. still_m = inf ⇒ no drift gate = the pure SDF baseline.
 _CLOSE_GRID = (0.02, 0.03)
@@ -65,9 +92,26 @@ _SDF_DETECTOR_REF = "precision 0.83–0.97, recall 0.19–0.65, FPR 0.01–0.21 
 
 # ─────────────────────────────── scoring ─────────────────────────────────
 
-def _members(mid_names: list[str], coarse: str) -> list[int]:
+def _members(mid_names: list[str], coarse: str, mapping: dict[str, list[str]]) -> list[int]:
     idx = {n: i for i, n in enumerate(mid_names)}
-    return [idx[j] for j in _ANN_TO_SMPLX[coarse] if j in idx]
+    return [idx[j] for j in mapping[coarse] if j in idx]
+
+
+_ALLOW_FRAME_TRIM = False   # set by --allow-frame-trim; a frame-count mismatch is otherwise fatal
+
+
+def _align_frames(n_body: int, n_ann: int, clip: str, oid: int) -> int:
+    """Frames to score. A body/annotation frame-count mismatch is FATAL by default —
+    blind min-trimming assumes the missing frames are at the tail, so any temporal
+    offset would yield plausible-but-wrong scores. ``--allow-frame-trim`` restores
+    the old warn+score-the-overlap behaviour."""
+    if n_ann != n_body:
+        msg = f"{clip} oid={oid}: annotation {n_ann}f vs body {n_body}f"
+        if not _ALLOW_FRAME_TRIM:
+            raise SystemExit(f"[frame-mismatch] {msg} — frame counts must match exactly "
+                             f"(pass --allow-frame-trim to score the min-overlap anyway)")
+        print(f"  [trim] {msg} → using {min(n_body, n_ann)}f")
+    return min(n_body, n_ann)
 
 
 def _coarse_pred(member_bool: np.ndarray) -> np.ndarray:
@@ -86,7 +130,7 @@ def _rates(tp: int, fp: int, fn: int, tn: int) -> dict:
 
 
 def _score(pred_coarse: dict[str, np.ndarray], ann: np.ndarray, ann_names: list[str],
-           valid: np.ndarray) -> dict:
+           valid: np.ndarray, coarse: list[str]) -> dict:
     """Confusion counts per coarse joint over frames where the annotation is 0/1 and valid.
 
     ``pred_coarse[c]`` is (N,) bool; ``ann`` is (J_ann, N) tri-state; returns per-joint
@@ -95,7 +139,7 @@ def _score(pred_coarse: dict[str, np.ndarray], ann: np.ndarray, ann_names: list[
     ann_idx = {n: i for i, n in enumerate(ann_names)}
     out = {}
     tot = dict(tp=0, fp=0, fn=0, tn=0)
-    for c in _COARSE:
+    for c in coarse:
         if c not in ann_idx or c not in pred_coarse:
             continue
         a = ann[ann_idx[c]]                              # (N,) tri-state
@@ -219,12 +263,11 @@ def run_one(pred_dir: str, config_path: Path, device: str, source=None,
 
     mid = load_smplx_mid(_DEFAULT_SMPLX_MODEL, device)
     mid_names = list(mid.joint_names)
-    member_cols = {c: _members(mid_names, c) for c in _COARSE}
     exit_default = float(cc["exit_thresh_m"]); min_frames = int(cc["min_frames"])
 
     ann_path = resolve_annotation_path(source or pred, None)
     ann_all = ann_names = ann_oids = None
-    ann_ignored = None
+    ann_ignored = coarse = focus = member_cols = None
     if ann_path.exists():
         a = dict(np.load(ann_path, allow_pickle=True))
         ann_all = np.asarray(a["contacts"])                       # (Pa, J_ann, N)
@@ -232,6 +275,9 @@ def run_one(pred_dir: str, config_path: Path, device: str, source=None,
         ann_oids = [int(x) for x in np.asarray(a["object_ids"]).ravel()]
         ann_ignored = (np.asarray(a["ignored"]).ravel().astype(bool)
                        if "ignored" in a else np.zeros(len(ann_oids), bool))
+        mapping, coarse, extremities = _ann_mapping(ann_names)    # per-clip 10- vs 14-joint
+        focus = list(extremities)
+        member_cols = {c: _members(mid_names, c, mapping) for c in coarse}
 
     results = []
     for p in range(P):
@@ -254,7 +300,9 @@ def run_one(pred_dir: str, config_path: Path, device: str, source=None,
             dp = np.asarray(kin["drift_pre"])[p]
             if np.isfinite(dp).all():
                 gate_drift = torch.as_tensor(dp, dtype=drift.dtype, device=drift.device)
-        ann = ann_all[ann_oids.index(oid)]                        # (J_ann, N)
+        ann = ann_all[ann_oids.index(oid)]                        # (J_ann, N_ann)
+        Nc = _align_frames(N, ann.shape[1], pred.name, oid)
+        ann = ann[:, :Nc]; vmask_c = vmask[:Nc]
         grid = {}
         for close in _CLOSE_GRID:
             exit_below = max(exit_default, close)
@@ -265,11 +313,12 @@ def run_one(pred_dir: str, config_path: Path, device: str, source=None,
                     jc_t = merge_contact_spans(jc_t, jw, gsdf, merge_dist_m=merge_dist,
                                                max_gap_s=float(cc["merge_max_gap_s"]),
                                                gap_sdf_m=float(cc["merge_sdf_m"]), fps=fps)
-                jc = jc_t.cpu().numpy()
-                jc[~vmask] = False
-                pred_coarse = {c: _coarse_pred(jc[:, member_cols[c]]) for c in _COARSE}
-                grid[(close, still)] = _score(pred_coarse, ann, ann_names, vmask)
-        results.append(dict(clip=pred.name, oid=oid, valid=int(vmask.sum()), n=N, grid=grid))
+                jc = jc_t.cpu().numpy()[:Nc]
+                jc[~vmask_c] = False
+                pred_coarse = {c: _coarse_pred(jc[:, member_cols[c]]) for c in coarse}
+                grid[(close, still)] = _score(pred_coarse, ann, ann_names, vmask_c, coarse)
+        results.append(dict(clip=pred.name, oid=oid, valid=int(vmask_c.sum()), n=N, grid=grid,
+                            coarse=coarse, focus=focus))
     return results
 
 
@@ -294,6 +343,18 @@ def _pool(all_res: list[dict], close: float, still: float) -> dict:
     return _rates(**tot)
 
 
+def _pool_focus(all_res: list[dict], close: float, still: float) -> dict:
+    """Pool confusion across people/clips over each clip's FOCUS joints (hands+feet[+ankles])."""
+    tot = dict(tp=0, fp=0, fn=0, tn=0)
+    for res in all_res:
+        sc = res["grid"][(close, still)]
+        for c in res["focus"]:
+            if c in sc:
+                for k in tot:
+                    tot[k] += sc[c][k]
+    return _rates(**tot)
+
+
 def _print_pooled(all_res: list[dict], exclude: set[str]) -> None:
     pooled = [r for r in all_res if r["clip"] not in exclude]
     dropped = sorted({r["clip"] for r in all_res if r["clip"] in exclude})
@@ -305,6 +366,11 @@ def _print_pooled(all_res: list[dict], exclude: set[str]) -> None:
         print(f"  close_thresh={close * 100:.0f}cm")
         for still in _STILL_GRID:
             print(f"    still={_still_tag(still):>6s}  {_fmt(_pool(pooled, close, still))}")
+    print("\n=== POOLED — FOCUS joints only (hands + feet + ankles; the signal joints) ===")
+    for close in _CLOSE_GRID:
+        print(f"  close_thresh={close * 100:.0f}cm")
+        for still in _STILL_GRID:
+            print(f"    still={_still_tag(still):>6s}  {_fmt(_pool_focus(pooled, close, still))}")
 
 
 def _print_per_joint(all_res: list[dict], close: float, still: float) -> None:
@@ -312,7 +378,7 @@ def _print_per_joint(all_res: list[dict], close: float, still: float) -> None:
     for res in all_res:
         print(f"  {res['clip']} oid={res['oid']}")
         sc = res["grid"][(close, still)]
-        for c in _COARSE:
+        for c in res["coarse"]:
             if c in sc:
                 print(f"    {c:12s} {_fmt(sc[c])}")
 
@@ -328,7 +394,6 @@ def _print_per_joint(all_res: list[dict], close: float, still: float) -> None:
 _FUNNEL_LOOSE_GUARD_M = 0.15   # invisible test: no scene point within this on EVERY span frame = carve gap
 _INF = 1e30                    # joint_guarded_min_sdf's +inf sentinel (finfo.max) reads as this in float32
 _FUNNEL_CATS = ("invisible", "unlabeled", "hovering", "hovering_blind", "moving", "flicker")
-_EXTREMITIES = ("left_hand", "right_hand", "left_foot", "right_foot")
 
 
 @torch.no_grad()
@@ -379,7 +444,7 @@ def _dilate(mask: np.ndarray, k: int) -> np.ndarray:
 
 
 def _classify_person(gsdf_t, gsdf_l, drift, jc, auto_lab, ann, ann_names, valid,
-                     member_cols, *, close: float, still_m: float, fps: float) -> dict:
+                     member_cols, extremities, *, close: float, still_m: float, fps: float) -> dict:
     """Walk each missed annotated-positive coarse-joint-frame to its first-failing stage.
 
     Returns ``{per, tot, hover_gaps, still_ext_gsdf}``: per-coarse + overall confusion/category
@@ -406,7 +471,7 @@ def _classify_person(gsdf_t, gsdf_l, drift, jc, auto_lab, ann, ann_names, valid,
         cj = {"pos": int(pos.sum()), "hit": int((pos & pred).sum()),
               "neg": int(neg.sum()), "fp": int((neg & pred).sum())}
         cj.update({k: 0 for k in _FUNNEL_CATS})
-        if c in _EXTREMITIES:                              # hover evidence: still + visible extremity frames
+        if c in extremities:                               # hover evidence: still + visible extremity frames
             sel = valid & (dr < two_still) & (gt < _INF)
             still_ext.extend(gt[sel].tolist())
         fp = neg & pred
@@ -457,7 +522,6 @@ def _funnel_one(pred_dir: str, config_path: Path, device: str, source=None,
     scene_pts, scene_normals, scene_conf = _load_scene_readout(pred, cc, cam_centers, device)
 
     mid = load_smplx_mid(_DEFAULT_SMPLX_MODEL, device)
-    member_cols = {c: _members(list(mid.joint_names), c) for c in _COARSE}
 
     ann_path = resolve_annotation_path(source or pred, None)
     if not ann_path.exists():
@@ -468,6 +532,8 @@ def _funnel_one(pred_dir: str, config_path: Path, device: str, source=None,
     ann_oids = [int(x) for x in np.asarray(a["object_ids"]).ravel()]
     ann_ignored = (np.asarray(a["ignored"]).ravel().astype(bool)
                    if "ignored" in a else np.zeros(len(ann_oids), bool))
+    mapping, _coarse, extremities = _ann_mapping(ann_names)       # per-clip 10- vs 14-joint
+    member_cols = {c: _members(list(mid.joint_names), c, mapping) for c in _coarse}
 
     results = []
     for p in range(P):
@@ -488,10 +554,12 @@ def _funnel_one(pred_dir: str, config_path: Path, device: str, source=None,
         jc[~vmask] = False
         auto_lab = np.asarray(kin["auto_labels"][p], np.int8)
         ann = ann_all[ann_oids.index(oid)]
-        cls = _classify_person(gt_t.cpu().numpy(), gl_t.cpu().numpy(), dr_t.cpu().numpy(),
-                               jc, auto_lab, ann, ann_names, vmask, member_cols,
-                               close=close, still_m=still_m, fps=fps)
-        results.append(dict(clip=pred.name, oid=oid, valid=int(vmask.sum()), n=N, **cls))
+        Nc = _align_frames(N, ann.shape[1], pred.name, oid)
+        cls = _classify_person(gt_t.cpu().numpy()[:Nc], gl_t.cpu().numpy()[:Nc], dr_t.cpu().numpy()[:Nc],
+                               jc[:Nc], auto_lab[:Nc], ann[:, :Nc], ann_names, vmask[:Nc], member_cols,
+                               extremities, close=close, still_m=still_m, fps=fps)
+        results.append(dict(clip=pred.name, oid=oid, valid=int(vmask[:Nc].sum()), n=N,
+                            extremities=list(extremities), **cls))
     return results
 
 
@@ -551,7 +619,8 @@ def _print_funnel(all_res: list[dict], exclude: set[str]) -> None:
     print(f"\n### FUNNEL POOLED{' (excl ' + ', '.join(dropped) + ')' if dropped else ''} ###")
     _print_funnel_block(tot, gaps, sext)
     print("  per-coarse (pooled extremities):")
-    for c in _EXTREMITIES:
+    ext_order = list(dict.fromkeys(c for r in pooled for c in r["extremities"]))   # ordered union
+    for c in ext_order:
         cjs = [r["per"][c] for r in pooled if c in r["per"]]
         if not cjs:
             continue
@@ -587,7 +656,6 @@ def _reliability_one(pred_dir: str, config_path: Path, device: str, source=None,
     scene_pts, scene_normals, scene_conf = _load_scene_readout(pred, cc, cam_centers, device)
     mid = load_smplx_mid(_DEFAULT_SMPLX_MODEL, device)
     mid_names = list(mid.joint_names)
-    member_cols = {c: _members(mid_names, c) for c in _COARSE}
     coarse_t = torch.as_tensor(coarse_of_joint_ids(mid_names), device=device)
     exit_below = max(float(cc["exit_thresh_m"]), close); min_frames = int(cc["min_frames"])
     pose_path = pred / "sapiens" / "pose.npz"
@@ -603,6 +671,8 @@ def _reliability_one(pred_dir: str, config_path: Path, device: str, source=None,
     ann_ignored = (np.asarray(a["ignored"]).ravel().astype(bool)
                    if "ignored" in a else np.zeros(len(ann_oids), bool))
     ann_idx = {n: i for i, n in enumerate(ann_names)}
+    mapping, _coarse, _extremities = _ann_mapping(ann_names)      # per-clip 10- vs 14-joint
+    member_cols = {c: _members(mid_names, c, mapping) for c in _coarse}
 
     out = []
     for p in range(P):
@@ -639,12 +709,16 @@ def _reliability_one(pred_dir: str, config_path: Path, device: str, source=None,
                                          n_occ=n_occ, sap_score=torch.as_tensor(sap, device=device),
                                          cfg=cf, window_s=float(cg["window_s"]), fps=fps, body_health=health)
         speed = (gate_drift / max(float(cg["window_s"]), 1e-6)).cpu().numpy()
-        gsdf_np = gsdf.cpu().numpy(); rows = np.arange(N)
+        gsdf_np = gsdf.cpu().numpy()
+        ann_p = ann_all[ann_oids.index(oid)]                       # (J_ann, N_ann)
+        Nc = _align_frames(N, ann_p.shape[1], pred.name, oid)
+        ann_p = ann_p[:, :Nc]; vmask = vmask[:Nc]; rows = np.arange(Nc)
+        lconf, jc, speed, gsdf_np = lconf[:Nc], jc[:Nc], speed[:Nc], gsdf_np[:Nc]
         rec: dict[str, list] = {k: [] for k in ("conf", "pred", "ann_pos", "speed", "gsdf")}
         for c, M in member_cols.items():
             if c not in ann_idx or not M:
                 continue
-            a_c = ann_all[ann_oids.index(oid)][ann_idx[c]]          # (N,) tri-state
+            a_c = ann_p[ann_idx[c]]                                 # (Nc,) tri-state
             gt = gsdf_np[:, M]; jstar = gt.argmin(axis=1)           # closest-to-wall member
             m = vmask & ((a_c == 0) | (a_c == 1))
             if not m.any():
@@ -738,7 +812,12 @@ def main(argv=None) -> int:
                     help="span-merge distance (m) applied to the grid readout; 0 = off")
     ap.add_argument("--gate-source", choices=["final", "pre"], default="final",
                     help="stillness-gate drift source: final-body (default) or persisted refine-start drift_pre")
+    ap.add_argument("--allow-frame-trim", action="store_true",
+                    help="on a body/annotation frame-count mismatch, warn and score the min-overlap "
+                         "instead of aborting (assumes the missing frames are at the tail)")
     args = ap.parse_args(argv)
+    global _ALLOW_FRAME_TRIM
+    _ALLOW_FRAME_TRIM = bool(args.allow_frame_trim)
     body_path = Path(args.body_path) if args.body_path else None
     if body_path is not None and len(args.predictions) != 1:
         raise SystemExit("--body-path requires exactly one --predictions")
