@@ -41,13 +41,12 @@ import torch  # noqa: E402
 from tools.geometry.normals import estimate_point_normals  # noqa: E402
 from tools.human_optim import (  # noqa: E402
     drift_gated_contact, joint_drift, joint_guarded_min_sdf, joint_occlusion_counts,
-    lift_joint_contact, merge_contact_spans, project, scene_sdf, transform_points,
-    vertex_to_joint, world_from_cam,
+    merge_contact_spans, project,
+    scene_sdf, transform_points, vertex_to_joint, world_from_cam,
 )
 from tools.human_optim import paths  # noqa: E402
 from tools.human_optim.confidence import (  # noqa: E402
-    CONTACT_CONFIDENCE_DEFAULTS, coarse_of_joint_ids, compute_body_health, contact_confidence,
-    joint_sapiens_score)
+    confidence_config, joint_label_confidence, occlusion_group_ids)
 from tools.human_optim.qmath import normalize_q  # noqa: E402
 from tools.human_optim.stages import _ANN_TO_SMPLX, _hand_smplx_joints, resolve_annotation_path  # noqa: E402
 from tools.smplx_robot import load_smplx_mid  # noqa: E402
@@ -191,8 +190,9 @@ def _pose_world(mid, betas: torch.Tensor, q: torch.Tensor, scale: float, *, chun
 
 @torch.no_grad()
 def _readout_signals(mid, betas, q, scale, scene_pts, scene_normals, scene_conf, *,
-                     fps: float, cc: dict, cg: dict):
-    """Grid-invariant readout signals for one person: ``(jw, vw, v2j, guarded_min_sdf, jsdf, drift)``.
+                     fps: float, cc: dict, cg: dict, posed_world=None,
+                     valid_mask=None):
+    """Grid-invariant signals: posed geometry, guarded SDF, and motion drift.
 
     Everything the (close_thresh_m, still_m) sweep does NOT change — the pose, the scene
     SDF, the guarded per-joint min, and the net window drift — computed once. ``jw``/``vw``/``v2j``
@@ -201,14 +201,15 @@ def _readout_signals(mid, betas, q, scale, scene_pts, scene_normals, scene_conf,
     J = mid.num_joints
     v_rest, j_rest = mid.forward_shape(betas[None])
     v2j = vertex_to_joint(v_rest[0], j_rest[0])                       # (V,) per person
-    jw, vw = _pose_world(mid, betas, q, scale)
+    jw, vw = (_pose_world(mid, betas, q, scale)
+              if posed_world is None else posed_world)
     sdf, dmin, conf = scene_sdf(vw, scene_pts, scene_normals, scene_conf,
                                 prune_margin_m=float(cc["prune_margin_m"]))
     gsdf = joint_guarded_min_sdf(sdf, dmin, conf, v2j, J,
                                  max_dist_m=float(cc["max_dist_m"]), conf_thresh=float(cc["conf_thresh"]))
-    _, jsdf = lift_joint_contact(torch.zeros_like(sdf, dtype=torch.bool), sdf, v2j, J)   # unguarded per-joint min sdf (cm)
-    drift = joint_drift(jw, fps=fps, window_s=float(cg["window_s"]))
-    return jw, vw, v2j, gsdf, jsdf, drift
+    drift = joint_drift(
+        jw, fps=fps, window_s=float(cg["window_s"]), valid_mask=valid_mask)
+    return jw, vw, v2j, gsdf, drift
 
 
 def _load_scene_readout(pred: Path, cc: dict, cam_centers: torch.Tensor, device: str):
@@ -233,7 +234,8 @@ def _load_contact_cfg(path: Path) -> tuple[dict, dict]:
     cc.setdefault("prune_margin_m", 0.10)
     cc.setdefault("close_thresh_m", 0.02)   # standard-readout enter distance (funnel reads it; grid sweeps it)
     cc.setdefault("exit_thresh_m", 0.035); cc.setdefault("min_frames", 3)
-    cc.setdefault("merge_max_gap_s", 2.0); cc.setdefault("merge_sdf_m", 0.08)   # span-merge knobs
+    cc.setdefault("merge_dist_m", 0.03); cc.setdefault("merge_max_gap_s", 2.0)
+    cc.setdefault("merge_sdf_m", 0.08)   # span-merge knobs
     cg = cfg.get("contact_gate", {})
     cg.setdefault("window_s", 0.35); cg.setdefault("still_m", 0.025)
     return cc, cg
@@ -291,15 +293,18 @@ def run_one(pred_dir: str, config_path: Path, device: str, source=None,
         betas = torch.as_tensor(kin["betas"][p], dtype=torch.float32, device=device)
         q = torch.as_tensor(kin["q"][p], dtype=torch.float32, device=device)
         scale = float(kin["scale"][p]) if "scale" in kin else 1.0
-        jw, _vw, _v2j, gsdf, _jsdf, drift = _readout_signals(mid, betas, q, scale, scene_pts, scene_normals,
-                                                             scene_conf, fps=fps, cc=cc, cg=cg)
+        jw, _vw, _v2j, gsdf, drift = _readout_signals(
+            mid, betas, q, scale, scene_pts, scene_normals,
+            scene_conf, fps=fps, cc=cc, cg=cg, valid_mask=vmask)
         # gate source: read the persisted refine-start drift_pre (pre-enforcement) instead of
         # the final-body drift. Per-person fallback to computed drift if absent / NaN (old npz).
         gate_drift = drift
         if gate_source == "pre" and "drift_pre" in kin:
-            dp = np.asarray(kin["drift_pre"])[p]
-            if np.isfinite(dp).all():
-                gate_drift = torch.as_tensor(dp, dtype=drift.dtype, device=drift.device)
+            dp = torch.as_tensor(
+                np.asarray(kin["drift_pre"])[p], dtype=drift.dtype, device=drift.device)
+            if dp.shape == drift.shape:
+                gate_drift = torch.where(
+                    torch.isfinite(dp) & torch.isfinite(drift), dp, drift)
         ann = ann_all[ann_oids.index(oid)]                        # (J_ann, N_ann)
         Nc = _align_frames(N, ann.shape[1], pred.name, oid)
         ann = ann[:, :Nc]; vmask_c = vmask[:Nc]
@@ -632,8 +637,9 @@ def _print_funnel(all_res: list[dict], exclude: set[str]) -> None:
 # Recompute the readout AND its per-joint label_confidence at one operating point, then
 # check the confidence against the manual annotation: does accuracy rise with confidence
 # (per predicted class), and do the two monotonicities hold (faster ⇒ surer no-contact;
-# closer ⇒ surer contact). Confidence is folded to coarse by the closest-to-wall member,
-# matching the funnel's best-member convention.
+# stronger surface evidence ⇒ surer contact). Coarse groups use the same logic
+# as export: contact is an OR with maximum confidence over touching members; free
+# is an AND with minimum confidence over all members.
 
 def _reliability_one(pred_dir: str, config_path: Path, device: str, source=None,
                      body_path: Path | None = None, close: float = 0.03, still: float = 0.03,
@@ -642,7 +648,7 @@ def _reliability_one(pred_dir: str, config_path: Path, device: str, source=None,
     pred = Path(pred_dir)
     cc, cg = _load_contact_cfg(config_path)
     raw = tomllib.load(config_path.open("rb")) if config_path.exists() else {}
-    cf = {**CONTACT_CONFIDENCE_DEFAULTS, **raw.get("contact_confidence", {})}
+    cf = confidence_config(raw.get("contact_confidence", {}))
     bpath = Path(body_path) if body_path is not None else paths.body_path(pred, "kinematic_1")
     kin = dict(np.load(bpath, allow_pickle=True))
     tr = dict(np.load(pred / "geometry" / "transform.npz", allow_pickle=True))
@@ -656,11 +662,8 @@ def _reliability_one(pred_dir: str, config_path: Path, device: str, source=None,
     scene_pts, scene_normals, scene_conf = _load_scene_readout(pred, cc, cam_centers, device)
     mid = load_smplx_mid(_DEFAULT_SMPLX_MODEL, device)
     mid_names = list(mid.joint_names)
-    coarse_t = torch.as_tensor(coarse_of_joint_ids(mid_names), device=device)
+    occ_group_t = torch.as_tensor(occlusion_group_ids(mid_names), device=device)
     exit_below = max(float(cc["exit_thresh_m"]), close); min_frames = int(cc["min_frames"])
-    pose_path = pred / "sapiens" / "pose.npz"
-    posef = dict(np.load(pose_path, allow_pickle=True)) if pose_path.exists() else None
-    pose_oids = [int(x) for x in posef["object_ids"]] if posef is not None else []
 
     ann_path = resolve_annotation_path(source or pred, None)
     if not ann_path.exists():
@@ -674,6 +677,13 @@ def _reliability_one(pred_dir: str, config_path: Path, device: str, source=None,
     mapping, _coarse, _extremities = _ann_mapping(ann_names)      # per-clip 10- vs 14-joint
     member_cols = {c: _members(mid_names, c, mapping) for c in _coarse}
 
+    posed_people = []
+    for p in range(P):
+        betas_p = torch.as_tensor(kin["betas"][p], dtype=torch.float32, device=device)
+        q_p = torch.as_tensor(kin["q"][p], dtype=torch.float32, device=device)
+        scale_p = float(kin["scale"][p]) if "scale" in kin else 1.0
+        posed_people.append(_pose_world(mid, betas_p, q_p, scale_p))
+
     out = []
     for p in range(P):
         oid = int(object_ids[p])
@@ -683,13 +693,17 @@ def _reliability_one(pred_dir: str, config_path: Path, device: str, source=None,
         betas = torch.as_tensor(kin["betas"][p], dtype=torch.float32, device=device)
         q = torch.as_tensor(kin["q"][p], dtype=torch.float32, device=device)
         scale = float(kin["scale"][p]) if "scale" in kin else 1.0
-        jw, vw, v2j, gsdf, jsdf, drift = _readout_signals(mid, betas, q, scale, scene_pts, scene_normals,
-                                                          scene_conf, fps=fps, cc=cc, cg=cg)
+        jw, vw, v2j, gsdf, drift = _readout_signals(
+            mid, betas, q, scale, scene_pts, scene_normals,
+            scene_conf, fps=fps, cc=cc, cg=cg, posed_world=posed_people[p],
+            valid_mask=vmask)
         gate_drift = drift
         if gate_source == "pre" and "drift_pre" in kin:
-            dp = np.asarray(kin["drift_pre"])[p]
-            if np.isfinite(dp).all():
-                gate_drift = torch.as_tensor(dp, dtype=drift.dtype, device=drift.device)
+            dp = torch.as_tensor(
+                np.asarray(kin["drift_pre"])[p], dtype=drift.dtype, device=drift.device)
+            if dp.shape == drift.shape:
+                gate_drift = torch.where(
+                    torch.isfinite(dp) & torch.isfinite(drift), dp, drift)
         jc_t = drift_gated_contact(gsdf, gate_drift, close_thresh_m=close, exit_thresh_m=exit_below,
                                    min_frames=min_frames, still_m=still)
         if merge_dist > 0.0:
@@ -697,37 +711,60 @@ def _reliability_one(pred_dir: str, config_path: Path, device: str, source=None,
                                        max_gap_s=float(cc["merge_max_gap_s"]),
                                        gap_sdf_m=float(cc["merge_sdf_m"]), fps=fps)
         jc = jc_t.cpu().numpy(); jc[~vmask] = False
-        px = project(transform_points(jw, extr), K)
-        health = compute_body_health(jc, jsdf.cpu().numpy(), vmask, cfg=cf)
-        n_occ = joint_occlusion_counts(vw, jw, cam_centers, v2j, coarse_t)
-        if posef is not None and oid in pose_oids:
-            sap = joint_sapiens_score(np.asarray(posef["keypoint_scores"][pose_oids.index(oid)], np.float32), mid_names)
-        else:
-            sap = np.full((N, len(mid_names)), np.nan, np.float32)
-        _, _, lconf = contact_confidence(torch.as_tensor(jc, dtype=torch.bool, device=device),
-                                         gsdf, jsdf / 100.0, gate_drift, jw, px, scene_pts, H, W,
-                                         n_occ=n_occ, sap_score=torch.as_tensor(sap, device=device),
-                                         cfg=cf, window_s=float(cg["window_s"]), fps=fps, body_health=health)
+        jw_cam = transform_points(jw, extr)
+        px = project(jw_cam, K)
+        other_vw = None
+        if P > 1:
+            others = []
+            for i, pose in enumerate(posed_people):
+                if i == p:
+                    continue
+                other_valid = torch.as_tensor(
+                    np.asarray(kin["valid_mask"][i], bool), device=device)[:, None, None]
+                others.append(torch.where(
+                    other_valid, pose[1], torch.full_like(pose[1], float("nan"))))
+            other_vw = torch.stack(others, dim=1)
+        n_occ = joint_occlusion_counts(
+            vw, jw, cam_centers, v2j, occ_group_t,
+            other_vertices=other_vw,
+            perp_m=float(cf["occ_perp_m"]), front_m=float(cf["occ_front_m"]),
+            subsample=int(cf["occ_subsample"]))
+        terms = joint_label_confidence(
+            torch.as_tensor(jc, dtype=torch.bool, device=device), gsdf, gate_drift,
+            px, jw_cam[..., 2], n_occ, height=H, width=W, cfg=cf,
+            window_s=float(cg["window_s"]))
+        lconf = terms["label_confidence"]
+        surface = terms["surface"]
         speed = (gate_drift / max(float(cg["window_s"]), 1e-6)).cpu().numpy()
         gsdf_np = gsdf.cpu().numpy()
         ann_p = ann_all[ann_oids.index(oid)]                       # (J_ann, N_ann)
         Nc = _align_frames(N, ann_p.shape[1], pred.name, oid)
         ann_p = ann_p[:, :Nc]; vmask = vmask[:Nc]; rows = np.arange(Nc)
-        lconf, jc, speed, gsdf_np = lconf[:Nc], jc[:Nc], speed[:Nc], gsdf_np[:Nc]
-        rec: dict[str, list] = {k: [] for k in ("conf", "pred", "ann_pos", "speed", "gsdf")}
+        lconf, surface = lconf[:Nc], surface[:Nc]
+        jc, speed, gsdf_np = jc[:Nc], speed[:Nc], gsdf_np[:Nc]
+        rec: dict[str, list] = {
+            k: [] for k in ("conf", "pred", "ann_pos", "speed", "gsdf", "surface")}
         for c, M in member_cols.items():
             if c not in ann_idx or not M:
                 continue
             a_c = ann_p[ann_idx[c]]                                 # (Nc,) tri-state
-            gt = gsdf_np[:, M]; jstar = gt.argmin(axis=1)           # closest-to-wall member
+            member_contact = jc[:, M]
+            pred_c = member_contact.any(axis=1)
+            member_conf = lconf[:, M]
+            touch_conf = np.where(member_contact, member_conf, -np.inf)
+            touch_j = touch_conf.argmax(axis=1)
+            free_j = member_conf.argmin(axis=1)
+            jstar = np.where(pred_c, touch_j, free_j)
+            gt = gsdf_np[:, M]
             m = vmask & ((a_c == 0) | (a_c == 1))
             if not m.any():
                 continue
             rec["conf"].append(lconf[:, M][rows, jstar][m])
-            rec["pred"].append(jc[:, M][rows, jstar][m])
+            rec["pred"].append(pred_c[m])
             rec["ann_pos"].append((a_c == 1)[m])
             rec["speed"].append(speed[:, M][rows, jstar][m])
             rec["gsdf"].append(gt[rows, jstar][m])
+            rec["surface"].append(surface[:, M][rows, jstar][m])
         if rec["conf"]:
             out.append(dict(clip=pred.name, oid=oid,
                             **{k: np.concatenate(v) for k, v in rec.items()}))
@@ -750,6 +787,8 @@ def _bin_table(conf: np.ndarray, correct: np.ndarray, nbins: int = 10) -> str:
 
 def _decile_trend(x: np.ndarray, conf: np.ndarray, label: str) -> str:
     """Mean conf per decile of x — for the two monotonicity checks."""
+    finite = np.isfinite(x) & np.isfinite(conf)
+    x, conf = x[finite], conf[finite]
     if x.size < 10:
         return f"    {label}: n={x.size} (too few)"
     q = np.quantile(x, np.linspace(0, 1, 11))
@@ -760,15 +799,17 @@ def _decile_trend(x: np.ndarray, conf: np.ndarray, label: str) -> str:
     return f"    {label}: " + " ".join(f"{m:.2f}" for m in means)
 
 
-def _print_reliability(all_rec: list[dict], exclude: set[str], close: float, still: float) -> None:
+def _print_reliability(all_rec: list[dict], exclude: set[str], close: float, still: float,
+                       *, merge_dist: float, gate_source: str) -> None:
     from scipy.stats import spearmanr
     pooled = [r for r in all_rec if r["clip"] not in exclude]
     dropped = sorted({r["clip"] for r in all_rec if r["clip"] in exclude})
     cat = lambda k: np.concatenate([r[k] for r in pooled]) if pooled else np.zeros(0)
     conf, pred, ann_pos = cat("conf"), cat("pred").astype(bool), cat("ann_pos").astype(bool)
-    speed, gsdf = cat("speed"), cat("gsdf")
+    speed, surface = cat("speed"), cat("surface")
     correct = (pred == ann_pos)
-    print(f"\n=== CONFIDENCE RELIABILITY  (close={close*100:.0f}cm still={still:.3f}, gate=pre)"
+    print(f"\n=== CONFIDENCE RELIABILITY  (close={close*100:.0f}cm still={still:.3f}, "
+          f"merge={merge_dist:.3f}m gate={gate_source})"
           f"{'  excl ' + ', '.join(dropped) if dropped else ''} ===")
     print(f"  scored coarse-joint-frames: {conf.size}  (pred-contact {int(pred.sum())}, "
           f"pred-no-contact {int((~pred).sum())})")
@@ -782,7 +823,8 @@ def _print_reliability(all_rec: list[dict], exclude: set[str], close: float, sti
         print(_bin_table(c, ok))
     print("\n  monotonicity (mean confidence per decile — should be monotone):")
     print(_decile_trend(speed[~pred], conf[~pred], "conf(no-contact) vs speed↑ (want ↑)"))
-    print(_decile_trend(gsdf[pred], conf[pred], "conf(contact)    vs gsdf↑  (want ↓)"))
+    print(_decile_trend(surface[pred], conf[pred],
+                        "conf(contact)    vs surface evidence↑ (want ↑)"))
     missed = (~pred) & ann_pos                                    # annotated contacts we called no-contact
     if missed.any():
         mc = conf[missed]
@@ -808,10 +850,12 @@ def main(argv=None) -> int:
     ap.add_argument("--reliability", action="store_true",
                     help="check per-joint label_confidence against the annotation "
                          "(accuracy per confidence bin + monotonicity) instead of the grid")
-    ap.add_argument("--merge-dist", type=float, default=0.0,
-                    help="span-merge distance (m) applied to the grid readout; 0 = off")
-    ap.add_argument("--gate-source", choices=["final", "pre"], default="final",
-                    help="stillness-gate drift source: final-body (default) or persisted refine-start drift_pre")
+    ap.add_argument("--merge-dist", type=float, default=None,
+                    help="span-merge distance (m); reliability defaults to the stage config, "
+                         "the grid/funnel default to 0 (off)")
+    ap.add_argument("--gate-source", choices=["final", "pre"], default=None,
+                    help="stillness-gate drift source; reliability defaults to pre (the saved "
+                         "stage readout), the grid/funnel default to final")
     ap.add_argument("--allow-frame-trim", action="store_true",
                     help="on a body/annotation frame-count mismatch, warn and score the min-overlap "
                          "instead of aborting (assumes the missing frames are at the tail)")
@@ -833,26 +877,35 @@ def main(argv=None) -> int:
         return 0
 
     if args.reliability:
+        score_cc, _ = _load_contact_cfg(args.config)
+        reliability_merge = (float(score_cc["merge_dist_m"])
+                             if args.merge_dist is None else float(args.merge_dist))
+        reliability_gate = args.gate_source or "pre"
         all_rec: list[dict] = []
         for pd in args.predictions:
             all_rec.extend(_reliability_one(pd, args.config, args.device, source=args.source,
                                             body_path=body_path, close=args.ref_close, still=args.ref_still,
-                                            merge_dist=args.merge_dist, gate_source=args.gate_source))
+                                            merge_dist=reliability_merge,
+                                            gate_source=reliability_gate))
         if not all_rec:
             print("no annotated people found in the given clips")
             return 1
-        _print_reliability(all_rec, set(args.exclude_from_pool), args.ref_close, args.ref_still)
+        _print_reliability(
+            all_rec, set(args.exclude_from_pool), args.ref_close, args.ref_still,
+            merge_dist=reliability_merge, gate_source=reliability_gate)
         return 0
 
+    grid_merge = 0.0 if args.merge_dist is None else float(args.merge_dist)
+    grid_gate = args.gate_source or "final"
     all_res = []
     for pd in args.predictions:
         all_res.extend(run_one(pd, args.config, args.device, source=args.source, body_path=body_path,
-                               merge_dist=args.merge_dist, gate_source=args.gate_source))
+                               merge_dist=grid_merge, gate_source=grid_gate))
     if not all_res:
         print("no annotated people found in the given clips")
         return 1
-    if args.merge_dist > 0.0 or args.gate_source != "final":
-        print(f"[readout: merge_dist={args.merge_dist} gate_source={args.gate_source}]")
+    if grid_merge > 0.0 or grid_gate != "final":
+        print(f"[readout: merge_dist={grid_merge} gate_source={grid_gate}]")
     for res in all_res:
         _print_clip_grid(res)
     _print_per_joint(all_res, args.ref_close, args.ref_still)

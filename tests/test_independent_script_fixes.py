@@ -9,7 +9,7 @@ import pytest
 import torch
 
 from scripts.audit_scenes import _finite_percentiles, _person_rows
-from scripts.stages.estimate_uncertainty import _mean_contact_conf, _score_person
+from scripts.precompute_contacts_scenes import _is_fresh, _sha256
 from scripts.stages.fuse_geometry import _build_geometry, _record_anchor_veto
 
 
@@ -80,7 +80,7 @@ def test_fusion_split_scale_geometry_signature_is_unchanged(tmp_path):
     assert float(distance.min(dim=0).values.max()) < 1e-6
 
 
-def test_audit_percentiles_and_person_rows_tolerate_all_nan_chamfer(tmp_path):
+def test_audit_percentiles_and_person_rows_handle_contact_only_inputs(tmp_path):
     got = _finite_percentiles([np.nan, np.nan])
     assert got.shape == (5,)
     assert np.isnan(got).all()
@@ -104,12 +104,6 @@ def test_audit_percentiles_and_person_rows_tolerate_all_nan_chamfer(tmp_path):
         joint_contact=np.zeros((1, 2, 1), bool),
         joint_sdf_cm=np.array([[[1.0], [2.0]]], np.float32),
     )
-    np.savez(
-        human_dir / "uncertainty_1.npz",
-        valid=np.array([[True, True]]),
-        chamfer_cm=np.full((1, 2), np.nan, np.float32),
-        obs_score=np.array([[0.5, 0.7]], np.float32),
-    )
     np.savez(geometry_dir / "scene.npz", points=np.zeros((10, 3), np.float32))
 
     with warnings.catch_warnings():
@@ -117,52 +111,52 @@ def test_audit_percentiles_and_person_rows_tolerate_all_nan_chamfer(tmp_path):
         rows = _person_rows(Paths(), sid, min_valid=1)
 
     assert len(rows) == 1
-    assert np.isnan(rows[0]["med_chamfer_cm"])
-    assert np.isnan(rows[0]["p90_chamfer_cm"])
+    assert rows[0]["contact_rate"] == 0.0
+    assert rows[0]["med_min_jsdf_cm"] == 1.5
 
 
-def _reprojection_metrics(n_frames: int) -> dict[str, np.ndarray]:
-    return {
-        "L_sap": np.full(n_frames, 0.1, np.float32),
-        "L_init": np.full(n_frames, 0.1, np.float32),
-        "n_kp": np.ones(n_frames, np.float32),
-        "reproj_sap_px": np.ones(n_frames, np.float32),
-        "reproj_init_px": np.ones(n_frames, np.float32),
-    }
+def test_contact_precompute_skip_requires_matching_provenance(tmp_path):
+    body = tmp_path / "kinematic_1.npz"
+    geom = tmp_path / "geometry"
+    geom.mkdir()
+    scene, transform = geom / "scene.npz", geom / "transform.npz"
+    config = tmp_path / "config.toml"
+    body.write_bytes(b"body")
+    scene.write_bytes(b"scene")
+    transform.write_bytes(b"transform")
+    config.write_text("[contact_confidence]\n")
+    out = tmp_path / "contacts_1.npz"
+    np.savez(
+        out,
+        confidence_schema=np.int32(4),
+        confidence_method=np.str_("motion-only-joint-label-v1"),
+        source_body=np.str_(body.name),
+        source_body_sha256=np.str_(_sha256(body)),
+        source_scene_sha256=np.str_(_sha256(scene)),
+        source_transform_sha256=np.str_(_sha256(transform)),
+    )
+    assert _is_fresh(out, body, geom, config)
 
+    np.savez(
+        out,
+        confidence_schema=np.int32(3),
+        confidence_method=np.str_("continuous-joint-label-v1"),
+        source_body=np.str_(body.name),
+        source_body_sha256=np.str_(_sha256(body)),
+        source_scene_sha256=np.str_(_sha256(scene)),
+        source_transform_sha256=np.str_(_sha256(transform)),
+    )
+    assert not _is_fresh(out, body, geom, config)
 
-def test_uncertainty_absent_evidence_is_not_observable_or_reliable():
-    valid = np.array([True, True])
-    result = _score_person(
-        _reprojection_metrics(2),
-        np.full(2, np.nan, np.float32),
-        np.zeros(2, np.float32),
-        np.zeros(2, np.float32),
-        valid,
-        (8.0, 30.0, 10.0),
+    np.savez(
+        out,
+        confidence_schema=np.int32(4),
+        confidence_method=np.str_("motion-only-joint-label-v1"),
+        source_body=np.str_(body.name),
+        source_body_sha256=np.str_(_sha256(body)),
+        source_scene_sha256=np.str_(_sha256(scene)),
+        source_transform_sha256=np.str_(_sha256(transform)),
     )
 
-    np.testing.assert_array_equal(result["obs_score"], np.zeros(2, np.float32))
-    assert not result["reliable"].any()
-
-    observed = _score_person(
-        _reprojection_metrics(2),
-        np.full(2, 5.0, np.float32),
-        np.full(2, 100.0, np.float32),
-        np.ones(2, np.float32),
-        valid,
-        (8.0, 30.0, 10.0),
-    )
-    assert observed["reliable"].all()
-
-
-def test_mean_contact_conf_is_warning_free_for_frames_without_contact():
-    contact = np.array([[False, False], [True, True]])
-    confidence = np.array([[0.9, 0.8], [0.2, 0.6]], np.float32)
-
-    with warnings.catch_warnings():
-        warnings.simplefilter("error", RuntimeWarning)
-        got = _mean_contact_conf(contact, confidence)
-
-    assert np.isnan(got[0])
-    assert got[1] == pytest.approx(0.4)
+    body.write_bytes(b"new body")
+    assert not _is_fresh(out, body, geom, config)

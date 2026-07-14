@@ -3,9 +3,9 @@
 float off the wall, sit behind it, or rest on a degenerate scene cloud.
 
 Reads only artifacts already on disk in the post-T1 DB tree — the contact readout
-(``contacts_1.npz``), the trust readout (``uncertainty_1.npz``) and the body
-(``kinematic_1.npz``) beside it under ``features/human_optim/<scene>/``, plus the
-fused ``geometry/scene.npz``. For every tracked person with at least
+(``contacts_1.npz``) and body (``kinematic_1.npz``) beside it under
+``features/human_optim/<scene>/``, plus the fused ``geometry/scene.npz``. For every
+tracked person with at least
 ``--min-valid`` valid frames it computes:
 
 - ``contact_rate``   — share of valid frames with ≥1 of 52 joints in contact.
@@ -13,8 +13,6 @@ fused ``geometry/scene.npz``. For every tracked person with at least
   the wall (``joint_sdf_cm``, unguarded; negative = inside/behind the wall).
 - ``p_seated``       — share of frames whose closest joint sits in [−5, +3] cm.
 - ``nan_jsdf_share`` — share of frames with no usable wall distance (degenerate cloud).
-- ``med_chamfer_cm`` / ``p90_chamfer_cm`` — body-to-own-cloud fit error (uncertainty).
-- ``mean_obs``       — mean per-frame observability (uncertainty ``obs_score``).
 - ``scene_pts``      — fused scene-cloud point count (a floor-level upstream health cue).
 - ``valid_share``    — tracking coverage (valid frames / total).
 
@@ -58,8 +56,8 @@ NAMED = ["PfwFWSoPF_k_0026", "2nwG1Qa5k_c_0115", "9RvrpYoWDoo_0000",
          "CRquJ8H1QLI_0001", "3DAgLpPXVCs_0132"]
 
 _FIELDS = ["scene_id", "oid", "pidx", "n_valid", "valid_share", "contact_rate",
-           "med_min_jsdf_cm", "p_seated", "nan_jsdf_share", "med_chamfer_cm",
-           "p90_chamfer_cm", "mean_obs", "scene_pts", "floater", "buried", "degenerate"]
+           "med_min_jsdf_cm", "p_seated", "nan_jsdf_share", "scene_pts",
+           "floater", "buried", "degenerate"]
 
 
 def _finite_percentiles(values, percentiles=(5, 25, 50, 75, 95)) -> np.ndarray:
@@ -79,9 +77,6 @@ def _person_rows(paths: scene_db.ScenePaths, sid: str, min_valid: int) -> list[d
         return []
     kin = np.load(kin_p, allow_pickle=True)
     cnt = np.load(cnt_p, allow_pickle=True)
-    unc_p = ho / "uncertainty_1.npz"
-    unc = np.load(unc_p, allow_pickle=True) if unc_p.is_file() else None
-
     scene_pts = 0
     scene_np = paths.feature_dir("geometry", sid) / "scene.npz"
     if scene_np.is_file():
@@ -108,16 +103,6 @@ def _person_rows(paths: scene_db.ScenePaths, sid: str, min_valid: int) -> list[d
         seated = (fmin_v >= -5.0) & (fmin_v <= 3.0)       # NaN → False (not seated)
         p_seated = float(seated.mean())
 
-        med_ch = p90_ch = mean_obs = float("nan")
-        if unc is not None:
-            uv = np.asarray(unc["valid"], bool)[p]
-            if uv.any():
-                ch = np.asarray(unc["chamfer_cm"], np.float32)[p][uv]
-                if np.isfinite(ch).any():
-                    med_ch = float(np.nanmedian(ch))
-                    p90_ch = float(np.nanpercentile(ch, 90))
-                mean_obs = float(np.nanmean(np.asarray(unc["obs_score"], np.float32)[p][uv]))
-
         floater = (contact_rate < FLOATER_CONTACT_RATE) or (med_min > FLOATER_HOVER_CM)
         buried = med_min < BURIED_CM
         degenerate = (nan_share > DEGEN_NAN_SHARE) or (scene_pts < DEGEN_SCENE_PTS)
@@ -125,9 +110,7 @@ def _person_rows(paths: scene_db.ScenePaths, sid: str, min_valid: int) -> list[d
             "scene_id": sid, "oid": int(oids[p]), "pidx": p, "n_valid": n_valid,
             "valid_share": round(float(vm.mean()), 3), "contact_rate": round(contact_rate, 3),
             "med_min_jsdf_cm": round(med_min, 2), "p_seated": round(p_seated, 3),
-            "nan_jsdf_share": round(nan_share, 3),
-            "med_chamfer_cm": round(med_ch, 2), "p90_chamfer_cm": round(p90_ch, 2),
-            "mean_obs": round(mean_obs, 3), "scene_pts": scene_pts,
+            "nan_jsdf_share": round(nan_share, 3), "scene_pts": scene_pts,
             "floater": bool(floater), "buried": bool(buried), "degenerate": bool(degenerate),
         })
     return rows
@@ -136,13 +119,12 @@ def _person_rows(paths: scene_db.ScenePaths, sid: str, min_valid: int) -> list[d
 def _fmt(rows: list[dict], keys: list[str]) -> str:
     """A fixed-width console table of selected columns."""
     cols = ["scene_id", "pidx", "contact_rate", "med_min_jsdf_cm", "p_seated",
-            "med_chamfer_cm", "mean_obs", "scene_pts", "flags"]
+            "scene_pts", "flags"]
     out = ["  ".join(f"{c:>15s}" if c != "scene_id" else f"{c:<22s}" for c in cols)]
     for r in rows:
         fl = ",".join(f for f in ("floater", "buried", "degenerate") if r[f]) or "-"
         vals = [f"{r['scene_id']:<22s}", f"{r['pidx']:>15d}", f"{r['contact_rate']:>15.3f}",
                 f"{r['med_min_jsdf_cm']:>15.2f}", f"{r['p_seated']:>15.3f}",
-                f"{r['med_chamfer_cm']:>15.2f}", f"{r['mean_obs']:>15.3f}",
                 f"{r['scene_pts']:>15d}", f"{fl:>15s}"]
         out.append("  ".join(vals))
     return "\n".join(out)
@@ -154,8 +136,7 @@ def _histograms(rows: list[dict], out_dir: Path) -> None:
     import matplotlib.pyplot as plt
     out_dir.mkdir(parents=True, exist_ok=True)
     specs = [("contact_rate", "contact rate", (0, 1)),
-             ("med_min_jsdf_cm", "closest-joint dist to wall (cm)", (-40, 40)),
-             ("med_chamfer_cm", "body-to-cloud chamfer (cm)", (0, 40))]
+             ("med_min_jsdf_cm", "closest-joint dist to wall (cm)", (-40, 40))]
     for key, label, rng in specs:
         vals = np.array([r[key] for r in rows], float)
         vals = vals[np.isfinite(vals)]
@@ -208,7 +189,7 @@ def main(argv: list[str] | None = None) -> int:
 
     def pctl(key):
         return _finite_percentiles([r[key] for r in rows])
-    for key in ("contact_rate", "med_min_jsdf_cm", "med_chamfer_cm"):
+    for key in ("contact_rate", "med_min_jsdf_cm"):
         print(f"  {key:16s} p[5,25,50,75,95] = {np.round(pctl(key), 2)}")
 
     flagged = sorted([r for r in rows if r["floater"] or r["buried"] or r["degenerate"]],

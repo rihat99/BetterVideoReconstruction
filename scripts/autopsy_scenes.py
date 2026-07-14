@@ -7,17 +7,14 @@ reason it floats / reads wrong:
 
 - **d_broken**  — upstream garbage: near-empty scene cloud, no usable wall distance,
   or tracking dropout (``scene_pts<3000`` / ``nan_jsdf_share>0.3`` / ``valid_share<0.5``).
-- **a_off_cloud** — the body is off its OWN depth cloud (an optimizer/placement
-  failure): ``p90_chamfer_cm >= 30`` (corpus p90). The cloud may be fine.
-- **b_detached** — the body sits on its cloud, but the CLOUD is off the wall
-  (VGGT depth layering): cloud→scene gap ``> 30 cm`` (healthy p95 ~19). Unfixable
+- **b_detached** — the human depth CLOUD is off the wall (VGGT depth layering):
+  cloud→scene gap ``> 30 cm`` (healthy p95 ~19). Unfixable
   kinematically.
 - **c_short** — the body's limbs are specially short (worst bone below the corpus
   5th percentile). Rare: the MHR→SMPL-X limb deficit is UNIFORM across the corpus
   (floaters no shorter than healthy), so short limbs do NOT distinguish floaters.
-- **b_uncertain** — on its cloud, cloud near the exclusion baseline, limbs typical:
-  a subtle cloud detachment below the ~15 cm human-exclusion floor we cannot localize
-  directly. Also flag-only.
+- **b_uncertain** — the severe-detachment and short-limb probes do not explain the
+  flag; this may be a subtle cloud detachment below the ~15 cm human-exclusion floor.
 
 Probe (b) cloud→scene gap is the p10 nearest-neighbour distance of per-frame human
 points (``geometry/human.npz``) to the static scene cloud (``geometry/scene.npz``),
@@ -54,7 +51,6 @@ _SMPLX = {"upperarm": ((16, 18), (17, 19)), "forearm": ((18, 20), (19, 21)),
 BROKEN_SCENE_PTS = 3000
 BROKEN_NAN_SHARE = 0.30
 BROKEN_VALID_SHARE = 0.50
-OFFCLOUD_CHAMFER_CM = 30.0
 DETACHED_GAP_CM = 30.0
 
 
@@ -121,8 +117,6 @@ def _cause(a, gap, dworst, worst_p05):
     if (float(a["scene_pts"]) < BROKEN_SCENE_PTS or float(a["nan_jsdf_share"]) > BROKEN_NAN_SHARE
             or float(a["valid_share"]) < BROKEN_VALID_SHARE):
         return "d_broken"
-    if float(a["p90_chamfer_cm"]) >= OFFCLOUD_CHAMFER_CM:
-        return "a_off_cloud"
     if np.isfinite(gap) and gap > DETACHED_GAP_CM:
         return "b_detached"
     if np.isfinite(dworst) and dworst < worst_p05:
@@ -194,7 +188,7 @@ def main(argv: list[str] | None = None) -> int:
             "flags": ",".join(f for f in ("floater", "buried", "degenerate") if a_row[f] == "True"),
             "cause": _cause(a_row, g, d.get("worst", float("nan")), worst_p05),
             "contact_rate": a_row["contact_rate"], "hover_cm": a_row["med_min_jsdf_cm"],
-            "p90_chamfer_cm": a_row["p90_chamfer_cm"], "cloud_gap_cm": round(g, 2) if g == g else "",
+            "cloud_gap_cm": round(g, 2) if g == g else "",
             "def_worst_cm": round(d["worst"], 2) if d else "", "scene_pts": a_row["scene_pts"],
         })
     out_csv = audit_csv.parent / "autopsy.csv"

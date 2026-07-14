@@ -9,7 +9,9 @@ inside the loaders that need them, so importing this module stays light.
 """
 from __future__ import annotations
 
+import hashlib
 import sys
+import warnings
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -76,7 +78,7 @@ def _load_skeleton(pred: Path) -> dict | None:
 
     The joint tree (``parents`` / ``joint_names``, 52-joint ``SMPLXMid`` order) comes
     from ``human_optim/kinematic_1.npz`` so the skeleton can be drawn even without a
-    contact pass; the per-joint contact flags — and the round-5 T3 per-joint
+    contact pass; the per-joint contact flags — and the schema-4 per-joint
     ``label_confidence`` ∈ [0, 1] (both classes) that shades the sphere — come from
     ``human_optim/contacts_1.npz`` when present (same joint order). ``None`` when no
     kinematic body exists.
@@ -95,15 +97,53 @@ def _load_skeleton(pred: Path) -> dict | None:
     cf = pred / "human_optim" / "contacts_1.npz"
     if cf.exists():
         cd = np.load(cf, allow_pickle=True)
-        contact = cd["joint_contact"].astype(bool)           # (P, N, J), fresh copy
-        conf = (cd["label_confidence"].astype(np.float32)    # (P, N, J) or None (older pass)
-                if "label_confidence" in cd.files else None)
+        expected = (
+            len(np.asarray(kd["object_ids"])), int(np.asarray(kd["num_frames"]).item()),
+            len(out["joint_names"]),
+        )
+        contact = np.asarray(cd["joint_contact"], bool)
+        contact_names = ([str(x) for x in np.asarray(cd["joint_names"]).tolist()]
+                         if "joint_names" in cd.files else [])
+        contact_oids = (np.asarray(cd["object_ids"], np.int32)
+                        if "object_ids" in cd.files else np.empty(0, np.int32))
+        body_oids = np.asarray(kd["object_ids"], np.int32)
+        if (contact.shape != expected or contact_names != out["joint_names"]
+                or contact_oids.shape != (expected[0],)
+                or not np.array_equal(contact_oids, body_oids)):
+            warnings.warn(
+                f"ignoring incompatible contact artifact {cf}; regenerate estimate_contacts",
+                RuntimeWarning, stacklevel=2)
+            return out
+        contact = contact.copy()                              # folding below must not mutate the npz
+        conf = None
+        try:
+            schema = int(np.asarray(cd["confidence_schema"]).item())
+            method = str(np.asarray(cd["confidence_method"]).item())
+            candidate = np.asarray(cd["label_confidence"], np.float32)
+            saved_body_hash = str(np.asarray(cd["source_body_sha256"]).item())
+            with kin.open("rb") as body_file:
+                current_body_hash = hashlib.file_digest(body_file, "sha256").hexdigest()
+            valid_confidence = (
+                schema == 4 and method == "motion-only-joint-label-v1"
+                and candidate.shape == expected and np.isfinite(candidate).all()
+                and not bool(((candidate < 0.0) | (candidate > 1.0)).any())
+                and saved_body_hash == current_body_hash
+            )
+        except (KeyError, TypeError, ValueError):
+            valid_confidence = False
+        if valid_confidence:
+            conf = candidate.copy()
+        else:
+            warnings.warn(
+                f"ignoring stale/invalid joint confidence in {cf}; regenerate estimate_contacts",
+                RuntimeWarning, stacklevel=2)
         # OR-fold each hand's finger contact into its wrist: the skeleton draws only
         # the wrist (fingers are excluded), and a hand on the wall touches through the
         # fingers — the same "resolve hand contact at the wrist" convention the dynamics
         # stage uses. Fold the confidence to match the OR: when the folded label is
         # contact, take the strongest touching vote (max over in-contact members); when
-        # free, the mean certainty across the hand. Mutates the copies; the npz is untouched.
+        # free, take the weakest member because the free label is an AND across all
+        # members. Mutates the copies; the npz is untouched.
         names = out["joint_names"]
         for side in ("left", "right"):
             wrist = names.index(f"{side}_wrist")
@@ -117,12 +157,11 @@ def _load_skeleton(pred: Path) -> dict | None:
             if conf is not None:
                 mconf = conf[..., members]                    # (P, N, M)
                 c_hit = np.where(mcon, mconf, -np.inf).max(-1)  # strongest touching vote
-                conf[..., wrist] = np.where(folded, c_hit, mconf.mean(-1))
+                conf[..., wrist] = np.where(folded, c_hit, mconf.min(-1))
             contact[..., wrist] = folded
         out["contact"] = contact
         out["confidence"] = conf
-        out["contact_oids"] = (np.asarray(cd["object_ids"], np.int32)
-                               if "object_ids" in cd.files else None)
+        out["contact_oids"] = contact_oids
     return out
 
 

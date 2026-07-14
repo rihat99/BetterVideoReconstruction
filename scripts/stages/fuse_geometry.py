@@ -287,7 +287,7 @@ def fuse(args: argparse.Namespace) -> None:
                           f"burial_q05={baseline_burial:+.3f} m")
                 else:
                     anchor["anchor_true_touch"], anchor["anchor_true_burial"] = bt, bb
-                    print("  [body-anchor] WARNING: kinematic_1/contacts/uncertainty/"
+                    print("  [body-anchor] WARNING: kinematic_1/contacts/"
                           "kinematic_2/dynamics for this clip are now stale")
 
     out_dir.mkdir(parents=True, exist_ok=True)

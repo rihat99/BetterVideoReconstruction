@@ -135,24 +135,19 @@ merge_dist_m = 0.03    # max endpoint displacement across the gap (m)
 merge_max_gap_s = 2.0  # only bridge gaps shorter than this (s)
 merge_sdf_m = 0.08     # re-grip guard: it stayed within this signed distance of the wall the whole gap
 
-# Per-joint label confidence (readout-only; estimate_contacts' loader reads this, NOT config.py).
-# Confidence in the FINAL binary label, both classes; semantics in tools/human_optim/confidence.py.
+# Continuous confidence in each FINAL per-joint contact/no-contact label.
+# The compact formula and units are documented in docs/contact_confidence.md.
 [contact_confidence]
-close_ref_m  = 0.03    # p_contact = 0.5 at this signed distance to the wall
-ramp_m       = 0.03    # close/far sat ramp half-width (m)
-far_ref_m    = 0.25    # p_far = 0.5 at this UNGUARDED distance (jsdf); beyond any hold protrusion = carve-safe
-still_ref_m  = 0.03    # p_still = 0 at drift >= 2x this
-pen_ref_m    = -0.01   # p_pen = 1 by this signed penetration depth (m); firm penetration overrides motion doubt
-v_lo         = 0.15    # joint speed (m/s) below which motion says nothing about contact
-v_hi         = 0.5     # speed at which no-contact is motion-certain
-img_margin_px = 10     # in-frame margin (px) for the visibility gate
-occ_ref      = 8.0     # vis: n_occ (occluding body verts) at which the occlusion factor hits 0 (round-11)
-det_lo       = 0.4     # vis: Sapiens keypoint score at/below which the detector factor is 0
-det_hi       = 0.75    # vis: Sapiens keypoint score at/above which the detector factor is 1
-vis_floor    = 0.1     # vis floor — never hard-zero a class on visibility alone
-health_cr    = 0.1     # contact_rate below which a body reads as never-touching (floated) => mute far branch
-health_hover_cm = 15.0 # median closest-joint dist (cm) at which hover-health -> 0 (round-7 T4)
-nan_scene_min_pts = 1000  # a NaN distance counts as "far" only if the scene cloud has >= this many points (round-8 T2c)
+surface_inner_m = -0.02 # contact evidence fades when the body is implausibly deep inside the wall
+surface_outer_m = 0.05  # contact evidence fades beyond this outside distance
+surface_soft_m = 0.01   # sigmoid softness for outside distance and penetration reliability
+penetration_floor = 0.40 # deeply buried contact stays uncertain, but is not erased by noisy scene normals
+motion_scale_mps = 0.10 # motion = 1-exp(-speed/scale); no dead zone near contact changes
+image_margin_px = 10.0  # visibility ramps continuously from image edge to this margin
+occ_perp_m = 0.02       # body vertices within this camera-ray radius can occlude a joint
+occ_front_m = 0.005     # vertex must be at least this far in front; small enough to catch palm/finger overlap
+occ_subsample = 2500    # deterministic body-vertex sample used by the occlusion count
+occ_full = 5.0          # 3-D visibility reaches exactly zero at this occluding-vertex count
 
 [contact]
 groups = ["left_hand", "right_hand", "left_foot", "right_foot"]

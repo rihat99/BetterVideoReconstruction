@@ -47,7 +47,7 @@ def render_contact_overlay(source, out_path, joints_2d, joint_contact, parents,
     One skeleton per tracked person: bones (parent→child) are drawn as neutral
     grey lines and each joint as a dot — **red** when that joint is in contact
     with the scene, **green** otherwise. When ``label_confidence (P, N, J)`` (the
-    round-5 T3 field) is given, a **contact** dot's radius grows with the confidence
+    schema-4 field) is given, a **contact** dot's radius grows with the confidence
     in its label — a small red dot is an uncertain contact. Everything is
     precomputed by the stage; this only rasterizes.
 

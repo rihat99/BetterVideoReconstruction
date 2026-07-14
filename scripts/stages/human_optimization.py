@@ -78,7 +78,7 @@ def main(argv=None) -> int:
                     help="kinematics_2 manual-contact npz (default: <source>.npz or data/<stem>.npz)")
     ap.add_argument("--labels", choices=("manual", "auto"), default="manual",
                     help="kinematics_2 contact labels: manual annotation (default) or our own "
-                         "contacts_1.npz, confidence-weighted (round-5 T4)")
+                         "contacts_1.npz, weighted by schema-4 per-joint confidence")
     ap.add_argument("--bodies", default="kinematic_2",
                     help="dynamics: which refined body to solve on (kinematic_1|kinematic_2)")
     ap.add_argument("--config", type=Path, default=_DEFAULT_CONFIG)

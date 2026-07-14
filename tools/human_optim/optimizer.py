@@ -425,7 +425,9 @@ def optimize_person(
                                     prune_margin_m=float(ac["prune_margin_m"]))
         gsdf = joint_guarded_min_sdf(sdf, dmin, conf, v2j_full, mid.num_joints,
                                      max_dist_m=float(ac["max_dist_m"]), conf_thresh=float(ac["conf_thresh"]))
-        drift = joint_drift(jw_full, fps=fps, window_s=float(ac["window_s"]))
+        drift = joint_drift(
+            jw_full, fps=fps, window_s=float(ac["window_s"]),
+            valid_mask=frame_valid)
         jc = drift_gated_contact(gsdf, drift, close_thresh_m=float(ac["detect_thresh_m"]),
                                  exit_thresh_m=float(ac["detect_exit_m"]), min_frames=int(ac["min_frames"]),
                                  still_m=float(ac["still_m"]))          # (T, J) bool

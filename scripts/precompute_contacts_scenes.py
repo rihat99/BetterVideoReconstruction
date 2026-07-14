@@ -26,12 +26,15 @@ failures are reported and skipped, never fatal. Resumable with ``--skip-existing
 from __future__ import annotations
 
 import argparse
+import hashlib
 import os
 import shutil
 import subprocess
 import sys
 import tempfile
 from pathlib import Path
+
+import numpy as np
 
 _HERE = Path(__file__).resolve()
 _REPO_ROOT = _HERE.parents[1]
@@ -41,10 +44,45 @@ import scene_db  # noqa: E402  (scripts/ on path)
 
 _CONTACTS_CLI = _REPO_ROOT / "scripts" / "stages" / "estimate_contacts.py"
 _DEFAULT_CONFIG = _REPO_ROOT / "configs" / "human_optimization.toml"
+_CONFIDENCE_SCHEMA = 4
+_CONFIDENCE_METHOD = "motion-only-joint-label-v1"
+_IMPLEMENTATION_INPUTS = (
+    _CONTACTS_CLI,
+    _REPO_ROOT / "tools" / "human_optim" / "confidence.py",
+    _REPO_ROOT / "tools" / "human_optim" / "contacts.py",
+)
 
 
 def _out_path(paths: scene_db.ScenePaths, scene_id: str, tag: str) -> Path:
     return paths.feature_dir("human_optim", scene_id) / f"contacts_{tag}.npz"
+
+
+def _sha256(path: Path) -> str:
+    return hashlib.sha256(path.read_bytes()).hexdigest()
+
+
+def _is_fresh(out: Path, body: Path, geom: Path, config: Path) -> bool:
+    """A resumable output is reusable only when its complete provenance matches."""
+    scene, transform = geom / "scene.npz", geom / "transform.npz"
+    # Include the implementation itself: a code-only occlusion/confidence fix
+    # must invalidate --skip-existing even when the artifact schema is unchanged.
+    inputs = (body, scene, transform, config, *_IMPLEMENTATION_INPUTS)
+    if not out.is_file() or any(not path.is_file() for path in inputs):
+        return False
+    if out.stat().st_mtime < max(path.stat().st_mtime for path in inputs):
+        return False
+    try:
+        with np.load(out, allow_pickle=False) as saved:
+            return (
+                int(saved["confidence_schema"]) == _CONFIDENCE_SCHEMA
+                and str(saved["confidence_method"]) == _CONFIDENCE_METHOD
+                and str(saved["source_body"]) == body.name
+                and str(saved["source_body_sha256"]) == _sha256(body)
+                and str(saved["source_scene_sha256"]) == _sha256(scene)
+                and str(saved["source_transform_sha256"]) == _sha256(transform)
+            )
+    except (KeyError, OSError, TypeError, ValueError):
+        return False
 
 
 def _process_scene(paths: scene_db.ScenePaths, out_paths: scene_db.ScenePaths, row, gpu: int,
@@ -57,23 +95,21 @@ def _process_scene(paths: scene_db.ScenePaths, out_paths: scene_db.ScenePaths, r
     sid = row["scene_id"]
     tag = bodies.removeprefix("kinematic_")
     out = _out_path(out_paths, sid, tag)
-    if skip_existing and out.is_file():
-        return "skip"
     body = paths.feature_dir("human_optim", sid) / f"{bodies}.npz"
     geom = paths.feature_dir("geometry", sid)
     if not body.is_file() or not (geom / "scene.npz").is_file() or not (geom / "transform.npz").is_file():
         print(f"  [skip] {sid}: missing body/geometry inputs")
         return "skip"
+    if skip_existing and _is_fresh(out, body, geom, config):
+        return "skip"
+    if skip_existing and out.is_file():
+        print(f"  [stale] {sid}: regenerating contacts whose provenance no longer matches")
 
     with tempfile.TemporaryDirectory(prefix=f"contacts_{sid}_") as farm:
         farm = Path(farm)
         (farm / "human_optim").mkdir()
         (farm / "human_optim" / f"{bodies}.npz").symlink_to(body.resolve())
         (farm / "geometry").symlink_to(geom.resolve())
-        # sapiens feeds the round-11 detector-belief factor; optional (contacts degrade to neutral).
-        sap = paths.feature_dir("sapiens", sid)
-        if sap.is_dir():
-            (farm / "sapiens").symlink_to(sap.resolve())
         cmd = [sys.executable, str(_CONTACTS_CLI), "--source", str(paths.clip_path(row)),
                "--predictions", str(farm), "--bodies", bodies, "--config", str(config),
                "--device", "cuda", "--no-overlay"]
@@ -164,9 +200,11 @@ def main(argv: list[str] | None = None) -> int:
         for row in rows:
             sid = row["scene_id"]
             body = paths.feature_dir("human_optim", sid) / f"{a.bodies}.npz"
-            have = body.is_file() and (paths.feature_dir("geometry", sid) / "scene.npz").is_file()
-            done = _out_path(out_paths, sid, tag).is_file()
-            print(f"  {sid:24s} inputs={'OK' if have else 'MISSING'}  {'done' if done else 'pending'}")
+            geom = paths.feature_dir("geometry", sid)
+            have = body.is_file() and (geom / "scene.npz").is_file() and (geom / "transform.npz").is_file()
+            out = _out_path(out_paths, sid, tag)
+            state = "fresh" if _is_fresh(out, body, geom, a.config) else ("stale" if out.is_file() else "pending")
+            print(f"  {sid:24s} inputs={'OK' if have else 'MISSING'}  {state}")
         return 0
 
     gpus = list(scene_db.parse_int_csv(a.devices))

@@ -17,6 +17,7 @@ The caller (``scripts/stages/human_optimization.py``) has already put
 from __future__ import annotations
 
 import dataclasses
+import hashlib
 from pathlib import Path
 
 import numpy as np
@@ -523,14 +524,15 @@ def run_kinematics_2(source, pred: Path, cfg: HumanOptimConfig, device: str, *,
     ``labels_mode='manual'`` (default) uses the human annotation ``data/<stem>.npz``;
     ``'auto'`` uses our own ``contacts_1.npz`` labels instead —
     positives-only (in-contact → ``+1``, else ``-1``, **never** ``0``, so the
-    clearance repulsion stays inert by construction), each weighted by the T3
-    ``label_confidence``.
+    clearance repulsion stays inert by construction), each weighted by schema-4
+    per-joint ``label_confidence``.
     """
     knobs = cfg.knobs
     pred = Path(pred)
     tag = "human_optim/kinematic_2"
 
-    kin = dict(np.load(paths.body_path(pred, "kinematic_1"), allow_pickle=True))
+    kin_path = paths.body_path(pred, "kinematic_1")
+    kin = dict(np.load(kin_path, allow_pickle=True))
     pose = dict(np.load(pred / "sapiens" / "pose.npz", allow_pickle=True))
     human = dict(np.load(pred / "geometry" / "human.npz", allow_pickle=True))
     tr = dict(np.load(pred / "geometry" / "transform.npz", allow_pickle=True))
@@ -548,12 +550,49 @@ def run_kinematics_2(source, pred: Path, cfg: HumanOptimConfig, device: str, *,
 
     # Label source: our own contacts_1 (auto) or the human annotation (manual).
     cnt = ann_contacts = ann_names = ann_oids = cnt_oids = None
+    cnt_contact = cnt_confidence = None
     if labels_mode == "auto":
         cnt_path = paths.contacts_path(pred, "1")
         if not cnt_path.exists():
             raise SystemExit(f"missing {cnt_path} — run estimate_contacts (--bodies kinematic_1) first")
         cnt = dict(np.load(cnt_path, allow_pickle=True))
         cnt_oids = [int(x) for x in cnt["object_ids"]]
+        try:
+            schema = int(np.asarray(cnt["confidence_schema"]).item())
+            method = str(np.asarray(cnt["confidence_method"]).item())
+            cnt_contact = np.asarray(cnt["joint_contact"], bool)
+            cnt_confidence = np.asarray(cnt["label_confidence"], np.float32)
+        except (KeyError, TypeError, ValueError) as exc:
+            raise SystemExit(
+                f"{cnt_path} is not a complete per-joint confidence artifact; "
+                "regenerate it with estimate_contacts") from exc
+        if schema != 4 or method != "motion-only-joint-label-v1":
+            raise SystemExit(
+                f"{cnt_path} has confidence schema/method {schema}/{method!r}; "
+                "expected 4/'motion-only-joint-label-v1', regenerate it")
+        expected = (len(cnt_oids), N, len(kin["joint_names"]))
+        if cnt_contact.shape != expected or cnt_confidence.shape != expected:
+            raise SystemExit(
+                f"{cnt_path} contact/confidence shapes must both be {expected}, got "
+                f"{cnt_contact.shape} and {cnt_confidence.shape}")
+        if (not np.isfinite(cnt_confidence).all()
+                or bool(((cnt_confidence < 0.0) | (cnt_confidence > 1.0)).any())):
+            raise SystemExit(f"{cnt_path} label_confidence must be finite and in [0,1]")
+        cnt_names = [str(x) for x in np.asarray(cnt["joint_names"]).tolist()]
+        kin_names = [str(x) for x in np.asarray(kin["joint_names"]).tolist()]
+        if cnt_names != kin_names:
+            raise SystemExit(f"{cnt_path} joint order does not match {kin_path}")
+        provenance = (
+            (kin_path, "source_body_sha256"),
+            (pred / "geometry" / "scene.npz", "source_scene_sha256"),
+            (pred / "geometry" / "transform.npz", "source_transform_sha256"),
+        )
+        for source_path, hash_key in provenance:
+            with source_path.open("rb") as source_file:
+                expected_hash = hashlib.file_digest(source_file, "sha256").hexdigest()
+            if hash_key not in cnt or str(np.asarray(cnt[hash_key]).item()) != expected_hash:
+                raise SystemExit(
+                    f"{cnt_path} is stale for {source_path}; regenerate estimate_contacts")
         print(f"[{tag}] AUTO labels from {cnt_path.name} (contacts_1), ids {cnt_oids}")
     else:
         ann_path = resolve_annotation_path(source, annotations)
@@ -618,13 +657,12 @@ def run_kinematics_2(source, pred: Path, cfg: HumanOptimConfig, device: str, *,
         if labels_mode == "auto":
             if cnt_oids is not None and oid in cnt_oids:
                 cp = cnt_oids.index(oid)
-                jc = np.asarray(cnt["joint_contact"][cp], bool)                # (N, 52)
+                jc = cnt_contact[cp]                                           # (N, 52)
                 lab = np.where(jc, np.int8(1), np.int8(-1)).astype(np.int8)    # +1 / -1, NEVER 0 (repulsion inert)
                 lab[~vmask] = -1
                 contact_labels = torch.as_tensor(lab, dtype=torch.int8, device=device)
-                if "label_confidence" in cnt:
-                    cf = np.asarray(cnt["label_confidence"][cp], np.float32)
-                    contact_conf = torch.as_tensor(cf, dtype=torch.float32, device=device)
+                contact_conf = torch.as_tensor(
+                    cnt_confidence[cp], dtype=torch.float32, device=device)
                 nc = int((lab == 1).any(1).sum())
                 print(f"[{tag}] obj_id={oid}: AUTO contacts on {nc} frames"
                       f"{' (confidence-weighted)' if contact_conf is not None else ''}")

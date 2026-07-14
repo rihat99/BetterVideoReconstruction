@@ -1,7 +1,7 @@
 """Output-path resolver for the human-optimization artifacts under ``out/<stem>/``.
 
 Everything about an *optimized* human lives together in ``human_optim/`` —
-``kinematic_1/2.npz``, ``dynamics.npz``, per-body ``contacts_*`` + ``uncertainty_*``,
+``kinematic_1/2.npz``, ``dynamics.npz``, per-body ``contacts_*``,
 overlays, and ``diagnostics/`` — kept apart from the raw body *estimates* in
 ``sam3d/`` (``smplx_params.npz``, the converter output, is the optimization INPUT
 and stays there).
@@ -31,11 +31,6 @@ def dynamics_path(pred: str | Path) -> Path:
 def contacts_path(pred: str | Path, tag: str) -> Path:
     """Per-joint scene-contact npz for body ``tag`` (``1`` / ``2``)."""
     return human_optim_dir(pred) / f"contacts_{tag}.npz"
-
-
-def uncertainty_path(pred: str | Path, tag: str) -> Path:
-    """Reconstruction-trust npz for body ``tag``."""
-    return human_optim_dir(pred) / f"uncertainty_{tag}.npz"
 
 
 def overlay_path(pred: str | Path, name: str) -> Path:

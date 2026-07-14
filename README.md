@@ -6,8 +6,8 @@ body every frame for each tracked person, converts each to SMPL-X, anchors the
 scene's metric scale to the human body, fuses the metric geometry, and runs a
 **visually-guided kinematic refinement** (2D reprojection + depth chamfer + pose
 prior + acceleration/jerk smoothness). Standalone SMPL-X stages then add scene
-contact, world-frame gravity, per-contact-joint **forces** via inverse dynamics
-(RNEA), and reconstruction-trust scoring.
+contact, world-frame gravity, and per-contact-joint **forces** via inverse dynamics
+(RNEA).
 
 It is the video-focused sibling of
 [`BetterImageReconstruction`](../BetterImageReconstruction) (image/scene) and
@@ -50,11 +50,10 @@ Off the default chain, each runs on a single clip's `out/<stem>/` dir:
 
 | Stage | Output |
 |-------|--------|
-| `optimize_smplx_2` | annotation-guided refinement (`sam3d/smplx_kinematic_2.npz`) |
-| `estimate_contacts` | per-joint scene contact (`sam3d/cnt_kin.npz` + overlay) |
+| `human_optimization --stages kinematics_2` | optional annotation- or auto-contact-guided refinement (`human_optim/kinematic_2.npz`) |
+| `estimate_contacts` | per-joint scene contact and confidence (`human_optim/contacts_1.npz` + overlay) |
 | `estimate_gravity_geocalib` | world-frame gravity (`geocalib/gravity.npz`) |
-| `optimize_dynamics_smplx` | force-only RNEA: per-contact-joint forces + torques (`sam3d/smplx_dynamics.npz`) |
-| `estimate_uncertainty` | per-frame + per-contact reconstruction-trust scoring |
+| `human_optimization --stages dynamics` | force-only RNEA: per-contact-joint forces + torques (`human_optim/dynamics.npz`) |
 
 ### Dataset pipeline (ClimbingVideos DB)
 
@@ -64,8 +63,9 @@ per-scene YOLO track, then
 over the batch (shared helpers in `scripts/scene_db.py`).
 `scripts/export_contact_dataset.py` packages the resulting frames, masks,
 intrinsics, and 22-joint contact labels into a self-contained train/test dataset.
-Manual annotations are used only to fill the export's test labels; they are not
-an input to human optimization.
+Manual annotations are not used by `kinematics_1` or by confidence generation.
+They are used only by the optional manual `kinematics_2` mode, confidence auditing,
+and the export's test labels.
 
 ## Quick start
 
@@ -86,4 +86,5 @@ runnable on its own; see [`CLAUDE.md`](CLAUDE.md) for the full stage table, the
 
 - [`INSTALL.md`](INSTALL.md) — environment, submodules, model assets.
 - [`CLAUDE.md`](CLAUDE.md) — architecture, pipeline contract, conventions.
-- [`docs/geometry_fusion_plan.md`](docs/geometry_fusion_plan.md) — `fuse_geometry` design + `geometry/*.npz` contract.
+- [`docs/contact_confidence.md`](docs/contact_confidence.md) — per-joint contact-confidence formula and artifact schema.
+- [`docs/ISSUE.md`](docs/ISSUE.md) — current scale, fusion, and human-optimization audit.

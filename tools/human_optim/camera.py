@@ -6,7 +6,7 @@ the converter are in the **camera** frame, so we fold the per-frame
 ``world_from_cam`` into the root before optimizing, and project world joints back
 through the per-frame extrinsic + pixel intrinsics for the reprojection loss.
 
-Frame conventions (see ``docs/geometry_fusion_plan.md``): ``extrinsics`` are
+Frame conventions: ``extrinsics`` are
 OpenCV ``cam_from_world`` (X right, Y down, Z forward); ``intrinsics_px_orig``
 are pixel intrinsics at the original frame resolution.
 """

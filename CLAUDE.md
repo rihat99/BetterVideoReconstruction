@@ -8,7 +8,7 @@ VGGT's metric scale to the human body** → fuse to metric geometry →
 **visually-guided kinematic refinement** (2D reprojection + depth chamfer + pose
 prior + acceleration/jerk smoothness + scene contact). The default chain ends at
 the refined SMPL-X bodies; scene contacts, gravity, annotation-guided refinement,
-force dynamics, and trust-scoring are standalone SMPL-X stages.
+and force dynamics are standalone SMPL-X stages.
 
 Code that was tested and then dropped — **MoGe2** depth, **MAMMA `ma_2d`**
 landmarks, the **SMPL** (not SMPL-X) motion/dynamics path, and the **Gemma**
@@ -30,9 +30,9 @@ branch" behavior for this repo).
   the YOLO first-frame bbox) + `scripts/precompute_scenes.py`
   (`--stage vggt|sapiens|sam3d|smplx`, GPU-sharded) over the scene DB, writing
   `features/<stage>/<aa>/<bb>/<scene>/`. The `--predictions` stages that don't fit
-  the manifest fan-out run on a symlink farm instead: `scripts/precompute_contacts_scenes.py`
-  and `scripts/precompute_uncertainty_scenes.py` (the contact + trust readouts, written
-  **alongside the body** into `features/human_optim/<scene>/` to mirror the local
+  the manifest fan-out uses `scripts/precompute_contacts_scenes.py`, a symlink-farm
+  contact readout written **alongside the body** in `features/human_optim/<scene>/`
+  to mirror the local
   `out/<stem>/human_optim/` layout; `--out-root` redirects for smoke tests).
   `scripts/export_contact_dataset.py` packages those features into a standalone
   22-joint train/test contact corpus; manual annotations fill test labels only.
@@ -55,13 +55,12 @@ SMPL-X stages, off the default chain.
 | 4 | `estimate_body_sam3d.py` | `sam3/bboxes.npz`, `sam3/`, `vggt/camera.npz` (denormalized to orig res), frames | `sam3d/params.npz` (**all tracked people**, MHR params stacked `(P,N,…)` + `object_ids (P,)`), `sam3d/overlay.mp4` |
 | 5 | `convert_mhr_to_smplx.py` | `sam3d/params.npz` | `sam3d/smplx_params.npz` (per-person `(P,N,…)`: betas, body/hand pose, global_orient, transl, jaw/eye/expr), `sam3d/smplx_overlay.mp4` |
 | 6 | `estimate_scale.py` | `sam3d/smplx_params.npz`, `vggt/camera.npz`, `vggt/depth/`, `sam3/` | `geometry/scale.npz` (human-body-anchored metric scale + per-frame diagnostics), `geometry/diagnostics/scale_over_time.png` |
-| 7 | `fuse_geometry.py` | `vggt/`, `geometry/scale.npz`, `sam3/`, `sam3d/smplx_params.npz` | `geometry/transform.npz` (metric scale + orig-res VGGT cameras + **body-anchor** gate diagnostics), `geometry/scene.npz`, `geometry/human.npz` — see `docs/geometry_fusion_plan.md` |
+| 7 | `fuse_geometry.py` | `vggt/`, `geometry/scale.npz`, `sam3/`, `sam3d/smplx_params.npz` | `geometry/transform.npz` (metric scale + orig-res VGGT cameras + **body-anchor** gate diagnostics), `geometry/scene.npz`, `geometry/human.npz` |
 | 8 | `human_optimization.py` (`root`+`kinematics_1`) | `sam3d/smplx_params.npz`, `sapiens/pose.npz`, `geometry/{human,transform,scene}.npz` | `human_optim/kinematic_1.npz` (**all tracked people**, refined **world-frame** params `(P,N,…)` + `q (P,N,211)` + `scale (P,)`≡1 (compat), 52-joint `SMPLXMid`, `frame='world'`), `human_optim/kinematic_1_overlay.mp4` (`--overlay`) |
 | – | `human_optimization.py --stages kinematics_2` | `human_optim/kinematic_1.npz`, **`data/<stem>.npz`** (manual contact annotation), `sapiens/pose.npz`, `geometry/{human,scene,transform}.npz` | `human_optim/kinematic_2.npz` (annotation-guided refinement; same schema), `human_optim/kinematic_2_overlay.mp4` (`--overlay`) |
-| – | `estimate_contacts.py` | `human_optim/<bodies>.npz` (`--bodies`, default `kinematic_1`), `geometry/{scene,transform}.npz`, frames | `human_optim/contacts_<tag>.npz` (`joint_contact (P,N,J)` bool + `joint_sdf_cm` + `merged` (span-merge-bridged frames) + `label_confidence`/`p_contact`/`observability`/`body_health (P,)` + `confidence_schema` (**round-11 v3, =2**) — both classes; **firm penetration overrides motion doubt** on the contact side so hard grips aren't throttled; a **visibility witness** (round-11) enters the two classes asymmetrically — the contact side is gated by the **Sapiens detector score** only (a low-score contact is less precise; occlusion is NOT penalised — a deeply-hidden predicted contact is usually a firm grip behind the body), the no-contact side is gated by **occlusion × detector** (an occluded/low-score joint we call free may be a missed hidden contact); the far-from-wall no-contact witness is **relative-first** — a **relative clearance** above the body's own surface-clamped closest joint (round-8 T2a, floater-safe, primary) with **absolute distance** + a **nothing-within-reach** flag as the **`body_health`**-gated fallback (round-7 T4; the relative witness is health-free). The `observability` field now holds the visibility factor (the old scene-point-count "seen" factor was dropped). Distances are the **unguarded** per-joint min; the confidence formula + its full derivation live in [`docs/contact_confidence.md`](docs/contact_confidence.md)), `human_optim/contacts_<tag>_overlay.mp4` (skeleton; joints **red**=contact / **green**=free, dot size ∝ confidence) |
+| – | `estimate_contacts.py` | `human_optim/<bodies>.npz` (`--bodies`, default `kinematic_1`), `geometry/{scene,transform}.npz`, frames | `human_optim/contacts_<tag>.npz` (`joint_contact (P,N,J)` bool, signed-SDF and Euclidean-distance diagnostics, `merged`, and schema-4 per-joint confidence fields). Confidence is `visibility × label evidence`: contact uses soft surface evidence; no-contact uses motion only, so a stationary free joint is untrusted regardless of reconstructed wall distance. There is no clearance/floating-body, detector, body-health, or persistence gate. Detected full body occlusion (at least five sampled occluders) is exactly zero-confidence. See [`docs/contact_confidence.md`](docs/contact_confidence.md). The optional overlay draws **red**=contact / **green**=free with contact-dot size ∝ confidence. |
 | – | `estimate_gravity_geocalib.py` | frames, `geometry/transform.npz` | `geocalib/gravity.npz` (world-frame unit `gravity_world (3,)` down + per-frame diagnostics + `reliable` flag; magnitude 9.81 applied by dynamics) |
 | – | `human_optimization.py --stages dynamics` | `human_optim/kinematic_2.npz` (frozen `q`), `human_optim/contacts_2.npz`, `geocalib/gravity.npz` | `human_optim/dynamics.npz` (force-only RNEA: world `contact_forces`, `joint_torques (P,N,159)`, + viewer-ready `joints_world`/`torque_mag`/`contact_forces_world (P,N,52,…)`) |
-| – | `estimate_uncertainty.py` | `human_optim/<bodies>.npz` (`--bodies`, default `kinematic_2`→`kinematic_1`), `sam3d/smplx_params.npz`, `human_optim/contacts_<tag>.npz`, `sapiens/pose.npz`, `geometry/{human,transform}.npz`, frames (`--overlay`) | `human_optim/uncertainty_<tag>.npz` (**per-frame body trust only** — data-fit loss + relative/observability/residual/cue axes; per-contact `label_confidence` now lives in `contacts_<tag>.npz`, read here for the viz), `human_optim/diagnostics/uncertainty_person<oid>.png`, `human_optim/uncertainty_<tag>_overlay.mp4` (`--overlay`) |
 
 Viewer: `scripts/view_3d.py out/<stem>/` (viser: fused `geometry/` scene cloud +
 camera frustums + GeoCalib gravity arrow + per-climber human points + the refined
@@ -107,7 +106,6 @@ uv run python scripts/stages/human_optimization.py --source video.mp4 --predicti
 uv run python scripts/stages/estimate_contacts.py --source video.mp4 --predictions out/video/            # per-joint scene contact (--bodies kinematic_1)
 uv run python scripts/stages/estimate_gravity_geocalib.py --source video.mp4 --predictions out/video/    # world-frame gravity
 uv run python scripts/stages/human_optimization.py --predictions out/video/ --stages dynamics            # force-only RNEA (needs contacts_2 + gravity)
-uv run python scripts/stages/estimate_uncertainty.py --source video.mp4 --predictions out/video/ --overlay   # reconstruction-trust scoring
 ```
 
 Orchestrator knobs + step selection live in
@@ -119,7 +117,7 @@ Orchestrator knobs + step selection live in
 BetterVideoReconstruction/
 ├── CLAUDE.md / README.md / INSTALL.md
 ├── pyproject.toml / .gitmodules
-├── docs/geometry_fusion_plan.md   # fuse_geometry design + geometry/*.npz contract
+├── docs/contact_confidence.md     # per-joint confidence formula + contacts artifact schema
 ├── configs/
 │   ├── pipeline.toml              # orchestrator: per-stage knobs + [steps]
 │   └── human_optimization.toml    # all 4 human-optimization stages: 4-column [loss_weights.*] tables + shared knobs
@@ -127,7 +125,6 @@ BetterVideoReconstruction/
 │   ├── pipeline.py                # LOCAL pipeline (load-once subprocess orchestrator)
 │   ├── precompute_scenes.py       # DATASET pipeline: vggt/sapiens/sam3d/smplx fan-out
 │   ├── precompute_contacts_scenes.py  # DATASET pipeline: contact readout (symlink farm)
-│   ├── precompute_uncertainty_scenes.py # DATASET pipeline: trust readout (symlink farm)
 │   ├── export_contact_dataset.py # DATASET packaging: frames/masks/intrinsics/contact labels
 │   ├── track_sam3_scenes.py       # DATASET pipeline: SAM 3 seeding + fan-out
 │   ├── scene_db.py                # shared scene-DB access + target selection
@@ -193,10 +190,8 @@ BetterVideoReconstruction/
     **per-limb quotas** (`[chamfer] sampling="limb_quota"`, default — hands/feet keep up
     to 200 points each instead of being drowned by the torso; robust/anisotropic chamfer
     kernels were tried, measured worse, and removed — the raw along-ray chamfer pull is
-    load-bearing). Round-12's physics-gated de-smear second pass was **removed in
-    round 13** (measured +0.006 pooled F1 with a proven-closed ceiling — see
-    `docs/UPDATE.md`; history in
-    [`docs/round12_depth_root_cause.md`](docs/round12_depth_root_cause.md)).
+    load-bearing). The later physics-gated de-smear second pass was measured and
+    removed because its improvement ceiling was negligible.
     Gross whole-clip depth errors are instead handled upstream by the
     **fuse body anchor** (see the `fuse_geometry` bullet).
   - **No per-body scale** — `estimate_scale` sizes the metric geometry to the body
@@ -238,8 +233,8 @@ BetterVideoReconstruction/
     attraction/damping acted.
     (Round-10's wall-contact seating pull + rigid `seat` phase were dropped, and
     round-12's physics-gated de-smear followed in round 13 — both superseded by the
-    round-13 **fuse body anchor**, which corrects the *world* where the depth
-    evidence is refuted instead of pushing the body; see `docs/UPDATE.md`.)
+    **fuse body anchor**, which corrects the *world* where its gate says the depth
+    evidence is refuted instead of pushing the body.)
 - **Scene contact is a separate one-shot stage** (`estimate_contacts`, off the
   default chain): reads the refined body + `geometry/scene.npz` and marks
   **per-joint** scene contact for every person, reusing the penetration SDF +
@@ -272,20 +267,6 @@ BetterVideoReconstruction/
   flicker. `v`/`a` are central finite-differences of `q`
   (`velocity_acceleration_from_trajectory` in `tools/smplx_robot/dynamics.py`),
   **not** denoised. `[stages.dynamics].device` defaults to **cpu**.
-- **Reconstruction trust is a separate scoring stage** (`estimate_uncertainty`):
-  per-frame + per-contact trust of an optimized body. The headline is a per-frame
-  **data-fit loss** `L(t)` = the kinematic stage's *data* terms only
-  (`reproj_sapiens·GM + reproj_init·GM + chamfer`, same weights + GM kernel as
-  `human_optimization`'s kinematics_1 stage; priors/smoothness excluded) → a **relative score**
-  `s = L*/L(t) ∈ (0,1]` (robust variant vs the 5th-percentile loss). Three more
-  axes: **observability** (per-clip-normalised geomean of # Sapiens kp / # confident
-  depth points / mean VGGT depth-conf), **absolute residuals** (px + cm, fixed
-  thresholds), **cue disagreement** (px spread between the Sapiens vs init-anchor
-  reprojections). `combined = robust_score × obs_score`. Per-contact confidence is
-  **no longer computed here** — round-5 T3 moved it to `estimate_contacts`
-  (`label_confidence`, both classes); this stage only reads it for the plot/overlay.
-  The plot is a simplified 3-panel (confidence / fit-error / contacts), shared with
-  the `--overlay` video.
 - **Camera is its own stage; the body uses the VGGT camera.** VGGT intrinsics are
   scale-invariant, so the scaleless VGGT camera is exact for the body (which
   predicts its own metric translation). `estimate_body_sam3d` reads `K` from
@@ -343,7 +324,8 @@ BetterVideoReconstruction/
 
 ## See also
 
-- [`docs/geometry_fusion_plan.md`](docs/geometry_fusion_plan.md) — `fuse_geometry` design + `geometry/*.npz` contract.
+- [`docs/contact_confidence.md`](docs/contact_confidence.md) — per-joint contact-confidence formula and schema.
+- [`docs/ISSUE.md`](docs/ISSUE.md) — current scale, fusion, and human-optimization audit.
 - [`README.md`](README.md) — user-facing overview.
 - [`INSTALL.md`](INSTALL.md) — env, submodules, model assets.
 - [`legacy/README.md`](legacy/README.md) — what was dropped and why.

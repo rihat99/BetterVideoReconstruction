@@ -14,10 +14,10 @@ so frame ``k`` on disk lines up with row ``k`` of every ``(…, N, …)`` array.
 
 Contacts are per **22 SMPL-X body joints** (0–21): the 30 finger joints are OR-folded
 into the two wrists (``left_wrist`` 20, ``right_wrist`` 21). A merged hand's confidence
-is the strongest touch when it is in contact (max over the touching parts) and the mean
-certainty across the hand when it is free (mean over all 16 parts) — the same finger→wrist
-fold the 3D viewer (``tools/viewer/loading.py``) and BetterParsing's 2D contact overlay
-(``scene_viewer/contacts.py``) use, so the training label matches what both viewers draw.
+is the strongest touch when it is in contact (maximum over the touching parts) and the
+weakest member when it is free (minimum over all 16 parts): the folded free label is an
+AND, so one occluded/unknown finger makes the whole-hand free label uncertain. The 3D
+viewer uses the same fold.
 
 Train scenes carry the 22-joint auto-labels + confidence. Test scenes carry the
 SAM-3D-Body inputs (bbox / mask / intrinsics); their contact labels come from the manual
@@ -29,6 +29,7 @@ body joints remain outside the score mask.
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import shutil
 import sys
@@ -52,6 +53,8 @@ RIGHT_HAND_GROUP = [21] + list(range(37, 52))  # right_wrist + right fingers
 HAND_JOINTS = ((20, LEFT_HAND_GROUP), (21, RIGHT_HAND_GROUP))
 N_JOINTS_22 = 22
 N_JOINTS_52 = 52
+CONTACT_CONFIDENCE_SCHEMA = 4
+CONTACT_CONFIDENCE_METHOD = "motion-only-joint-label-v1"
 
 
 def merge_contacts_52_to_22(
@@ -59,9 +62,8 @@ def merge_contacts_52_to_22(
 ) -> tuple[np.ndarray, np.ndarray]:
     """Fold 52-joint contacts + confidence into the 22 SMPL-X body joints.
 
-    Confidence fold matches both viewers (``tools/viewer/loading.py`` +
-    BetterParsing ``scene_viewer/contacts.py``): strongest touching vote when the hand is
-    in contact, else the mean certainty across the whole hand.
+    Confidence follows the folded label's logic: strongest touching vote for the
+    contact OR, weakest member for the no-contact AND.
 
     :param jc52: ``(P, N, 52)`` bool contact labels.
     :param conf52: ``(P, N, 52)`` float32 label confidence.
@@ -85,7 +87,7 @@ def merge_contacts_52_to_22(
         sub_conf = conf52[..., group].astype(np.float32)
         lbl = sub_lbl.any(axis=-1)                       # (P, N)
         conf_touch = np.where(sub_lbl, sub_conf, -np.inf).max(axis=-1)  # strongest touching vote
-        conf_free = sub_conf.mean(axis=-1)                             # mean certainty across the hand
+        conf_free = sub_conf.min(axis=-1)                              # weakest member of the free AND
         jc22[..., wrist] = lbl
         conf22[..., wrist] = np.where(lbl, conf_touch, conf_free)
     return jc22, conf22
@@ -306,18 +308,46 @@ def export_scene(task: dict) -> dict:
 
     test_labels_ready = False
     if split == "train":
+        if "confidence_schema" not in contacts.files:
+            raise ValueError(f"{sid}: contacts_1 has no confidence_schema; regenerate it")
+        confidence_schema = int(np.asarray(contacts["confidence_schema"]).item())
+        if confidence_schema != CONTACT_CONFIDENCE_SCHEMA:
+            raise ValueError(
+                f"{sid}: contacts_1 confidence_schema={confidence_schema}, expected "
+                f"{CONTACT_CONFIDENCE_SCHEMA}; regenerate it before export")
+        confidence_method = str(np.asarray(contacts["confidence_method"]).item())
+        if confidence_method != CONTACT_CONFIDENCE_METHOD:
+            raise ValueError(
+                f"{sid}: contacts_1 confidence_method={confidence_method!r}, expected "
+                f"{CONTACT_CONFIDENCE_METHOD!r}; regenerate it before export")
         _require_shape(sid, "joint_contact", contacts["joint_contact"], (p, n, N_JOINTS_52))
         _require_shape(
             sid, "label_confidence", contacts["label_confidence"], (p, n, N_JOINTS_52)
         )
+        confidence_52 = np.asarray(contacts["label_confidence"], np.float32)
+        if (not np.isfinite(confidence_52).all()
+                or bool(((confidence_52 < 0.0) | (confidence_52 > 1.0)).any())):
+            raise ValueError(f"{sid}: label_confidence must be finite and in [0,1]")
+        source_files = (
+            (hd / "kinematic_1.npz", "source_body_sha256"),
+            (geom / "scene.npz", "source_scene_sha256"),
+            (geom / "transform.npz", "source_transform_sha256"),
+        )
+        for source_path, hash_key in source_files:
+            with source_path.open("rb") as source_file:
+                current_hash = hashlib.file_digest(source_file, "sha256").hexdigest()
+            if hash_key not in contacts.files or str(np.asarray(contacts[hash_key]).item()) != current_hash:
+                raise ValueError(
+                    f"{sid}: contacts_1 is stale for {source_path.name}; regenerate it before export")
         jc22, conf22 = merge_contacts_52_to_22(
             np.asarray(contacts["joint_contact"], bool),
-            np.asarray(contacts["label_confidence"], np.float32),
+            confidence_52,
         )
         np.savez_compressed(
             out_scene / "labels.npz",
             joint_contact_22=jc22, contact_conf_22=conf22,
-            confidence_schema=np.int32(contacts["confidence_schema"]), **common,
+            confidence_schema=np.int32(confidence_schema),
+            confidence_method=np.str_(confidence_method), **common,
         )
     else:  # test: inputs now, contacts pending (manual annotation)
         np.savez_compressed(out_scene / "inputs.npz", **common)
@@ -661,10 +691,10 @@ def main() -> int:
         corpus_filter="human_selected=1 AND vlm_category IN (1,2) AND vlm_rope_supported=0",
         n_scenes={s: len(summaries[s]) for s in want_splits},
         joint_set="smplx_body_22", joint_names_22=joint_names,
-        n_joints=N_JOINTS_22, confidence_schema=2,
+        n_joints=N_JOINTS_22, confidence_schema=CONTACT_CONFIDENCE_SCHEMA,
+        confidence_method=CONTACT_CONFIDENCE_METHOD,
         hand_merge="fingers OR-folded into the wrist; conf = max over touching parts when "
-                   "in contact, else mean over all 16 parts (matches the 3D viewer + "
-                   "BetterParsing 2D contact-overlay fold)",
+                   "in contact, else min over all 16 parts (free is an AND; matches the 3D viewer)",
         intrinsics="per-frame 3x3 pixels at original resolution (geometry/transform.npz "
                    "intrinsics_px_orig)",
         bbox="xyxy absolute pixels, original resolution (SAM-3 tracker bboxes_per_obj)",

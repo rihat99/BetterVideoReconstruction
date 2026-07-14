@@ -26,7 +26,7 @@ def test_hand_contacts_and_confidence_fold_to_wrists():
     assert conf[0, 0, 21] == pytest.approx(0.7)
     assert not labels[0, 1, 20]
     assert conf[0, 1, 20] == pytest.approx(
-        confidence[0, 1, export.LEFT_HAND_GROUP].mean()
+        confidence[0, 1, export.LEFT_HAND_GROUP].min()
     )
 
 

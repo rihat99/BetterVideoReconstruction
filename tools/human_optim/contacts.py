@@ -106,29 +106,64 @@ def joint_occlusion_counts(
     joints: torch.Tensor,          # (T, J, 3) posed world-frame joint centres
     cam_centers: torch.Tensor,     # (T, 3) world camera centres
     v2j: torch.Tensor,             # (V,) long vertex→joint
-    coarse_of_joint: torch.Tensor, # (J,) int coarse-group id per joint (-1 = none)
+    occlusion_group: torch.Tensor, # (J,) nonnegative local-surface group id per joint
     *,
-    perp_m: float = 0.04,
-    front_m: float = 0.05,
+    other_vertices: torch.Tensor | None = None,  # (T,Vo,3) or (T,Pother,V,3)
+    perp_m: float = 0.02,
+    front_m: float = 0.005,
     subsample: int = 2500,
     chunk: int = 16,
 ) -> torch.Tensor:
     """Per-(frame, joint) count of body vertices that occlude the joint from the camera ``(T, J)``.
 
-    A vertex occludes joint ``j`` when it lies within ``perp_m`` of the camera→joint ray and
-    at least ``front_m`` closer to the camera than the joint (in front of it), and its nearest
-    joint is **not** in ``j``'s own coarse group — so a hand's own fingers do not count as
-    occluding the wrist, but the torso / other limbs do. The count is a monotone occlusion
-    margin: 0 = fully visible, large = deeply hidden behind other body parts. Vertices are
-    uniformly subsampled to ``subsample`` for speed (a count over a dense region is robust).
+    A vertex occludes joint ``j`` when it lies within ``perp_m`` of the camera→joint
+    ray and at least ``front_m`` in front of that joint's own local skin surface.
+    The local surface is the frontmost near-ray vertex in ``j``'s local group; the
+    joint centre is only a fallback when no such vertex was sampled. This removes
+    the unavoidable skin in front of an internal joint centre without a large blind
+    zone. A candidate's nearest joint must be outside the target's local group.
+
+    Vertices from ``other_vertices`` always count as outside the target's local
+    group, so another optimized person can occlude the joint too. The target and
+    each other person's mesh are uniformly subsampled to ``subsample`` for speed;
+    a crowded frame therefore does not dilute any one person's sampling density.
+    The count is a monotone occlusion margin: 0 = fully visible, large = deeply
+    hidden behind another body region.
     """
     T, V, _ = vertices.shape
     J = joints.shape[1]
+    if perp_m <= 0.0 or front_m <= 0.0 or subsample <= 0 or chunk <= 0:
+        raise ValueError("occlusion distances, subsample, and chunk must be positive")
     if V > subsample:
         vidx = torch.linspace(0, V - 1, subsample, device=vertices.device).long()
         vertices, v2j = vertices[:, vidx], v2j[vidx]
-    coarse_of_v = coarse_of_joint[v2j]                                       # (Vs,)
-    valid_occ = (coarse_of_v[:, None] != coarse_of_joint[None, :])          # (Vs,J) may this vertex occlude j?
+    if occlusion_group.shape != (J,) or bool((occlusion_group < 0).any()):
+        raise ValueError("occlusion_group must contain one nonnegative group ID per joint")
+    group_of_v = occlusion_group[v2j]                                      # (Vs,)
+    if other_vertices is not None:
+        if (other_vertices.ndim not in (3, 4) or other_vertices.shape[0] != T
+                or other_vertices.shape[-1] != 3):
+            raise ValueError("other_vertices must have shape (T,Vo,3) or (T,Pother,V,3)")
+        people = (other_vertices[:, None]
+                  if other_vertices.ndim == 3 else other_vertices)
+        sampled_people = []
+        for person in people.unbind(dim=1):
+            if person.shape[1] > subsample:
+                oidx = torch.linspace(
+                    0, person.shape[1] - 1, subsample,
+                    device=person.device).long()
+                person = person[:, oidx]
+            sampled_people.append(person)
+        other_vertices = torch.cat(sampled_people, dim=1)
+        vertices = torch.cat((vertices, other_vertices), dim=1)
+        group_of_v = torch.cat((
+            group_of_v,
+            torch.full(
+                (other_vertices.shape[1],), -1, dtype=group_of_v.dtype,
+                device=group_of_v.device),
+        ))
+    valid_occ = (group_of_v[:, None] != occlusion_group[None, :])           # (Vs,J) may this vertex occlude j?
+    own_surface = ~valid_occ
     n_occ = torch.zeros((T, J), device=vertices.device)
     for s in range(0, T, chunk):
         e = min(s + chunk, T)
@@ -139,7 +174,18 @@ def joint_occlusion_counts(
         w = vertices[s:e] - C[:, None, :]                                    # (F,Vs,3)
         depth = torch.einsum("fvc,fjc->fvj", w, uhat)                        # (F,Vs,J)
         perp = (w[:, :, None, :] - depth[..., None] * uhat[:, None, :, :]).norm(dim=-1)
-        occ = (perp < perp_m) & (depth > 0.0) & (depth < (L[:, None, :] - front_m)) & valid_occ[None]
+        on_ray = (perp < perp_m) & (depth > 0.0)
+        own_depth = torch.where(
+            on_ray & own_surface[None], depth, torch.full_like(depth, float("inf"))
+        ).amin(dim=1)                                                         # (F,J)
+        # A sampled local vertex can lie behind its internal joint centre (for
+        # example on the back side of a limb). It must never move the visibility
+        # reference behind the joint and let another behind-joint vertex count as
+        # an occluder.
+        reference_depth = torch.minimum(
+            torch.where(torch.isfinite(own_depth), own_depth, L), L)
+        occ = (on_ray & valid_occ[None]
+               & (depth < (reference_depth[:, None, :] - front_m)))
         n_occ[s:e] = occ.sum(dim=1).float()
     return n_occ
 
@@ -187,6 +233,28 @@ def lift_joint_contact(
     jsdf.scatter_reduce_(1, idx, sdf, reduce="amin", include_self=True)
     jsdf_cm = torch.where(jsdf < INF * 0.5, jsdf * 100.0, torch.full_like(jsdf, float("nan")))
     return jc > 0.5, jsdf_cm
+
+
+def lift_joint_min_distance(
+    distance_m: torch.Tensor,       # (T, V) nonnegative per-vertex distance (m)
+    v2j: torch.Tensor,              # (V,) long vertex→joint
+    num_joints: int,
+) -> torch.Tensor:
+    """Minimum Euclidean scene distance for each joint's owned surface ``(T,J)``.
+
+    Unlike signed wall-normal SDF, this is a true clearance magnitude and cannot
+    read near zero merely because a far-away correspondence lies tangent to a bad
+    scene normal. A joint with no finite scene candidate is returned as ``NaN``.
+    """
+    T = distance_m.shape[0]
+    INF = torch.finfo(distance_m.dtype).max
+    idx = v2j[None].expand(T, -1)
+    finite_distance = torch.where(
+        torch.isfinite(distance_m), distance_m, torch.full_like(distance_m, INF))
+    out = torch.full(
+        (T, num_joints), INF, device=distance_m.device, dtype=distance_m.dtype)
+    out.scatter_reduce_(1, idx, finite_distance, reduce="amin", include_self=True)
+    return torch.where(out < INF * 0.5, out, torch.full_like(out, float("nan")))
 
 
 def joint_guarded_min_sdf(
@@ -280,6 +348,7 @@ def joint_drift(
     *,
     fps: float,
     window_s: float,
+    valid_mask: torch.Tensor | None = None,
 ) -> torch.Tensor:
     """Net joint displacement across a centered time window ``(T, J)`` metres.
 
@@ -293,18 +362,37 @@ def joint_drift(
     a full interior window would for the same motion — otherwise the first/last ``h``
     frames read as artificially still (a fast joint there would false-contact). Two
     gathers, no loop, no gradients — a signal to READ, never to optimize. ``T < 2`` ⇒
-    all-zero.
+    all-zero. When ``valid_mask (T,)`` is supplied, a sample whose current frame
+    or either window endpoint is invalid is returned as ``NaN``. This prevents a
+    camera-glued tracking gap from manufacturing motion at an adjacent valid
+    frame; downstream confidence treats the missing motion witness as zero.
     """
     T = joints_world.shape[0]
     if T < 2:
-        return joints_world.new_zeros(joints_world.shape[:2])
+        drift = joints_world.new_zeros(joints_world.shape[:2])
+        if valid_mask is not None:
+            valid_mask = torch.as_tensor(
+                valid_mask, dtype=torch.bool, device=joints_world.device)
+            if valid_mask.shape != (T,):
+                raise ValueError(
+                    f"valid_mask must have shape ({T},), got {tuple(valid_mask.shape)}")
+            drift = torch.where(
+                valid_mask[:, None], drift, torch.full_like(drift, float("nan")))
+        return drift
     h = max(1, int(round(window_s * float(fps) / 2.0)))
     idx = torch.arange(T, device=joints_world.device)
     lo = (idx - h).clamp_min(0)
     hi = (idx + h).clamp_max(T - 1)
     disp = (joints_world[hi] - joints_world[lo]).norm(dim=-1)          # (T, J)
     span = (hi - lo).clamp_min(1).to(disp.dtype)                      # actual window frames (2h interior)
-    return disp * (2 * h / span)[:, None]                            # scale short end-windows to full width
+    drift = disp * (2 * h / span)[:, None]                           # scale short end-windows to full width
+    if valid_mask is not None:
+        valid_mask = torch.as_tensor(valid_mask, dtype=torch.bool, device=joints_world.device)
+        if valid_mask.shape != (T,):
+            raise ValueError(f"valid_mask must have shape ({T},), got {tuple(valid_mask.shape)}")
+        window_valid = valid_mask & valid_mask[lo] & valid_mask[hi]
+        drift = torch.where(window_valid[:, None], drift, torch.full_like(drift, float("nan")))
+    return drift
 
 
 def stillness_weight(drift: torch.Tensor, *, still_m: float) -> torch.Tensor:
