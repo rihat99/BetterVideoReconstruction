@@ -44,6 +44,8 @@ from __future__ import annotations
 import argparse
 import sys
 import tempfile
+from collections import deque
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 _HERE = Path(__file__).resolve()
@@ -131,6 +133,31 @@ def _merge_scene(points: torch.Tensor, conf: torch.Tensor, color: torch.Tensor,
     return cent2, conf2, col2, wsum.to(torch.int32), coords
 
 
+def _prep_frame(pred, frame_path, idx, objs, climber_ids, args, hv, wv):
+    """Per-frame CPU prep (loads, cleaning, masks) — runs on a worker thread."""
+    vd = np.load(pred / "vggt" / "depth" / f"frame_{idx:06d}.npz")
+    depth, conf = vd["depth"].astype(np.float32), vd["depth_conf"].astype(np.float32)
+    # One shared edge-filter pass (the expensive half of the cleaning). The human
+    # keeps every in-mask point that survives it; the scene additionally drops
+    # its lowest-confidence quantile.
+    valid_human = clean_depth(depth, edge_rtol=args.edge_rtol)
+    valid_scene = valid_human
+    if args.conf_drop_q > 0 and valid_human.any():
+        valid_scene = valid_human & (conf >= np.quantile(conf[valid_human], args.conf_drop_q))
+
+    rgb = cv2.cvtColor(cv2.imread(str(frame_path)), cv2.COLOR_BGR2RGB)
+    rgb = cv2.resize(rgb, (wv, hv), interpolation=cv2.INTER_AREA)
+
+    is_human, obj_id = _human_masks(pred / "sam3", idx, objs, hv, wv)
+    # Imperfect masks leak human-edge pixels into the background, so subtract
+    # a *dilated* band of every tracked person from the scene; collect the
+    # human from the tight mask, restricted to the reconstructed climbers.
+    scene_mask = valid_scene & ~_dilate(is_human, args.human_dilate)
+    human_mask = valid_human & is_human & np.isin(obj_id, climber_ids)
+    med = float(np.median(depth[scene_mask])) if scene_mask.any() else None
+    return depth, conf, rgb, scene_mask, human_mask, obj_id, med
+
+
 def _build_geometry(args, pred, cam, frame_indices, extr, K_px, objs, climber_ids):
     """Backproject every frame, split scene/human, merge + cluster-filter the scene."""
     hv, wv = int(cam["vggt_height"]), int(cam["vggt_width"])
@@ -140,43 +167,44 @@ def _build_geometry(args, pred, cam, frame_indices, extr, K_px, objs, climber_id
 
     with tempfile.TemporaryDirectory(prefix="fuse_frames_") as tmp:
         frame_paths, src_fps = resolve_source(Path(args.source), Path(tmp))
-        for k, idx in enumerate(frame_indices):
-            idx = int(idx)
-            vd = np.load(pred / "vggt" / "depth" / f"frame_{idx:06d}.npz")
-            depth, conf = vd["depth"].astype(np.float32), vd["depth_conf"].astype(np.float32)
-            # Scene gets the full clean (confidence-gated); the human keeps every
-            # in-mask point — edge filter only, no confidence drop.
-            valid_scene = clean_depth(depth, conf, conf_drop_q=args.conf_drop_q, edge_rtol=args.edge_rtol)
-            valid_human = clean_depth(depth, edge_rtol=args.edge_rtol)
+        # The CPU prep (zlib, edge filter, imread) dominates the loop, so a few
+        # worker threads prefetch it in a bounded window ahead of the GPU work.
+        with ThreadPoolExecutor(max_workers=4) as pool:
+            pending = deque()
+            todo = deque(enumerate(frame_indices))
 
-            rgb = cv2.cvtColor(cv2.imread(str(frame_paths[idx])), cv2.COLOR_BGR2RGB)
-            rgb = cv2.resize(rgb, (wv, hv), interpolation=cv2.INTER_AREA)
+            def _submit_next():
+                if todo:
+                    k, idx = todo.popleft()
+                    pending.append((k, pool.submit(
+                        _prep_frame, pred, frame_paths[int(idx)], int(idx),
+                        objs, climber_ids, args, hv, wv)))
 
-            is_human, obj_id = _human_masks(pred / "sam3", idx, objs, hv, wv)
-            # Imperfect masks leak human-edge pixels into the background, so subtract
-            # a *dilated* band of every tracked person from the scene; collect the
-            # human from the tight mask, restricted to the reconstructed climbers.
-            scene_mask = valid_scene & ~_dilate(is_human, args.human_dilate)
-            human_mask = valid_human & is_human & np.isin(obj_id, climber_ids)
-            if scene_mask.any():
-                scene_depth_med.append(float(np.median(depth[scene_mask])))
+            for _ in range(8):
+                _submit_next()
+            while pending:
+                k, fut = pending.popleft()
+                depth, conf, rgb, scene_mask, human_mask, obj_id, med = fut.result()
+                _submit_next()
+                if med is not None:
+                    scene_depth_med.append(med)
 
-            depth_t, K_t, E_t = (torch.from_numpy(depth).to(dev),
-                                 torch.from_numpy(K_px[k]).to(dev), torch.from_numpy(extr[k]).to(dev))
-            conf_t = torch.from_numpy(conf).to(dev)
-            col_t = torch.from_numpy(np.ascontiguousarray(rgb)).to(dev)
+                depth_t, K_t, E_t = (torch.from_numpy(depth).to(dev),
+                                     torch.from_numpy(K_px[k]).to(dev), torch.from_numpy(extr[k]).to(dev))
+                conf_t = torch.from_numpy(conf).to(dev)
+                col_t = torch.from_numpy(np.ascontiguousarray(rgb)).to(dev)
 
-            ss = torch.from_numpy(scene_mask).to(dev)
-            scene_pts.append(backproject(depth_t, K_t, E_t, mask=ss))
-            scene_conf.append(conf_t[ss])
-            scene_col.append(col_t[ss])
-            if human_mask.any():
-                sh = torch.from_numpy(human_mask).to(dev)
-                human_pts.append(backproject(depth_t, K_t, E_t, mask=sh))
-                human_conf.append(conf_t[sh])
-                human_obj.append(torch.from_numpy(obj_id).to(dev)[sh].to(torch.int32))
-                human_fid.append(torch.full((int(sh.sum()),), k, dtype=torch.int32, device=dev))
-                human_col.append(col_t[sh])
+                ss = torch.from_numpy(scene_mask).to(dev)
+                scene_pts.append(backproject(depth_t, K_t, E_t, mask=ss))
+                scene_conf.append(conf_t[ss])
+                scene_col.append(col_t[ss])
+                if human_mask.any():
+                    sh = torch.from_numpy(human_mask).to(dev)
+                    human_pts.append(backproject(depth_t, K_t, E_t, mask=sh))
+                    human_conf.append(conf_t[sh])
+                    human_obj.append(torch.from_numpy(obj_id).to(dev)[sh].to(torch.int32))
+                    human_fid.append(torch.full((int(sh.sum()),), k, dtype=torch.int32, device=dev))
+                    human_col.append(col_t[sh])
 
     empty = torch.zeros((0, 3), device=dev)
     all_scene = torch.cat(scene_pts)

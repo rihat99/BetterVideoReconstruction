@@ -44,9 +44,10 @@ Three files under `geometry/`:
      (`conf_drop_q = 0.3`). The threshold is a per-frame quantile, not a fixed
      value, because VGGT's confidence scale drifts from frame to frame.
 
-   The scene gets both filters. The human cloud gets **only the edge filter** — the
-   person is exactly where we cannot afford to throw points away, and the scale
-   stage applies its own confidence handling later.
+   The edge filter runs once per frame (it is the expensive half of the
+   cleaning) and both clouds share it. The confidence gate applies **only to the
+   scene** — the person is exactly where we cannot afford to throw points away,
+   and the scale stage applies its own confidence handling later.
 
 2. **Split person from background.** The SAM3 masks say which pixels belong to
    which tracked person (resized to the VGGT resolution, nearest-neighbour).
