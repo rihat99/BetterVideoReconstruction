@@ -2,7 +2,7 @@
 
 Each precompute step subclasses :class:`Step` (``load`` / ``process`` /
 ``release``) and calls :func:`run_batch` from its ``main()``. The runner
-parses :func:`add_standard_args` (``--source``, ``--save-dir``, ...) and
+parses :func:`add_standard_args` (``--source``, ``--save-dir``, ``--config``) and
 dispatches inputs through :func:`iter_inputs`, which accepts a single image
 or video, a directory of either, a glob, or a ``.txt`` / ``.json`` manifest.
 
@@ -56,6 +56,7 @@ from tools.source import IMAGE_EXTS, VIDEO_EXTS
 _MEDIA_EXTS = IMAGE_EXTS | VIDEO_EXTS
 _MANIFEST_EXTS = {".txt", ".json"}
 _GLOB_CHARS = set("*?[")
+_DEFAULT_CONFIG = Path(__file__).resolve().parents[1] / "configs" / "pipeline.toml"
 
 
 @dataclass
@@ -200,7 +201,7 @@ class Step(Protocol):
 
 
 def add_standard_args(parser: argparse.ArgumentParser) -> None:
-    """Attach the shared precompute-script flags. Step-specific flags go on top."""
+    """Attach the shared precompute-script input and config flags."""
     parser.add_argument(
         "--source", required=True, type=str,
         help="single image/video | directory | glob pattern | .txt or .json manifest",
@@ -210,17 +211,12 @@ def add_standard_args(parser: argparse.ArgumentParser) -> None:
         help="parent dir; per-item outputs land in <save-dir>/<stem>/...",
     )
     parser.add_argument(
-        "--config", default=None, type=Path,
-        help="optional TOML/YAML config (interpretation is step-specific)",
+        "--config", default=_DEFAULT_CONFIG, type=Path,
+        help="pipeline TOML (default: configs/pipeline.toml)",
     )
     parser.add_argument(
         "--skip-existing", action="store_true",
-        help="step may skip items whose outputs are already on disk",
-    )
-    parser.add_argument("--device", default="cuda", help="cuda | cpu (default: cuda)")
-    parser.add_argument(
-        "--dtype", default="fp16", choices=("fp16", "bf16", "fp32"),
-        help="model dtype hint passed to the step (default: fp16)",
+        help="skip items whose outputs already exist (overrides the config key)",
     )
 
 

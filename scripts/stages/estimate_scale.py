@@ -51,6 +51,7 @@ import cv2  # noqa: E402
 import numpy as np  # noqa: E402
 import torch  # noqa: E402
 
+from tools.config import load_toml, section  # noqa: E402
 from tools.geometry.human_scale import combine_log_scales, weighted_median  # noqa: E402
 from tools.geometry.intrinsics import denormalize_K  # noqa: E402
 from tools.human_optim import normalize_q  # noqa: E402
@@ -369,36 +370,39 @@ def estimate_scale(args: argparse.Namespace) -> None:
                         object_ids, mid, device, args)
 
 
-def main(argv: list[str] | None = None) -> int:
+def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     p = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     p.add_argument("--predictions", required=True, type=Path, help="clip dir, e.g. out/<stem>/")
-    p.add_argument("--conf-drop-q", type=float, default=0.3,
-                   help="drop this lowest-confidence fraction of depth per frame (default: 0.3)")
-    p.add_argument("--min-inlier-verts", type=int, default=50,
-                   help="skip a scale frame with fewer than this many inlier vertices (default: 50)")
-    p.add_argument("--mad-k", type=float, default=3.0,
-                   help="reject scale frames beyond this many MADs from the median (default: 3.0)")
-    p.add_argument("--device", default="cuda", help="cuda | cpu (default: cuda)")
-    p.add_argument("--skip-existing", action="store_true", help="skip if outputs already exist")
-    # overfit knobs
-    p.add_argument("--skip-overfit", action="store_true", help="estimate scale only, no body overfit")
-    p.add_argument("--iters", type=int, default=300, help="Adam iterations per frame-batch (default: 300)")
-    p.add_argument("--lr", type=float, default=0.02, help="Adam learning rate (default: 0.02)")
-    p.add_argument("--frame-batch", type=int, default=512,
-                   help="frames optimized together (lower to bound GPU memory; default: 512)")
-    p.add_argument("--w-chamfer", type=float, default=1.0, help="chamfer weight (default: 1.0)")
-    p.add_argument("--w-reproj", type=float, default=0.5, help="Sapiens reprojection weight (default: 0.5)")
-    p.add_argument("--w-pose", type=float, default=0.02, help="init-pose prior weight (default: 0.02)")
-    p.add_argument("--w-betas", type=float, default=1e-3, help="betas gauge weight (default: 1e-3)")
-    p.add_argument("--gm-chamfer-m", type=float, default=0.3,
-                   help="chamfer robust scale in m; larger is more L2-like (default: 0.3)")
-    p.add_argument("--gm-reproj-px", type=float, default=10.0,
-                   help="reprojection robust scale in px (default: 10.0)")
-    p.add_argument("--max-points", type=int, default=4000,
-                   help="cap on depth points per frame for chamfer (default: 4000)")
-    p.add_argument("--vertex-subsample", type=int, default=3000,
-                   help="body vertices used for chamfer (default: 3000)")
-    estimate_scale(p.parse_args(argv))
+    p.add_argument("--config", type=Path, default=_REPO_ROOT / "configs" / "pipeline.toml",
+                   help="pipeline TOML (default: configs/pipeline.toml)")
+    cli = p.parse_args(argv)
+    cfg = load_toml(cli.config)
+    args = section(cfg, "scale", {
+        "conf_drop_q": 0.3,
+        "min_inlier_verts": 50,
+        "mad_k": 3.0,
+        "skip_existing": False,
+        # overfit knobs
+        "skip_overfit": False,
+        "iters": 300,
+        "lr": 0.02,
+        "frame_batch": 512,
+        "w_chamfer": 1.0,
+        "w_reproj": 0.5,
+        "w_pose": 0.02,
+        "w_betas": 1e-3,
+        "gm_chamfer_m": 0.3,
+        "gm_reproj_px": 10.0,
+        "max_points": 4000,
+        "vertex_subsample": 3000,
+    })
+    args.device = section(cfg, "runtime", {"device": "cuda"}).device
+    args.predictions, args.config = cli.predictions, cli.config
+    return args
+
+
+def main(argv: list[str] | None = None) -> int:
+    estimate_scale(_parse_args(argv))
     return 0
 
 

@@ -16,7 +16,7 @@ Two run modes:
 
   * **single clip** — ``--source clip --predictions out/video/``; reads the
     ``sam3/`` + ``vggt/`` (or ``geometry/``) siblings under ``--predictions``.
-  * **batch / manifest** — ``--source manifest.json --save-dir <dir>`` (a
+  * **batch / manifest** — ``--source manifest.json`` with ``[sam3d].save_dir`` (a
     ``precompute_runner`` Step): loads SAM-3D-Body once and sweeps every scene,
     taking each scene's ``bboxes`` / ``camera`` paths from the manifest. This is
     how ``scripts/precompute_scenes.py`` fans the stage across the ClimbingVideos
@@ -27,8 +27,7 @@ Run from CLI::
     uv run python scripts/stages/estimate_body_sam3d.py \\
         --source path/to/{video.mp4|frames_folder|photo.jpg} \\
         --predictions out/video/ \\
-        [--obj-ids 0,1] [--hf-repo facebook/sam-3d-body-dinov3] \\
-        [--device cuda] [--inference-type full] [--no-overlay]
+        --config configs/pipeline.toml
 
 Inputs:
     sam3/bboxes.npz          tracked bboxes (bboxes_per_obj / legacy bboxes)
@@ -37,7 +36,7 @@ Inputs:
     vggt/camera.npz          VGGT intrinsics, denormalized on the fly (fallback)
 
 Outputs (``sam3d/`` under ``--predictions``, or the manifest ``out_dir`` /
-``--subdir`` in batch mode):
+``[sam3d].subdir`` in batch mode):
     sam3d/params.npz      per-frame MHR pose/shape params for every tracked
                           person, stacked along a leading axis ``(P, N, ...)``
                           (``object_ids (P,)`` records which SAM 3 id each row is)
@@ -67,6 +66,7 @@ import numpy as np  # noqa: E402
 import torch  # noqa: E402
 from tqdm import tqdm  # noqa: E402
 
+from tools.config import load_toml, section  # noqa: E402
 from tools.geometry.intrinsics import denormalize_K  # noqa: E402
 from tools.precompute_runner import InputItem, SkipItem, run_batch  # noqa: E402
 from tools.source import find_frame_file, resolve_source  # noqa: E402
@@ -483,54 +483,37 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     )
     p.add_argument(
         "--source", required=True,
-        help="single clip (video / folder of frames / image) for --predictions "
-             "mode, or a .json manifest for --save-dir (batch) mode",
+        help="single clip (video / folder of frames / image), or a .json manifest",
     )
-    # Mode selector — exactly one of these:
     p.add_argument(
         "--predictions", default=None,
         help="single-clip mode: folder holding sam3/bboxes.npz + sam3/<obj>/ + "
              "vggt/camera.npz (or geometry/transform.npz); writes sam3d/ here",
     )
     p.add_argument(
-        "--save-dir", type=Path, default=None,
-        help="batch mode: run as a precompute_runner Step over the .json --source "
-             "manifest (per-scene bboxes/camera/out_dir paths); load model once",
+        "--save-dir", default=None, type=Path,
+        help="manifest batch mode: output root (per-item outputs under <save-dir>/<stem>/)",
     )
-    p.add_argument(
-        "--subdir", default="sam3d",
-        help="batch mode: output subfolder under each manifest out_dir "
-             "('.' writes straight into it; default: sam3d)",
-    )
-    p.add_argument(
-        "--skip-existing", action="store_true",
-        help="batch mode: skip scenes whose sam3d/params.npz already exists",
-    )
-    p.add_argument(
-        "--obj-ids", type=_parse_obj_ids, default=None,
-        help="comma-separated tracked object ids to fit, e.g. --obj-ids 0,1 "
-             "(default: all tracked people). Each fits bboxes_per_obj[id] + "
-             "sam3/<id:02d>/; results are stacked along a leading (P, N, ...) axis.",
-    )
-    p.add_argument(
-        "--hf-repo", default="facebook/sam-3d-body-dinov3",
-        help="HuggingFace repo ID for SAM-3D-Body (default: %(default)s)",
-    )
-    p.add_argument("--device", default="cuda")
-    p.add_argument(
-        "--inference-type", default="full", choices=["full", "body"],
-        help="'full' for body+hands, 'body' for body only (default: %(default)s)",
-    )
-    p.add_argument(
-        "--overlay", action=argparse.BooleanOptionalAction, default=True,
-        help="render the SAM-3D-Body mesh overlay to sam3d/overlay.mp4 "
-             "(default: ON; --no-overlay to skip)",
-    )
-    p.add_argument(
-        "--fps", type=float, default=None,
-        help="output video fps (default: source fps, or 30 for frame folders)",
-    )
-    return p.parse_args(argv)
+    p.add_argument("--config", type=Path, default=_REPO_ROOT / "configs" / "pipeline.toml",
+                   help="pipeline TOML (default: configs/pipeline.toml)")
+    cli = p.parse_args(argv)
+    cfg = load_toml(cli.config)
+    args = section(cfg, "sam3d", {
+        "subdir": "sam3d",
+        "skip_existing": False,
+        "obj_ids": "",
+        "hf_repo": "facebook/sam-3d-body-dinov3",
+        "inference_type": "full",
+        "overlay": True,
+        "fps": "",
+    })
+    args.device = section(cfg, "runtime", {"device": "cuda"}).device
+    args.source, args.predictions, args.config = cli.source, cli.predictions, cli.config
+    args.save_dir = cli.save_dir
+    args.obj_ids = (_parse_obj_ids(args.obj_ids) if isinstance(args.obj_ids, str)
+                    else list(args.obj_ids) or None)
+    args.fps = float(args.fps) if args.fps != "" else None
+    return args
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -544,7 +527,7 @@ def main(argv: list[str] | None = None) -> int:
     if args.predictions is None:
         raise SystemExit(
             "estimate_body_sam3d: pass --predictions <clip-dir> (single clip) "
-            "or --save-dir <dir> with a .json --source manifest (batch)."
+            "or set sam3d.save_dir in the config for a .json --source manifest (batch)."
         )
     est = Sam3dBodyEstimator(
         hf_repo=args.hf_repo,

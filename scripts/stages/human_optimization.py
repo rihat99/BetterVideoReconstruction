@@ -43,26 +43,33 @@ from tools.human_optim.stages import (  # noqa: E402
 _DEFAULT_CONFIG = _REPO_ROOT / "configs" / "human_optimization.toml"
 
 
-def run(source, predictions_dir, config_path, *, stages=None, annotations=None,
-        device_override=None, overlay=False, bodies="kinematic_2", labels="manual") -> None:
-    """Run the requested human-optimization stages in dependency order."""
+def run(source, predictions_dir, config_path, *, stages=None, annotations=None) -> None:
+    """Run the requested human-optimization stages in dependency order.
+
+    Per-stage options (overlay, kinematics_2 label source, dynamics body/device)
+    come from the config's ``[stages.<name>]`` tables.
+    """
     cfg = load_config(config_path)
     requested = stages if stages else list(cfg.run)
     bad = [s for s in requested if s not in STAGE_ORDER]
     if bad:
         raise SystemExit(f"[human_optimization] unknown stage(s) {bad}; known: {list(STAGE_ORDER)}")
     pred = Path(predictions_dir)
+    opts = cfg.stage_opts
 
     kin_stages = [s for s in ("root", "kinematics_1") if s in requested]
-    kin_device = device_override or cfg.device
     if kin_stages:
-        run_kinematic(source, pred, cfg, kin_stages, kin_device, overlay=overlay)
+        run_kinematic(source, pred, cfg, kin_stages, cfg.device,
+                      overlay=bool(opts.get("kinematics_1", {}).get("overlay", False)))
     if "kinematics_2" in requested:
-        run_kinematics_2(source, pred, cfg, kin_device, annotations=annotations, overlay=overlay,
-                         labels_mode=labels)
+        k2 = opts.get("kinematics_2", {})
+        run_kinematics_2(source, pred, cfg, cfg.device, annotations=annotations,
+                         overlay=bool(k2.get("overlay", False)),
+                         labels_mode=str(k2.get("labels", "manual")))
     if "dynamics" in requested:
-        dyn_device = device_override or cfg.stage_opts.get("dynamics", {}).get("device", "cpu")
-        run_dynamics(pred, cfg, dyn_device, bodies=bodies)
+        dyn = opts.get("dynamics", {})
+        run_dynamics(pred, cfg, dyn.get("device", "cpu"),
+                     bodies=str(dyn.get("bodies", "kinematic_2")))
 
 
 def main(argv=None) -> int:
@@ -76,18 +83,11 @@ def main(argv=None) -> int:
                          "(default: config [stages].run)")
     ap.add_argument("--annotations", default=None,
                     help="kinematics_2 manual-contact npz (default: <source>.npz or data/<stem>.npz)")
-    ap.add_argument("--labels", choices=("manual", "auto"), default="manual",
-                    help="kinematics_2 contact labels: manual annotation (default) or our own "
-                         "contacts_1.npz, weighted by schema-4 per-joint confidence")
-    ap.add_argument("--bodies", default="kinematic_2",
-                    help="dynamics: which refined body to solve on (kinematic_1|kinematic_2)")
-    ap.add_argument("--config", type=Path, default=_DEFAULT_CONFIG)
-    ap.add_argument("--device", default=None)
-    ap.add_argument("--overlay", action=argparse.BooleanOptionalAction, default=False)
+    ap.add_argument("--config", type=Path, default=_DEFAULT_CONFIG,
+                    help="human-optimization TOML (default: configs/human_optimization.toml)")
     args = ap.parse_args(argv)
     stages = [s.strip() for s in args.stages.split(",") if s.strip()] if args.stages else None
-    run(args.source, args.predictions, args.config, stages=stages, annotations=args.annotations,
-        device_override=args.device, overlay=args.overlay, bodies=args.bodies, labels=args.labels)
+    run(args.source, args.predictions, args.config, stages=stages, annotations=args.annotations)
     return 0
 
 

@@ -62,6 +62,7 @@ import numpy as np
 import torch
 
 from tools.adapters.geocalib import DEFAULT_WEIGHTS, infer_gravity, load_geocalib
+from tools.config import load_toml, section
 from tools.source import resolve_source
 
 
@@ -281,31 +282,24 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--source", required=True,
                    help="video / folder of frames (same source used for the rest of the clip)")
     p.add_argument("--predictions", required=True, type=Path, help="clip dir, e.g. out/<stem>/")
-    p.add_argument("--num-frames", type=int, default=48,
-                   help="frames sampled uniformly across the clip (default 48)")
-    p.add_argument("--conf-rel", type=float, default=0.5,
-                   help="keep frames with confidence >= conf_rel * max confidence (default 0.5)")
-    p.add_argument("--inlier-deg", type=float, default=8.0,
-                   help="world-frame angular inlier threshold, degrees (default 8)")
-    p.add_argument("--min-frames", type=int, default=5,
-                   help="if fewer frames pass the gate, fall back to the best this many (default 5)")
-    p.add_argument("--conf-floor", type=float, default=0.01,
-                   help="reliability: min absolute GeoCalib confidence (default 0.01; "
-                        "horizon-free scenes collapse to ~0.001, clear scenes ~0.05)")
-    p.add_argument("--min-diversity-deg", type=float, default=8.0,
-                   help="reliability: min camera-rotation spread across selected frames "
-                        "for the agreement to be non-trivial, degrees (default 8)")
-    p.add_argument("--max-spread-deg", type=float, default=5.0,
-                   help="reliability: max world-gravity inlier spread, degrees (default 5)")
-    p.add_argument("--fallback-gravity", default="0,1,0",
-                   help="world-down direction used when GeoCalib is unreliable "
-                        "(default '0,1,0' = VGGT world +y; cam0 anchors the world and is ~upright)")
-    p.add_argument("--weights", default=DEFAULT_WEIGHTS, choices=("pinhole", "distorted"),
-                   help="GeoCalib checkpoint (default pinhole)")
-    p.add_argument("--device", default="cuda", help="cuda | cpu (default: cuda)")
-    p.add_argument("--skip-existing", action="store_true",
-                   help="skip if geocalib/gravity.npz already exists")
-    args = p.parse_args(sys.argv[1:] if argv is None else argv)
+    p.add_argument("--config", type=Path, default=_REPO_ROOT / "configs" / "pipeline.toml",
+                   help="pipeline TOML (default: configs/pipeline.toml)")
+    cli = p.parse_args(sys.argv[1:] if argv is None else argv)
+    cfg = load_toml(cli.config)
+    args = section(cfg, "gravity", {
+        "num_frames": 48,
+        "conf_rel": 0.5,
+        "inlier_deg": 8.0,
+        "min_frames": 5,
+        "conf_floor": 0.01,
+        "min_diversity_deg": 8.0,
+        "max_spread_deg": 5.0,
+        "fallback_gravity": "0,1,0",
+        "weights": DEFAULT_WEIGHTS,
+        "skip_existing": False,
+    })
+    args.device = section(cfg, "runtime", {"device": "cuda"}).device
+    args.source, args.predictions, args.config = cli.source, cli.predictions, cli.config
     estimate_gravity(args)
     return 0
 

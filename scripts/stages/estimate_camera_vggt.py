@@ -28,7 +28,7 @@ Per-item I/O (``<save-dir>/<stem>/``)::
               image_resolution / mode / checkpoint   inference settings
               scale            'up_to_scale'  (VGGT depth/translation are NOT
                                               metric; one arbitrary per-clip scale)
-            vggt/depth/frame_NNNNNN.npz   (only with --save-depth; NNNNNN is the
+            vggt/depth/frame_NNNNNN.npz   (with [vggt].save_depth; NNNNNN is the
               original frame index)
               depth (H, W) f16, depth_conf (H, W) f16   at the VGGT resolution
 
@@ -36,7 +36,7 @@ Standalone CLI::
 
     uv run python scripts/stages/estimate_camera_vggt.py \\
         --source video.mp4 --save-dir out/ \\
-        --checkpoint /path/to/vggt_omega_1b_512.pt
+        --config configs/pipeline.toml
 """
 from __future__ import annotations
 
@@ -63,6 +63,7 @@ from tools.adapters.vggt_omega import (
     load_vggt_omega,
     uniform_subsample,
 )
+from tools.config import load_toml, section
 from tools.precompute_runner import InputItem, SkipItem, add_standard_args, run_batch
 from tools.source import resolve_source
 
@@ -160,24 +161,22 @@ class CameraVggtStep:
 def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     p = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     add_standard_args(p)
-    p.set_defaults(dtype="fp16")
-    p.add_argument("--checkpoint", default=DEFAULT_CHECKPOINT_REPO,
-                   help="local VGGT-Omega .pt path or HF repo id "
-                        f"(default: {DEFAULT_CHECKPOINT_REPO})")
-    p.add_argument("--subdir", default="vggt",
-                   help="output subfolder under <save-dir>/<stem>/ ('.' writes "
-                        "directly into it; default: vggt)")
-    p.add_argument("--max-frames", type=int, default=DEFAULT_MAX_FRAMES,
-                   help="cap on frames per clip; longer clips are uniformly "
-                        f"subsampled, <=0 disables (default: {DEFAULT_MAX_FRAMES})")
-    p.add_argument("--image-resolution", type=int, default=DEFAULT_IMAGE_RESOLUTION,
-                   help=f"VGGT-Omega input resolution (default: {DEFAULT_IMAGE_RESOLUTION})")
-    p.add_argument("--mode", default=DEFAULT_MODE, choices=("balanced", "max_size"),
-                   help="load_and_preprocess_images sizing mode (default: balanced)")
-    p.add_argument("--save-depth", action="store_true",
-                   help="also write per-frame depth + confidence at the VGGT "
-                        "resolution to vggt/depth/frame_NNNNNN.npz")
-    return p.parse_args(argv)
+    cli = p.parse_args(argv)
+    cfg = load_toml(cli.config)
+    args = section(cfg, "vggt", {
+        "skip_existing": False,
+        "dtype": "fp16",
+        "checkpoint": DEFAULT_CHECKPOINT_REPO,
+        "subdir": "vggt",
+        "max_frames": DEFAULT_MAX_FRAMES,
+        "image_resolution": DEFAULT_IMAGE_RESOLUTION,
+        "mode": DEFAULT_MODE,
+        "save_depth": False,
+    })
+    args.device = section(cfg, "runtime", {"device": "cuda"}).device
+    args.source, args.save_dir, args.config = cli.source, cli.save_dir, cli.config
+    args.skip_existing = args.skip_existing or cli.skip_existing
+    return args
 
 
 def main(argv: list[str] | None = None) -> int:

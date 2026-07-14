@@ -13,7 +13,7 @@ Single video, default text::
 Folder of images — load SAM 3 weights once, run on each (benchmark mode)::
 
     uv run python scripts/stages/track_sam3.py \\
-        --source data/prox_50/ --save-dir out/track_batch --text "person"
+        --source data/prox_50/ --save-dir out/track_batch
 
 Mixed-type multi-object via JSON (one image, two objects, different prompt
 types — tracked together as separate ``obj_id``s)::
@@ -23,7 +23,7 @@ types — tracked together as separate ``obj_id``s)::
      {"label":"couch","bbox":[100,200,800,900]}]
     JSON
     uv run python scripts/stages/track_sam3.py \\
-        --source img.jpg --save-dir out/ --prompts prompts.json
+        --source img.jpg --save-dir out/  # set sam3.prompts = "prompts.json"
 
 Per-item prompts via ``--source <json>`` manifest (each entry can carry its
 own ``prompts`` field — useful for batches where every input has a different
@@ -36,15 +36,15 @@ target)::
     uv run python scripts/stages/track_sam3.py \\
         --source batch.json --save-dir out/
 
-Prompt CLI flags (mutually exclusive — combine multiple via ``--prompts``)::
+Prompt config keys (mutually exclusive — combine multiple via ``prompts``)::
 
-    --text "person, ladder"    # SAM 3 grounding (default; comma = multi-phrase)
-    --bbox X1 Y1 X2 Y2         # single bounding box prompt (pixel xyxy)
-    --mask path.png            # single mask file prompt
-    --points X,Y,+ X,Y,+ X,Y,- # one or more points (+ positive, - negative)
-    --label NAME               # display label override for single-object CLI prompts
+    text = "person, ladder"                  # grounding; comma = multi-phrase
+    bbox = [X1, Y1, X2, Y2]                  # single pixel-xyxy box
+    mask = "path.png"                        # single mask file
+    points = ["X,Y,+", "X,Y,+", "X,Y,-"]   # positive/negative points
+    label = "NAME"                           # single-object display label
 
-JSON prompt schema (``--prompts`` file or per-item ``prompts`` field) — list of::
+JSON prompt schema (configured ``prompts`` file or per-item field) — list of::
 
     {"label": str?, "text": str, "confidence": float?, "top_k": int?}
     {"label": str?, "bbox": [x1, y1, x2, y2]}
@@ -62,8 +62,7 @@ Outputs (per item, at ``<save-dir>/<source.stem>/``)::
                                     per-object per-frame mask (multi-frame input)
     sam3/union_mask.png             OR over all per-object masks (single-frame
                                     only; downstream erasers consume this)
-    sam3/mask_overlay.png OR .mp4   multi-object mask+bbox overlay (default
-                                    ON; --no-overlay to disable)
+    sam3/mask_overlay.png OR .mp4   multi-object mask+bbox overlay ([sam3].overlay)
     sam3/bboxes.npz                 bboxes_per_obj (N_obj,T,4), object_ids,
                                     labels, num_objects, num_frames,
                                     video_height/width, plus legacy `bboxes`
@@ -90,6 +89,7 @@ import numpy as np
 import torch
 from PIL import Image
 
+from tools.config import load_toml, section
 from tools.mask_io import union_obj_masks, write_mask_png
 from tools.precompute_runner import InputItem, SkipItem, add_standard_args, run_batch
 from tools.source import frame_stem, resolve_source
@@ -887,80 +887,46 @@ class Sam3ObjectTracker:
 
 # ------------------------------ CLI --------------------------------
 
+_DEFAULTS = {
+    "skip_existing": False,
+    "dtype": "fp16",
+    "text": "person",
+    "top_k": 0,
+    "confidence": 0.5,
+    "min_area_frac": 0.01,
+    "bbox": [],
+    "mask": "",
+    "points": [],
+    "prompts": "",
+    "label": "",
+    "part_length": 200,
+    "overlay": True,
+    "fps": "",
+    "checkpoint": "",
+    "masks_subdir": "sam3",
+}
+
 
 def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     p = argparse.ArgumentParser(
         description="Track multiple objects with SAM 3 — text/bbox/points/mask prompts on images & videos.",
     )
     add_standard_args(p)
-
-    p.add_argument(
-        "--text", default="person",
-        help='text prompt for SAM 3 grounding on frame 0 (default: %(default)r). '
-             'Comma-separated for multi-phrase grounding ("person, ladder").',
-    )
-    p.add_argument(
-        "--top-k", type=int, default=0,
-        help="keep at most K detections per text prompt (sorted by area). 0 = all (default).",
-    )
-    p.add_argument(
-        "--confidence", type=float, default=0.5,
-        help="SAM 3 grounding confidence threshold (default: %(default)s)",
-    )
-    p.add_argument(
-        "--min-area-frac", type=float, default=0.01,
-        help="drop text-grounded masks with area < min_area_frac * H * W "
-             "(default: %(default)s ~= 1%% of image; useful to skip "
-             "background crowds / tiny detections).",
-    )
-
-    prompt_grp = p.add_mutually_exclusive_group()
-    prompt_grp.add_argument(
-        "--bbox", nargs=4, type=float, metavar=("X1", "Y1", "X2", "Y2"),
-        help="single bounding box prompt in pixel xyxy on frame 0 (overrides --text).",
-    )
-    prompt_grp.add_argument(
-        "--mask", type=Path, default=None,
-        help="single mask file prompt (PNG matching frame 0 dimensions; overrides --text).",
-    )
-    prompt_grp.add_argument(
-        "--points", nargs="+", type=_parse_point_arg, default=None,
-        metavar="X,Y,+|-",
-        help="point prompts for one object — '+' positive, '-' negative. "
-             "Pass multiple tokens to give multi-point prompts (overrides --text).",
-    )
-    prompt_grp.add_argument(
-        "--prompts", type=Path, default=None,
-        help="JSON file with a list of multi-type prompts; see module docstring.",
-    )
-    p.add_argument(
-        "--label", type=str, default=None,
-        help="display label override for single-object CLI prompts (--bbox/--mask/--points).",
-    )
-
-    p.add_argument(
-        "--part-length", type=int, default=200,
-        help="frames per propagation part (default 200; lower if SAM 3 OOMs).",
-    )
-    p.add_argument(
-        "--overlay", action=argparse.BooleanOptionalAction, default=True,
-        help="render per-frame mask+bbox overlay (default: ON; pass --no-overlay to disable).",
-    )
-    p.add_argument(
-        "--fps", type=float, default=None,
-        help="output overlay-video fps (default: source video fps, or 30 for image folders).",
-    )
-    p.add_argument(
-        "--checkpoint", type=str, default=None,
-        help="path to SAM 3 .pt checkpoint (default: HuggingFace download).",
-    )
-    p.add_argument(
-        "--masks-subdir", default="sam3",
-        help='subdir under each item out_dir for SAM 3 outputs (default: "sam3", '
-             'giving out/<stem>/sam3/…). Pass "." to write masks/overlay/bboxes.npz '
-             'directly into out_dir — used by the DB features/sam3/<shard>/<scene>/ layout.',
-    )
-    return p.parse_args(argv)
+    cli = p.parse_args(argv)
+    cfg = load_toml(cli.config)
+    args = section(cfg, "sam3", _DEFAULTS)
+    args.device = section(cfg, "runtime", {"device": "cuda"}).device
+    args.source, args.save_dir, args.config = cli.source, cli.save_dir, cli.config
+    args.skip_existing = args.skip_existing or cli.skip_existing
+    args.bbox = list(args.bbox) if args.bbox else None
+    args.mask = Path(args.mask) if args.mask else None
+    args.points = [(_parse_point_arg(point) if isinstance(point, str) else tuple(point))
+                   for point in args.points] or None
+    args.prompts = Path(args.prompts) if args.prompts else None
+    args.label = args.label or None
+    args.fps = float(args.fps) if args.fps != "" else None
+    args.checkpoint = args.checkpoint or None
+    return args
 
 
 def main(argv: list[str] | None = None) -> int:

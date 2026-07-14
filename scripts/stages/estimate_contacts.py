@@ -31,13 +31,13 @@ in contact (dot size ∝ confidence) / **green** otherwise.
 Run from CLI::
 
     .venv/bin/python scripts/stages/estimate_contacts.py \\
-        --source video.mp4 --predictions out/video/ [--no-overlay]
+        --source video.mp4 --predictions out/video/ --config configs/human_optimization.toml
 
 Reads:  human_optim/kinematic_1.npz, geometry/scene.npz, geometry/transform.npz
 Writes: human_optim/contacts_1.npz          (joint_contact (P,N,J) bool + signed/Euclidean
                                              scene-distance diagnostics + merged + auditable
                                              visibility/evidence terms + label_confidence)
-        human_optim/contacts_1_overlay.mp4  (--overlay; default on)
+        human_optim/contacts_1_overlay.mp4  ([contacts].overlay; default on)
 """
 
 from __future__ import annotations
@@ -53,11 +53,11 @@ for _p in (str(_BETTER_HUMAN_SRC), str(_REPO_ROOT)):
         sys.path.insert(0, _p)
 
 import argparse  # noqa: E402
-import tomllib  # noqa: E402
 
 import numpy as np  # noqa: E402
 import torch  # noqa: E402
 
+from tools.config import load_toml  # noqa: E402
 from tools.geometry.normals import estimate_point_normals  # noqa: E402
 from tools.human_optim import (  # noqa: E402
     contact_from_sdf, drift_gated_contact, joint_drift, joint_guarded_min_sdf,
@@ -80,7 +80,7 @@ _DEFAULT_SMPLX_MODEL = (
 
 def _load_config(path: Path) -> dict:
     """Operational knobs for the contact stage (no loss weights here)."""
-    cfg = tomllib.load(path.open("rb")) if path.exists() else {}
+    cfg = load_toml(path) if path.exists() else {}
     c = cfg.setdefault("contacts", {})
     c.setdefault("close_thresh_m", 0.02)   # enter: "just outside" distance counted as contact
     c.setdefault("exit_thresh_m", 0.035)   # stay: looser hysteresis exit (holds a span, kills boundary flicker)
@@ -93,6 +93,7 @@ def _load_config(path: Path) -> dict:
     c.setdefault("merge_dist_m", 0.03)     # span-merge: bridge a flicker gap the joint barely moved across
     c.setdefault("merge_max_gap_s", 2.0)   # …only gaps shorter than this
     c.setdefault("merge_sdf_m", 0.08)      # …re-grip guard: it stayed within this of the wall the whole gap
+    c.setdefault("overlay", True)           # render the contact skeleton overlay
     g = cfg.setdefault("contact_gate", {})
     g.setdefault("window_s", 0.35)         # drift window (s) for the stillness gate
     g.setdefault("still_m", 0.025)         # net drift (m) at which stillness = 0.5 (gate kills frames >= 2·still_m)
@@ -132,11 +133,9 @@ def _pose(mid, betas: torch.Tensor, q: torch.Tensor, scale: float, *, chunk=64):
     return torch.cat(jws, 0), torch.cat(vws, 0)
 
 
-def run(source, predictions_dir, config_path, *, device_override=None, overlay=True,
-        bodies="kinematic_1") -> Path:
+def run(source: str | Path, predictions_dir: str | Path, config_path: str | Path, *,
+        overlay: bool = True, bodies: str = "kinematic_1") -> Path:
     cfg = _load_config(Path(config_path))
-    if device_override:
-        cfg["runtime"]["device"] = device_override
     device = cfg["runtime"]["device"]
     cc = cfg["contacts"]
     cg = cfg["contact_gate"]
@@ -349,7 +348,7 @@ def run(source, predictions_dir, config_path, *, device_override=None, overlay=T
     return out_path
 
 
-def main(argv=None) -> int:
+def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     ap.add_argument("--source", required=True)
     ap.add_argument("--predictions", required=True)
@@ -357,11 +356,10 @@ def main(argv=None) -> int:
                     help="which refined body under human_optim/ to read contact from "
                          "(default kinematic_1; kinematic_2 for the annotation stage)")
     ap.add_argument("--config", type=Path, default=_DEFAULT_CONFIG)
-    ap.add_argument("--device", default=None)
-    ap.add_argument("--overlay", action=argparse.BooleanOptionalAction, default=True)
     args = ap.parse_args(argv)
+    cfg = _load_config(args.config)
     run(args.source, args.predictions, args.config,
-        device_override=args.device, overlay=args.overlay, bodies=args.bodies)
+        overlay=bool(cfg["contacts"]["overlay"]), bodies=args.bodies)
     return 0
 
 

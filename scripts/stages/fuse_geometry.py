@@ -50,6 +50,7 @@ import cv2
 import numpy as np
 import torch
 
+from tools.config import load_toml, section
 from tools.geometry.backproject import backproject
 from tools.geometry.clean import clean_depth
 from tools.geometry.intrinsics import denormalize_K
@@ -332,30 +333,24 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--source", required=True,
                    help="clip video / folder of frames (RGB, for per-point colour)")
     p.add_argument("--predictions", required=True, type=Path, help="clip dir, e.g. out/<stem>/")
-    p.add_argument("--voxel-scene", type=float, default=0.05,
-                   help="scene merge voxel size in metres (default: 0.05)")
-    p.add_argument("--conf-drop-q", type=float, default=0.3,
-                   help="drop this lowest-confidence fraction of VGGT depth (default: 0.3)")
-    p.add_argument("--edge-rtol", type=float, default=0.04,
-                   help="depth-edge (flying-pixel) filter tolerance; 0 disables (default: 0.04)")
-    p.add_argument("--human-dilate", type=int, default=8,
-                   help="grow the human mask by N px before subtracting it from the scene, so "
-                        "imperfect mask edges don't leak human points into it (default: 8; 0 disables)")
-    p.add_argument("--min-scene-voxels", type=int, default=25,
-                   help="drop scene clusters smaller than this many connected voxels "
-                        "(floating fragments / off-surface blobs); 1 disables (default: 25)")
-    p.add_argument("--person-obj-ids", default=None,
-                   help="comma-separated SAM3 object ids to treat as people (default: all)")
-    p.add_argument("--body-anchor", choices=("on", "off"), default="on",
-                   help="body-anchored world rescale gate (default: on)")
-    p.add_argument("--float-gate-m", type=float, default=0.28,
-                   help="median extremity/scene distance that fires the gate (default: 0.28 — "
-                        "calibrated on the 8-scene hard set: healthy rows top out at 0.225, "
-                        "floaters start at 0.346)")
-    p.add_argument("--device", default="cuda", help="cuda | cpu (default: cuda)")
-    p.add_argument("--skip-existing", action="store_true",
-                   help="skip if geometry/transform.npz already exists")
-    fuse(p.parse_args(argv))
+    p.add_argument("--config", type=Path, default=_REPO_ROOT / "configs" / "pipeline.toml",
+                   help="pipeline TOML (default: configs/pipeline.toml)")
+    cli = p.parse_args(argv)
+    cfg = load_toml(cli.config)
+    args = section(cfg, "fuse", {
+        "voxel_scene": 0.05,
+        "conf_drop_q": 0.3,
+        "edge_rtol": 0.04,
+        "human_dilate": 8,
+        "min_scene_voxels": 25,
+        "person_obj_ids": "",
+        "body_anchor": "on",
+        "float_gate_m": 0.28,
+        "skip_existing": False,
+    })
+    args.device = section(cfg, "runtime", {"device": "cuda"}).device
+    args.source, args.predictions, args.config = cli.source, cli.predictions, cli.config
+    fuse(args)
     return 0
 
 

@@ -25,7 +25,7 @@ subset of the chain.
 
 Per-stage knobs and the step selection live in ``configs/pipeline.toml``; the
 CLI only takes ``--source``, ``--save-dir``, ``--config``, ``--steps``,
-``--skip-existing``, and ``--device``. Each stage is also runnable standalone
+and ``--skip-existing``. Each stage is also runnable standalone
 (see ``scripts/stages/``).
 
 Usage::
@@ -39,13 +39,13 @@ from __future__ import annotations
 import argparse
 import subprocess
 import sys
-import tomllib
 from pathlib import Path
 
 _HERE = Path(__file__).resolve()
 _REPO_ROOT = _HERE.parents[1]
 sys.path.insert(0, str(_REPO_ROOT))
 
+from tools.config import load_toml  # noqa: E402
 from tools.source import IMAGE_EXTS, VIDEO_EXTS  # noqa: E402
 
 _STAGES_DIR = _HERE.parent / "stages"
@@ -72,7 +72,7 @@ def _default_config() -> dict:
                  "human_dilate": 8, "min_scene_voxels": 25, "person_obj_ids": ""},
         "sam3d": {"obj_ids": "", "inference_type": "full", "overlay": True},
         "smplx": {"iters": 300, "gender": "neutral", "overlay": True},
-        "human_optimization": {"config": "configs/human_optimization.toml", "overlay": False, "stages": ""},
+        "human_optimization": {"config": "configs/human_optimization.toml"},
     }
 
 
@@ -81,8 +81,7 @@ def _load_config(path: Path | None) -> dict:
     if path is not None:
         if not path.exists():
             raise FileNotFoundError(f"config not found: {path}")
-        with path.open("rb") as f:
-            user = tomllib.load(f)
+        user = load_toml(path)
         for section, vals in user.items():
             cfg.setdefault(section, {}).update(vals)
     return cfg
@@ -99,37 +98,21 @@ def _resolve_clips(source: Path) -> list[Path]:
     raise FileNotFoundError(f"--source not found: {source}")
 
 
-def _flag(args: list[str], cond: bool, *flag: str) -> None:
-    if cond:
-        args.extend(flag)
-
-
-def _build_precompute_args(step: str, cfg: dict, source: Path, save_dir: Path,
-                           device: str, skip_existing: bool) -> list[str]:
-    base = ["--source", str(source), "--save-dir", str(save_dir), "--device", device]
-    _flag(base, skip_existing, "--skip-existing")
-    if step == "sam3":
-        return base + ["--text", str(cfg["sam3"]["text"])]
-    if step == "vggt":
-        v = cfg["vggt"]
-        extra = ["--max-frames", str(v.get("max_frames", 500)),
-                 "--image-resolution", str(v.get("image_resolution", 512)),
-                 "--mode", str(v.get("mode", "balanced"))]
-        if v.get("checkpoint"):
-            extra += ["--checkpoint", str(v["checkpoint"])]
-        _flag(extra, v.get("save_depth", False), "--save-depth")
-        return base + extra
-    if step == "sapiens":
-        extra = ["--tasks", str(cfg["sapiens"]["tasks"])]
-        _flag(extra, not cfg["sapiens"].get("overlay", True), "--no-overlay")
-        return base + extra
-    raise ValueError(step)
+def _build_precompute_args(source: Path, save_dir: Path, config: Path,
+                           skip_existing: bool) -> list[str]:
+    args = ["--source", str(source), "--save-dir", str(save_dir),
+            "--config", str(config)]
+    if skip_existing:
+        args.append("--skip-existing")   # per-item resume inside the load-once sweep
+    return args
 
 
 def _perclip_output(step: str, clip_dir: Path, cfg: dict) -> Path:
     if step == "human_optimization":  # skip-check the LAST configured sub-stage's body
-        st = [s.strip() for s in str(cfg["human_optimization"].get("stages", "")).split(",") if s.strip()]
-        st = st or ["root", "kinematics_1"]
+        ho_path = Path(cfg["human_optimization"]["config"])
+        if not ho_path.is_absolute():
+            ho_path = _REPO_ROOT / ho_path
+        st = list(load_toml(ho_path).get("stages", {}).get("run", ["root", "kinematics_1"]))
         name = ("dynamics" if "dynamics" in st
                 else "kinematic_2" if "kinematics_2" in st
                 else "kinematic_1" if "kinematics_1" in st
@@ -144,49 +127,16 @@ def _perclip_output(step: str, clip_dir: Path, cfg: dict) -> Path:
 
 
 def _build_perclip_args(step: str, cfg: dict, clip: Path, clip_dir: Path,
-                        device: str) -> list[str]:
+                        config: Path) -> list[str]:
     if step == "scale":
-        sc = cfg["scale"]
-        return ["--predictions", str(clip_dir), "--device", device,
-                "--conf-drop-q", str(sc["conf_drop_q"]),
-                "--min-inlier-verts", str(sc["min_inlier_verts"]),
-                "--mad-k", str(sc["mad_k"])]
-    if step == "fuse":
-        f = cfg["fuse"]
-        extra = ["--source", str(clip), "--predictions", str(clip_dir), "--device", device,
-                 "--voxel-scene", str(f["voxel_scene"]),
-                 "--conf-drop-q", str(f["conf_drop_q"]),
-                 "--edge-rtol", str(f["edge_rtol"]),
-                 "--human-dilate", str(f["human_dilate"]),
-                 "--min-scene-voxels", str(f["min_scene_voxels"])]
-        if f.get("person_obj_ids"):
-            extra += ["--person-obj-ids", str(f["person_obj_ids"])]
-        return extra
-    if step == "sam3d":
-        s = cfg["sam3d"]
-        extra = ["--source", str(clip), "--predictions", str(clip_dir),
-                 "--inference-type", str(s["inference_type"]),
-                 "--device", device]
-        if s.get("obj_ids"):  # empty → fit all tracked people
-            extra += ["--obj-ids", str(s["obj_ids"])]
-        _flag(extra, not s.get("overlay", True), "--no-overlay")
-        return extra
-    if step == "smplx":
-        s = cfg["smplx"]
-        extra = ["--source", str(clip), "--predictions", str(clip_dir),
-                 "--iters", str(s["iters"]),
-                 "--gender", str(s.get("gender", "neutral")),
-                 "--device", device]
-        _flag(extra, not s.get("overlay", True), "--no-overlay")
-        return extra
+        return ["--predictions", str(clip_dir), "--config", str(config)]
+    if step in {"fuse", "sam3d", "smplx"}:
+        return ["--source", str(clip), "--predictions", str(clip_dir),
+                "--config", str(config)]
     if step == "human_optimization":
         s = cfg["human_optimization"]
-        extra = ["--source", str(clip), "--predictions", str(clip_dir),
-                 "--config", str(s["config"]), "--device", device]
-        if s.get("stages"):
-            extra += ["--stages", str(s["stages"])]
-        _flag(extra, s.get("overlay", False), "--overlay")
-        return extra
+        return ["--source", str(clip), "--predictions", str(clip_dir),
+                "--config", str(s["config"])]
     raise ValueError(step)
 
 
@@ -212,7 +162,6 @@ def _run(step: str, extra_args: list[str]) -> None:
 
 def run_pipeline(args: argparse.Namespace) -> int:
     cfg = _load_config(args.config)
-    device = args.device or cfg["runtime"]["device"]
     source = Path(args.source)
     save_dir = Path(args.save_dir)
 
@@ -232,14 +181,14 @@ def run_pipeline(args: argparse.Namespace) -> int:
     # order lets a per-clip stage (fuse) run before a precompute one (sapiens).
     for step in requested:
         if step in _PRECOMPUTE:
-            _run(step, _build_precompute_args(step, cfg, source, save_dir, device, args.skip_existing))
+            _run(step, _build_precompute_args(source, save_dir, args.config, args.skip_existing))
             continue
         for clip in clips:
             clip_dir = save_dir / clip.stem
             if args.skip_existing and _perclip_output(step, clip_dir, cfg).exists():
                 print(f"[pipeline] skip {step} for {clip.stem} (output exists)")
                 continue
-            _run(step, _build_perclip_args(step, cfg, clip, clip_dir, device))
+            _run(step, _build_perclip_args(step, cfg, clip, clip_dir, args.config))
 
     print("\n[pipeline] done.")
     return 0
@@ -257,10 +206,7 @@ def main(argv: list[str] | None = None) -> int:
                    help="comma-separated subset of steps to run (default: config's [steps].run)")
     p.add_argument("--skip-existing", action="store_true",
                    help="skip stages whose outputs already exist")
-    p.add_argument("--device", default=None, help="override runtime.device from the config")
     args = p.parse_args(sys.argv[1:] if argv is None else argv)
-    if not args.config.exists():
-        args.config = None  # fall back to built-in defaults
     return run_pipeline(args)
 
 

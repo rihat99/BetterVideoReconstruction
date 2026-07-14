@@ -12,12 +12,16 @@ iters = { root = 150 }
 # kin1 auto-contacts: labels detected ONCE at the refine phase (readout at the [auto_contact] point),
 # frozen, then drive the attraction (ann_attraction). ann_attraction[kin1]=0 gives a pure visual fit.
 iters = { full = 300, refine = 200, lbfgs = 30 }
+overlay = false          # reprojected-keypoint debug overlay → human_optim/kinematic_1_overlay.mp4
 
 [stages.kinematics_2]
 iters = { root = 20, full = 80, refine = 250, lbfgs = 30 }
+overlay = false          # debug overlay → human_optim/kinematic_2_overlay.mp4
+labels = "manual"        # contact labels: "manual" (data/<stem>.npz) | "auto" (contacts_1, confidence-weighted)
 
 [stages.dynamics]
 device = "cpu"
+bodies = "kinematic_2"   # which refined body the force solve reads (kinematic_1 | kinematic_2)
 
 #                       root  kin1  kin2  dyn
 [loss_weights.kinematic]
@@ -121,6 +125,7 @@ window_s = 0.35        # drift window (~11 frames at 30 fps)
 still_m  = 0.03        # readout net-drift recall knob (raise → more recall); the kin1 DETECTOR pins its own in [auto_contact]
 
 [contacts]
+overlay = true             # render the contact skeleton overlay
 close_thresh_m = 0.03  # enter: "just outside" distance counted as contact
 exit_thresh_m = 0.035  # stay: looser hysteresis exit (holds a span, kills 1-frame boundary flicker)
 min_frames = 3         # drop contact spans shorter than this many frames

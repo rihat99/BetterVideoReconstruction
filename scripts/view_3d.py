@@ -31,7 +31,7 @@ The three mesh sources are each one skinned mesh per person, posed per frame (LB
 in the browser, one upload) over a single averaged ``betas`` identity.
 
 A **video** pane in the sidebar plays the clip's original footage in sync with the
-frame slider (loaded from the repo's ``data/`` by default, or ``--video-dir``;
+frame slider (loaded from the repo's ``data/`` by default, or ``[viewer].video_dir``;
 hidden when the source video is absent). The playback folder's **onboard camera**
 toggle (off by default) rides the reconstructed camera — matching its pose and
 field of view each frame and locking out manual orbiting — so you watch from the
@@ -62,9 +62,9 @@ Usage::
 
     uv run python scripts/view_3d.py out/            # all clips, pick in the UI
     uv run python scripts/view_3d.py out/<stem>/     # a single clip
-    uv run python scripts/view_3d.py out/ [--port 8082] [--no-smplx]
+    uv run python scripts/view_3d.py out/ --config configs/pipeline.toml
     uv run python scripts/view_3d.py --scenes        # browse the ClimbingVideos DB
-    uv run python scripts/view_3d.py --scenes --sample 50   # a random 50-scene subset
+    # Set viewer.sample = 50 in the config for a random 50-scene subset.
 """
 from __future__ import annotations
 
@@ -76,6 +76,7 @@ _REPO_ROOT = Path(__file__).resolve().parents[1]
 if str(_REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(_REPO_ROOT))
 
+from tools.config import load_toml, section
 from tools.viewer import view_3d
 
 # The stage feature dirs the viewer's loaders read (sapiens is stage-only, so it is
@@ -148,53 +149,48 @@ def _run_scenes(args: argparse.Namespace) -> None:
 
 def main(argv: list[str] | None = None) -> int:
     p = argparse.ArgumentParser(description=__doc__.splitlines()[0])
-    p.add_argument("predictions", type=Path, nargs="?", default=None,
+    p.add_argument("target", type=Path, nargs="?", default=None,
                    help="root of clips (out/) or a single clip dir (out/<stem>/); "
                         "omit when using --scenes")
-    p.add_argument("--port", type=int, default=8082)
-    p.add_argument("--point-size", type=float, default=0.02,
-                   help="scene point radius, metres (default 0.02)")
-    p.add_argument("--human-point-size", type=float, default=0.01,
-                   help="human point radius, metres (default 0.01)")
-    p.add_argument("--camera-scale", type=float, default=0.1,
-                   help="initial frustum size, metres (default 0.1; adjust live under 'sizes')")
-    p.add_argument("--camera-stride", type=int, default=1, help="show every Nth camera frustum (default 1)")
-    p.add_argument("--up", default="-y", choices=["+x", "+y", "+z", "-x", "-y", "-z"],
-                   help="viewer up direction (default -y, OpenCV world)")
-    p.add_argument("--smplx", action=argparse.BooleanOptionalAction, default=True,
-                   help="load the fitted SMPL-X bodies (default: ON; --no-smplx to skip)")
-    p.add_argument("--human-max-points", type=int, default=6000,
-                   help="cap human depth points per frame+climber for faster loading "
-                        "(default 6000; 0 = keep all)")
-    p.add_argument("--scene-surface", choices=["points", "bpa", "poisson"], default="points",
-                   help="render the scene cloud as points or a reconstructed surface "
-                        "(default: points; switch live in the 'layers' panel)")
-    p.add_argument("--device", default="cuda",
-                   help="device for the SMPL-X forward (default cuda; falls back to cpu)")
-    p.add_argument("--video-dir", type=Path, default=None,
-                   help="directory of source videos for the sidebar video pane "
-                        "(default: the repo's data/; pane hides if <stem>.mp4 is absent)")
-    db = p.add_argument_group("ClimbingVideos scene DB (--scenes)")
-    db.add_argument("--scenes", action="store_true",
-                    help="browse the ClimbingVideos feature DB instead of a local out/ tree")
-    db.add_argument("--data-root", type=Path, default=None,
-                    help="ClimbingVideos root (default: ../data/ClimbingVideos)")
-    db.add_argument("--categories", default="1,2",
-                    help="vlm_category filter, CSV (default 1,2 = indoor boulder + rope)")
-    db.add_argument("--rope-supported", type=int, default=0,
-                    help="vlm_rope_supported filter (default 0; -1 = any)")
-    db.add_argument("--scene-ids", default=None, help="restrict to these scene ids (CSV)")
-    db.add_argument("--sample", type=int, default=None, help="random subset of N target scenes")
-    db.add_argument("--limit", type=int, default=None, help="first N target scenes")
-    db.add_argument("--seed", type=int, default=0, help="--sample seed (default 0)")
-    args = p.parse_args(sys.argv[1:] if argv is None else argv)
+    p.add_argument("--scenes", action="store_true",
+                   help="browse the ClimbingVideos feature DB instead of a local out/ tree")
+    p.add_argument("--config", type=Path, default=_REPO_ROOT / "configs" / "pipeline.toml",
+                   help="pipeline TOML (default: configs/pipeline.toml)")
+    cli = p.parse_args(sys.argv[1:] if argv is None else argv)
+    cfg = load_toml(cli.config)
+    args = section(cfg, "viewer", {
+        "port": 8082,
+        "point_size": 0.02,
+        "human_point_size": 0.01,
+        "camera_scale": 0.1,
+        "camera_stride": 1,
+        "up": "-y",
+        "smplx": True,
+        "human_max_points": 6000,
+        "scene_surface": "points",
+        "video_dir": "",
+        "data_root": "",
+        "categories": "1,2",
+        "rope_supported": 0,
+        "scene_ids": "",
+        "sample": "",
+        "limit": "",
+        "seed": 0,
+    })
+    args.device = section(cfg, "runtime", {"device": "cuda"}).device
+    args.target, args.scenes, args.config = cli.target, cli.scenes, cli.config
+    args.video_dir = Path(args.video_dir) if args.video_dir else None
+    args.data_root = Path(args.data_root) if args.data_root else None
+    args.scene_ids = args.scene_ids or None
+    args.sample = int(args.sample) if args.sample != "" else None
+    args.limit = int(args.limit) if args.limit != "" else None
 
     if args.scenes:
         _run_scenes(args)
         return 0
-    if args.predictions is None:
+    if args.target is None:
         p.error("give a predictions dir (out/ or out/<stem>/) or use --scenes")
-    view_3d(args.predictions, port=args.port, point_size=args.point_size,
+    view_3d(args.target, port=args.port, point_size=args.point_size,
             human_point_size=args.human_point_size, camera_scale=args.camera_scale,
             camera_stride=args.camera_stride, up=args.up, show_smplx=args.smplx,
             device=args.device, human_max_points=args.human_max_points,

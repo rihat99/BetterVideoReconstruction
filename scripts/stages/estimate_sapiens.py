@@ -33,7 +33,7 @@ Standalone::
     uv run python scripts/stages/estimate_sapiens.py \\
         --source data/images/wild_images/ellen2.jpg \\
         --save-dir out/images/wild_images/ \\
-        --tasks pose,pointmap
+        --config configs/pipeline.toml
 
 Pipeline integration is deferred — this step is opt-in until we know the
 VRAM/perf profile in the static-pipeline context.
@@ -55,6 +55,7 @@ import cv2  # noqa: E402
 import numpy as np  # noqa: E402
 import torch  # noqa: E402
 
+from tools.config import load_toml, section  # noqa: E402
 from tools.precompute_runner import (  # noqa: E402
     InputItem,
     SkipItem,
@@ -399,47 +400,27 @@ def run_sapiens(args: argparse.Namespace) -> int:
 def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     p = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     add_standard_args(p)
-    # 5B is bf16-friendly; bf16 also matches the FSDP training mixed-precision.
-    p.set_defaults(dtype="bf16")
-    p.add_argument(
-        "--tasks", type=_parse_tasks, default="pose",
-        help="comma-separated; choices "
-             f"{list(_TASK_CHOICES)} (default: pose). pointmap/normal are dense "
-             "depth-like forwards — opt in explicitly, e.g. --tasks pose,pointmap.",
-    )
-    p.add_argument(
-        "--label", default="person",
-        help="bboxes.npz label to filter on for pose (default: %(default)r)",
-    )
-    p.add_argument(
-        "--subdir", default="sapiens",
-        help="output subfolder under <save-dir>/<stem>/ ('.' writes directly "
-             "into it; default: sapiens)",
-    )
-    p.add_argument(
-        "--batch-size", type=int, default=1,
-        help="bbox-crop batch size for pose forward (default: %(default)s; "
-             "5B at 1024×768 in bf16 is ~20 GB / forward — bump only on big GPUs)",
-    )
-    p.add_argument(
-        "--checkpoint-root", type=Path, default=None,
-        help="optional override; default = HF cache. Layout: "
-             "<root>/<task>/sapiens2_5b_<task>.safetensors",
-    )
-    p.add_argument(
-        "--score-thresh", type=float, default=0.3,
-        help="overlay score threshold (default: %(default)s; saved arrays "
-             "are unfiltered)",
-    )
-    p.add_argument(
-        "--overlay", action=argparse.BooleanOptionalAction, default=True,
-        help="render pose skeleton overlay (default: ON; --no-overlay to disable)",
-    )
-    p.add_argument(
-        "--fps", type=float, default=None,
-        help="overlay-video fps (default: 30)",
-    )
-    return p.parse_args(argv)
+    cli = p.parse_args(argv)
+    cfg = load_toml(cli.config)
+    args = section(cfg, "sapiens", {
+        "skip_existing": False,
+        "dtype": "fp16",
+        "tasks": "pose",
+        "label": "person",
+        "subdir": "sapiens",
+        "batch_size": 1,
+        "checkpoint_root": "",
+        "score_thresh": 0.3,
+        "overlay": True,
+        "fps": "",
+    })
+    args.device = section(cfg, "runtime", {"device": "cuda"}).device
+    args.source, args.save_dir, args.config = cli.source, cli.save_dir, cli.config
+    args.skip_existing = args.skip_existing or cli.skip_existing
+    args.tasks = _parse_tasks(args.tasks) if isinstance(args.tasks, str) else list(args.tasks)
+    args.checkpoint_root = Path(args.checkpoint_root) if args.checkpoint_root else None
+    args.fps = float(args.fps) if args.fps != "" else None
+    return args
 
 
 def main(argv: list[str] | None = None) -> int:

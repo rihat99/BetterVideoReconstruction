@@ -20,7 +20,7 @@ Two run modes (like ``estimate_body_sam3d``):
 
   * **single clip** — ``--source clip --predictions out/video/``; reads/writes
     ``out/video/sam3d/``.
-  * **batch / manifest** — ``--source manifest.json --save-dir <dir>`` (a
+  * **batch / manifest** — ``--source manifest.json`` with ``[smplx].save_dir`` (a
     ``precompute_runner`` Step): builds the MHR→SMPL-X converter once and sweeps
     every scene, each manifest ``out_dir`` being that scene's sam3d feature dir.
     This is how ``scripts/precompute_scenes.py`` fans the stage across the
@@ -31,7 +31,7 @@ Run from CLI::
     uv run python scripts/stages/convert_mhr_to_smplx.py \\
         --source path/to/{video.mp4|frames_folder|photo.jpg} \\
         --predictions out/video/ \\
-        [--gender neutral] [--device cuda] [--iters 300] [--no-overlay]
+        --config configs/pipeline.toml
 
 Inputs:
     source             video file, folder of frames, or single image
@@ -70,6 +70,7 @@ from tqdm import tqdm  # noqa: E402
 
 _REPO_ROOT = _HERE.parents[2]
 sys.path.insert(0, str(_REPO_ROOT))  # repo root for tools.*
+from tools.config import load_toml, section  # noqa: E402
 from tools.precompute_runner import InputItem, SkipItem, run_batch  # noqa: E402
 _MAPPING_NPZ = (
     _REPO_ROOT
@@ -484,48 +485,37 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     p.add_argument(
         "--source", required=True,
         help="single clip (video / folder of frames) for --predictions mode, or a "
-             ".json manifest for --save-dir (batch) mode. Only used for the overlay.",
+             ".json manifest for configured batch mode. Only used for the overlay.",
     )
-    # Mode selector — exactly one of these:
     p.add_argument(
         "--predictions", default=None,
         help="single-clip mode: folder containing sam3d/params.npz; writes "
              "sam3d/smplx_params.npz",
     )
     p.add_argument(
-        "--save-dir", type=Path, default=None,
-        help="batch mode: run as a precompute_runner Step over the .json --source "
-             "manifest (per-scene out_dir = the sam3d feature dir); build model once",
+        "--save-dir", default=None, type=Path,
+        help="manifest batch mode: output root (per-item outputs under <save-dir>/<stem>/)",
     )
-    p.add_argument(
-        "--subdir", default="sam3d",
-        help="batch mode: subfolder of each manifest out_dir that holds params.npz "
-             "and receives smplx_params.npz ('.' = out_dir itself; default: sam3d)",
-    )
-    p.add_argument(
-        "--skip-existing", action="store_true",
-        help="batch mode: skip scenes whose sam3d/smplx_params.npz already exists",
-    )
-    p.add_argument(
-        "--smplx-model-folder", default=None,
-        help=f"parent of smplx/SMPLX_*.npz (default: {_DEFAULT_SMPLX_MODELS})",
-    )
-    p.add_argument(
-        "--gender", default="neutral", choices=("neutral", "male", "female"),
-    )
-    p.add_argument("--device", default="cuda")
-    p.add_argument("--iters", type=int, default=300, help="fine-stage iterations")
-    p.add_argument("--batch-size", type=int, default=64)
-    p.add_argument(
-        "--overlay", action=argparse.BooleanOptionalAction, default=True,
-        help="render the SMPL-X mesh overlay to smplx_overlay.mp4 "
-             "(default: ON; --no-overlay to skip)",
-    )
-    p.add_argument(
-        "--fps", type=float, default=None,
-        help="output video fps (default: source video fps, or 30 for folders)",
-    )
-    return p.parse_args(argv)
+    p.add_argument("--config", type=Path, default=_REPO_ROOT / "configs" / "pipeline.toml",
+                   help="pipeline TOML (default: configs/pipeline.toml)")
+    cli = p.parse_args(argv)
+    cfg = load_toml(cli.config)
+    args = section(cfg, "smplx", {
+        "subdir": "sam3d",
+        "skip_existing": False,
+        "smplx_model_folder": "",
+        "gender": "neutral",
+        "iters": 300,
+        "batch_size": 64,
+        "overlay": True,
+        "fps": "",
+    })
+    args.device = section(cfg, "runtime", {"device": "cuda"}).device
+    args.source, args.predictions, args.config = cli.source, cli.predictions, cli.config
+    args.save_dir = cli.save_dir
+    args.smplx_model_folder = args.smplx_model_folder or None
+    args.fps = float(args.fps) if args.fps != "" else None
+    return args
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -539,7 +529,7 @@ def main(argv: list[str] | None = None) -> int:
     if args.predictions is None:
         raise SystemExit(
             "convert_mhr_to_smplx: pass --predictions <clip-dir> (single clip) "
-            "or --save-dir <dir> with a .json --source manifest (batch)."
+            "or set smplx.save_dir in the config for a .json --source manifest (batch)."
         )
     script = MhrToSmplxScript(
         device=args.device,
