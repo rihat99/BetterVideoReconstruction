@@ -2,8 +2,9 @@
 
 Reconstruct a **per-person SMPL-X body trajectory** from a monocular video.
 Given a clip, the pipeline tracks everyone in it, recovers the camera, fits a 3D
-body every frame for each tracked person, converts each to SMPL-X, anchors the
-scene's metric scale to the human body, fuses the metric geometry, and runs a
+body every frame for each tracked person, converts each to SMPL-X, fuses the
+up-to-scale point clouds, anchors the scene's metric scale to the human body
+(rescaling the fused geometry in place), and runs a
 **visually-guided kinematic refinement** (2D reprojection + depth chamfer + pose
 prior + acceleration/jerk smoothness). Standalone SMPL-X stages then add scene
 contact, world-frame gravity, and per-contact-joint **forces** via inverse dynamics
@@ -21,7 +22,7 @@ optimization residuals used here.
 The default chain (`scripts/pipeline.py`) runs these stages in order:
 
 ```
-video ─▶ sam3 ─▶ vggt ─▶ sapiens ─▶ sam3d ─▶ smplx ─▶ scale ─▶ fuse ─▶ human_optimization
+video ─▶ sam3 ─▶ vggt ─▶ sapiens ─▶ sam3d ─▶ smplx ─▶ fuse ─▶ scale ─▶ human_optimization
 ```
 
 | Stage | Model | Output (under `out/<stem>/`) |
@@ -31,8 +32,8 @@ video ─▶ sam3 ─▶ vggt ─▶ sapiens ─▶ sam3d ─▶ smplx ─▶ sc
 | sapiens | Sapiens2-5B | Goliath-308 keypoint pose |
 | sam3d | SAM-3D-Body | per-frame MHR body params (all tracked people) |
 | smplx | MHR→SMPL-X fit | per-frame SMPL-X params |
-| scale | human-body ruler | metric scale anchored to the body + per-frame overfit body (`geometry/scale.npz`, `geometry/overfit.npz`) |
-| fuse | metric fuse | metric scene + per-frame human point clouds, body-anchor gate (`geometry/`) |
+| fuse | point-cloud fuse | up-to-scale scene + per-frame human point clouds (`geometry/`) |
+| scale | human-body ruler | metric scale anchored to the body; rescales the fused geometry in place (`geometry/scale.npz`) |
 | human_optimization | Adam + L-BFGS | visually-guided kinematic refinement (`human_optim/kinematic_1.npz`) |
 
 **VGGT-Omega** runs right after the tracker as the multi-view camera/geometry
@@ -41,8 +42,8 @@ inference resolution) and the body stage reads that camera directly. Its
 access-gated checkpoints are not bundled (see [`INSTALL.md`](INSTALL.md)).
 
 **Metric scale** is recovered by `scale` (`estimate_scale`), which uses the
-SAM-3D-Body human as a ruler, so it runs after the body stages and before `fuse`
-(which applies it).
+SAM-3D-Body human as a ruler against the fused human points, so it runs after
+`fuse` and rescales the saved geometry in place.
 
 ### Standalone SMPL-X stages
 
@@ -85,8 +86,8 @@ and conventions.
 
 - [`INSTALL.md`](INSTALL.md) — environment, submodules, model assets.
 - [`CLAUDE.md`](CLAUDE.md) — architecture, pipeline contract, conventions.
-- [`docs/scale.md`](docs/scale.md) — the metric scale + the per-frame body overfit.
-- [`docs/fusion.md`](docs/fusion.md) — metric point clouds + the body-anchor gate.
+- [`docs/scale.md`](docs/scale.md) — the metric scale + in-place metricization.
+- [`docs/fusion.md`](docs/fusion.md) — the point clouds + the relative two-pass voxel merge.
 - [`docs/human_optimization.md`](docs/human_optimization.md) — the four-stage refinement, every loss term.
 - [`docs/contacts.md`](docs/contacts.md) — per-joint contact detection.
 - [`docs/contact_confidence.md`](docs/contact_confidence.md) — per-joint contact-confidence formula and artifact schema.

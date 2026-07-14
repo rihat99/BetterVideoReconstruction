@@ -3,16 +3,17 @@
 Monocular video → a per-person **SMPL-X body trajectory** for everyone tracked,
 plus **per-contact-joint forces** on the refined bodies. Track the people (SAM 3)
 → VGGT camera → Sapiens keypoints → per-frame MHR body for every person
-(SAM-3D-Body) → convert to **SMPL-X** → **anchor VGGT's metric scale to the human
-body** → fuse to metric geometry → **visually-guided kinematic refinement**. The
+(SAM-3D-Body) → convert to **SMPL-X** → fuse the up-to-scale point clouds →
+**anchor VGGT's metric scale to the human body** (rescales the fused geometry in
+place) → **visually-guided kinematic refinement**. The
 default chain ends at the refined SMPL-X bodies; scene contacts, gravity,
 annotation-guided refinement, and force dynamics are standalone SMPL-X stages.
 
 The algorithm docs live in `docs/` and are the reference for auditing the
 optimization — keep them current when the code changes:
 
-- [`docs/scale.md`](docs/scale.md) — human-ruler metric scale + per-frame body overfit
-- [`docs/fusion.md`](docs/fusion.md) — metric clouds + the body-anchor world-rescale gate
+- [`docs/scale.md`](docs/scale.md) — human-ruler metric scale + in-place metricization
+- [`docs/fusion.md`](docs/fusion.md) — up-to-scale clouds, relative two-pass voxel merge
 - [`docs/human_optimization.md`](docs/human_optimization.md) — the 4 stages, every loss term
 - [`docs/contacts.md`](docs/contacts.md) + [`docs/contact_confidence.md`](docs/contact_confidence.md) — contact labels + confidence
 
@@ -81,8 +82,8 @@ Default chain in order (rows 1–8; `human_optimization` runs its `root` +
 | 3 | `estimate_sapiens.py` | frames, `sam3/bboxes.npz` | `sapiens/pose.npz` (Goliath-308), overlay |
 | 4 | `estimate_body_sam3d.py` | `sam3/`, `vggt/camera.npz`, frames | `sam3d/params.npz` (all people, `(P,N,…)` + `object_ids`), overlay |
 | 5 | `convert_mhr_to_smplx.py` | `sam3d/params.npz` | `sam3d/smplx_params.npz` (`(P,N,…)` classic SMPL-X), overlay |
-| 6 | `estimate_scale.py` | `sam3d/smplx_params.npz`, `sapiens/pose.npz`, `vggt/` | `geometry/scale.npz` (human-anchored metric scale), `geometry/overfit.npz` (per-frame overfit body, diagnostic), diagnostics plot |
-| 7 | `fuse_geometry.py` | `vggt/`, `geometry/scale.npz`, `sam3/`, `sam3d/smplx_params.npz` | `geometry/transform.npz` (metric cameras + body-anchor diagnostics), `geometry/scene.npz`, `geometry/human.npz` |
+| 6 | `fuse_geometry.py` | `vggt/`, `sam3/`, `sam3d/smplx_params.npz`, frames | `geometry/transform.npz` (cameras, `metric=False`), `geometry/scene.npz` (two-pass voxel merge, relative voxel), `geometry/human.npz` (per-frame human points) |
+| 7 | `estimate_scale.py` | `sam3d/smplx_params.npz`, `vggt/camera.npz`, `geometry/` | `geometry/scale.npz` + rescales `transform/scene/human.npz` in place (`metric=True`); `geometry/overfit.npz` only when `skip_overfit=false` |
 | 8 | `human_optimization.py` (`root`+`kinematics_1`) | `sam3d/smplx_params.npz`, `sapiens/pose.npz`, `geometry/` | `human_optim/kinematic_1.npz` (world-frame `q (P,N,211)` + `drift_pre` + `auto_labels`), optional overlay |
 | – | `human_optimization.py --stages kinematics_2` | `kinematic_1.npz`, labels (`data/<stem>.npz` manual, or `contacts_1.npz` auto — `[stages.kinematics_2].labels`) | `human_optim/kinematic_2.npz` |
 | – | `estimate_contacts.py` | a refined body (`--bodies`), `geometry/` | `human_optim/contacts_<tag>.npz` (per-joint labels + confidence) |
@@ -153,7 +154,9 @@ BetterVideoReconstruction/
 - **Keypoints are Goliath-308**, not COCO-wholebody (`tools/human_optim/keypoints.py`).
 - **Camera is VGGT's** (scale-invariant intrinsics); **gravity is GeoCalib's**
   (world-frame, `reliable` flag, world-down fallback); **VGGT geometry is
-  up-to-scale** until `estimate_scale` + `fuse` metricize it (details: docs).
+  up-to-scale**: `fuse` builds the clouds unscaled (`metric=False`), then
+  `estimate_scale` measures `s` against the fused human points and rescales the
+  saved geometry in place (`metric=True`; downstream stages check the flag).
 - **`root`+`kinematics_1` share ONE optimization call** — priors and the
   init-projection anchor stay pinned to the converter pose across both.
 - **Contact honesty:** the readout gates stillness on `drift_pre` (measured

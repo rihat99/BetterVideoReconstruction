@@ -182,5 +182,6 @@ decision: the forces should explain the reconstructed motion, not a prettified o
 - No per-body scale variable (the world is sized to the body upstream).
 - No per-frame betas in the kinematic fit (one person, one shape); the overfit body in
   the scale stage is where shape flexes per frame.
-- No hand-tuned per-clip gates in the loss: clip-level failures are handled upstream
-  (the fusion body anchor), not by adding terms here.
+- No hand-tuned per-clip gates in the loss: a clip whose world is grossly wrong
+  (e.g. the person's depth off the wall — a "floater") is an upstream problem,
+  not something extra terms here should paper over.
