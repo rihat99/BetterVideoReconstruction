@@ -228,6 +228,67 @@ def _load_scene(pred: Path, knobs: dict, wfc: torch.Tensor, device, tag: str):
     return scene_pts, scene_normals, scene_conf
 
 
+def _body_context(knobs: dict, device: str):
+    """The per-clip body machinery both kinematic stages build identically.
+
+    Returns ``(mid, fvids, corr, sub, chamfer_w)``: the SMPLXMid model, its frame
+    landmark vertex ids, the Goliath-308 correspondence, the chamfer vertex
+    subsample, and the per-vertex extremity-emphasis chamfer weights (geodesic
+    linear, log-mapped to ``[lo, hi]`` over ``radius`` m — defaults reproduce the
+    base field).
+    """
+    mid = load_smplx_mid(_DEFAULT_SMPLX_MODEL, device)
+    fvids = torch.as_tensor([int(x) for x in mid.frame_vertex_ids], dtype=torch.long, device=device)
+    corr = build_correspondence(list(mid.frame_names),
+                                include_hands=bool(knobs["keypoints"]["include_hands"]), device=device)
+    sub = subsample_indices(mid.num_vertices, int(knobs["chamfer"]["vertex_subsample"]), device=device)
+    chamfer_w = torch.as_tensor(
+        geodesic_endeffector_weights(
+            mid.vertices_template, mid.faces, mid.lbs_weights, mid.joint_names,
+            lo=float(knobs["chamfer"].get("emphasis_lo", 0.1)),
+            hi=float(knobs["chamfer"].get("emphasis_hi", 10.0)),
+            radius=float(knobs["chamfer"].get("emphasis_radius", 1.0))),
+        dtype=torch.float32, device=device)[sub]                                   # (Ns,)
+    return mid, fvids, corr, sub, chamfer_w
+
+
+def _person_visual_inputs(pose: dict, human: dict, oid: int, N: int, vmask: np.ndarray,
+                          knobs: dict, device: str, *, mid, betas_T: torch.Tensor,
+                          q_world: torch.Tensor, extr: torch.Tensor, K: torch.Tensor):
+    """One person's 2D + depth evidence, invalid frames blanked.
+
+    Returns ``(target_kp, scores, depth, frame_valid)``: Sapiens keypoints +
+    scores, the per-frame chamfer depth clouds (conf-gated, capped — with the
+    ``limb_quota`` grouping when configured, referenced to this ``q_world``'s
+    projected joints), and the validity mask. Untracked frames get zero scores
+    and an empty cloud so no image/depth term can read a held pose as evidence.
+    """
+    kp_np, sc_np = _sapiens_for(pose, oid, N)
+    target_kp = torch.as_tensor(kp_np, dtype=torch.float32, device=device)
+    scores = torch.as_tensor(sc_np, dtype=torch.float32, device=device)
+    sampling = str(knobs["chamfer"].get("sampling", "stride"))
+    jpx = jgrp = extr_np = K_np = None
+    if sampling == "limb_quota":   # project the init body's joints once — the grouping reference
+        with torch.no_grad():
+            jw0 = mid.forward(betas_T, normalize_q(q_world, mid.num_joints)
+                              ).joints_world.tensor()[..., :3]
+            jpx = project(transform_points(jw0, extr), K).cpu().numpy()
+        jgrp = _limb_group_ids(list(mid.joint_names))
+        extr_np, K_np = extr.cpu().numpy(), K.cpu().numpy()
+    depth = _person_depth_points(human, oid, N, float(knobs["chamfer"]["conf_drop_q"]),
+                                 int(knobs["chamfer"]["max_points"]), device,
+                                 sampling=sampling,
+                                 limb_quota=int(knobs["chamfer"].get("limb_quota", 200)),
+                                 joint_px=jpx, joint_group=jgrp,
+                                 extrinsics=extr_np, intrinsics=K_np)
+    for i in range(N):
+        if not vmask[i]:
+            scores[i] = 0.0
+            depth[i] = depth[i][:0]
+    frame_valid = torch.as_tensor(vmask, dtype=torch.bool, device=device)
+    return target_kp, scores, depth, frame_valid
+
+
 def _new_out() -> dict[str, list]:
     return {k: [] for k in ("global_orient", "transl", "body_pose",
                             "left_hand_pose", "right_hand_pose", "q")}
@@ -346,19 +407,7 @@ def run_kinematic(source, pred: Path, cfg: HumanOptimConfig, stages_to_run,
     cam_centers = wfc[:, :3, 3]                     # (N,3) world camera centers (radial-velocity damper)
     scene_pts, scene_normals, scene_conf = _load_scene(pred, knobs, wfc, device, tag)
 
-    mid = load_smplx_mid(_DEFAULT_SMPLX_MODEL, device)
-    fvids = torch.as_tensor([int(x) for x in mid.frame_vertex_ids], dtype=torch.long, device=device)
-    corr = build_correspondence(list(mid.frame_names), include_hands=bool(knobs["keypoints"]["include_hands"]), device=device)
-    sub = subsample_indices(mid.num_vertices, int(knobs["chamfer"]["vertex_subsample"]), device=device)
-    # Per-vertex body-part emphasis for chamfer (geodesic linear, log-mapped to [lo, hi] over
-    # radius m): extremities ×hi, torso ×lo. Defaults (0.1 / 10.0 / 1.0) reproduce the base field.
-    chamfer_w = torch.as_tensor(
-        geodesic_endeffector_weights(
-            mid.vertices_template, mid.faces, mid.lbs_weights, mid.joint_names,
-            lo=float(knobs["chamfer"].get("emphasis_lo", 0.1)),
-            hi=float(knobs["chamfer"].get("emphasis_hi", 10.0)),
-            radius=float(knobs["chamfer"].get("emphasis_radius", 1.0))),
-        dtype=torch.float32, device=device)[sub]                                   # (Ns,)
+    mid, fvids, corr, sub, chamfer_w = _body_context(knobs, device)
     torch.manual_seed(0)
     phases = _kinematic_phases(cfg, stages_to_run)
 
@@ -397,29 +446,9 @@ def run_kinematic(source, pred: Path, cfg: HumanOptimConfig, stages_to_run,
         q_world = fold_root_to_world(q_cam, wfc)
         q_world[:, 3:] += 1e-6 * torch.randn_like(q_world[:, 3:])   # break bit-exact static-frame ties
 
-        kp_np, sc_np = _sapiens_for(pose, oid, N)
-        target_kp = torch.as_tensor(kp_np, dtype=torch.float32, device=device)
-        scores = torch.as_tensor(sc_np, dtype=torch.float32, device=device)
-        sampling = str(knobs["chamfer"].get("sampling", "stride"))
-        jpx = jgrp = extr_np = K_np = None
-        if sampling == "limb_quota":   # project the init body's joints once — the grouping reference
-            with torch.no_grad():
-                jw0 = mid.forward(betas_T, normalize_q(q_world, mid.num_joints)
-                                  ).joints_world.tensor()[..., :3]
-                jpx = project(transform_points(jw0, extr), K).cpu().numpy()
-            jgrp = _limb_group_ids(list(mid.joint_names))
-            extr_np, K_np = extr.cpu().numpy(), K.cpu().numpy()
-        depth = _person_depth_points(human, oid, N, float(knobs["chamfer"]["conf_drop_q"]),
-                                     int(knobs["chamfer"]["max_points"]), device,
-                                     sampling=sampling,
-                                     limb_quota=int(knobs["chamfer"].get("limb_quota", 200)),
-                                     joint_px=jpx, joint_group=jgrp,
-                                     extrinsics=extr_np, intrinsics=K_np)
-        for i in range(N):
-            if not vmask[i]:
-                scores[i] = 0.0
-                depth[i] = depth[i][:0]
-        frame_valid = torch.as_tensor(vmask, dtype=torch.bool, device=device)
+        target_kp, scores, depth, frame_valid = _person_visual_inputs(
+            pose, human, oid, N, vmask, knobs, device,
+            mid=mid, betas_T=betas_T, q_world=q_world, extr=extr, K=K)
 
         print(f"[{tag}] person obj_id={oid} ({int(vmask.sum())}/{N} valid) …")
         q_opt, before, after, aux = optimize_person(
@@ -602,20 +631,8 @@ def run_kinematics_2(source, pred: Path, cfg: HumanOptimConfig, device: str, *,
         ann_oids = [int(x) for x in ann["object_ids"]]
         print(f"[{tag}] annotation {ann_path} — {ann_contacts.shape[0]} people, joints {ann_names}, ids {ann_oids}")
 
-    mid = load_smplx_mid(_DEFAULT_SMPLX_MODEL, device)
+    mid, fvids, corr, sub, chamfer_w = _body_context(knobs, device)
     mid_names = list(mid.joint_names)
-    fvids = torch.as_tensor([int(x) for x in mid.frame_vertex_ids], dtype=torch.long, device=device)
-    corr = build_correspondence(list(mid.frame_names), include_hands=bool(knobs["keypoints"]["include_hands"]), device=device)
-    sub = subsample_indices(mid.num_vertices, int(knobs["chamfer"]["vertex_subsample"]), device=device)
-    # Per-vertex body-part emphasis for chamfer (geodesic linear, log-mapped to [lo, hi] over
-    # radius m): extremities ×hi, torso ×lo. Defaults (0.1 / 10.0 / 1.0) reproduce the base field.
-    chamfer_w = torch.as_tensor(
-        geodesic_endeffector_weights(
-            mid.vertices_template, mid.faces, mid.lbs_weights, mid.joint_names,
-            lo=float(knobs["chamfer"].get("emphasis_lo", 0.1)),
-            hi=float(knobs["chamfer"].get("emphasis_hi", 10.0)),
-            radius=float(knobs["chamfer"].get("emphasis_radius", 1.0))),
-        dtype=torch.float32, device=device)[sub]                                   # (Ns,)
     torch.manual_seed(0)
     phases = _kinematics_2_phases(cfg)
 
@@ -629,29 +646,9 @@ def run_kinematics_2(source, pred: Path, cfg: HumanOptimConfig, device: str, *,
         q_world[:, 3:] += 1e-6 * torch.randn_like(q_world[:, 3:])
         betas_T = betas_mean[None].expand(N, -1)
 
-        kp_np, sc_np = _sapiens_for(pose, oid, N)
-        target_kp = torch.as_tensor(kp_np, dtype=torch.float32, device=device)
-        scores = torch.as_tensor(sc_np, dtype=torch.float32, device=device)
-        sampling = str(knobs["chamfer"].get("sampling", "stride"))
-        jpx = jgrp = extr_np = K_np = None
-        if sampling == "limb_quota":   # project the init body's joints once — the grouping reference
-            with torch.no_grad():
-                jw0 = mid.forward(betas_T, normalize_q(q_world, mid.num_joints)
-                                  ).joints_world.tensor()[..., :3]
-                jpx = project(transform_points(jw0, extr), K).cpu().numpy()
-            jgrp = _limb_group_ids(list(mid.joint_names))
-            extr_np, K_np = extr.cpu().numpy(), K.cpu().numpy()
-        depth = _person_depth_points(human, oid, N, float(knobs["chamfer"]["conf_drop_q"]),
-                                     int(knobs["chamfer"]["max_points"]), device,
-                                     sampling=sampling,
-                                     limb_quota=int(knobs["chamfer"].get("limb_quota", 200)),
-                                     joint_px=jpx, joint_group=jgrp,
-                                     extrinsics=extr_np, intrinsics=K_np)
-        for i in range(N):
-            if not vmask[i]:
-                scores[i] = 0.0
-                depth[i] = depth[i][:0]
-        frame_valid = torch.as_tensor(vmask, dtype=torch.bool, device=device)
+        target_kp, scores, depth, frame_valid = _person_visual_inputs(
+            pose, human, oid, N, vmask, knobs, device,
+            mid=mid, betas_T=betas_T, q_world=q_world, extr=extr, K=K)
 
         contact_labels = contact_conf = None
         if labels_mode == "auto":
