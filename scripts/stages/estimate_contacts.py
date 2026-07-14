@@ -157,6 +157,8 @@ def run(source: str | Path, predictions_dir: str | Path, config_path: str | Path
     source_scene_sha256 = _sha256(scene_path)
     source_transform_sha256 = _sha256(transform_path)
     tr = dict(np.load(transform_path, allow_pickle=True))
+    if not bool(tr.get("metric", True)):  # absent flag = old already-metric artifact
+        raise SystemExit(f"geometry under {pred} is up-to-scale — run estimate_scale after fuse")
     sc = dict(np.load(scene_path, allow_pickle=True))
     N, P = int(kin["num_frames"]), int(kin["num_people"])
     H, W = int(kin["video_height"]), int(kin["video_width"])

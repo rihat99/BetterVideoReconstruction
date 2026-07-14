@@ -1,23 +1,28 @@
-"""Fuse VGGT geometry into metric scene + human point clouds.
+"""Fuse VGGT geometry into scene + human point clouds (up-to-scale).
 
-Runs after ``estimate_scale``, which anchors VGGT's arbitrary per-clip scale to
-the SAM-3D-Body human ruler (``geometry/scale.npz``). VGGT-Omega gives
-cross-frame-consistent cameras and depth but **up to one arbitrary scale** and at
-a **reduced resolution**. This stage:
+Runs right after the body / SMPL-X stages and **before** ``estimate_scale``.
+VGGT-Omega gives cross-frame-consistent cameras and depth but **up to one
+arbitrary per-clip scale** and at a **reduced resolution**. This stage builds
+the point clouds in that native (unscaled) world; ``estimate_scale`` then
+measures the metric factor against the fused human points and rescales the
+saved files in place. This stage:
 
-  1. reads the metric scale ``s`` from ``geometry/scale.npz`` (the human-anchored
-     factor — depth and camera translations all multiply by it);
-  2. denormalizes VGGT's intrinsics to the original frame resolution (FOV is
-     VGGT's and is preserved — scaling only touches depth + camera translation);
-  3. backprojects every cleaned VGGT depth map to metric world points, split into
-     a static **scene** cloud and per-frame **human** points via the SAM3 masks.
+  1. denormalizes VGGT's intrinsics to the original frame resolution (FOV is
+     VGGT's and is preserved);
+  2. backprojects every cleaned VGGT depth map to world points, split into a
+     static **scene** cloud and per-frame **human** points via the SAM3 masks.
      The scene subtracts a *dilated* mask of **every** tracked person, so no one —
      climber or bystander — leaks into it; the **human** cloud keeps only the
      reconstructed climbers (``sam3d/smplx_params.npz`` ``object_ids``), tagged by
      ``obj_id`` (edge filter only — no confidence gate);
-  4. merges near-duplicate points by voxel hashing — the scene globally (it is
-     static); the human is kept per-frame, unmerged (the person moves);
-  5. drops small disconnected voxel clusters from the scene — floating depth
+  3. merges near-duplicate scene points by voxel hashing. The voxel size is
+     **relative**: ``voxel_px`` pixel footprints at the median scene depth
+     (``voxel_px * median_depth / fx``), so it is meaningful in the unscaled
+     world. The merge runs **twice** — the second pass on a half-voxel-shifted
+     grid — because a surface straddling a cell face otherwise leaves two
+     near-coincident centroids on either side. The human is kept per-frame,
+     unmerged (the person moves);
+  4. drops small disconnected voxel clusters from the scene — floating depth
      fragments and off-surface blobs (e.g. an untracked bystander VGGT placed off
      the wall).
 
@@ -25,11 +30,10 @@ Per-clip I/O (``--source`` frames + ``--predictions out/<stem>/``)::
 
     reads:  --source video / folder of frames          (RGB, for per-point colour)
             vggt/camera.npz, vggt/depth/frame_*.npz     (needs [vggt] save_depth)
-            geometry/scale.npz                          (metric scale, from estimate_scale)
             sam3/<obj>/frame_*.png
-    writes: geometry/transform.npz   scale + metric extrinsics + original-res K
-            geometry/scene.npz        merged metric background points (+ colour)
-            geometry/human.npz        per-frame metric human points (frame_id, obj_id, colour)
+    writes: geometry/transform.npz   extrinsics + original-res K (scale=1, metric=False)
+            geometry/scene.npz        merged background points (+ colour)
+            geometry/human.npz        per-frame human points (frame_id, obj_id, colour)
 
 Standalone CLI::
 
@@ -91,26 +95,43 @@ def _save_cloud(path: Path, points: torch.Tensor, **arrays) -> None:
              **{k: (v.detach().cpu().numpy() if torch.is_tensor(v) else v) for k, v in arrays.items()})
 
 
-def _record_anchor_veto(anchor: dict, touch_m: float, burial_m: float) -> None:
-    """Make anchor diagnostics describe the baseline world that actually ships."""
-    anchor["rescale_r"] = 1.0
-    anchor["depth_refuted"][:] = False
-    anchor["anchor_pred_gap_q"][:] = np.nan
-    anchor["anchor_true_touch"] = float(touch_m)
-    anchor["anchor_true_burial"] = float(burial_m)
+def _merge_scene(points: torch.Tensor, conf: torch.Tensor, color: torch.Tensor,
+                 voxel: float):
+    """Two-pass voxel merge of the scene cloud.
 
-
-def _build_geometry(args, pred, cam, frame_indices, extr, K_px, objs, climber_ids,
-                    scale, *, base_scale, fixed_human_ids):
-    """Run the standard backproject/merge/CC build at ``scale``.
-
-    ``fixed_human_ids`` is empty for the ordinary build. On a fired second pass,
-    those people's points retain their ``base_scale`` camera coordinates while
-    the camera translations and every other point follow ``scale``.
+    Pass 1 collapses each occupied voxel to its centroid (confidence: max, colour:
+    mean). A surface that straddles a cell face leaves two near-coincident
+    centroids on either side, so pass 2 re-merges the centroids on a grid shifted
+    by half a voxel, weighted by each centroid's source-point count. Returns
+    ``(points (M,3), confidence (M,), color (M,3) uint8, count (M,), coords (M,3))``
+    with ``coords`` the final integer grid indices (for the cluster filter).
     """
+    cent, inv, cnt, _ = voxel_downsample(points, voxel)
+    n1 = cnt.numel()
+    conf1 = group_reduce(conf, inv, n1, "amax")
+    col1 = torch.zeros((n1, 3), device=points.device)
+    col1.index_add_(0, inv, color.float())
+    col1 /= cnt.unsqueeze(1)
+
+    _, inv2, _, coords = voxel_downsample(cent, voxel, shift=0.5)
+    m = coords.shape[0]
+    w = cnt.to(points.dtype)
+    wsum = group_reduce(w, inv2, m, "sum")
+    cent2 = torch.zeros((m, 3), dtype=points.dtype, device=points.device)
+    cent2.index_add_(0, inv2, cent * w.unsqueeze(1))
+    cent2 /= wsum.unsqueeze(1)
+    conf2 = group_reduce(conf1, inv2, m, "amax")
+    col2 = torch.zeros((m, 3), device=points.device)
+    col2.index_add_(0, inv2, col1 * w.unsqueeze(1))
+    col2 = (col2 / wsum.unsqueeze(1)).round().to(torch.uint8)
+    return cent2, conf2, col2, wsum.to(torch.int32), coords
+
+
+def _build_geometry(args, pred, cam, frame_indices, extr, K_px, objs, climber_ids):
+    """Backproject every frame, split scene/human, merge + cluster-filter the scene."""
     hv, wv = int(cam["vggt_height"]), int(cam["vggt_width"])
     dev = args.device
-    scene_pts, scene_conf, scene_col = [], [], []
+    scene_pts, scene_conf, scene_col, scene_depth_med = [], [], [], []
     human_pts, human_conf, human_obj, human_fid, human_col = [], [], [], [], []
 
     with tempfile.TemporaryDirectory(prefix="fuse_frames_") as tmp:
@@ -133,6 +154,8 @@ def _build_geometry(args, pred, cam, frame_indices, extr, K_px, objs, climber_id
             # human from the tight mask, restricted to the reconstructed climbers.
             scene_mask = valid_scene & ~_dilate(is_human, args.human_dilate)
             human_mask = valid_human & is_human & np.isin(obj_id, climber_ids)
+            if scene_mask.any():
+                scene_depth_med.append(float(np.median(depth[scene_mask])))
 
             depth_t, K_t, E_t = (torch.from_numpy(depth).to(dev),
                                  torch.from_numpy(K_px[k]).to(dev), torch.from_numpy(extr[k]).to(dev))
@@ -151,12 +174,12 @@ def _build_geometry(args, pred, cam, frame_indices, extr, K_px, objs, climber_id
                 human_fid.append(torch.full((int(sh.sum()),), k, dtype=torch.int32, device=dev))
                 human_col.append(col_t[sh])
 
-    centroids, inverse, counts, coords = voxel_downsample(torch.cat(scene_pts) * scale,
-                                                          args.voxel_scene)
-    scene_confidence = group_reduce(torch.cat(scene_conf), inverse, counts.numel(), "amax")
-    scene_color = torch.zeros((counts.numel(), 3), device=dev)
-    scene_color.index_add_(0, inverse, torch.cat(scene_col).float())
-    scene_color = (scene_color / counts.unsqueeze(1)).round().to(torch.uint8)
+    # Relative voxel size: what a voxel_px-pixel patch covers at the median scene
+    # depth. Scale-free — the world's unknown metric factor cancels out.
+    fx_med = float(np.median(K_px[:, 0, 0]))
+    voxel = args.voxel_px * float(np.median(scene_depth_med)) / fx_med
+    centroids, scene_confidence, scene_color, counts, coords = _merge_scene(
+        torch.cat(scene_pts), torch.cat(scene_conf), torch.cat(scene_col), voxel)
 
     # Drop small disconnected clusters — floating depth fragments and off-surface
     # blobs (e.g. an untracked bystander VGGT placed off the wall).
@@ -167,17 +190,7 @@ def _build_geometry(args, pred, cam, frame_indices, extr, K_px, objs, climber_id
 
     empty = torch.zeros((0, 3), device=dev)
     if human_pts:
-        raw_human = torch.cat(human_pts)
-        all_obj = torch.cat(human_obj)
-        all_fid = torch.cat(human_fid)
-        human_points = raw_human * scale
-        if fixed_human_ids:
-            extr_t = torch.as_tensor(extr, dtype=raw_human.dtype, device=dev)
-            cam_offset = torch.einsum("tji,tj->ti", extr_t[:, :3, :3], extr_t[:, :3, 3])
-            cam_offset *= base_scale - scale
-            for oid in fixed_human_ids:
-                fixed = all_obj == int(oid)
-                human_points[fixed] = raw_human[fixed] * base_scale + cam_offset[all_fid[fixed].long()]
+        human_points, all_obj, all_fid = torch.cat(human_pts), torch.cat(human_obj), torch.cat(human_fid)
     else:
         human_points, all_obj, all_fid = empty, empty[:, 0].to(torch.int32), empty[:, 0].to(torch.int32)
     return dict(scene_points=centroids, scene_count=counts, scene_confidence=scene_confidence,
@@ -185,21 +198,18 @@ def _build_geometry(args, pred, cam, frame_indices, extr, K_px, objs, climber_id
                 human_color=torch.cat(human_col) if human_col else empty.to(torch.uint8),
                 human_confidence=torch.cat(human_conf) if human_conf else empty[:, 0],
                 human_frame_id=all_fid, human_obj_id=all_obj, n_dropped=n_dropped,
-                n_human=sum(int(t.shape[0]) for t in human_pts), src_fps=src_fps)
+                n_human=sum(int(t.shape[0]) for t in human_pts), src_fps=src_fps,
+                voxel=voxel)
 
 
 def fuse(args: argparse.Namespace) -> None:
     pred = Path(args.predictions)
     if not (pred / "vggt" / "depth").is_dir():
         raise SystemExit(f"[fuse] missing vggt/depth/ under {pred} — run the vggt stage with save_depth=true")
-    scale_path = pred / "geometry" / "scale.npz"
-    if not scale_path.exists():
-        raise SystemExit(f"[fuse] missing {scale_path} — run the scale stage (estimate_scale) first")
     out_dir = pred / "geometry"
     if args.skip_existing and (out_dir / "transform.npz").exists():
         print(f"  skip (exists): {out_dir / 'transform.npz'}")
         return
-    s = float(np.load(scale_path)["scale"])
 
     cam = np.load(pred / "vggt" / "camera.npz")
     frame_indices = cam["frame_indices"]
@@ -217,105 +227,24 @@ def fuse(args: argparse.Namespace) -> None:
     if smplx_path.exists():
         ids = np.load(smplx_path, allow_pickle=True)["object_ids"].ravel()
         climber_ids = [int(o) for o in ids if int(o) in objs]
-    built = _build_geometry(args, pred, cam, frame_indices, extr, K_px, objs, climber_ids,
-                            s, base_scale=s, fixed_human_ids=set())
-    s_eff = s
-    anchor = None
-    if args.body_anchor == "on":
-        if not smplx_path.exists():
-            print("  [body-anchor] note: no sam3d/smplx_params.npz; gate skipped")
-        elif int(built["scene_points"].shape[0]) == 0:
-            print("  [body-anchor] note: empty scene cloud; gate skipped")
-        else:
-            from tools.human_optim.depth_anchor import evaluate_body_anchor
-
-            extr_base = extr.copy()
-            extr_base[:, :3, 3] *= s
-            anchor = evaluate_body_anchor(
-                smplx_path, built["scene_points"], built["scene_confidence"], extr_base,
-                frame_indices, climber_ids, device=args.device, float_gate_m=args.float_gate_m)
-            for person in anchor["people"]:
-                verdict = "FIRED" if person["fired"] else ("healthy" if person["eligible"] else "SKIP")
-                print(f"  [body-anchor] person obj_id={person['object_id']}: "
-                      f"gap_med={person['gap_m']:+.3f} m burial_med={person['burial_m']:+.3f} m "
-                      f"support={person['support']:.1%} ({person['n_finite']}/{person['n_valid']}) "
-                      f"-> {verdict}")
-            if not anchor["consistent"]:
-                print(f"  [body-anchor] WARNING: rescale skipped — {anchor['reason']}")
-            elif bool(anchor["depth_refuted"].any()):
-                s_eff = s * anchor["rescale_r"]
-                if anchor["burial_conflict"]:
-                    print("  [body-anchor] WARNING: touch and burial constraints conflict; burial wins")
-                for i, person in enumerate(anchor["people"]):
-                    if person["fired"]:
-                        q05, q25, q50 = anchor["anchor_pred_gap_q"][i]
-                        print(f"  [body-anchor] chosen r={anchor['rescale_r']:.6f} for "
-                              f"obj_id={person['object_id']}: predicted gaps "
-                              f"p05={q05:+.3f} p25={q25:+.3f} p50={q50:+.3f} m")
-                print(f"  [body-anchor] verified true gaps at r={anchor['rescale_r']:.6f}: "
-                      f"touch_q25={anchor['anchor_true_touch']:+.3f} m "
-                      f"burial_q05={anchor['anchor_true_burial']:+.3f} m")
-                fixed_ids = {p["object_id"] for p in anchor["people"] if p["fired"]}
-                built = _build_geometry(args, pred, cam, frame_indices, extr, K_px, objs,
-                                        climber_ids, s_eff, base_scale=s,
-                                        fixed_human_ids=fixed_ids)
-                # Final acceptance on the ACTUAL candidate scene: re-voxelization at the
-                # new metric can move surfaces by up to a voxel vs the scaled-centroid
-                # verifier, which is material against the burial budget. Violation ⇒
-                # veto the whole rescale and rebuild the baseline world.
-                from tools.human_optim.depth_anchor import BURIAL_CAP_M, verify_built_world
-
-                extr_eff = extr.copy()
-                extr_eff[:, :3, 3] *= s_eff
-                bt, bb = verify_built_world(
-                    smplx_path, built["scene_points"], built["scene_confidence"], extr_eff,
-                    frame_indices, sorted(fixed_ids), device=args.device)
-                print(f"  [body-anchor] built-world gaps: touch_q25={bt:+.3f} m "
-                      f"burial_q05={bb:+.3f} m")
-                if not np.isfinite(bb) or bb < -BURIAL_CAP_M - 1e-6:
-                    print("  [body-anchor] WARNING: built-world burial check FAILED "
-                          f"({bb:+.3f} m) — rescale vetoed, rebuilding baseline world")
-                    s_eff = s
-                    built = _build_geometry(args, pred, cam, frame_indices, extr, K_px,
-                                            objs, climber_ids, s, base_scale=s,
-                                            fixed_human_ids=set())
-                    baseline_touch, baseline_burial = verify_built_world(
-                        smplx_path, built["scene_points"], built["scene_confidence"],
-                        extr_base, frame_indices, sorted(fixed_ids), device=args.device)
-                    _record_anchor_veto(anchor, baseline_touch, baseline_burial)
-                    print(f"  [body-anchor] baseline built-world gaps: "
-                          f"touch_q25={baseline_touch:+.3f} m "
-                          f"burial_q05={baseline_burial:+.3f} m")
-                else:
-                    anchor["anchor_true_touch"], anchor["anchor_true_burial"] = bt, bb
-                    print("  [body-anchor] WARNING: kinematic_1/contacts/"
-                          "kinematic_2/dynamics for this clip are now stale")
+    built = _build_geometry(args, pred, cam, frame_indices, extr, K_px, objs, climber_ids)
 
     out_dir.mkdir(parents=True, exist_ok=True)
-    extr_metric = extr.copy()
-    extr_metric[:, :3, 3] *= s_eff
     K_orig = np.stack([denormalize_K(K_norm[k], ho, wo) for k in range(len(frame_indices))])
     fps = float(built["src_fps"]) if built["src_fps"] else 30.0
-    transform_args = dict(
-        scale=np.float32(s_eff), extrinsics=extr_metric.astype(np.float32),
+    np.savez(
+        out_dir / "transform.npz",
+        scale=np.float32(1.0), metric=np.bool_(False),
+        extrinsics=extr.astype(np.float32),
         intrinsics_px_orig=K_orig.astype(np.float32), intrinsics=K_norm,
         fov_x_deg=cam["fov_x_deg"], fov_y_deg=cam["fov_y_deg"],
         frame_indices=frame_indices.astype(np.int32), image_height=np.int32(ho),
         image_width=np.int32(wo), vggt_height=np.int32(hv), vggt_width=np.int32(wv),
-        fps=np.float32(fps), scale_method=np.str_("human-anchored (estimate_scale)"))
-    if anchor is not None:
-        transform_args.update(
-            scale_base=np.float32(s), rescale_r=np.float32(anchor["rescale_r"]),
-            depth_refuted=anchor["depth_refuted"], anchor_gap_m=anchor["anchor_gap_m"],
-            anchor_burial_m=anchor["anchor_burial_m"], anchor_support=anchor["anchor_support"],
-            anchor_pred_gap_q=anchor["anchor_pred_gap_q"],
-            anchor_true_touch=np.float32(anchor["anchor_true_touch"]),
-            anchor_true_burial=np.float32(anchor["anchor_true_burial"]))
-    np.savez(out_dir / "transform.npz", **transform_args)
+        fps=np.float32(fps))
     _save_cloud(out_dir / "scene.npz", built["scene_points"],
                 colors=built["scene_color"], confidence=built["scene_confidence"],
                 count=built["scene_count"].to(torch.int32),
-                voxel_size=np.float32(args.voxel_scene))
+                voxel_size=np.float32(built["voxel"]))
     _save_cloud(
         out_dir / "human.npz",
         built["human_points"], colors=built["human_color"],
@@ -323,9 +252,10 @@ def fuse(args: argparse.Namespace) -> None:
         obj_id=built["human_obj_id"],
         frame_indices=frame_indices.astype(np.int32),
     )
-    print(f"  scale={s_eff:.4f} | scene {built['scene_points'].shape[0]} pts "
-          f"({built['n_dropped']} dropped: small clusters) | human {built['n_human']} pts "
-          f"(climbers {climber_ids}) -> {out_dir}")
+    print(f"  scene {built['scene_points'].shape[0]} pts (voxel={built['voxel']:.4f}, "
+          f"{built['n_dropped']} dropped: small clusters) | human {built['n_human']} pts "
+          f"(climbers {climber_ids}) -> {out_dir}\n"
+          f"  world is UP-TO-SCALE — run estimate_scale next to make it metric")
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -338,14 +268,12 @@ def main(argv: list[str] | None = None) -> int:
     cli = p.parse_args(argv)
     cfg = load_toml(cli.config)
     args = section(cfg, "fuse", {
-        "voxel_scene": 0.05,
+        "voxel_px": 5.0,
         "conf_drop_q": 0.3,
         "edge_rtol": 0.04,
         "human_dilate": 8,
         "min_scene_voxels": 25,
         "person_obj_ids": "",
-        "body_anchor": "on",
-        "float_gate_m": 0.28,
         "skip_existing": False,
     })
     args.device = section(cfg, "runtime", {"device": "cuda"}).device

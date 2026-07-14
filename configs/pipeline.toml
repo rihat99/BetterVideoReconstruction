@@ -4,10 +4,10 @@
 
 [steps]
 # Active stages, in order; the chain ends at human_optimization (four-stage SMPL-X
-# refinement). List order is honoured: `scale` (estimate_scale) anchors VGGT's metric
-# scale to the SAM-3D-Body human ruler, so it runs after the body / SMPL-X stages and
-# before `fuse` (which applies it). `--steps` runs any subset.
-run = ["sam3", "vggt", "sapiens", "sam3d", "smplx", "scale", "fuse", "human_optimization"]
+# refinement). List order is honoured: `fuse` builds the point clouds in VGGT's
+# up-to-scale world; `scale` (estimate_scale) then measures the metric factor against
+# the fused human points and rescales the saved geometry in place. `--steps` runs any subset.
+run = ["sam3", "vggt", "sapiens", "sam3d", "smplx", "fuse", "scale", "human_optimization"]
 
 [runtime]
 device = "cuda"             # compute device shared by stages and the viewer
@@ -53,13 +53,13 @@ fps = ""                   # overlay fps; empty uses 30
 skip_existing = false      # skip items whose task output already exists
 dtype = "fp16"             # model dtype hint
 
-[scale]                     # human-body-anchored metric scale → geometry/scale.npz (runs before fuse)
-conf_drop_q = 0.3           # drop this lowest-confidence fraction of in-mask body vertices per frame
+[scale]                     # human-anchored metric scale (runs AFTER fuse; rescales geometry/ in place)
+conf_drop_q = 0.3           # drop this lowest-confidence fraction of cloud-hit body vertices per frame
 min_inlier_verts = 50       # skip a frame with fewer inlier vertices than this
 mad_k = 3.0                 # reject frames beyond this many MADs from the median log-scale
-skip_existing = false       # skip when the outputs already exist
+skip_existing = false       # skip when scale.npz exists and the world is already metric
 # per-frame body overfit to the scaled depth → geometry/overfit.npz (see docs/scale.md)
-skip_overfit = false        # estimate scale only, no diagnostic body overfit
+skip_overfit = true         # off by default; set false for the diagnostic overfit body
 iters = 300                 # Adam iterations per frame-batch
 lr = 0.02                   # Adam learning rate
 frame_batch = 512           # frames optimized together (lower to bound GPU memory)
@@ -72,15 +72,13 @@ gm_reproj_px = 10.0         # reprojection robust scale (px)
 max_points = 4000           # depth points per frame for chamfer
 vertex_subsample = 3000     # body vertices used for chamfer
 
-[fuse]                      # backproject VGGT → metric point clouds (scale from geometry/scale.npz) → geometry/
-voxel_scene = 0.05          # scene merge voxel size, metres
+[fuse]                      # backproject VGGT → up-to-scale point clouds → geometry/ (runs BEFORE scale)
+voxel_px = 5.0              # scene merge voxel size, in pixel footprints at the median scene depth
 conf_drop_q = 0.3           # drop this lowest-confidence fraction of VGGT depth (scene only; human keeps all)
 edge_rtol = 0.04            # depth-edge (flying-pixel) filter tolerance; 0 disables
 human_dilate = 8            # grow the human mask N px before subtracting from the scene (cleaner scene); 0 disables
 min_scene_voxels = 25       # drop scene clusters smaller than this many connected voxels (floating blobs); 1 disables
 person_obj_ids = ""         # restrict SAM3 ids treated as people, e.g. "0,1"; empty → all
-body_anchor = "on"          # body-anchored world rescale gate: on | off
-float_gate_m = 0.28        # median extremity/scene distance that fires the gate
 skip_existing = false      # skip when geometry/transform.npz exists
 
 [sam3d]                     # SAM-3D-Body MHR fit → sam3d/params.npz (camera from VGGT via fuse)

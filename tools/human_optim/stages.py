@@ -395,6 +395,8 @@ def run_kinematic(source, pred: Path, cfg: HumanOptimConfig, stages_to_run,
     pose = dict(np.load(pred / "sapiens" / "pose.npz", allow_pickle=True))
     human = dict(np.load(pred / "geometry" / "human.npz", allow_pickle=True))
     tr = dict(np.load(pred / "geometry" / "transform.npz", allow_pickle=True))
+    if not bool(tr.get("metric", True)):  # absent flag = old already-metric artifact
+        raise SystemExit(f"[{tag}] geometry under {pred} is up-to-scale — run estimate_scale after fuse")
 
     N, P = int(sp["num_frames"]), int(sp["num_people"])
     H, W = int(sp["video_height"]), int(sp["video_width"])
@@ -565,6 +567,8 @@ def run_kinematics_2(source, pred: Path, cfg: HumanOptimConfig, device: str, *,
     pose = dict(np.load(pred / "sapiens" / "pose.npz", allow_pickle=True))
     human = dict(np.load(pred / "geometry" / "human.npz", allow_pickle=True))
     tr = dict(np.load(pred / "geometry" / "transform.npz", allow_pickle=True))
+    if not bool(tr.get("metric", True)):  # absent flag = old already-metric artifact
+        raise SystemExit(f"[{tag}] geometry under {pred} is up-to-scale — run estimate_scale after fuse")
 
     N, P = int(kin["num_frames"]), int(kin["num_people"])
     H, W = int(kin["video_height"]), int(kin["video_width"])

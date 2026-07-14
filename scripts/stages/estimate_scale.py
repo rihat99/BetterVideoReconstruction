@@ -1,33 +1,41 @@
-"""Metric scale for VGGT depth, then a per-frame SMPL-X body overfit to that depth.
+"""Metric scale for the fused VGGT world, anchored to the SMPL-X human body.
 
-Two things happen here, in order:
+Runs **after** ``fuse_geometry``. VGGT-Omega geometry is up to one arbitrary
+per-clip factor (depth and camera translations share it), so fuse writes an
+**up-to-scale** world. The SAM-3D-Body → SMPL-X body carries real metric size
+and was fit in the *same* VGGT camera, so it is a ruler. Three things happen
+here, in order:
 
-1. **Scale.** VGGT-Omega geometry is up to one arbitrary per-clip factor (depth and
-   camera translations share it). The SAM-3D-Body → SMPL-X body carries real metric
-   size and was fit in the *same* VGGT camera, so it is a ruler: over the person, the
-   body's camera-frame depth and VGGT's relative depth differ by exactly the unknown
-   factor ``s``. Per body-valid frame we pose the body with that frame's own betas,
-   keep the camera-facing vertices, read VGGT depth under them, and take the robust
-   median of ``log(d_body) − log(d_vggt)``. The per-frame log-scales are pooled into
-   one clip ``s`` (:func:`tools.geometry.human_scale.combine_log_scales`). No body-part
-   weighting — every visible vertex counts the same.
+1. **Measure.** Per body-valid frame we pose the body with that frame's own
+   betas at the converter's translation, keep the camera-facing vertices, and
+   look up the fused human cloud (``geometry/human.npz`` — already edge-filtered
+   and mask-restricted by fuse) at the pixels those vertices project to. The
+   body's camera depth and the cloud's differ by exactly the unknown factor
+   ``s``; we take the robust median of ``log(d_body) − log(d_cloud)`` per frame
+   and pool the frames (:func:`tools.geometry.human_scale.combine_log_scales`).
+   No body-part weighting — every visible vertex counts the same.
 
-2. **Overfit.** With ``s`` known, we back-project ``s · vggt_depth`` over each person's
-   mask into a metric point cloud and **overfit a fresh SMPL-X body to it, per frame**,
-   with free shape (per-frame betas) and no temporal coupling. See
-   :mod:`tools.human_optim.overfit`. This is a diagnostic body — it does not feed the
-   kinematic stage — written so the 3D viewer can show it next to the original and the
-   kinematic fit.
+2. **Metricize.** The measured ``s`` is applied **in place** to the saved fused
+   world: scene + human points, camera translations and the voxel size all
+   multiply by ``s`` (pixel intrinsics and rotations are scale-free), and
+   ``transform.npz`` gets ``metric=True``. Re-running is harmless: on an
+   already-metric world the measured ratio is ~1.
+
+3. **Overfit** (optional, off by default). With the world metric, back-project
+   each person's masked depth and overfit a fresh SMPL-X body to it per frame,
+   with free shape and no temporal coupling (:mod:`tools.human_optim.overfit`).
+   A diagnostic body for the viewer — it does not feed the kinematic stage.
 
 Per-clip I/O (``--predictions out/<stem>/``)::
 
     reads:  sam3d/smplx_params.npz      (per-frame betas + pose, per person)
-            sapiens/pose.npz            (Goliath-308 keypoints, for the overfit reproj)
-            vggt/camera.npz             (frame_indices, intrinsics @ vggt + normalized)
-            vggt/depth/frame_*.npz      (up-to-scale depth + confidence)
-            sam3/<obj>/frame_*.png      (per-person silhouette)
+            vggt/camera.npz             (frame_indices + VGGT-resolution intrinsics)
+            geometry/transform.npz      (extrinsics in the cloud's current units)
+            geometry/human.npz          (fused per-frame human points, from fuse)
+            sapiens/pose.npz, vggt/depth/, sam3/   (only when the overfit runs)
     writes: geometry/scale.npz          (scale + per-frame diagnostics)
-            geometry/overfit.npz        (per-frame overfit body, camera-frame classic params)
+            geometry/{transform,scene,human}.npz   (rescaled in place, metric=True)
+            geometry/overfit.npz        (only when the overfit runs)
             geometry/diagnostics/scale_over_time.png
 
 Standalone CLI::
@@ -83,9 +91,10 @@ def _frame_log_scale(
     :param verts_cam: ``(Nf, 3)`` camera-frame front-facing vertices (metric m); their
         ``z`` is the body depth ``d_body``.
     :param K: ``(3, 3)`` VGGT-resolution pixel intrinsics.
-    :param depth_rel: ``(Hv, Wv)`` VGGT up-to-scale depth; ``conf`` its confidence;
-        ``mask`` this person's silhouette at VGGT resolution.
-    :param conf_drop_q: drop the lowest ``conf_drop_q`` fraction of in-mask vertices by
+    :param depth_rel: ``(Hv, Wv)`` cloud depth in the world's current units (``nan``
+        where no cloud point); ``conf`` its confidence; ``mask`` which pixels hold a
+        cloud point.
+    :param conf_drop_q: drop the lowest ``conf_drop_q`` fraction of hit vertices by
         confidence before reducing.
     :param min_inliers: skip the frame (return ``nan``) below this many inliers.
     :returns: ``(log_scale, weight)`` — ``(nan, 0.0)`` if too few inliers; the weight is
@@ -154,16 +163,29 @@ def _plot(
 
 
 def _estimate_metric_scale(
-    pred: Path, sp: dict, frame_indices: np.ndarray, K_vggt: np.ndarray,
-    hv: int, wv: int, object_ids: np.ndarray, mid, device: str, args: argparse.Namespace,
+    sp: dict, frame_indices: np.ndarray, K_vggt: np.ndarray, hv: int, wv: int,
+    object_ids: np.ndarray, extr: np.ndarray, human: dict, mid, device: str,
+    args: argparse.Namespace,
 ) -> tuple[float, dict]:
-    """Robust human-anchored metric scale + per-frame diagnostics."""
+    """Robust human-anchored scale from the fused human cloud + per-frame diagnostics.
+
+    ``extr`` must be in the same units as ``human['points']`` (both come from
+    ``geometry/`` as fuse — or a previous metricization — left them).
+    """
     num_people = len(object_ids)
     n_frames = len(frame_indices)
     per_frame_scale = np.full((num_people, n_frames), np.nan, dtype=np.float32)
     per_frame_weight = np.zeros((num_people, n_frames), dtype=np.float32)
     pooled_log: list[float] = []
     pooled_weight: list[float] = []
+
+    # Group the cloud once by (person, frame): points sorted by a combined key,
+    # each (person, frame) then a contiguous slice found by binary search.
+    pts = np.asarray(human["points"], dtype=np.float32)
+    conf = np.asarray(human["confidence"], dtype=np.float32)
+    key = np.asarray(human["obj_id"], np.int64) * n_frames + np.asarray(human["frame_id"], np.int64)
+    order = np.argsort(key)
+    key_sorted = key[order]
 
     for p in range(num_people):
         oid = int(object_ids[p])
@@ -174,8 +196,8 @@ def _estimate_metric_scale(
             continue
         idxs = frame_indices[cols]
 
-        def gather(key: str) -> torch.Tensor:
-            return torch.as_tensor(sp[key][p][idxs], dtype=torch.float32, device=device)
+        def gather(k: str) -> torch.Tensor:
+            return torch.as_tensor(sp[k][p][idxs], dtype=torch.float32, device=device)
 
         with torch.no_grad():
             betas = gather("betas")
@@ -187,18 +209,28 @@ def _estimate_metric_scale(
         verts_np = verts.cpu().numpy()
         front_np = front.cpu().numpy()
 
-        for fi, (col, idx) in enumerate(zip(cols, idxs)):
-            idx = int(idx)
-            depth_path = pred / "vggt" / "depth" / f"frame_{idx:06d}.npz"
-            mask = read_binary_mask(pred / "sam3" / f"{oid:02d}" / f"frame_{idx:06d}.png")
-            if not depth_path.exists() or mask is None:
+        for fi, col in enumerate(cols):
+            col = int(col)
+            lo = np.searchsorted(key_sorted, oid * n_frames + col)
+            hi = np.searchsorted(key_sorted, oid * n_frames + col + 1)
+            if hi - lo < args.min_inlier_verts:
                 continue
-            vd = np.load(depth_path)
-            depth = vd["depth"].astype(np.float32)
-            conf = vd["depth_conf"].astype(np.float32)
-            mask = cv2.resize(mask.astype(np.uint8), (wv, hv), interpolation=cv2.INTER_NEAREST) > 0
+            sel = order[lo:hi]
+            # Cloud points back to this frame's camera; projecting with the same K
+            # recovers exactly the pixels fuse backprojected them from.
+            E = extr[col]
+            Xc = pts[sel] @ E[:3, :3].T + E[:3, 3]
+            z = Xc[:, 2]
+            K = K_vggt[col]
+            u = np.rint(K[0, 0] * Xc[:, 0] / z + K[0, 2]).astype(np.int64)
+            v = np.rint(K[1, 1] * Xc[:, 1] / z + K[1, 2]).astype(np.int64)
+            ok = (z > 0) & (u >= 0) & (u < wv) & (v >= 0) & (v < hv)
+            dmap = np.full((hv, wv), np.nan, np.float32)
+            cmap = np.zeros((hv, wv), np.float32)
+            dmap[v[ok], u[ok]] = z[ok]
+            cmap[v[ok], u[ok]] = conf[sel][ok]
             log_s, weight = _frame_log_scale(
-                verts_np[fi][front_np[fi]], K_vggt[col], depth, conf, mask,
+                verts_np[fi][front_np[fi]], K, dmap, cmap, np.isfinite(dmap),
                 args.conf_drop_q, args.min_inlier_verts)
             if not np.isfinite(log_s):
                 continue
@@ -208,12 +240,35 @@ def _estimate_metric_scale(
             pooled_weight.append(weight)
 
     if not pooled_log:
-        raise SystemExit(f"[scale] no usable body frames to anchor scale under {pred}")
+        raise SystemExit("[scale] no usable body frames to anchor scale — is geometry/human.npz empty?")
 
     res = combine_log_scales(np.asarray(pooled_log), np.asarray(pooled_weight), mad_k=args.mad_k)
     diagnostics = dict(res, per_frame_scale=per_frame_scale, per_frame_weight=per_frame_weight,
                        n_pooled=len(pooled_log))
     return res["scale"], diagnostics
+
+
+def _metricize_geometry(pred: Path, s: float) -> float:
+    """Multiply the saved fused world by ``s`` in place; returns the cumulative scale.
+
+    Everything with length units scales: camera translations, scene + human
+    points, the voxel size. Rotations and pixel intrinsics are scale-free.
+    ``metric=True`` marks the world as done for the downstream stages.
+    """
+    geo = pred / "geometry"
+    tr = dict(np.load(geo / "transform.npz", allow_pickle=True))
+    total = float(tr["scale"]) * s
+    extr = np.asarray(tr["extrinsics"], np.float32).copy()
+    extr[:, :3, 3] *= s
+    tr.update(extrinsics=extr, scale=np.float32(total), metric=np.bool_(True),
+              scale_method=np.str_("human-log-ratio (estimate_scale)"))
+    np.savez(geo / "transform.npz", **tr)
+    for name, keys in (("scene.npz", ("points", "voxel_size")), ("human.npz", ("points",))):
+        d = dict(np.load(geo / name, allow_pickle=True))
+        for k in keys:
+            d[k] = (np.asarray(d[k], np.float32) * s).astype(np.float32)
+        np.savez(geo / name, **d)
+    return total
 
 
 def _overfit_bodies(
@@ -325,8 +380,13 @@ def estimate_scale(args: argparse.Namespace) -> None:
     pred = Path(args.predictions)
     out_dir = pred / "geometry"
     scale_path = out_dir / "scale.npz"
-    overfit_path = out_dir / "overfit.npz"
-    done = scale_path.exists() and (args.skip_overfit or overfit_path.exists())
+    tr_path = out_dir / "transform.npz"
+    if not tr_path.exists():
+        raise SystemExit(f"[scale] missing {tr_path} — run fuse_geometry first")
+    tr = dict(np.load(tr_path, allow_pickle=True))
+    already_metric = bool(tr.get("metric", False))
+    done = (scale_path.exists() and already_metric
+            and (args.skip_overfit or (out_dir / "overfit.npz").exists()))
     if args.skip_existing and done:
         print(f"  skip (exists): {scale_path}")
         return
@@ -340,15 +400,22 @@ def estimate_scale(args: argparse.Namespace) -> None:
     K_orig = denormalize_K(np.asarray(cam["intrinsics"], dtype=np.float32), H, W)  # (F, 3, 3) @ orig res
     object_ids = np.asarray(sp["object_ids"], dtype=np.int32)
     device = args.device
+    # Extrinsics from transform.npz, NOT vggt/camera.npz: they are in the same
+    # units as the human cloud, so a re-run on a metric world measures s ≈ 1.
+    extr = np.asarray(tr["extrinsics"], dtype=np.float32)
+    human = dict(np.load(out_dir / "human.npz", allow_pickle=True))
+    if np.asarray(human["points"]).size == 0:
+        raise SystemExit(f"[scale] geometry/human.npz has no points under {pred}")
 
     mid = load_smplx_mid(str(_DEFAULT_SMPLX_MODEL), device)
 
-    scale, diag = _estimate_metric_scale(pred, sp, frame_indices, K_vggt, hv, wv,
-                                         object_ids, mid, device, args)
-    out_dir.mkdir(parents=True, exist_ok=True)
+    scale, diag = _estimate_metric_scale(sp, frame_indices, K_vggt, hv, wv,
+                                         object_ids, extr, human, mid, device, args)
+    s_total = _metricize_geometry(pred, scale)
     np.savez(
         scale_path,
         scale=np.float32(scale),
+        scale_total=np.float32(s_total),
         log_scale=np.float32(diag["log_scale"]),
         per_frame_scale=diag["per_frame_scale"],
         per_frame_weight=diag["per_frame_weight"],
@@ -362,11 +429,12 @@ def estimate_scale(args: argparse.Namespace) -> None:
     _plot(out_dir / "diagnostics" / "scale_over_time.png",
           diag["per_frame_scale"], diag["per_frame_weight"], frame_indices, object_ids, scale)
     print(f"  scale={scale:.4f} (log {diag['log_scale']:.4f}, mad {diag['mad']:.4f}, "
-          f"{diag['n_used']}/{diag['n_pooled']} frames) -> {scale_path}")
+          f"{diag['n_used']}/{diag['n_pooled']} frames) — world now metric "
+          f"(total {s_total:.4f}) -> {scale_path}")
 
     if not args.skip_overfit:
         pose = dict(np.load(pred / "sapiens" / "pose.npz", allow_pickle=True))
-        _overfit_bodies(pred, sp, pose, scale, frame_indices, K_vggt, K_orig, hv, wv,
+        _overfit_bodies(pred, sp, pose, s_total, frame_indices, K_vggt, K_orig, hv, wv,
                         object_ids, mid, device, args)
 
 
@@ -382,8 +450,8 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         "min_inlier_verts": 50,
         "mad_k": 3.0,
         "skip_existing": False,
-        # overfit knobs
-        "skip_overfit": False,
+        # overfit knobs (skip_overfit=False re-enables the diagnostic body)
+        "skip_overfit": True,
         "iters": 300,
         "lr": 0.02,
         "frame_batch": 512,

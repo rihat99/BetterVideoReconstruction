@@ -2,7 +2,7 @@
 
 Runs the active stages in order for a video (or a folder of videos):
 
-    sam3 → vggt → sapiens → sam3d → smplx → scale → fuse → ™
+    sam3 → vggt → sapiens → sam3d → smplx → fuse → scale → human_optimization
 
 Each stage is invoked as a subprocess of the current interpreter — this
 isolates per-stage model memory (SAM 3, VGGT-Omega, Sapiens2 and SAM-3D-Body
@@ -13,11 +13,11 @@ Stages run in the **listed order**. The model **precompute** stages (``sam3``,
 ``vggt``, ``sapiens``) run once over ``--source`` — given a *folder* of videos
 they load each model once and sweep the whole batch
 (``tools/precompute_runner`` semantics). The **per-clip** stages (``sam3d``,
-``smplx``, ``scale``, ``fuse``, ``human_optimization``) loop over each clip's
-``<save-dir>/<stem>/``. ``scale`` (``estimate_scale``) anchors VGGT's metric
-scale to the SAM-3D-Body human ruler, so it runs **after** the body / SMPL-X
-stages and **before** ``fuse`` (which applies that scale); ``sam3d`` reads the
-VGGT camera from ``vggt/camera.npz`` directly.
+``smplx``, ``fuse``, ``scale``, ``human_optimization``) loop over each clip's
+``<save-dir>/<stem>/``. ``fuse`` builds the point clouds in VGGT's up-to-scale
+world; ``scale`` (``estimate_scale``) then anchors the metric factor to the
+SAM-3D-Body human ruler and rescales the saved geometry in place; ``sam3d``
+reads the VGGT camera from ``vggt/camera.npz`` directly.
 
 The run ends at ``human_optimization`` — the four-stage SMPL-X refinement (default
 chain: root, kinematics_1 → ``human_optim/kinematic_1.npz``). ``--steps`` runs any
@@ -54,24 +54,16 @@ _MEDIA_EXTS = IMAGE_EXTS | VIDEO_EXTS
 # Canonical order. "precompute" stages operate on --source / --save-dir; "perclip"
 # stages operate on a single clip's --predictions dir. ``--steps`` runs any subset;
 # the chain ends at human_optimization (visually-guided SMPL-X kinematics).
-DEFAULT_RUN = ["sam3", "vggt", "sapiens", "sam3d", "smplx", "scale", "fuse", "human_optimization"]
+DEFAULT_RUN = ["sam3", "vggt", "sapiens", "sam3d", "smplx", "fuse", "scale", "human_optimization"]
 _PRECOMPUTE = {"sam3", "vggt", "sapiens"}
 _KNOWN = set(DEFAULT_RUN)
 
 
 def _default_config() -> dict:
+    # Only what the orchestrator itself reads — each stage parses its own
+    # section (with its own defaults) straight from the TOML it is handed.
     return {
         "steps": {"run": DEFAULT_RUN},
-        "runtime": {"device": "cuda"},
-        "sam3": {"text": "person"},
-        "vggt": {"max_frames": 500, "image_resolution": 512, "mode": "balanced",
-                 "save_depth": False, "checkpoint": ""},
-        "sapiens": {"tasks": "pose", "overlay": True},
-        "scale": {"conf_drop_q": 0.3, "min_inlier_verts": 50, "mad_k": 3.0},
-        "fuse": {"voxel_scene": 0.05, "conf_drop_q": 0.3, "edge_rtol": 0.04,
-                 "human_dilate": 8, "min_scene_voxels": 25, "person_obj_ids": ""},
-        "sam3d": {"obj_ids": "", "inference_type": "full", "overlay": True},
-        "smplx": {"iters": 300, "gender": "neutral", "overlay": True},
         "human_optimization": {"config": "configs/human_optimization.toml"},
     }
 

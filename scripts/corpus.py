@@ -114,7 +114,7 @@ STAGES: dict[str, StageSpec] = {
         mode="farm_inprocess",
         cli=None,
         out_stage="geometry",
-        out_check="transform.npz",
+        out_check="scale.npz",  # scale runs last in the fuse→scale chain
         farm_inputs=("vggt", "sam3d", "sam3"),
         config_sections=("scale", "fuse"),
     ),
@@ -648,9 +648,7 @@ def _run_farm_worker(
         farm = _build_farm(entry, farms_root, spec)
         try:
             if stage == "geometry":
-                scale_rc = scale_stage.main(
-                    ["--predictions", str(farm), "--config", str(config_path)]
-                )
+                # fuse builds the up-to-scale clouds; scale then metricizes them in place.
                 fuse_rc = fuse_stage.main(
                     [
                         "--source",
@@ -661,8 +659,11 @@ def _run_farm_worker(
                         str(config_path),
                     ]
                 )
-                if scale_rc or fuse_rc:
-                    raise RuntimeError(f"stage return codes: scale={scale_rc}, fuse={fuse_rc}")
+                scale_rc = scale_stage.main(
+                    ["--predictions", str(farm), "--config", str(config_path)]
+                )
+                if fuse_rc or scale_rc:
+                    raise RuntimeError(f"stage return codes: fuse={fuse_rc}, scale={scale_rc}")
             else:
                 rc = human_stage.main(
                     [
