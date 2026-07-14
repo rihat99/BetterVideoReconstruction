@@ -118,6 +118,19 @@ def _perclip_output(step: str, clip_dir: Path, cfg: dict) -> Path:
     }[step]
 
 
+def _perclip_done(step: str, clip_dir: Path, cfg: dict) -> bool:
+    if not _perclip_output(step, clip_dir, cfg).exists():
+        return False
+    if step == "scale":  # a re-fused world resets metric=False; a stale scale.npz must not mask it
+        import numpy as np
+        tr_path = clip_dir / "geometry" / "transform.npz"
+        if not tr_path.exists():
+            return False
+        with np.load(tr_path) as tr:
+            return "metric" not in tr.files or bool(tr["metric"])
+    return True
+
+
 def _build_perclip_args(step: str, cfg: dict, clip: Path, clip_dir: Path,
                         config: Path) -> list[str]:
     if step == "scale":
@@ -177,7 +190,7 @@ def run_pipeline(args: argparse.Namespace) -> int:
             continue
         for clip in clips:
             clip_dir = save_dir / clip.stem
-            if args.skip_existing and _perclip_output(step, clip_dir, cfg).exists():
+            if args.skip_existing and _perclip_done(step, clip_dir, cfg):
                 print(f"[pipeline] skip {step} for {clip.stem} (output exists)")
                 continue
             _run(step, _build_perclip_args(step, cfg, clip, clip_dir, args.config))

@@ -115,7 +115,7 @@ STAGES: dict[str, StageSpec] = {
         cli=None,
         out_stage="geometry",
         out_check="scale.npz",  # scale runs last in the fuse→scale chain
-        farm_inputs=("vggt", "sam3d", "sam3"),
+        farm_inputs=("vggt", "sam3d", "sam3", "sapiens"),  # sapiens: only the opt-in overfit reads it
         config_sections=("scale", "fuse"),
     ),
     "human_optim": StageSpec(
@@ -373,6 +373,15 @@ def _contacts_inputs(paths: ScenePaths, scene_id: str, bodies: str) -> tuple[Pat
     return body, paths.feature_dir("geometry", scene_id)
 
 
+def _geometry_metric(geom_dir: Path) -> bool:
+    """True when the fused world has been metricized (a re-fuse resets the flag)."""
+    tr_path = geom_dir / "transform.npz"
+    if not tr_path.is_file():
+        return False
+    with np.load(tr_path) as tr:
+        return "metric" not in tr.files or bool(tr["metric"])
+
+
 def _scene_fresh(
     paths: ScenePaths,
     out_paths: ScenePaths,
@@ -386,7 +395,11 @@ def _scene_fresh(
     if spec.capture_and_move:
         body, geom = _contacts_inputs(paths, scene_id, config.bodies)
         return _is_fresh(out, body, geom, config.human_optim_config)
-    return out.is_file()
+    if not out.is_file():
+        return False
+    if spec.out_check == "scale.npz":  # a stale scale.npz must not mask a re-fused world
+        return _geometry_metric(out.parent)
+    return True
 
 
 def _manifest_entry(
@@ -640,7 +653,8 @@ def _run_farm_worker(
     for index, entry in enumerate(entries, 1):
         sid = entry["scene_id"]
         out = Path(entry["output"]) / spec.out_check
-        if skip_existing and out.is_file():
+        done = out.is_file() and (stage != "geometry" or _geometry_metric(out.parent))
+        if skip_existing and done:
             print(f"[{index}/{len(entries)}] {sid}: skip ({spec.out_check} exists)", flush=True)
             ok += 1
             continue

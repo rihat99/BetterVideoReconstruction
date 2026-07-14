@@ -4,18 +4,23 @@ from __future__ import annotations
 import torch
 
 
-def voxel_downsample(points: torch.Tensor, voxel_size: float, *, shift: float = 0.0):
+def voxel_downsample(points: torch.Tensor, voxel_size: float, *, shift: float = 0.0,
+                     origin: torch.Tensor | None = None):
     """Collapse ``points`` ``(N, 3)`` sharing a ``voxel_size`` cell to their centroid.
 
     Returns ``(centroids (M, 3), inverse (N,), counts (M,), coords (M, 3))`` —
     ``inverse`` maps each input point to its voxel row (for reducing per-point
     attributes with :func:`group_reduce`) and ``coords`` are the integer grid
     indices of each occupied voxel (for :func:`large_component_mask`). ``O(N)``,
-    one ``torch.unique``. ``shift`` offsets the grid origin in cell units
-    (``0.5`` = half a voxel — a second pass on that grid merges the twin
-    centroids a boundary-straddling surface leaves behind).
+    one ``torch.unique``. ``origin`` fixes the grid origin (default: the cloud's
+    min corner) and ``shift`` offsets it in cell units — a second pass over the
+    SAME origin with ``shift=0.5`` merges the twin centroids a
+    boundary-straddling surface leaves behind (the origin must be shared, or the
+    second lattice can realign with the first).
     """
-    ijk = torch.floor((points - points.amin(0)) / voxel_size + shift).long()
+    base = points.amin(0) if origin is None else origin
+    ijk = torch.floor((points - base) / voxel_size + shift).long()
+    ijk -= ijk.amin(0)  # re-zero so the linear key below stays non-negative
     dims = ijk.amax(0) + 1
     keys = (ijk[:, 0] * dims[1] + ijk[:, 1]) * dims[2] + ijk[:, 2]
     _, inverse, counts = torch.unique(keys, return_inverse=True, return_counts=True)

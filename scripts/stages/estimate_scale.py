@@ -54,6 +54,7 @@ for _p in (str(_BETTER_HUMAN_SRC), str(_REPO_ROOT)):
         sys.path.insert(0, _p)
 
 import argparse  # noqa: E402
+import os  # noqa: E402
 
 import cv2  # noqa: E402
 import numpy as np  # noqa: E402
@@ -248,26 +249,43 @@ def _estimate_metric_scale(
     return res["scale"], diagnostics
 
 
+def _replace_npz(path: Path, arrays: dict) -> None:
+    """Write ``arrays`` to a temp file and atomically rename it over ``path``."""
+    tmp = path.with_name(path.name + ".tmp")
+    with open(tmp, "wb") as f:
+        np.savez(f, **arrays)
+    os.replace(tmp, path)
+
+
 def _metricize_geometry(pred: Path, s: float) -> float:
-    """Multiply the saved fused world by ``s`` in place; returns the cumulative scale.
+    """Bring the saved fused world to metric in place; returns the cumulative scale.
 
     Everything with length units scales: camera translations, scene + human
     points, the voxel size. Rotations and pixel intrinsics are scale-free.
     ``metric=True`` marks the world as done for the downstream stages.
+
+    Each file carries its own ``world_scale``, and its multiplier is computed
+    from that — so if a previous run died mid-rescale, the lagging file is
+    simply brought up to the target instead of everything double-scaling.
+    The clouds are written first and ``transform.npz`` (which holds the
+    ``metric`` flag) last, each via an atomic temp-file rename.
     """
     geo = pred / "geometry"
     tr = dict(np.load(geo / "transform.npz", allow_pickle=True))
-    total = float(tr["scale"]) * s
+    tr_ws = float(tr["scale"])
+    total = tr_ws * s
+    for name, keys in (("scene.npz", ("points", "voxel_size")), ("human.npz", ("points",))):
+        d = dict(np.load(geo / name, allow_pickle=True))
+        m = total / float(d.get("world_scale", tr_ws))
+        for k in keys:
+            d[k] = (np.asarray(d[k], np.float32) * m).astype(np.float32)
+        d["world_scale"] = np.float32(total)
+        _replace_npz(geo / name, d)
     extr = np.asarray(tr["extrinsics"], np.float32).copy()
     extr[:, :3, 3] *= s
     tr.update(extrinsics=extr, scale=np.float32(total), metric=np.bool_(True),
               scale_method=np.str_("human-log-ratio (estimate_scale)"))
-    np.savez(geo / "transform.npz", **tr)
-    for name, keys in (("scene.npz", ("points", "voxel_size")), ("human.npz", ("points",))):
-        d = dict(np.load(geo / name, allow_pickle=True))
-        for k in keys:
-            d[k] = (np.asarray(d[k], np.float32) * s).astype(np.float32)
-        np.savez(geo / name, **d)
+    _replace_npz(geo / "transform.npz", tr)
     return total
 
 
@@ -406,6 +424,13 @@ def estimate_scale(args: argparse.Namespace) -> None:
     human = dict(np.load(out_dir / "human.npz", allow_pickle=True))
     if np.asarray(human["points"]).size == 0:
         raise SystemExit(f"[scale] geometry/human.npz has no points under {pred}")
+    # If a previous run died mid-rescale, the cloud may lag the extrinsics'
+    # units; bring it in line before measuring, or the ratio would be biased.
+    hu_ws = float(human.get("world_scale", tr["scale"]))
+    if not np.isclose(hu_ws, float(tr["scale"])):
+        print(f"  [scale] note: repairing partial rescale (human world_scale {hu_ws:.4f} "
+              f"vs transform {float(tr['scale']):.4f})")
+        human["points"] = np.asarray(human["points"], np.float32) * (float(tr["scale"]) / hu_ws)
 
     mid = load_smplx_mid(str(_DEFAULT_SMPLX_MODEL), device)
 

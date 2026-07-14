@@ -101,19 +101,23 @@ def _merge_scene(points: torch.Tensor, conf: torch.Tensor, color: torch.Tensor,
 
     Pass 1 collapses each occupied voxel to its centroid (confidence: max, colour:
     mean). A surface that straddles a cell face leaves two near-coincident
-    centroids on either side, so pass 2 re-merges the centroids on a grid shifted
-    by half a voxel, weighted by each centroid's source-point count. Returns
+    centroids on either side, so pass 2 re-merges the centroids on the SAME grid
+    shifted by half a voxel, weighted by each centroid's source-point count.
+    (The origin is shared across the passes on purpose: letting pass 2 re-derive
+    its origin from the centroids can realign the two lattices and let twins
+    survive.) Returns
     ``(points (M,3), confidence (M,), color (M,3) uint8, count (M,), coords (M,3))``
     with ``coords`` the final integer grid indices (for the cluster filter).
     """
-    cent, inv, cnt, _ = voxel_downsample(points, voxel)
+    origin = points.amin(0)
+    cent, inv, cnt, _ = voxel_downsample(points, voxel, origin=origin)
     n1 = cnt.numel()
     conf1 = group_reduce(conf, inv, n1, "amax")
     col1 = torch.zeros((n1, 3), device=points.device)
     col1.index_add_(0, inv, color.float())
     col1 /= cnt.unsqueeze(1)
 
-    _, inv2, _, coords = voxel_downsample(cent, voxel, shift=0.5)
+    _, inv2, _, coords = voxel_downsample(cent, voxel, origin=origin, shift=0.5)
     m = coords.shape[0]
     w = cnt.to(points.dtype)
     wsum = group_reduce(w, inv2, m, "sum")
@@ -174,21 +178,26 @@ def _build_geometry(args, pred, cam, frame_indices, extr, K_px, objs, climber_id
                 human_fid.append(torch.full((int(sh.sum()),), k, dtype=torch.int32, device=dev))
                 human_col.append(col_t[sh])
 
-    # Relative voxel size: what a voxel_px-pixel patch covers at the median scene
-    # depth. Scale-free — the world's unknown metric factor cancels out.
-    fx_med = float(np.median(K_px[:, 0, 0]))
-    voxel = args.voxel_px * float(np.median(scene_depth_med)) / fx_med
-    centroids, scene_confidence, scene_color, counts, coords = _merge_scene(
-        torch.cat(scene_pts), torch.cat(scene_conf), torch.cat(scene_col), voxel)
-
-    # Drop small disconnected clusters — floating depth fragments and off-surface
-    # blobs (e.g. an untracked bystander VGGT placed off the wall).
-    keep = large_component_mask(coords, args.min_scene_voxels)
-    n_dropped = int((~keep).sum())
-    centroids, counts = centroids[keep], counts[keep]
-    scene_confidence, scene_color = scene_confidence[keep], scene_color[keep]
-
     empty = torch.zeros((0, 3), device=dev)
+    all_scene = torch.cat(scene_pts)
+    if scene_depth_med and all_scene.shape[0]:
+        # Relative voxel size: what a voxel_px-pixel patch covers at the median
+        # scene depth. Scale-free — the world's unknown metric factor cancels out.
+        fx_med = float(np.median(K_px[:, 0, 0]))
+        voxel = args.voxel_px * float(np.median(scene_depth_med)) / fx_med
+        centroids, scene_confidence, scene_color, counts, coords = _merge_scene(
+            all_scene, torch.cat(scene_conf), torch.cat(scene_col), voxel)
+
+        # Drop small disconnected clusters — floating depth fragments and off-surface
+        # blobs (e.g. an untracked bystander VGGT placed off the wall).
+        keep = large_component_mask(coords, args.min_scene_voxels)
+        n_dropped = int((~keep).sum())
+        centroids, counts = centroids[keep], counts[keep]
+        scene_confidence, scene_color = scene_confidence[keep], scene_color[keep]
+    else:  # e.g. the person fills every frame — the human ruler can still run
+        voxel, n_dropped = 0.0, 0
+        centroids, counts = empty, empty[:, 0].to(torch.int32)
+        scene_confidence, scene_color = empty[:, 0], empty.to(torch.uint8)
     if human_pts:
         human_points, all_obj, all_fid = torch.cat(human_pts), torch.cat(human_obj), torch.cat(human_fid)
     else:
@@ -241,16 +250,18 @@ def fuse(args: argparse.Namespace) -> None:
         frame_indices=frame_indices.astype(np.int32), image_height=np.int32(ho),
         image_width=np.int32(wo), vggt_height=np.int32(hv), vggt_width=np.int32(wv),
         fps=np.float32(fps))
+    # world_scale mirrors transform.npz's scale per file, so a partially
+    # metricized state (crash mid-rescale) is detectable and self-healing.
     _save_cloud(out_dir / "scene.npz", built["scene_points"],
                 colors=built["scene_color"], confidence=built["scene_confidence"],
                 count=built["scene_count"].to(torch.int32),
-                voxel_size=np.float32(built["voxel"]))
+                voxel_size=np.float32(built["voxel"]), world_scale=np.float32(1.0))
     _save_cloud(
         out_dir / "human.npz",
         built["human_points"], colors=built["human_color"],
         confidence=built["human_confidence"], frame_id=built["human_frame_id"],
         obj_id=built["human_obj_id"],
-        frame_indices=frame_indices.astype(np.int32),
+        frame_indices=frame_indices.astype(np.int32), world_scale=np.float32(1.0),
     )
     print(f"  scene {built['scene_points'].shape[0]} pts (voxel={built['voxel']:.4f}, "
           f"{built['n_dropped']} dropped: small clusters) | human {built['n_human']} pts "

@@ -257,6 +257,8 @@ def run_one(pred_dir: str, config_path: Path, device: str, source=None,
     bpath = Path(body_path) if body_path is not None else paths.body_path(pred, "kinematic_1")
     kin = dict(np.load(bpath, allow_pickle=True))
     tr = dict(np.load(pred / "geometry" / "transform.npz", allow_pickle=True))
+    if not bool(tr.get("metric", True)):  # absent flag = old already-metric artifact
+        raise SystemExit(f"geometry under {pred} is up-to-scale — run estimate_scale after fuse")
     N, P = int(kin["num_frames"]), int(kin["num_people"])
     object_ids = np.asarray(kin["object_ids"], np.int32)
     fps = float(tr.get("fps", kin.get("fps", 30.0)))
@@ -520,6 +522,8 @@ def _funnel_one(pred_dir: str, config_path: Path, device: str, source=None,
     if "auto_labels" not in kin:
         raise SystemExit(f"{bpath} has no 'auto_labels' — re-run kinematics_1 with auto-contact labels first")
     tr = dict(np.load(pred / "geometry" / "transform.npz", allow_pickle=True))
+    if not bool(tr.get("metric", True)):  # absent flag = old already-metric artifact
+        raise SystemExit(f"geometry under {pred} is up-to-scale — run estimate_scale after fuse")
     N, P = int(kin["num_frames"]), int(kin["num_people"])
     object_ids = np.asarray(kin["object_ids"], np.int32)
     fps = float(tr.get("fps", kin.get("fps", 30.0)))
@@ -653,6 +657,8 @@ def _reliability_one(pred_dir: str, config_path: Path, device: str, source=None,
     bpath = Path(body_path) if body_path is not None else paths.body_path(pred, "kinematic_1")
     kin = dict(np.load(bpath, allow_pickle=True))
     tr = dict(np.load(pred / "geometry" / "transform.npz", allow_pickle=True))
+    if not bool(tr.get("metric", True)):  # absent flag = old already-metric artifact
+        raise SystemExit(f"geometry under {pred} is up-to-scale — run estimate_scale after fuse")
     N, P = int(kin["num_frames"]), int(kin["num_people"])
     H, W = int(kin["video_height"]), int(kin["video_width"])
     object_ids = np.asarray(kin["object_ids"], np.int32)

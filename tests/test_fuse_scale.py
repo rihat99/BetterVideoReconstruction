@@ -15,20 +15,22 @@ from tools.geometry.voxel import voxel_downsample
 
 
 def test_merge_scene_collapses_boundary_twins():
-    # Two tight pairs straddle the cell face at x=2 (grid origin = amin = 0.0):
-    # pass 1 leaves twin centroids 0.03 apart; pass 2 (half-shifted grid) merges them.
-    pts = torch.tensor([[0.0, 0.0, 0.0], [1.98, 0.0, 0.0], [1.99, 0.0, 0.0],
-                        [2.01, 0.0, 0.0], [2.02, 0.0, 0.0], [7.0, 0.0, 0.0]])
-    conf = torch.tensor([0.1, 0.2, 0.3, 0.4, 0.5, 0.6])
-    color = torch.full((6, 3), 100.0)
+    # Adversarial case: the twins straddle x=2, while the pair near 0 pulls the
+    # pass-1 centroid minimum to 0.499. A second pass that re-derived its origin
+    # from the centroids would place a face at 1.999 and MISS the twins — the
+    # passes must share one grid origin.
+    xs = [0.0, 0.998, 1.98, 1.99, 2.01, 2.02, 7.0]
+    pts = torch.tensor([[x, 0.0, 0.0] for x in xs])
+    conf = torch.tensor([0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7])
+    color = torch.full((7, 3), 100.0)
 
     points, confidence, col, count, coords = _merge_scene(pts, conf, color, voxel=1.0)
 
-    assert points.shape[0] == 3  # far point + lone point + ONE merged twin
+    assert points.shape[0] == 3  # near pair + ONE merged twin + far point
     merged = points[count == 4]
     assert merged.shape == (1, 3)
     assert float(merged[0, 0]) == pytest.approx(2.0, abs=1e-6)
-    assert float(confidence[count == 4]) == pytest.approx(0.5)  # max over the twin
+    assert float(confidence[count == 4]) == pytest.approx(0.6)  # max over the twin
     assert coords.shape == points.shape
 
 
@@ -111,3 +113,19 @@ def test_metricize_geometry_scales_everything_with_units(tmp_path):
     total = _metricize_geometry(tmp_path, 0.5)
     assert total == pytest.approx(1.5)
     assert float(np.load(geo / "transform.npz")["scale"]) == pytest.approx(1.5)
+
+
+def test_metricize_heals_a_partial_rescale(tmp_path):
+    geo = _fake_geometry(tmp_path)
+    _metricize_geometry(tmp_path, 3.0)
+    # Simulate a crash that rescaled transform+scene but left human.npz behind.
+    np.savez(geo / "human.npz", points=np.full((5, 3), 2.0, np.float32),
+             frame_id=np.zeros(5, np.int32), world_scale=np.float32(1.0))
+
+    total = _metricize_geometry(tmp_path, 1.0)  # a re-run measures ~1 on the repaired cloud
+
+    assert total == pytest.approx(3.0)
+    hu = np.load(geo / "human.npz")
+    np.testing.assert_allclose(hu["points"], 6.0)  # lagging file brought to the shared world
+    assert float(hu["world_scale"]) == pytest.approx(3.0)
+    np.testing.assert_allclose(np.load(geo / "scene.npz")["points"], 3.0)  # NOT double-scaled

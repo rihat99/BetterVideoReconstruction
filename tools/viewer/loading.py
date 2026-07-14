@@ -476,6 +476,9 @@ def load_clip_data(pred: Path, *, device: str, show_smplx: bool,
     scene = np.load(geo / "scene.npz")
     human = np.load(geo / "human.npz")
     transform = np.load(geo / "transform.npz")
+    if "metric" in transform.files and not bool(transform["metric"]):
+        print("[viewer] WARNING: geometry is UP-TO-SCALE (run estimate_scale) — "
+              "metric bodies will not align with the scene")
     extr = transform["extrinsics"]
 
     # Show the same scene cloud the optimizer / estimate_contacts run against: drop the
