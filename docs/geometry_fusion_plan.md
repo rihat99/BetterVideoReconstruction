@@ -67,8 +67,8 @@ adding the diagnostic keys.
 | `rescale_r` | `()` | the applied body-anchor ratio (1.0 = not applied) |
 | `depth_refuted` | `(P,)` | per climber: this person's VGGT human depth was refuted and the rescale applied |
 | `anchor_gap_m` / `anchor_burial_m` / `anchor_support` | `(P,)` | gate diagnostics (median EE gap, signed burial, finite-frame fraction) |
-| `anchor_pred_gap_q` | `(P,3)` | predicted post-rescale gap p05/p25/p50 |
-| `anchor_true_touch` / `anchor_true_burial` | `()` | ground-truth touch-q25 / burial-q05 verified on the built world |
+| `anchor_pred_gap_q` | `(P,3)` | predicted post-rescale gap p05/p25/p50; NaN when the candidate was vetoed |
+| `anchor_true_touch` / `anchor_true_burial` | `()` | touch-q25 / burial-q05 for the world actually written (baseline values after a veto) |
 
 ## `geometry/scene.npz`
 

@@ -62,6 +62,15 @@ _FIELDS = ["scene_id", "oid", "pidx", "n_valid", "valid_share", "contact_rate",
            "p90_chamfer_cm", "mean_obs", "scene_pts", "floater", "buried", "degenerate"]
 
 
+def _finite_percentiles(values, percentiles=(5, 25, 50, 75, 95)) -> np.ndarray:
+    """Percentiles over finite values, or all NaNs when no value is usable."""
+    finite = np.asarray(values, dtype=float)
+    finite = finite[np.isfinite(finite)]
+    if finite.size == 0:
+        return np.full(len(percentiles), np.nan, dtype=float)
+    return np.percentile(finite, percentiles)
+
+
 def _person_rows(paths: scene_db.ScenePaths, sid: str, min_valid: int) -> list[dict]:
     """Health metrics for every person in one scene (empty if inputs are missing)."""
     ho = paths.feature_dir("human_optim", sid)
@@ -104,8 +113,9 @@ def _person_rows(paths: scene_db.ScenePaths, sid: str, min_valid: int) -> list[d
             uv = np.asarray(unc["valid"], bool)[p]
             if uv.any():
                 ch = np.asarray(unc["chamfer_cm"], np.float32)[p][uv]
-                med_ch = float(np.nanmedian(ch))
-                p90_ch = float(np.nanpercentile(ch, 90))
+                if np.isfinite(ch).any():
+                    med_ch = float(np.nanmedian(ch))
+                    p90_ch = float(np.nanpercentile(ch, 90))
                 mean_obs = float(np.nanmean(np.asarray(unc["obs_score"], np.float32)[p][uv]))
 
         floater = (contact_rate < FLOATER_CONTACT_RATE) or (med_min > FLOATER_HOVER_CM)
@@ -197,8 +207,7 @@ def main(argv: list[str] | None = None) -> int:
     print(f"  ANY flag   {n_any:4d}  ({n_any/n:.0%})   |   clean {len(healthy)} ({len(healthy)/n:.0%})")
 
     def pctl(key):
-        v = np.array([r[key] for r in rows], float); v = v[np.isfinite(v)]
-        return np.percentile(v, [5, 25, 50, 75, 95])
+        return _finite_percentiles([r[key] for r in rows])
     for key in ("contact_rate", "med_min_jsdf_cm", "med_chamfer_cm"):
         print(f"  {key:16s} p[5,25,50,75,95] = {np.round(pctl(key), 2)}")
 

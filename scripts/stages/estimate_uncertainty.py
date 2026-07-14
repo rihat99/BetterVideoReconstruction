@@ -226,7 +226,7 @@ def _score_person(rep, cham_cm, depth_cnt, mean_conf, valid, weights):
     def norm(x):
         vv = valid & np.isfinite(x)
         ref = float(np.percentile(x[vv], OBS_REF_PCT)) if vv.any() else 0.0
-        return np.ones_like(x, np.float32) if ref <= 0 else np.clip(x / ref, 0, 1).astype(np.float32)
+        return np.zeros_like(x, np.float32) if ref <= 0 else np.clip(x / ref, 0, 1).astype(np.float32)
 
     comps = [norm(rep["n_kp"]), norm(depth_cnt.astype(np.float32)), norm(mean_conf)]
     obs = np.ones_like(fit_loss)
@@ -240,7 +240,7 @@ def _score_person(rep, cham_cm, depth_cnt, mean_conf, valid, weights):
     disagreement_px = (np.nanmax(stack, 0) - np.nanmin(stack, 0)).astype(np.float32)
 
     reliable = (valid & (rep["reproj_sap_px"] < RELIABLE_REPROJ_PX)
-                & ((cham_cm < RELIABLE_CHAMFER_CM) | np.isnan(cham_cm))
+                & np.isfinite(cham_cm) & (cham_cm < RELIABLE_CHAMFER_CM)
                 & (obs_score > RELIABLE_OBS))
     combined = (fit_score_robust * obs_score).astype(np.float32)
     for a in (fit_score, fit_score_robust, obs_score, disagreement_px, combined):
@@ -261,8 +261,11 @@ def _shade_invalid(ax, valid):
 
 def _mean_contact_conf(jc, contact_conf):
     """Per-frame mean confidence over the joints in contact (NaN where none)."""
-    with np.errstate(invalid="ignore"):
-        return np.nanmean(np.where(jc, contact_conf, np.nan), axis=1)
+    values = np.where(jc, contact_conf, np.nan)
+    count = np.isfinite(values).sum(axis=1)
+    total = np.nansum(values, axis=1)
+    return np.divide(total, count, out=np.full_like(total, np.nan, dtype=np.float32),
+                     where=count > 0)
 
 
 def _make_fig(oid, valid, combined, reproj_px, cham_cm, jc, contact_conf, figsize=(12, 9)):

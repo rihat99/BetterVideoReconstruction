@@ -90,6 +90,15 @@ def _save_cloud(path: Path, points: torch.Tensor, **arrays) -> None:
              **{k: (v.detach().cpu().numpy() if torch.is_tensor(v) else v) for k, v in arrays.items()})
 
 
+def _record_anchor_veto(anchor: dict, touch_m: float, burial_m: float) -> None:
+    """Make anchor diagnostics describe the baseline world that actually ships."""
+    anchor["rescale_r"] = 1.0
+    anchor["depth_refuted"][:] = False
+    anchor["anchor_pred_gap_q"][:] = np.nan
+    anchor["anchor_true_touch"] = float(touch_m)
+    anchor["anchor_true_burial"] = float(burial_m)
+
+
 def _build_geometry(args, pred, cam, frame_indices, extr, K_px, objs, climber_ids,
                     scale, *, base_scale, fixed_human_ids):
     """Run the standard backproject/merge/CC build at ``scale``.
@@ -266,12 +275,16 @@ def fuse(args: argparse.Namespace) -> None:
                     print("  [body-anchor] WARNING: built-world burial check FAILED "
                           f"({bb:+.3f} m) — rescale vetoed, rebuilding baseline world")
                     s_eff = s
-                    anchor["rescale_r"] = 1.0
-                    anchor["depth_refuted"][:] = False
-                    anchor["anchor_true_touch"], anchor["anchor_true_burial"] = bt, bb
                     built = _build_geometry(args, pred, cam, frame_indices, extr, K_px,
                                             objs, climber_ids, s, base_scale=s,
                                             fixed_human_ids=set())
+                    baseline_touch, baseline_burial = verify_built_world(
+                        smplx_path, built["scene_points"], built["scene_confidence"],
+                        extr_base, frame_indices, sorted(fixed_ids), device=args.device)
+                    _record_anchor_veto(anchor, baseline_touch, baseline_burial)
+                    print(f"  [body-anchor] baseline built-world gaps: "
+                          f"touch_q25={baseline_touch:+.3f} m "
+                          f"burial_q05={baseline_burial:+.3f} m")
                 else:
                     anchor["anchor_true_touch"], anchor["anchor_true_burial"] = bt, bb
                     print("  [body-anchor] WARNING: kinematic_1/contacts/uncertainty/"

@@ -34,6 +34,8 @@ branch" behavior for this repo).
   and `scripts/precompute_uncertainty_scenes.py` (the contact + trust readouts, written
   **alongside the body** into `features/human_optim/<scene>/` to mirror the local
   `out/<stem>/human_optim/` layout; `--out-root` redirects for smoke tests).
+  `scripts/export_contact_dataset.py` packages those features into a standalone
+  22-joint train/test contact corpus; manual annotations fill test labels only.
   Shared DB access + row selection live in `scripts/scene_db.py`.
 
 Both reuse the same per-stage CLIs in `scripts/stages/` and the `tools/` library.
@@ -126,6 +128,7 @@ BetterVideoReconstruction/
 │   ├── precompute_scenes.py       # DATASET pipeline: vggt/sapiens/sam3d/smplx fan-out
 │   ├── precompute_contacts_scenes.py  # DATASET pipeline: contact readout (symlink farm)
 │   ├── precompute_uncertainty_scenes.py # DATASET pipeline: trust readout (symlink farm)
+│   ├── export_contact_dataset.py # DATASET packaging: frames/masks/intrinsics/contact labels
 │   ├── track_sam3_scenes.py       # DATASET pipeline: SAM 3 seeding + fan-out
 │   ├── scene_db.py                # shared scene-DB access + target selection
 │   ├── view_3d.py                 # viser: geometry + cameras + bodies + dynamics

@@ -62,6 +62,10 @@ For the large scene database, `scripts/track_sam3_scenes.py` seeds SAM 3 from th
 per-scene YOLO track, then
 `scripts/precompute_scenes.py --stage {vggt,sapiens,sam3d,smplx}` sweeps each model
 over the batch (shared helpers in `scripts/scene_db.py`).
+`scripts/export_contact_dataset.py` packages the resulting frames, masks,
+intrinsics, and 22-joint contact labels into a self-contained train/test dataset.
+Manual annotations are used only to fill the export's test labels; they are not
+an input to human optimization.
 
 ## Quick start
 
