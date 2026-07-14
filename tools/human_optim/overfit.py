@@ -32,6 +32,7 @@ from dataclasses import dataclass
 import torch
 
 from tools.geometry.backproject import backproject
+from tools.optim import Phase, Problem, State, run_phases
 
 from .keypoints import Correspondence
 from .losses import geman_mcclure, pose_prior_loss, sapiens_reprojection_gm
@@ -180,9 +181,18 @@ def overfit_person(
     identity = torch.eye(4, device=device).expand(num_frames, 4, 4)
     q0 = normalize_q(q_init, num_joints).detach()
 
-    betas = betas_init.clone().requires_grad_(True)
-    q = q_init.clone().requires_grad_(True)
-    opt = torch.optim.Adam([betas, q], lr=lr)
+    def _forward() -> State:
+        st = State()
+        q_norm = normalize_q(q, num_joints)
+        out = mid.forward(betas, q_norm)
+        st.put("qn", q_norm)
+        st.put("vertices", out.vertices)                          # (T, V, 3)
+        st.put("joints", out.joints_world.tensor()[..., :3])      # (T, J, 3)
+        return st
+
+    problem = Problem(_forward)
+    betas = problem.add_leaf("betas", betas_init)
+    q = problem.add_leaf("q", q_init)
 
     # Front-facing visibility is computed ONCE from the init pose and frozen. The body
     # only refines locally (cm-scale seating, small pose tweaks), so the front/back
@@ -192,35 +202,26 @@ def overfit_person(
     with torch.no_grad():
         front = _front_facing_sub(mid.forward(betas_init, q0).vertices, mid.faces, sub, chunk)
 
-    def losses(record: bool) -> tuple[torch.Tensor, dict]:
-        q_norm = normalize_q(q, num_joints)
-        out = mid.forward(betas, q_norm)
-        vertices = out.vertices                                   # (T, V, 3)
-        joints = out.joints_world.tensor()[..., :3]               # (T, J, 3)
-        chamfer = robust_chamfer(vertices[:, sub], front, cloud, cloud_valid,
-                                 gm_scale_m=weights.gm_chamfer_m, chunk=chunk)
-        reproj = sapiens_reprojection_gm(
-            joints, vertices, identity, K_orig, target_kp, scores, corr, frame_vertex_ids,
-            score_thresh=weights.score_thresh, gm_scale_px=weights.gm_reproj_px)
-        pose = pose_prior_loss(q_norm, q0, num_joints)
-        betas_reg = betas.square().mean()
-        total = (weights.chamfer * chamfer + weights.reproj * reproj
-                 + weights.pose * pose + weights.betas * betas_reg)
-        terms = {}
-        if record:
-            terms = {"chamfer": float(chamfer), "reproj": float(reproj),
-                     "pose": float(pose), "betas": float(betas_reg)}
-        return total, terms
+    problem.add_term("chamfer", lambda st: robust_chamfer(
+        st["vertices"][:, sub], front, cloud, cloud_valid,
+        gm_scale_m=weights.gm_chamfer_m, chunk=chunk))
+    problem.add_term("reproj", lambda st: sapiens_reprojection_gm(
+        st["joints"], st["vertices"], identity, K_orig, target_kp, scores, corr,
+        frame_vertex_ids, score_thresh=weights.score_thresh, gm_scale_px=weights.gm_reproj_px))
+    problem.add_term("pose", lambda st: pose_prior_loss(st["qn"], q0, num_joints))
+    problem.add_term("betas", lambda st: betas.square().mean())
 
-    with torch.no_grad():
-        _, before = losses(record=True)
-    for _ in range(iters):
-        opt.zero_grad()
-        total, _ = losses(record=False)
-        total.backward()
-        opt.step()
-    with torch.no_grad():
-        _, after = losses(record=True)
+    wcol = {"chamfer": weights.chamfer, "reproj": weights.reproj,
+            "pose": weights.pose, "betas": weights.betas}
+
+    def _record() -> dict:
+        with torch.no_grad():
+            _, report = problem.evaluate(wcol)
+        return {name: float(value) for name, (value, _, _) in report.items()}
+
+    before = _record()
+    run_phases(problem, [Phase("overfit", iters, wcol)], lr=lr)
+    after = _record()
 
     return OverfitResult(
         betas=betas.detach(),
