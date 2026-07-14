@@ -1,0 +1,49 @@
+# ClimbingVideos corpus orchestration and corpus-tool configuration.
+# Relative paths are resolved from the repository root.
+
+[corpus]
+data_root = "../data/ClimbingVideos" # Scene DB + read-mostly feature tree (old default).
+categories = [1, 2]                  # Curated VLM categories: indoor boulder + indoor rope.
+rope_supported = 0                  # Require no rope support; -1 removes this filter.
+seed = 0                            # Deterministic RNG seed used by --sample.
+devices = [1, 2, 3]                 # CUDA device ids; one stride-sharded worker per id.
+skip_existing = false               # Old default: recompute rather than resume existing outputs.
+out_root = ""                       # Contacts-only output-tree redirect; empty writes beside inputs.
+debug_overlay_dir = ""              # Gather overlays here; empty uses features/<stage>/_debug_overlays.
+pipeline_config = "configs/pipeline.toml" # Model-stage algorithm knobs (read, never modified).
+human_optim_config = "configs/human_optimization.toml" # Human/contact algorithm knobs.
+
+[overlay]
+# Old per-driver defaults. Stages without a key do not produce/gather an overlay.
+sam3 = true
+sapiens = false
+sam3d = false
+smplx = false
+human_optim = false
+contacts = false
+
+[track_sam3]
+min_presence = 0.9          # Minimum primary-mask frame fraction when discarding failures.
+discard_failed = false      # Write failed SAM3 QA back to scenes.db only after clean workers.
+text = "person"             # First-frame SAM3 grounding phrase.
+iou_thresh = 0.2            # Minimum grounded-mask/YOLO-box IoU for prompt selection.
+ground_min_area_frac = 0.002 # Reject smaller grounded masks before IoU matching.
+confidence = 0.5            # SAM3 text-grounding confidence.
+part_length = 200           # Frames per SAM3 propagation part.
+
+[contacts_run]
+bodies = "kinematic_1"      # Body artifact to score; produces contacts_1.npz (or use kinematic_2).
+
+[export]
+jobs = 8                    # Parallel scene-export processes.
+quality = 95                # Frame JPEG quality, 1..100.
+skip_existing = false       # Resume/validate existing exported frames and masks when true.
+
+[score]
+device = "cuda"             # Torch device for offline scoring.
+ref_close = 0.02            # Per-joint reference close-threshold cell, metres.
+ref_still = 0.025           # Per-joint reference stillness cell, metres.
+exclude_from_pool = ["sport_climb"] # Clip names reported but excluded from pooled metrics.
+merge_dist = ""             # Empty keeps mode defaults; otherwise span-merge distance in metres.
+gate_source = ""            # Empty keeps mode defaults; otherwise "final" or "pre".
+allow_frame_trim = false     # Permit min-overlap scoring when body/annotation lengths differ.

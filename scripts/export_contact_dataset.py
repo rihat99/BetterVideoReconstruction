@@ -33,6 +33,7 @@ import hashlib
 import json
 import shutil
 import sys
+import tomllib
 import traceback
 from concurrent.futures import ProcessPoolExecutor, as_completed
 from pathlib import Path
@@ -45,6 +46,9 @@ _SCRIPTS = Path(__file__).resolve().parent
 if str(_SCRIPTS) not in sys.path:
     sys.path.insert(0, str(_SCRIPTS))
 import scene_db  # noqa: E402  (sibling module in scripts/)
+
+_REPO_ROOT = _SCRIPTS.parent
+_DEFAULT_CORPUS_CONFIG = _REPO_ROOT / "configs" / "corpus.toml"
 
 # 52 SMPLXMid joints = 22 body (0–21) + 30 fingers (22–51). The two hands fold the
 # wrist + its 15 fingers together; every other output joint is one body joint.
@@ -560,20 +564,43 @@ def _finalize_test_index(out_root: Path, summ: list[dict]) -> None:
             json.dump(info, f, indent=2)
 
 
-def main() -> int:
+def _config_path(value: str | Path) -> Path:
+    """Resolve a corpus-config path relative to the repository root."""
+    path = Path(value).expanduser()
+    return path if path.is_absolute() else (_REPO_ROOT / path).resolve()
+
+
+def main(argv: list[str] | None = None) -> int:
+    """Export the selected corpus targets using behavior from ``corpus.toml``."""
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--out", type=Path, default=Path("/data3/rikhat.akizhanov/datasets/ClimbingVideos_v1"))
-    ap.add_argument("--data-root", type=Path, default=scene_db.DEFAULT_DATA_ROOT)
+    ap.add_argument("--data-root", type=Path, default=None)
+    ap.add_argument("--config", type=Path, default=_DEFAULT_CORPUS_CONFIG)
     ap.add_argument("--splits", default="train,test", help="which splits to export")
     ap.add_argument("--scenes", default=None, help="comma-separated scene_ids (smoke test)")
     ap.add_argument("--limit", type=int, default=None, help="cap scenes per split")
-    ap.add_argument("--jobs", type=int, default=8)
-    ap.add_argument("--quality", type=int, default=95, help="frame JPEG quality")
-    ap.add_argument("--skip-existing", action="store_true",
-                    help="resume missing frames/masks and validate existing files")
     ap.add_argument("--fill-test", action="store_true",
                     help="only fill test contacts.npz from manual annotations (no frame export)")
-    args = ap.parse_args()
+    args = ap.parse_args(argv)
+
+    try:
+        with args.config.open("rb") as config_file:
+            raw_config = tomllib.load(config_file)
+        corpus_config = raw_config.get("corpus", {})
+        export_config = raw_config.get("export", {})
+        args.data_root = args.data_root or _config_path(
+            corpus_config.get("data_root", scene_db.DEFAULT_DATA_ROOT)
+        )
+        args.jobs = int(export_config.get("jobs", 8))
+        args.quality = int(export_config.get("quality", 95))
+        args.skip_existing = bool(export_config.get("skip_existing", False))
+        categories = tuple(int(value) for value in corpus_config.get("categories", [1, 2]))
+        rope_value = int(
+            corpus_config.get("rope_supported", scene_db.DEFAULT_ROPE_SUPPORTED)
+        )
+        rope_supported = None if rope_value < 0 else rope_value
+    except (OSError, TypeError, ValueError, tomllib.TOMLDecodeError) as error:
+        ap.error(f"invalid corpus config: {error}")
 
     want_splits = [s.strip() for s in args.splits.split(",") if s.strip()]
     if not want_splits or len(want_splits) != len(set(want_splits)):
@@ -599,8 +626,8 @@ def main() -> int:
     # Corpus rows + their train/test split from the DB.
     with paths.connect() as conn:
         rows = scene_db.select_targets(
-            conn, categories=scene_db.DEFAULT_CATEGORIES,
-            rope_supported=scene_db.DEFAULT_ROPE_SUPPORTED,
+            conn, categories=categories,
+            rope_supported=rope_supported,
         )
         split_of = {r["scene_id"]: r["dataset_split"] for r in
                     conn.execute("SELECT scene_id, dataset_split FROM scenes").fetchall()}
@@ -685,10 +712,14 @@ def main() -> int:
                        "n_frame_items": int(sum(sum(it["valid_frames"]) for it in items)),
                        "scenes": items}, f, indent=2)
 
+    category_filter = ",".join(str(value) for value in categories)
+    corpus_filter = f"human_selected=1 AND vlm_category IN ({category_filter})"
+    if rope_supported is not None:
+        corpus_filter += f" AND vlm_rope_supported={rope_supported}"
     info = dict(
         schema_version=2, name=args.out.name,
         source_data_root=str(args.data_root),
-        corpus_filter="human_selected=1 AND vlm_category IN (1,2) AND vlm_rope_supported=0",
+        corpus_filter=corpus_filter,
         n_scenes={s: len(summaries[s]) for s in want_splits},
         joint_set="smplx_body_22", joint_names_22=joint_names,
         n_joints=N_JOINTS_22, confidence_schema=CONTACT_CONFIDENCE_SCHEMA,

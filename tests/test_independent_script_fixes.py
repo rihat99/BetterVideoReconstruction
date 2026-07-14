@@ -7,7 +7,7 @@ import numpy as np
 import pytest
 import torch
 
-from scripts.precompute_contacts_scenes import _is_fresh, _sha256
+from scripts.corpus import _is_fresh, _sha256
 from scripts.stages.fuse_geometry import _build_geometry, _record_anchor_veto
 
 

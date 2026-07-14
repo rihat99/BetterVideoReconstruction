@@ -57,10 +57,9 @@ Off the default chain, each runs on a single clip's `out/<stem>/` dir:
 
 ### Dataset pipeline (ClimbingVideos DB)
 
-For the large scene database, `scripts/track_sam3_scenes.py` seeds SAM 3 from the
-per-scene YOLO track, then
-`scripts/precompute_scenes.py --stage {vggt,sapiens,sam3d,smplx}` sweeps each model
-over the batch (shared helpers in `scripts/scene_db.py`).
+For the large scene database, `scripts/corpus.py` seeds SAM 3 from the per-scene
+YOLO track and sweeps every corpus stage over the batch (shared helpers in
+`scripts/scene_db.py`).
 `scripts/export_contact_dataset.py` packages the resulting frames, masks,
 intrinsics, and 22-joint contact labels into a self-contained train/test dataset.
 Manual annotations are not used by `kinematics_1` or by confidence generation.

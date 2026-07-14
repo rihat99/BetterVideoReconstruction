@@ -19,7 +19,7 @@ Two run modes:
   * **batch / manifest** — ``--source manifest.json`` with ``[sam3d].save_dir`` (a
     ``precompute_runner`` Step): loads SAM-3D-Body once and sweeps every scene,
     taking each scene's ``bboxes`` / ``camera`` paths from the manifest. This is
-    how ``scripts/precompute_scenes.py`` fans the stage across the ClimbingVideos
+    how ``scripts/corpus.py`` fans the stage across the ClimbingVideos
     scene DB, where ``sam3`` / ``vggt`` live in their own feature trees.
 
 Run from CLI::
@@ -428,7 +428,7 @@ class Sam3dBodyStep:
     (``out_dir``), the sam3 ``bboxes.npz`` (``bboxes_path`` — its parent holds
     the ``<obj>/`` mask dirs) and the VGGT ``camera.npz`` (``camera_path``).
     ``--subdir`` picks the subfolder of ``out_dir`` to write into (``.`` → write
-    straight into it, as ``precompute_scenes.py`` does for the stage-first tree).
+    straight into it, as ``corpus.py`` does for the stage-first tree).
     """
 
     def __init__(self, args: argparse.Namespace):

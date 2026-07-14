@@ -18,7 +18,7 @@ point whose recall sits well above the pure-SDF baseline.
 Scene is loaded exactly as ``estimate_contacts`` loads it (``[contacts]`` conf gate +
 PCA normals), so the grid scores the identical readout the stage writes.
 
-    uv run python scripts/score_contacts.py --predictions out/boulder_1/ out/boulder_3/ [--device cuda]
+    uv run python scripts/score_contacts.py --predictions out/boulder_1/ out/boulder_3/
 """
 
 from __future__ import annotations
@@ -52,6 +52,7 @@ from tools.human_optim.stages import _ANN_TO_SMPLX, _hand_smplx_joints, resolve_
 from tools.smplx_robot import load_smplx_mid  # noqa: E402
 
 _DEFAULT_CONFIG = _REPO_ROOT / "configs" / "human_optimization.toml"
+_DEFAULT_CORPUS_CONFIG = _REPO_ROOT / "configs" / "corpus.toml"
 _DEFAULT_SMPLX_MODEL = _REPO_ROOT.parent / "better_human" / "models" / "smplx" / "SMPLX_NEUTRAL.npz"
 
 # The 14-joint annotation (with its own ankle labels) splits foot(toe) from ankle and adds
@@ -833,35 +834,51 @@ def _print_reliability(all_rec: list[dict], exclude: set[str], close: float, sti
               f"(want most low = honest unknown)")
 
 
-def main(argv=None) -> int:
+def _config_path(value: str | Path) -> Path:
+    """Resolve a corpus-config path relative to the repository root."""
+    path = Path(value).expanduser()
+    return path if path.is_absolute() else (_REPO_ROOT / path).resolve()
+
+
+def main(argv: list[str] | None = None) -> int:
+    """Score selected prediction targets using behavior from ``corpus.toml``."""
     ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     ap.add_argument("--predictions", nargs="+", required=True, help="one or more clip dirs")
     ap.add_argument("--source", default=None, help="annotation override (default: data/<stem>.npz per clip)")
-    ap.add_argument("--config", type=Path, default=_DEFAULT_CONFIG)
-    ap.add_argument("--device", default="cuda")
-    ap.add_argument("--ref-close", type=float, default=0.02, help="per-joint report cell: close_thresh_m")
-    ap.add_argument("--ref-still", type=float, default=0.025, help="per-joint report cell: still_m")
+    ap.add_argument("--config", type=Path, default=_DEFAULT_CORPUS_CONFIG)
     ap.add_argument("--body-path", default=None,
                     help="score this body npz instead of kinematic_1.npz (requires a single --predictions)")
-    ap.add_argument("--exclude-from-pool", nargs="*", default=["sport_climb"],
-                    help="clip names shown per-clip but dropped from the POOLED row (fit outliers)")
     ap.add_argument("--funnel", action="store_true",
                     help="run the miss/FP funnel (needs auto_labels in the body npz) instead of the grid")
     ap.add_argument("--reliability", action="store_true",
                     help="check per-joint label_confidence against the annotation "
                          "(accuracy per confidence bin + monotonicity) instead of the grid")
-    ap.add_argument("--merge-dist", type=float, default=None,
-                    help="span-merge distance (m); reliability defaults to the stage config, "
-                         "the grid/funnel default to 0 (off)")
-    ap.add_argument("--gate-source", choices=["final", "pre"], default=None,
-                    help="stillness-gate drift source; reliability defaults to pre (the saved "
-                         "stage readout), the grid/funnel default to final")
-    ap.add_argument("--allow-frame-trim", action="store_true",
-                    help="on a body/annotation frame-count mismatch, warn and score the min-overlap "
-                         "instead of aborting (assumes the missing frames are at the tail)")
     args = ap.parse_args(argv)
+    try:
+        with args.config.open("rb") as config_file:
+            raw_config = tomllib.load(config_file)
+        corpus_config = raw_config.get("corpus", {})
+        score_config = raw_config.get("score", {})
+        contact_config = _config_path(
+            corpus_config.get("human_optim_config", _DEFAULT_CONFIG)
+        )
+        device = str(score_config.get("device", "cuda"))
+        ref_close = float(score_config.get("ref_close", 0.02))
+        ref_still = float(score_config.get("ref_still", 0.025))
+        exclude_from_pool = {
+            str(value) for value in score_config.get("exclude_from_pool", ["sport_climb"])
+        }
+        merge_value = score_config.get("merge_dist", "")
+        merge_dist = None if merge_value == "" else float(merge_value)
+        gate_value = str(score_config.get("gate_source", ""))
+        gate_source = gate_value or None
+        if gate_source not in {None, "final", "pre"}:
+            raise ValueError("[score].gate_source must be empty, 'final', or 'pre'")
+        allow_frame_trim = bool(score_config.get("allow_frame_trim", False))
+    except (OSError, TypeError, ValueError, tomllib.TOMLDecodeError) as error:
+        ap.error(f"invalid corpus config: {error}")
     global _ALLOW_FRAME_TRIM
-    _ALLOW_FRAME_TRIM = bool(args.allow_frame_trim)
+    _ALLOW_FRAME_TRIM = allow_frame_trim
     body_path = Path(args.body_path) if args.body_path else None
     if body_path is not None and len(args.predictions) != 1:
         raise SystemExit("--body-path requires exactly one --predictions")
@@ -869,37 +886,39 @@ def main(argv=None) -> int:
     if args.funnel:
         all_res: list[dict] = []
         for pd in args.predictions:
-            all_res.extend(_funnel_one(pd, args.config, args.device, source=args.source, body_path=body_path))
+            all_res.extend(_funnel_one(
+                pd, contact_config, device, source=args.source, body_path=body_path
+            ))
         if not all_res:
             print("no annotated people found in the given clips")
             return 1
-        _print_funnel(all_res, set(args.exclude_from_pool))
+        _print_funnel(all_res, exclude_from_pool)
         return 0
 
     if args.reliability:
-        score_cc, _ = _load_contact_cfg(args.config)
+        score_cc, _ = _load_contact_cfg(contact_config)
         reliability_merge = (float(score_cc["merge_dist_m"])
-                             if args.merge_dist is None else float(args.merge_dist))
-        reliability_gate = args.gate_source or "pre"
+                             if merge_dist is None else merge_dist)
+        reliability_gate = gate_source or "pre"
         all_rec: list[dict] = []
         for pd in args.predictions:
-            all_rec.extend(_reliability_one(pd, args.config, args.device, source=args.source,
-                                            body_path=body_path, close=args.ref_close, still=args.ref_still,
+            all_rec.extend(_reliability_one(pd, contact_config, device, source=args.source,
+                                            body_path=body_path, close=ref_close, still=ref_still,
                                             merge_dist=reliability_merge,
                                             gate_source=reliability_gate))
         if not all_rec:
             print("no annotated people found in the given clips")
             return 1
         _print_reliability(
-            all_rec, set(args.exclude_from_pool), args.ref_close, args.ref_still,
+            all_rec, exclude_from_pool, ref_close, ref_still,
             merge_dist=reliability_merge, gate_source=reliability_gate)
         return 0
 
-    grid_merge = 0.0 if args.merge_dist is None else float(args.merge_dist)
-    grid_gate = args.gate_source or "final"
+    grid_merge = 0.0 if merge_dist is None else merge_dist
+    grid_gate = gate_source or "final"
     all_res = []
     for pd in args.predictions:
-        all_res.extend(run_one(pd, args.config, args.device, source=args.source, body_path=body_path,
+        all_res.extend(run_one(pd, contact_config, device, source=args.source, body_path=body_path,
                                merge_dist=grid_merge, gate_source=grid_gate))
     if not all_res:
         print("no annotated people found in the given clips")
@@ -908,8 +927,8 @@ def main(argv=None) -> int:
         print(f"[readout: merge_dist={grid_merge} gate_source={grid_gate}]")
     for res in all_res:
         _print_clip_grid(res)
-    _print_per_joint(all_res, args.ref_close, args.ref_still)
-    _print_pooled(all_res, set(args.exclude_from_pool))
+    _print_per_joint(all_res, ref_close, ref_still)
+    _print_pooled(all_res, exclude_from_pool)
     return 0
 
 

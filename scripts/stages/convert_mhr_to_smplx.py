@@ -23,7 +23,7 @@ Two run modes (like ``estimate_body_sam3d``):
   * **batch / manifest** — ``--source manifest.json`` with ``[smplx].save_dir`` (a
     ``precompute_runner`` Step): builds the MHR→SMPL-X converter once and sweeps
     every scene, each manifest ``out_dir`` being that scene's sam3d feature dir.
-    This is how ``scripts/precompute_scenes.py`` fans the stage across the
+    This is how ``scripts/corpus.py`` fans the stage across the
     ClimbingVideos scene DB.
 
 Run from CLI::
@@ -437,7 +437,7 @@ class MhrToSmplxStep:
     ``params.npz`` and receives ``smplx_params.npz``). The conversion reads only
     ``params.npz``; ``source`` is carried through for the overlay but unused when
     ``--no-overlay``. ``--subdir`` picks the subfolder of ``out_dir`` (``.`` → it
-    directly, as ``precompute_scenes.py`` does for the stage-first tree).
+    directly, as ``corpus.py`` does for the stage-first tree).
     """
 
     def __init__(self, args: argparse.Namespace):

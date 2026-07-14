@@ -1,8 +1,7 @@
 """Shared ClimbingVideos scene-DB access, feature layout, and row selection.
 
-Every DB-driven precompute driver (``track_sam3_scenes.py`` for the tracker,
-``precompute_scenes.py`` for the vggt / sapiens / body stages) resolves scenes,
-on-disk paths, and the target-set the same way — so that logic lives here.
+The corpus driver resolves every stage's scenes, on-disk paths, and target set
+the same way, so that logic lives here.
 
 Feature layout is **stage-first**, matching the existing DB dirs
 (``features/{yolo,tracking,vlm,sam3}/<aa>/<bb>/<scene_id>``): each stage writes
@@ -107,19 +106,20 @@ def select_targets(
 def resolve_rows(
     rows: list[sqlite3.Row],
     *,
-    scenes: str | None = None,
+    scenes: str | list[str] | None = None,
     sample: int | None = None,
     limit: int | None = None,
     seed: int = 0,
 ) -> list[sqlite3.Row]:
     """Narrow ``rows`` by the mutually-exclusive selection flags.
 
-    ``scenes`` (comma-separated ids) wins, then a deterministic random
+    ``scenes`` (an id list or comma-separated ids) wins, then a deterministic random
     ``sample`` (by ``seed``), then a ``limit`` prefix; otherwise all rows.
     Unknown ids in ``scenes`` are reported and skipped.
     """
     if scenes is not None:
-        want = [s for s in scenes.split(",") if s.strip()]
+        values = scenes if isinstance(scenes, list) else scenes.split(",")
+        want = [s.strip() for s in values if s.strip()]
         by_id = {r["scene_id"]: r for r in rows}
         missing = [s for s in want if s not in by_id]
         if missing:
