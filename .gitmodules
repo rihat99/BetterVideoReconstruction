@@ -10,15 +10,9 @@
 [submodule "third_party/MHR"]
 	path = third_party/MHR
 	url = https://github.com/facebookresearch/MHR
-[submodule "third_party/moge"]
-	path = legacy/third_party/moge
-	url = https://github.com/microsoft/MoGe.git
 [submodule "third_party/vggt-omega"]
 	path = third_party/vggt-omega
 	url = https://github.com/facebookresearch/vggt-omega.git
-[submodule "third_party/mamma"]
-	path = legacy/third_party/mamma
-	url = https://github.com/cuevhv/mamma.git
 [submodule "third_party/geocalib"]
 	path = third_party/geocalib
 	url = https://github.com/cvg/GeoCalib.git

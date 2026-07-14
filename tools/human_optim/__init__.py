@@ -41,7 +41,6 @@ from .losses import (
 )
 from .motion import tangent_difference
 from .qmath import normalize_q
-from .velocity import joint_local_linear_speed
 from .visibility import front_facing_mask, subsample_indices, vertex_normals
 
 __all__ = [
@@ -74,7 +73,6 @@ __all__ = [
     "smoothness_loss",
     "tangent_difference",
     "normalize_q",
-    "joint_local_linear_speed",
     "front_facing_mask",
     "subsample_indices",
     "vertex_normals",

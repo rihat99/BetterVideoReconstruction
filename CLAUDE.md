@@ -10,11 +10,6 @@ prior + acceleration/jerk smoothness + scene contact). The default chain ends at
 the refined SMPL-X bodies; scene contacts, gravity, annotation-guided refinement,
 and force dynamics are standalone SMPL-X stages.
 
-Code that was tested and then dropped — **MoGe2** depth, **MAMMA `ma_2d`**
-landmarks, the **SMPL** (not SMPL-X) motion/dynamics path, and the **Gemma**
-placeholder — lives under **`legacy/`** and is imported by nothing here; see
-[`legacy/README.md`](legacy/README.md).
-
 ## Experimental branch — working principles
 
 This is the `experimental` branch. It exists to try out ideas and to make the
@@ -70,7 +65,7 @@ SMPL-X stages, off the default chain.
 | 3 | `estimate_sapiens.py` | frames, `sam3/bboxes.npz` | `sapiens/pose.npz`, `sapiens/overlay/…` (keypoints by default; `pointmap`/`normal` opt-in) |
 | 4 | `estimate_body_sam3d.py` | `sam3/bboxes.npz`, `sam3/`, `vggt/camera.npz` (denormalized to orig res), frames | `sam3d/params.npz` (**all tracked people**, MHR params stacked `(P,N,…)` + `object_ids (P,)`), `sam3d/overlay.mp4` |
 | 5 | `convert_mhr_to_smplx.py` | `sam3d/params.npz` | `sam3d/smplx_params.npz` (per-person `(P,N,…)`: betas, body/hand pose, global_orient, transl, jaw/eye/expr), `sam3d/smplx_overlay.mp4` |
-| 6 | `estimate_scale.py` | `sam3d/smplx_params.npz`, `vggt/camera.npz`, `vggt/depth/`, `sam3/` | `geometry/scale.npz` (human-body-anchored metric scale + per-frame diagnostics), `geometry/diagnostics/scale_over_time.png` |
+| 6 | `estimate_scale.py` | `sam3d/smplx_params.npz`, `sapiens/pose.npz`, `vggt/camera.npz`, `vggt/depth/`, `sam3/` | `geometry/scale.npz` (human-body-anchored metric scale + per-frame diagnostics), `geometry/overfit.npz` (**per-frame SMPL-X body overfit** to the scaled depth — camera-frame classic params, all people), `geometry/diagnostics/scale_over_time.png` |
 | 7 | `fuse_geometry.py` | `vggt/`, `geometry/scale.npz`, `sam3/`, `sam3d/smplx_params.npz` | `geometry/transform.npz` (metric scale + orig-res VGGT cameras + **body-anchor** gate diagnostics), `geometry/scene.npz`, `geometry/human.npz` |
 | 8 | `human_optimization.py` (`root`+`kinematics_1`) | `sam3d/smplx_params.npz`, `sapiens/pose.npz`, `geometry/{human,transform,scene}.npz` | `human_optim/kinematic_1.npz` (**all tracked people**, refined **world-frame** params `(P,N,…)` + `q (P,N,211)` + `scale (P,)`≡1 (compat), 52-joint `SMPLXMid`, `frame='world'`), `human_optim/kinematic_1_overlay.mp4` (`--overlay`) |
 | – | `human_optimization.py --stages kinematics_2` | `human_optim/kinematic_1.npz`, **`data/<stem>.npz`** (manual contact annotation), `sapiens/pose.npz`, `geometry/{human,scene,transform}.npz` | `human_optim/kinematic_2.npz` (annotation-guided refinement; same schema), `human_optim/kinematic_2_overlay.mp4` (`--overlay`) |
@@ -82,10 +77,11 @@ Viewer: `scripts/view_3d.py out/<stem>/` (viser: fused `geometry/` scene cloud +
 camera frustums + GeoCalib gravity arrow + per-climber human points + the refined
 SMPL-X bodies — a **`body source` dropdown** switches `original`
 (`sam3d/smplx_params.npz`) / `kinematics` (`human_optim/kinematic_1.npz`) /
+`overfit` (`geometry/overfit.npz` — the per-frame body fit to the scaled depth) /
 `kinematics_2` (`human_optim/kinematic_2.npz`) / **`dynamics`**
 (`human_optim/dynamics.npz` — no mesh: the 52-joint skeleton as red torque-scaled
-spheres + white cylinder bones + cyan contact-force arrows), defaulting to the
-most-refined body present). `scripts/diagnose_human_optim.py` plots every
+spheres + white cylinder bones + cyan contact-force arrows), defaulting to
+`overfit` when present, else the most-refined body). `scripts/diagnose_human_optim.py` plots every
 `human_optimization` kinematics_1 loss term per frame, per person.
 
 `vggt` and `sapiens` are **precompute_runner Steps** (operate on `--source` /
@@ -146,9 +142,7 @@ BetterVideoReconstruction/
 │   ├── scene_db.py                # shared scene-DB access + target selection
 │   ├── view_3d.py                 # viser: geometry + cameras + bodies + dynamics
 │   ├── audit_scenes.py            # round-7 corpus floater audit → features/audit/bodies.csv
-│   ├── autopsy_scenes.py          # round-7: assign each flagged body a cause (a/b/c/d)
 │   ├── diagnose_human_optim.py    # per-frame per-person plots of every kinematics_1 loss term
-│   ├── diagnose_depth_streaks.py  # round-9 T0: VGGT depth-streak meter + contact go/no-go slice
 │   ├── _pym_preload.py            # libstdc++ LD_PRELOAD shim for pymomentum
 │   └── stages/                    # the per-stage CLIs in the table above
 ├── tools/                         # importable library (repo root on sys.path via scripts)
@@ -309,7 +303,12 @@ BetterVideoReconstruction/
   the robust per-frame centre is pooled (MAD-gated, confidence-weighted, log space,
   `tools/geometry/human_scale.py`) into one clip factor `s` → `geometry/scale.npz`.
   Because VGGT is single-scale, this one `s` metricizes the whole clip; `fuse`
-  applies it.
+  applies it. (Every visible vertex counts the same — no body-part weighting.)
+  A second step then **overfits a fresh SMPL-X body to that scaled depth, per
+  frame** with free betas — robust chamfer + Sapiens 2D reprojection + a small
+  init-pose prior, nothing else — → `geometry/overfit.npz`
+  (`tools/human_optim/overfit.py`). This is a diagnostic body for the viewer, not
+  an input to the kinematic stage.
 - **`fuse_geometry` turns VGGT metric.** It reads `s` from `geometry/scale.npz`,
   denormalizes VGGT intrinsics to the original resolution, and backprojects VGGT
   depth × `s` into a metric **scene** cloud (voxel-merged) + per-frame **human**
@@ -344,4 +343,3 @@ BetterVideoReconstruction/
 - [`docs/ISSUE.md`](docs/ISSUE.md) — current scale, fusion, and human-optimization audit.
 - [`README.md`](README.md) — user-facing overview.
 - [`INSTALL.md`](INSTALL.md) — env, submodules, model assets.
-- [`legacy/README.md`](legacy/README.md) — what was dropped and why.
