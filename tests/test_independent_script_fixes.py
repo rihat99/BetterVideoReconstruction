@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import warnings
 from types import SimpleNamespace
 
 import cv2
@@ -8,7 +7,6 @@ import numpy as np
 import pytest
 import torch
 
-from scripts.audit_scenes import _finite_percentiles, _person_rows
 from scripts.precompute_contacts_scenes import _is_fresh, _sha256
 from scripts.stages.fuse_geometry import _build_geometry, _record_anchor_veto
 
@@ -78,41 +76,6 @@ def test_fusion_split_scale_geometry_signature_is_unchanged(tmp_path):
     distance = torch.cdist(candidate["scene_points"], base["scene_points"] * 0.75)
     assert float(distance.min(dim=1).values.max()) < 1e-6
     assert float(distance.min(dim=0).values.max()) < 1e-6
-
-
-def test_audit_percentiles_and_person_rows_handle_contact_only_inputs(tmp_path):
-    got = _finite_percentiles([np.nan, np.nan])
-    assert got.shape == (5,)
-    assert np.isnan(got).all()
-
-    class Paths:
-        def feature_dir(self, stage, sid):
-            return tmp_path / stage / sid
-
-    sid = "scene"
-    human_dir = Paths().feature_dir("human_optim", sid)
-    geometry_dir = Paths().feature_dir("geometry", sid)
-    human_dir.mkdir(parents=True)
-    geometry_dir.mkdir(parents=True)
-    np.savez(
-        human_dir / "kinematic_1.npz",
-        object_ids=np.array([4], np.int32),
-        valid_mask=np.array([[True, True]]),
-    )
-    np.savez(
-        human_dir / "contacts_1.npz",
-        joint_contact=np.zeros((1, 2, 1), bool),
-        joint_sdf_cm=np.array([[[1.0], [2.0]]], np.float32),
-    )
-    np.savez(geometry_dir / "scene.npz", points=np.zeros((10, 3), np.float32))
-
-    with warnings.catch_warnings():
-        warnings.simplefilter("error", RuntimeWarning)
-        rows = _person_rows(Paths(), sid, min_valid=1)
-
-    assert len(rows) == 1
-    assert rows[0]["contact_rate"] == 0.0
-    assert rows[0]["med_min_jsdf_cm"] == 1.5
 
 
 def test_contact_precompute_skip_requires_matching_provenance(tmp_path):

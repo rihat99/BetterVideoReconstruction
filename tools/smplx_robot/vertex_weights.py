@@ -23,8 +23,8 @@ Two generator families:
   falloff (linear / power / smoothstep / gaussian / exp — the "decreasing rate"). The
   head is naturally low (far from every hand / foot seed).
 
-Nothing here is wired into optimization. Visualize candidates with
-``scripts/render_vertex_weights.py`` and pick one.
+The kinematic chamfer term consumes :func:`geodesic_endeffector_weights` (see
+``tools/human_optim/stages.py``).
 
 .. note::
    SMPL-X vertex density is not uniform (hands and head are far more finely
