@@ -15,6 +15,22 @@ landmarks, the **SMPL** (not SMPL-X) motion/dynamics path, and the **Gemma**
 placeholder — lives under **`legacy/`** and is imported by nothing here; see
 [`legacy/README.md`](legacy/README.md).
 
+## Experimental branch — working principles
+
+This is the `experimental` branch. It exists to try out ideas and to make the
+code simpler, without disturbing the working pipeline on `main`. Commits land on
+`experimental` here (not `main`). Four rules guide every change on this branch:
+
+1. **Keep new features simple and clean.** Add the least code that does the job.
+   If it starts sprawling, step back and find the smaller version.
+2. **Write docs a person can actually read.** Short, plain sentences. Explain a
+   term the first time it shows up. No walls of jargon.
+3. **Never over-engineer.** No configurability, abstraction, or "future-proofing"
+   the task did not ask for.
+4. **Prefer methods that are elegant and clever over methods held together by
+   rules.** Avoid piling on gates, thresholds, and hand-tuned special cases; reach
+   for the idea that makes them unnecessary.
+
 ## Git workflow
 
 Commit directly to **`main`** — do **not** create branches. Land all work on

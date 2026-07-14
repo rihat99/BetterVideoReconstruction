@@ -26,8 +26,11 @@ def vertex_normals(vertices: torch.Tensor, faces: torch.Tensor) -> torch.Tensor:
     fn = torch.cross(v1 - v0, v2 - v0, dim=-1)  # (B, F, 3), magnitude ∝ area
 
     normals = vertices.new_zeros((B, V, 3))
-    idx = faces.reshape(-1)  # (3F,)
-    contrib = torch.cat([fn, fn, fn], dim=1)  # (B, 3F, 3)
+    idx = faces.reshape(-1)  # (3F,) [f0v0, f0v1, f0v2, f1v0, ...] per-face-vertex order
+    # Each face normal must land on that face's 3 vertices, so repeat it 3× in place
+    # to match `idx`'s order: [fn0, fn0, fn0, fn1, ...]. (A plain cat([fn,fn,fn]) gives
+    # block order [all-f, all-f, all-f], which misaligns with `idx` and scrambles normals.)
+    contrib = fn.repeat_interleave(3, dim=1)  # (B, 3F, 3)
     normals.index_add_(1, idx, contrib)
     return normals / normals.norm(dim=-1, keepdim=True).clamp_min(1e-8)
 

@@ -246,7 +246,7 @@ class ClipScene:
         self.body_source_names = (
             list(data.skinned) + (["dynamics"] if self.dyn is not None else []))
         self.default_body = next(
-            (s for s in ("kinematics_2", "kinematics", "original", "dynamics")
+            (s for s in ("overfit", "kinematics_2", "kinematics", "original", "dynamics")
              if s in self.body_source_names), None)
         self.active = self.default_body
 

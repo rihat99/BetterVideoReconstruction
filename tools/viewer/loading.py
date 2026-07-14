@@ -328,8 +328,12 @@ def _smplx_kinematic_skinned(npz_path: Path, *, device: str = "cuda"):
     return faces, object_ids, people
 
 
-def _smplx_params_skinned(pred: Path, extr: np.ndarray, *, device: str = "cuda"):
-    """Skinning data for the raw pre-optimization SMPL-X (``smplx_params.npz``).
+def _smplx_params_skinned(path: Path, extr: np.ndarray, *, device: str = "cuda"):
+    """Skinning data for a camera-frame classic-SMPL-X param file.
+
+    Used for both the raw ``sam3d/smplx_params.npz`` and the per-frame
+    ``geometry/overfit.npz`` — both store classic smplx-PyPI params in the VGGT
+    camera frame with the same keys.
 
     Poses the **same 52-joint ``SMPLXMid`` model + FK** as the kinematic sources —
     no hand-rolled kinematics. Each person's classic smplx-PyPI params (camera
@@ -345,7 +349,6 @@ def _smplx_params_skinned(pred: Path, extr: np.ndarray, *, device: str = "cuda")
     Same ``(faces, object_ids, people)`` contract as
     :func:`_smplx_kinematic_skinned`; ``None`` if no params exist.
     """
-    path = pred / "sam3d" / "smplx_params.npz"
     if not path.exists():
         return None
 
@@ -496,13 +499,18 @@ def load_clip_data(pred: Path, *, device: str, show_smplx: bool,
     skinned: dict = {}
     if show_smplx:
         if (pred / "sam3d" / "smplx_params.npz").exists():
-            orig = _smplx_params_skinned(pred, extr, device=device)
+            orig = _smplx_params_skinned(pred / "sam3d" / "smplx_params.npz", extr, device=device)
             if orig is not None:
                 skinned["original"] = orig
         # kinematics_2 temporarily excluded from the viewer (not actively worked on).
         for name, fn in (("kinematics", "kinematic_1.npz"),):
             if (pred / "human_optim" / fn).exists():
                 skinned[name] = _smplx_kinematic_skinned(pred / "human_optim" / fn, device=device)
+        # overfit: per-frame body fit to the scaled depth (camera frame, like original).
+        if (pred / "geometry" / "overfit.npz").exists():
+            ov = _smplx_params_skinned(pred / "geometry" / "overfit.npz", extr, device=device)
+            if ov is not None:
+                skinned["overfit"] = ov
 
     video_frames, play_fps = _load_video_frames(pred, len(extr), video_dir=video_dir)
     return ClipData(
