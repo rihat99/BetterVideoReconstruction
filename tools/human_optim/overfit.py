@@ -184,12 +184,19 @@ def overfit_person(
     q = q_init.clone().requires_grad_(True)
     opt = torch.optim.Adam([betas, q], lr=lr)
 
+    # Front-facing visibility is computed ONCE from the init pose and frozen. The body
+    # only refines locally (cm-scale seating, small pose tweaks), so the front/back
+    # split barely moves; the mask carries no gradient anyway (it only gates which
+    # vertices chamfer to the front-only depth). Recomputing full-mesh normals every
+    # iteration would be wasted work — this is the whole per-iteration normal pass.
+    with torch.no_grad():
+        front = _front_facing_sub(mid.forward(betas_init, q0).vertices, mid.faces, sub, chunk)
+
     def losses(record: bool) -> tuple[torch.Tensor, dict]:
         q_norm = normalize_q(q, num_joints)
         out = mid.forward(betas, q_norm)
         vertices = out.vertices                                   # (T, V, 3)
         joints = out.joints_world.tensor()[..., :3]               # (T, J, 3)
-        front = _front_facing_sub(vertices, mid.faces, sub, chunk)
         chamfer = robust_chamfer(vertices[:, sub], front, cloud, cloud_valid,
                                  gm_scale_m=weights.gm_chamfer_m, chunk=chunk)
         reproj = sapiens_reprojection_gm(
