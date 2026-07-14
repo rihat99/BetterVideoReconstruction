@@ -21,7 +21,7 @@ optimization residuals used here.
 The default chain (`scripts/pipeline.py`) runs these stages in order:
 
 ```
-video ─▶ sam3 ─▶ vggt ─▶ sapiens ─▶ sam3d ─▶ smplx ─▶ scale ─▶ fuse ─▶ optimize_smplx
+video ─▶ sam3 ─▶ vggt ─▶ sapiens ─▶ sam3d ─▶ smplx ─▶ scale ─▶ fuse ─▶ human_optimization
 ```
 
 | Stage | Model | Output (under `out/<stem>/`) |
@@ -31,9 +31,9 @@ video ─▶ sam3 ─▶ vggt ─▶ sapiens ─▶ sam3d ─▶ smplx ─▶ sc
 | sapiens | Sapiens2-5B | Goliath-308 keypoint pose |
 | sam3d | SAM-3D-Body | per-frame MHR body params (all tracked people) |
 | smplx | MHR→SMPL-X fit | per-frame SMPL-X params |
-| scale | human-body ruler | metric scale anchored to the body (`geometry/scale.npz`) |
-| fuse | metric fuse | metric scene + per-frame human point clouds (`geometry/`) |
-| optimize_smplx | Adam + L-BFGS | visually-guided kinematic refinement (`sam3d/smplx_kinematic.npz`) |
+| scale | human-body ruler | metric scale anchored to the body + per-frame overfit body (`geometry/scale.npz`, `geometry/overfit.npz`) |
+| fuse | metric fuse | metric scene + per-frame human point clouds, body-anchor gate (`geometry/`) |
+| human_optimization | Adam + L-BFGS | visually-guided kinematic refinement (`human_optim/kinematic_1.npz`) |
 
 **VGGT-Omega** runs right after the tracker as the multi-view camera/geometry
 stage; it writes `vggt/camera.npz` (cross-frame extrinsics + depth, plus the
@@ -76,14 +76,17 @@ uv run python scripts/pipeline.py --source data/boulder_1.mp4 --save-dir out/
 uv run python scripts/view_3d.py out/boulder_1/
 ```
 
-Outputs land under `out/<stem>/` (per clip). The current build is file-based
-and small-batch — a DB-backed dataset is planned later. Each stage is also
-runnable on its own; see [`CLAUDE.md`](CLAUDE.md) for the full stage table, the
-`out/<stem>/` contract, and conventions.
+Outputs land under `out/<stem>/` (per clip). Each stage is also runnable on its
+own; behavior knobs live in `configs/*.toml` (CLIs only take targets). See
+[`CLAUDE.md`](CLAUDE.md) for the full stage table, the `out/<stem>/` contract,
+and conventions.
 
 ## Documentation
 
 - [`INSTALL.md`](INSTALL.md) — environment, submodules, model assets.
 - [`CLAUDE.md`](CLAUDE.md) — architecture, pipeline contract, conventions.
+- [`docs/scale.md`](docs/scale.md) — the metric scale + the per-frame body overfit.
+- [`docs/fusion.md`](docs/fusion.md) — metric point clouds + the body-anchor gate.
+- [`docs/human_optimization.md`](docs/human_optimization.md) — the four-stage refinement, every loss term.
+- [`docs/contacts.md`](docs/contacts.md) — per-joint contact detection.
 - [`docs/contact_confidence.md`](docs/contact_confidence.md) — per-joint contact-confidence formula and artifact schema.
-- [`docs/ISSUE.md`](docs/ISSUE.md) — current scale, fusion, and human-optimization audit.
