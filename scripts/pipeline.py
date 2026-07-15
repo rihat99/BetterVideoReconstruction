@@ -127,7 +127,12 @@ def _perclip_done(step: str, clip_dir: Path, cfg: dict) -> bool:
         if not tr_path.exists():
             return False
         with np.load(tr_path) as tr:
-            return "metric" not in tr.files or bool(tr["metric"])
+            if "metric" in tr.files and not bool(tr["metric"]):
+                return False
+        with np.load(clip_dir / "geometry" / "scale.npz") as sc:  # pre-fit ran → its bodies must exist
+            if "method" in sc.files and str(sc["method"]) == "prefit-dual":
+                return (clip_dir / "geometry" / "prefit.npz").exists()
+        return True
     return True
 
 

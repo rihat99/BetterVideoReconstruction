@@ -33,7 +33,7 @@ video ─▶ sam3 ─▶ vggt ─▶ sapiens ─▶ sam3d ─▶ smplx ─▶ fu
 | sam3d | SAM-3D-Body | per-frame MHR body params (all tracked people) |
 | smplx | MHR→SMPL-X fit | per-frame SMPL-X params |
 | fuse | point-cloud fuse | up-to-scale scene + per-frame human point clouds (`geometry/`) |
-| scale | human-body ruler | metric scale anchored to the body; rescales the fused geometry in place (`geometry/scale.npz`) |
+| scale | human-body ruler + pre-fit | metric scale anchored to the body, refined by a dual scale+body alignment; rescales the fused geometry in place (`geometry/scale.npz`, `geometry/prefit.npz`) |
 | human_optimization | Adam + L-BFGS | visually-guided kinematic refinement (`human_optim/kinematic_1.npz`) |
 
 **VGGT-Omega** runs right after the tracker as the multi-view camera/geometry

@@ -10,8 +10,9 @@ import pytest
 import torch
 
 from scripts.stages.estimate_scale import _metricize_geometry
-from scripts.stages.fuse_geometry import _build_geometry, _merge_scene
+from scripts.stages.fuse_geometry import _build_geometry, _merge_scene, _visible_mask
 from tools.geometry.voxel import voxel_downsample
+from tools.human_optim.prefit import cloud_chamfer, finger_freeze_mask, joint_velocity_loss
 
 
 def test_merge_scene_collapses_boundary_twins():
@@ -40,6 +41,26 @@ def test_voxel_downsample_shift_moves_the_grid():
     _, _, counts_shift, _ = voxel_downsample(pts, 1.0, shift=0.5)
     assert counts_plain.numel() == 1   # amin-origin puts both in cell [0, 1)
     assert counts_shift.numel() == 2   # half-shift puts a face at 0.5, between them
+
+
+def test_visible_mask_prunes_the_slab_back():
+    # One camera at the origin looking down +z (identity extrinsic), fx=fy=100,
+    # 100x100 image. A 3x3 front sheet at z=2 with a duplicate ("ghost") sheet
+    # 0.5 behind it — more than one voxel — plus one isolated point far behind
+    # that is alone in its bin (nothing in front of it → visibility keeps it).
+    xy = [(x, y) for x in (-0.1, 0.0, 0.1) for y in (-0.1, 0.0, 0.1)]
+    front = [[x, y, 2.0] for x, y in xy]
+    ghost = [[x * 1.25, y * 1.25, 2.5] for x, y in xy]   # same rays, deeper
+    lone = [[0.8, 0.8, 4.0]]
+    pts = torch.tensor(front + ghost + lone)
+    extr = np.eye(4, dtype=np.float32)[None]
+    K = np.array([[[100.0, 0, 50.0], [0, 100.0, 50.0], [0, 0, 1.0]]], np.float32)
+
+    keep = _visible_mask(pts, extr, K, 100, 100, bin_px=6.0, voxel=0.2)
+
+    assert keep[:9].all()          # the front sheet survives
+    assert not keep[9:18].any()    # the ghost sheet is behind the front row everywhere
+    assert keep[18]                # an isolated point wins its own bin
 
 
 def _tiny_clip(tmp_path: Path):
@@ -75,6 +96,56 @@ def test_build_geometry_splits_scene_and_human_unscaled(tmp_path):
     assert built["n_human"] == 1
     # (1,1) at depth 2 with cx=cy=1, fx=fy=2 backprojects to the optical axis
     assert torch.allclose(built["human_points"][0], torch.tensor([0.0, 0.0, 2.0]))
+    # one unit normal per scene point, oriented toward the camera (plane at z=2,
+    # camera at the origin ⇒ normals ≈ -z)
+    normals = built["scene_normals"]
+    assert normals.shape == built["scene_points"].shape
+    assert torch.allclose(normals.norm(dim=-1), torch.ones(8), atol=1e-5)
+    assert (normals[:, 2] < 0).all()
+
+
+def test_estimate_point_normals_edge_cases():
+    from tools.geometry.normals import estimate_point_normals
+
+    cams = torch.zeros((1, 3))
+    empty = estimate_point_normals(torch.zeros((0, 3)), cams)
+    assert empty.shape == (0, 3)
+    # a single point (k collapses to 1) must not crash and faces the camera
+    one = estimate_point_normals(torch.tensor([[0.0, 0.0, 2.0]]), cams)
+    assert one.shape == (1, 3)
+    assert float(one.norm()) == pytest.approx(1.0, abs=1e-5)
+
+
+def test_finger_freeze_mask_zeros_the_finger_tail():
+    mask = finger_freeze_mask(211, "cpu")
+    assert mask[: 7 + 4 * 21].eq(1).all()   # root SE3 + 21 body joints stay live
+    assert mask[7 + 4 * 21:].eq(0).all()    # 30 finger joints frozen
+    assert mask.numel() == 211
+
+
+def test_cloud_chamfer_matches_only_visible_vertices():
+    # One frame, two verts: the visible one sits 0.1 from the cloud point, the
+    # hidden one exactly on it. The loss must reflect the VISIBLE distance.
+    verts = torch.tensor([[[0.0, 0.0, 1.9], [0.0, 0.0, 2.0]]])   # (1, 2, 3)
+    vis = torch.tensor([[True, False]])
+    cloud = torch.tensor([[[0.0, 0.0, 2.0]]])                    # (1, 1, 3)
+    valid = torch.tensor([[True]])
+
+    loss = cloud_chamfer(verts, vis, cloud, valid, gm_scale_m=0.3)
+
+    expected = 0.1 ** 2 / (0.3 ** 2 + 0.1 ** 2)                  # GM of the visible dist
+    assert float(loss) == pytest.approx(expected, rel=1e-4)
+    both = cloud_chamfer(verts, torch.tensor([[True, True]]), cloud, valid, gm_scale_m=0.3)
+    assert float(both) == pytest.approx(0.0, abs=1e-6)           # hidden vert now allowed
+
+
+def test_joint_velocity_loss_matches_converter_motion():
+    t = torch.linspace(0, 1, 4)[:, None, None]
+    joints0 = t * torch.tensor([[[1.0, 0.0, 0.0]]])              # constant velocity
+    pairs = torch.tensor([0, 1, 2])
+    assert float(joint_velocity_loss(joints0, joints0, pairs)) == 0.0   # same motion → free
+    still = torch.zeros_like(joints0)
+    assert float(joint_velocity_loss(still, joints0, pairs)) > 0.0     # killing motion costs
 
 
 def _fake_geometry(tmp_path: Path):

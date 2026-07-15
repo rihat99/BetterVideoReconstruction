@@ -144,7 +144,7 @@ def _run_scenes(args: argparse.Namespace) -> None:
             human_point_size=args.human_point_size, camera_scale=args.camera_scale,
             camera_stride=args.camera_stride, up=args.up, show_smplx=args.smplx,
             device=args.device, human_max_points=args.human_max_points,
-            scene_surface=args.scene_surface, video_dir=farm_root)
+            video_dir=farm_root)
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -167,7 +167,6 @@ def main(argv: list[str] | None = None) -> int:
         "up": "-y",
         "smplx": True,
         "human_max_points": 6000,
-        "scene_surface": "points",
         "video_dir": "",
         "data_root": "",
         "categories": "1,2",
@@ -194,7 +193,7 @@ def main(argv: list[str] | None = None) -> int:
             human_point_size=args.human_point_size, camera_scale=args.camera_scale,
             camera_stride=args.camera_stride, up=args.up, show_smplx=args.smplx,
             device=args.device, human_max_points=args.human_max_points,
-            scene_surface=args.scene_surface, video_dir=args.video_dir)
+            video_dir=args.video_dir)
     return 0
 
 

@@ -115,7 +115,7 @@ STAGES: dict[str, StageSpec] = {
         cli=None,
         out_stage="geometry",
         out_check="scale.npz",  # scale runs last in the fuse→scale chain
-        farm_inputs=("vggt", "sam3d", "sam3", "sapiens"),  # sapiens: only the opt-in overfit reads it
+        farm_inputs=("vggt", "sam3d", "sam3", "sapiens"),  # sapiens: the scale pre-fit reads it
         config_sections=("scale", "fuse"),
     ),
     "human_optim": StageSpec(
@@ -379,7 +379,14 @@ def _geometry_metric(geom_dir: Path) -> bool:
     if not tr_path.is_file():
         return False
     with np.load(tr_path) as tr:
-        return "metric" not in tr.files or bool(tr["metric"])
+        if "metric" in tr.files and not bool(tr["metric"]):
+            return False
+    scale_path = geom_dir / "scale.npz"
+    if scale_path.is_file():  # the pre-fit ran → its bodies must exist too
+        with np.load(scale_path) as sc:
+            if "method" in sc.files and str(sc["method"]) == "prefit-dual":
+                return (geom_dir / "prefit.npz").is_file()
+    return True
 
 
 def _scene_fresh(

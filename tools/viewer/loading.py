@@ -331,8 +331,8 @@ def _smplx_kinematic_skinned(npz_path: Path, *, device: str = "cuda"):
 def _smplx_params_skinned(path: Path, extr: np.ndarray, *, device: str = "cuda"):
     """Skinning data for a camera-frame classic-SMPL-X param file.
 
-    Used for both the raw ``sam3d/smplx_params.npz`` and the per-frame
-    ``geometry/overfit.npz`` — both store classic smplx-PyPI params in the VGGT
+    Used for both the raw ``sam3d/smplx_params.npz`` and the pre-fit
+    ``geometry/prefit.npz`` — both store classic smplx-PyPI params in the VGGT
     camera frame with the same keys.
 
     Poses the **same 52-joint ``SMPLXMid`` model + FK** as the kinematic sources —
@@ -443,7 +443,8 @@ class ClipData:
     # scene-surface meshes, built lazily and cached per method ("bpa"/"poisson");
     # a present key maps to (verts, faces, vertex_colors, vertex_normals) or None.
     scene_meshes: dict = field(default_factory=dict)
-    scene_normals: np.ndarray | None = None   # camera-oriented normals, computed once
+    scene_normals: np.ndarray | None = None   # camera-oriented normals (from fuse, else lazy)
+    scene_voxel: float = 0.0                  # merge voxel size (m) — sizes the normal arrows
     video_frames: np.ndarray | None = None    # original footage, frame-slider aligned (sidebar pane)
     fps: float | None = None                  # real-time playback fps (from the source video)
 
@@ -485,11 +486,13 @@ def load_clip_data(pred: Path, *, device: str, show_smplx: bool,
     # lowest-confidence quantile of voxels, so a point you see is a point that exists
     # for contact (raw VGGT confidence has no fixed scale, hence a quantile gate).
     sp, sco = scene["points"], scene["colors"]
+    sn = scene["normals"] if "normals" in scene.files else None   # per-point, from fuse
     if "confidence" in scene.files and _SCENE_CONF_DROP_Q > 0.0:
         conf = scene["confidence"]
         if len(conf) == len(sp) and len(conf):
             keep = conf >= np.quantile(conf, _SCENE_CONF_DROP_Q)
             sp, sco = sp[keep], sco[keep]
+            sn = sn[keep] if sn is not None else None
 
     hp, hc = human["points"], human["colors"]
     hf, ho = human["frame_id"], human["obj_id"]
@@ -509,11 +512,11 @@ def load_clip_data(pred: Path, *, device: str, show_smplx: bool,
         for name, fn in (("kinematics", "kinematic_1.npz"),):
             if (pred / "human_optim" / fn).exists():
                 skinned[name] = _smplx_kinematic_skinned(pred / "human_optim" / fn, device=device)
-        # overfit: per-frame body fit to the scaled depth (camera frame, like original).
-        if (pred / "geometry" / "overfit.npz").exists():
-            ov = _smplx_params_skinned(pred / "geometry" / "overfit.npz", extr, device=device)
-            if ov is not None:
-                skinned["overfit"] = ov
+        # prefit: the scale stage's dual scale+body alignment (camera frame, like original).
+        if (pred / "geometry" / "prefit.npz").exists():
+            pf = _smplx_params_skinned(pred / "geometry" / "prefit.npz", extr, device=device)
+            if pf is not None:
+                skinned["prefit"] = pf
 
     video_frames, play_fps = _load_video_frames(pred, len(extr), video_dir=video_dir)
     return ClipData(
@@ -528,6 +531,8 @@ def load_clip_data(pred: Path, *, device: str, show_smplx: bool,
         dynamics=None,   # dynamics temporarily excluded from the viewer (not actively worked on)
         skeleton=_load_skeleton(pred) if show_smplx else None,
         n_frames=len(extr),
+        scene_normals=sn,
+        scene_voxel=float(scene["voxel_size"]) if "voxel_size" in scene.files else 0.0,
         video_frames=video_frames, fps=play_fps)
 
 

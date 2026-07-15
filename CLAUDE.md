@@ -82,8 +82,8 @@ Default chain in order (rows 1–8; `human_optimization` runs its `root` +
 | 3 | `estimate_sapiens.py` | frames, `sam3/bboxes.npz` | `sapiens/pose.npz` (Goliath-308), overlay |
 | 4 | `estimate_body_sam3d.py` | `sam3/`, `vggt/camera.npz`, frames | `sam3d/params.npz` (all people, `(P,N,…)` + `object_ids`), overlay |
 | 5 | `convert_mhr_to_smplx.py` | `sam3d/params.npz` | `sam3d/smplx_params.npz` (`(P,N,…)` classic SMPL-X), overlay |
-| 6 | `fuse_geometry.py` | `vggt/`, `sam3/`, `sam3d/smplx_params.npz`, frames | `geometry/transform.npz` (cameras, `metric=False`), `geometry/scene.npz` (two-pass voxel merge, relative voxel), `geometry/human.npz` (per-frame human points) |
-| 7 | `estimate_scale.py` | `sam3d/smplx_params.npz`, `vggt/camera.npz`, `geometry/` | `geometry/scale.npz` + rescales `transform/scene/human.npz` in place (`metric=True`); `geometry/overfit.npz` only when `skip_overfit=false` |
+| 6 | `fuse_geometry.py` | `vggt/`, `sam3/`, `sam3d/smplx_params.npz`, frames | `geometry/transform.npz` (cameras, `metric=False`), `geometry/scene.npz` (two-pass voxel merge + hidden-point prune + per-point normals), `geometry/human.npz` (per-frame human points) |
+| 7 | `estimate_scale.py` | `sam3d/smplx_params.npz`, `vggt/camera.npz`, `sapiens/pose.npz`, `geometry/` | `geometry/scale.npz` + rescales `transform/scene/human.npz` in place (`metric=True`); `geometry/prefit.npz` (dual scale+body pre-fit bodies, unless `prefit=false`) |
 | 8 | `human_optimization.py` (`root`+`kinematics_1`) | `sam3d/smplx_params.npz`, `sapiens/pose.npz`, `geometry/` | `human_optim/kinematic_1.npz` (world-frame `q (P,N,211)` + `drift_pre` + `auto_labels`), optional overlay |
 | – | `human_optimization.py --stages kinematics_2` | `kinematic_1.npz`, labels (`data/<stem>.npz` manual, or `contacts_1.npz` auto — `[stages.kinematics_2].labels`) | `human_optim/kinematic_2.npz` |
 | – | `estimate_contacts.py` | a refined body (`--bodies`), `geometry/` | `human_optim/contacts_<tag>.npz` (per-joint labels + confidence) |
@@ -91,8 +91,9 @@ Default chain in order (rows 1–8; `human_optimization` runs its `root` +
 | – | `human_optimization.py --stages dynamics` | `kinematic_2.npz`, `contacts_2.npz`, gravity | `human_optim/dynamics.npz` (world contact forces + joint torques) |
 
 Viewer: `scripts/view_3d.py out/<stem>/` (viser: fused scene + cameras + human
-points + bodies; the **`body source`** dropdown switches `original` / `overfit` /
-`kinematics` / `kinematics_2` / `dynamics`). `--scenes` browses the DB.
+points + bodies; the **`body source`** dropdown switches `original` / `prefit` /
+`kinematics` / `kinematics_2` / `dynamics`; a **`scene normals`** debug layer
+draws the per-point normal arrows). `--scenes` browses the DB.
 
 ## Run
 
@@ -131,7 +132,7 @@ BetterVideoReconstruction/
 │   ├── adapters/                  # stateless model wrappers (sapiens2, vggt_omega, geocalib)
 │   ├── mhr_to_smplx/              # MHR → SMPL-X fitter (pip smplx)
 │   ├── smplx_robot/               # SMPLXMid ↔ BetterRobot 52-joint model; inertia + dynamics
-│   ├── human_optim/               # the stage machinery: losses/optimizer/stages/overfit/contacts/confidence/…
+│   ├── human_optim/               # the stage machinery: losses/optimizer/stages/prefit/contacts/confidence/…
 │   ├── geometry/                  # depth clean + backproject + voxel + normals + human scale
 │   └── viewer/                    # view_3d internals
 └── third_party/                   # submodules: sam3, sam-3d-body, sapiens2, MHR, vggt-omega, geocalib
@@ -144,7 +145,7 @@ BetterVideoReconstruction/
   and a list of `Phase` rows (weight column, iters, Adam/L-BFGS, DOF masks). A
   term is active iff its phase weight is non-zero, so the TOML weight columns ARE
   the objective. Kinematics (`tools/human_optim/optimizer.py`) and the scale
-  stage's overfit run on it; `dynamics` keeps its own small L-BFGS solve (its
+  stage's pre-fit run on it; `dynamics` keeps its own small L-BFGS solve (its
   weights multiply inside squared norms).
 - **Multi-person throughout.** Every stage from `sam3d` on carries a leading
   `(P, N, …)` axis with `object_ids (P,)`.

@@ -54,26 +54,28 @@ skip_existing = false      # skip items whose task output already exists
 dtype = "fp16"             # model dtype hint
 
 [scale]                     # human-anchored metric scale (runs AFTER fuse; rescales geometry/ in place)
-conf_drop_q = 0.3           # drop this lowest-confidence fraction of cloud-hit body vertices per frame
+conf_drop_q = 0.3           # drop this lowest-confidence fraction of cloud points per frame (ruler + pre-fit)
 min_inlier_verts = 50       # skip a frame with fewer inlier vertices than this
 mad_k = 3.0                 # reject frames beyond this many MADs from the median log-scale
 skip_existing = false       # skip when scale.npz exists and the world is already metric
-# per-frame body overfit to the scaled depth → geometry/overfit.npz (see docs/scale.md)
-skip_overfit = true         # off by default; set false for the diagnostic overfit body
-iters = 300                 # Adam iterations per frame-batch
-lr = 0.02                   # Adam learning rate
-frame_batch = 512           # frames optimized together (lower to bound GPU memory)
-w_chamfer = 1.0             # chamfer weight (the depth-seating term)
+# pre-fit: dual scale + body refinement → geometry/prefit.npz (see docs/scale.md)
+prefit = true               # false → ruler-only scale, no body alignment
+rounds = 4                  # body-round ↔ scale-re-measure alternations (early-stops at 0.1%)
+iters = 150                # Adam iterations per body round (per person)
+lr = 0.01                # Adam learning rate
+w_chamfer = 1.0             # depth term: every cloud point near a visible body vertex
 w_reproj = 0.5              # Sapiens reprojection weight (holds the body on the image)
-w_pose = 0.02               # init-pose prior weight (relaxed)
-w_betas = 1e-3              # betas gauge weight (keeps free shape near the SMPL-X mean)
+w_pose = 2.0                # pull of the joint rotations toward the converter pose
+w_orient = 1.0              # gentle root-orientation pull (stops ~180° flips)
+w_transl = 0.5              # gentle root-translation pull (m²; anchors depth where the image is silent)
+w_smooth = 0.1              # tiny converter-velocity tie on the posed joints
 gm_chamfer_m = 0.3          # chamfer robust scale (m); larger is more L2-like
 gm_reproj_px = 10.0         # reprojection robust scale (px)
-max_points = 4000           # depth points per frame for chamfer
+max_points = 2000           # depth points per frame for chamfer
 vertex_subsample = 3000     # body vertices used for chamfer
 
 [fuse]                      # backproject VGGT → up-to-scale point clouds → geometry/ (runs BEFORE scale)
-voxel_px = 5.0              # scene merge voxel size, in pixel footprints at the median scene depth
+voxel_px = 5.5              # scene merge voxel size, in pixel footprints at the median scene depth
 conf_drop_q = 0.3           # drop this lowest-confidence fraction of VGGT depth (scene only; human keeps all)
 edge_rtol = 0.04            # depth-edge (flying-pixel) filter tolerance; 0 disables
 human_dilate = 8            # grow the human mask N px before subtracting from the scene (cleaner scene); 0 disables
@@ -121,7 +123,6 @@ camera_stride = 1          # show every Nth camera frustum
 up = "-y"                  # viewer up direction
 smplx = true               # load fitted SMPL-X bodies
 human_max_points = 6000    # max human points per frame and climber; 0 keeps all
-scene_surface = "points"   # scene rendering: points | bpa | poisson
 video_dir = ""             # source-video directory; empty uses the viewer default
 data_root = ""             # ClimbingVideos root; empty uses the scene DB default
 categories = "1,2"         # ClimbingVideos vlm_category CSV filter

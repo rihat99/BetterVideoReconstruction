@@ -21,10 +21,8 @@ from .scene import ClipScene, _SKEL_ALPHA
 _LAYER_LABELS = (("body", "SMPL-X body"), ("skeleton", "body skeleton"),
                  ("confidence", "contact confidence"),
                  ("human", "human points"), ("scene", "scene points"),
-                 ("cameras", "cameras"), ("gravity", "gravity"), ("ground", "ground plane"))
-# scene rendering choices; the label lower-cases to the internal method name
-# ("points" / "bpa" / "poisson").
-_SURFACE_OPTIONS = ("points", "BPA", "Poisson")
+                 ("normals", "scene normals"),
+                 ("cameras", "cameras"), ("gravity", "gravity"))
 
 # World-frame up vector per ``--up`` axis, mirroring ``SceneApi.set_up_direction``.
 # ``set_up_direction`` rotates the scene root (it does NOT set the camera's
@@ -41,17 +39,16 @@ class Viewer:
     def __init__(self, server, clips: list[Path], *, point_size: float,
                  human_point_size: float, camera_scale: float, camera_stride: int,
                  show_smplx: bool, device: str, human_max_points: int = 0,
-                 scene_surface: str = "points", video_dir: Path | None = None,
-                 up: str = "-y") -> None:
+                 video_dir: Path | None = None, up: str = "-y") -> None:
         self.server = server
         self.clips = clips
         self.opts = dict(camera_stride=camera_stride, device=device,
                          show_smplx=show_smplx, human_max_points=human_max_points,
                          video_dir=video_dir)
         self.layers = {"body": show_smplx, "skeleton": False, "confidence": True,
-                       "human": True, "scene": True, "cameras": True,
-                       "gravity": False, "ground": True}
-        self._surface = scene_surface    # scene rendering: "points" / "bpa" / "poisson"
+                       "human": True, "scene": True, "normals": False,
+                       "cameras": True, "gravity": False}
+        self._surface = "points"    # surface-mesh rendering is off (code kept in ClipScene)
         self.cache: dict[Path, ClipData] = {}
         self.scene: ClipScene | None = None
         # Standard-view camera bits to restore when leaving onboard mode: the up is
@@ -108,11 +105,6 @@ class Viewer:
                 c = g.add_checkbox(label, self.layers[key])
                 c.on_update(self._make_layer_cb(key))
                 self.checkboxes[key] = c
-            init_surface = next((o for o in _SURFACE_OPTIONS if o.lower() == self._surface),
-                                "points")
-            self.surface_dd = g.add_dropdown("scene surface", _SURFACE_OPTIONS,
-                                             initial_value=init_surface)
-            self.surface_dd.on_update(lambda _: self._on_surface())
         # Sizes: independent point + camera-frustum radii (metres).
         sc0 = float(min(max(point_size, 0.002), 0.08))
         hu0 = float(min(max(human_point_size, 0.002), 0.08))
@@ -160,7 +152,7 @@ class Viewer:
             with self._lock:
                 if self.scene is None:
                     return
-                if key in ("scene", "cameras", "gravity", "ground"):
+                if key in ("scene", "normals", "cameras", "gravity"):
                     self.scene.set_static_layer(key, self.layers[key])
                 else:  # body / skeleton / confidence / human are per-frame → re-apply the frame
                     self.scene.apply_frame(self._cur())
@@ -170,12 +162,6 @@ class Viewer:
         with self._lock:
             if self.scene is not None and self.body.value not in ("", "(none)"):
                 self.scene.set_active_body(self.body.value)
-
-    def _on_surface(self) -> None:
-        self._surface = self.surface_dd.value.lower()
-        with self._lock:
-            if self.scene is not None:
-                self.scene.set_scene_surface(self._surface)
 
     def _on_scene_ps(self) -> None:
         with self._lock:
@@ -377,7 +363,7 @@ def view_3d(root: Path, *, port: int = 8082, point_size: float = 0.02,
             human_point_size: float = 0.01, camera_scale: float = 0.1,
             camera_stride: int = 1, up: str = "-y", show_smplx: bool = True,
             device: str = "cuda", human_max_points: int = 6000,
-            scene_surface: str = "points", video_dir: Path | None = None) -> None:
+            video_dir: Path | None = None) -> None:
     import viser
 
     clips = _discover_clips(root)
@@ -396,6 +382,5 @@ def view_3d(root: Path, *, port: int = 8082, point_size: float = 0.02,
     viewer = Viewer(server, clips, point_size=point_size, human_point_size=human_point_size,
                     camera_scale=camera_scale, camera_stride=camera_stride,
                     show_smplx=show_smplx, device=device,
-                    human_max_points=human_max_points, scene_surface=scene_surface,
-                    video_dir=video_dir, up=up)
+                    human_max_points=human_max_points, video_dir=video_dir, up=up)
     viewer.run()

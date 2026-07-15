@@ -1,8 +1,8 @@
 """``ClipScene`` — all viser nodes for one clip, grouped into toggleable layers.
 
 Builds every scene node for a single clip from its :class:`~tools.viewer.loading.ClipData`
-— the scene cloud (points or a reconstructed surface), the camera frustums +
-centre path, the gravity arrow, the fitted ground plane, the per-frame human
+— the scene cloud, the per-point normal arrows (debug), the camera frustums +
+centre path, the gravity arrow, the per-frame human
 points, the skinned SMPL-X bodies, and the force-only dynamics skeleton — and
 moves them together with the frame slider. One ``/clip`` root frame owns them all, so :meth:`ClipScene.dispose`
 tears the whole clip down in a single removal.
@@ -139,8 +139,12 @@ class ClipScene:
                               head_radius=camera_scale * 0.25, head_length=camera_scale * 0.4),
             ]
 
-        # -- ground plane fitted to the lowest scene points, drawn as a grid --
-        self._build_ground()
+        # -- ground plane: estimation turned off (code kept in ``_build_ground``) --
+        self.ground_nodes: list = []
+        self.ground_angle: float | None = None
+
+        # -- per-point scene normal arrows (debug layer, built lazily on first toggle) --
+        self.normal_nodes: list = []
 
         # -- human points: one hidden node per (frame, climber), preloaded --
         self.human_nodes: list[list] = [[] for _ in range(self.n_frames)]
@@ -246,7 +250,7 @@ class ClipScene:
         self.body_source_names = (
             list(data.skinned) + (["dynamics"] if self.dyn is not None else []))
         self.default_body = next(
-            (s for s in ("overfit", "kinematics_2", "kinematics", "original", "dynamics")
+            (s for s in ("kinematics_2", "kinematics", "prefit", "original", "dynamics")
              if s in self.body_source_names), None)
         self.active = self.default_body
 
@@ -301,8 +305,30 @@ class ClipScene:
             d, dist = np.array([0.0, 0.0, -1.0]), 1.0
         return self.focus_point + (d / dist) * max(dist, 2.0)
 
+    def _build_normals(self) -> None:
+        """Draw one arrow per scene point along its stored normal (debug layer).
+
+        Needs ``normals`` in ``geometry/scene.npz`` (written by fuse); silently
+        stays empty for older artifacts. Arrows are coloured by direction
+        (``(n+1)/2`` → RGB) so flipped or noisy normals stand out, and sized by
+        the merge voxel so they read at any scene scale.
+        """
+        d = self.data
+        if d.scene_normals is None or not len(d.scene_points):
+            return
+        n = np.asarray(d.scene_normals, np.float32)
+        length = 2.0 * d.scene_voxel if d.scene_voxel > 0 else 0.05
+        seg = np.stack([d.scene_points, d.scene_points + n * length], axis=1)
+        colors = ((n + 1.0) * 0.5 * 255.0).astype(np.uint8)
+        self.normal_nodes = [self.server.scene.add_arrows(
+            "/clip/normals", points=seg.astype(np.float32), colors=colors,
+            shaft_radius=0.05 * length, head_radius=0.12 * length,
+            head_length=0.3 * length)]
+
     def _build_ground(self) -> None:
         """Fit a plane to the lowest scene points and draw it as a ground grid.
+
+        (Currently not called — ground estimation is turned off in the viewer.)
 
         Uses :func:`~tools.viewer.helpers._fit_ground_plane`; the recovered normal
         should sit close to the gravity axis on a level floor, and ``ground_angle``
@@ -310,8 +336,6 @@ class ClipScene:
         local x-y plane, normal ``+z``) is rotated so ``+z`` aligns with the fitted
         up-normal and placed at the plane centroid.
         """
-        self.ground_nodes: list = []
-        self.ground_angle: float | None = None
         g_down = (np.asarray(self.data.gravity["g"], np.float64)
                   if self.data.gravity is not None
                   else np.array([0.0, 1.0, 0.0]))             # VGGT world up is -y ⇒ down +y
@@ -331,29 +355,33 @@ class ClipScene:
 
     # -- layer visibility --
     def _apply_static_layers(self) -> None:
-        """Scene / cameras / gravity visibility from the shared ``layers`` dict."""
+        """Scene / normals / cameras / gravity visibility from the shared ``layers`` dict."""
         self.scene_node.visible = self.layers["scene"]
+        if self.layers["normals"] and not self.normal_nodes:
+            self._build_normals()
+        for h in self.normal_nodes:
+            h.visible = self.layers["normals"]
         for h in self.camera_nodes:
             h.visible = self.layers["cameras"]
         self.camera_cursor.visible = self.layers["cameras"]
         for h in self.gravity_nodes:
             h.visible = self.layers["gravity"]
-        for h in self.ground_nodes:
-            h.visible = self.layers["ground"]
 
     def set_static_layer(self, name: str, on: bool) -> None:
-        """Toggle one static layer (``scene`` / ``cameras`` / ``gravity`` / ``ground``)."""
+        """Toggle one static layer (``scene`` / ``normals`` / ``cameras`` / ``gravity``)."""
         if name == "scene":
             self.scene_node.visible = on
+        elif name == "normals":
+            if on and not self.normal_nodes:
+                self._build_normals()
+            for h in self.normal_nodes:
+                h.visible = on
         elif name == "cameras":
             for h in self.camera_nodes:
                 h.visible = on
             self.camera_cursor.visible = on
         elif name == "gravity":
             for h in self.gravity_nodes:
-                h.visible = on
-        elif name == "ground":
-            for h in self.ground_nodes:
                 h.visible = on
 
     def _build_scene_node(self):
