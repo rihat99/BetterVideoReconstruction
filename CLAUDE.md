@@ -84,7 +84,7 @@ Default chain in order (rows 1–8; `human_optimization` runs its `root` +
 | 5 | `convert_mhr_to_smplx.py` | `sam3d/params.npz` | `sam3d/smplx_params.npz` (`(P,N,…)` classic SMPL-X), overlay |
 | 6 | `fuse_geometry.py` | `vggt/`, `sam3/`, `sam3d/smplx_params.npz`, frames | `geometry/transform.npz` (cameras, `metric=False`), `geometry/scene.npz` (two-pass voxel merge + hidden-point prune + per-point normals), `geometry/human.npz` (per-frame human points) |
 | 7 | `estimate_scale.py` | `sam3d/smplx_params.npz`, `vggt/camera.npz`, `sapiens/pose.npz`, `geometry/` | `geometry/scale.npz` + rescales `transform/scene/human.npz` in place (`metric=True`); `geometry/prefit.npz` (dual scale+body pre-fit bodies, unless `prefit=false`) |
-| 8 | `human_optimization.py` (`root`+`kinematics_1`) | `sam3d/smplx_params.npz`, `sapiens/pose.npz`, `geometry/` | `human_optim/kinematic_1.npz` (world-frame `q (P,N,211)` + `drift_pre` + `auto_labels`), optional overlay |
+| 8 | `human_optimization.py` (`root`+`kinematics_1`) | `sam3d/smplx_params.npz`, `sapiens/pose.npz`, `geometry/` (init pose = `prefit.npz` when present) | `human_optim/kinematic_1.npz` (world-frame `q (P,N,211)` + `drift_pre` + `auto_labels`), optional overlay |
 | – | `human_optimization.py --stages kinematics_2` | `kinematic_1.npz`, labels (`data/<stem>.npz` manual, or `contacts_1.npz` auto — `[stages.kinematics_2].labels`) | `human_optim/kinematic_2.npz` |
 | – | `estimate_contacts.py` | a refined body (`--bodies`), `geometry/` | `human_optim/contacts_<tag>.npz` (per-joint labels + confidence) |
 | – | `estimate_gravity_geocalib.py` | frames, `geometry/transform.npz` | `geocalib/gravity.npz` (world-frame down + `reliable` flag) |
@@ -159,7 +159,8 @@ BetterVideoReconstruction/
   `estimate_scale` measures `s` against the fused human points and rescales the
   saved geometry in place (`metric=True`; downstream stages check the flag).
 - **`root`+`kinematics_1` share ONE optimization call** — priors and the
-  init-projection anchor stay pinned to the converter pose across both.
+  init-projection anchor stay pinned to the starting pose across both (the
+  scale stage's pre-fit when `geometry/prefit.npz` exists, else the converter).
 - **Contact honesty:** the readout gates stillness on `drift_pre` (measured
   before any contact enforcement acted); kinematics_1 auto-labels are detected
   once, frozen, positive-only. See `docs/contacts.md`.

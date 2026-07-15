@@ -24,8 +24,8 @@ here, in order:
    person), then the **scale move** re-reads ``s`` from the fit's own
    nearest-vertex correspondences and reconciles the people. A few rounds
    converge to a scale and bodies that agree; the refined bodies land in
-   ``geometry/prefit.npz`` (viewer source ``prefit``; a future starting point
-   for the kinematic stage). See docs/scale.md for the full reasoning.
+   ``geometry/prefit.npz`` (viewer source ``prefit``; the kinematic stage
+   starts from them). See docs/scale.md for the full reasoning.
 
 3. **Metricize.** The final ``s`` is applied **in place** to the saved fused
    world: scene + human points, camera translations and the voxel size all

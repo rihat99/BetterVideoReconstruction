@@ -139,8 +139,9 @@ current pose, so an earlier round's root rotation cannot leave it stale.
 
 The refined bodies are saved to `geometry/prefit.npz` (classic SMPL-X params in
 the camera frame, canonical betas repeated per frame) and show in the viewer as
-body source **prefit**. They are also the natural starting point for the
-kinematic stage — not wired up yet.
+body source **prefit**. The kinematic stage starts from them: when the file
+exists, `human_optimization` reads its starting pose (and its priors' anchor)
+from the pre-fit instead of the raw converter output.
 
 ## Metricization: what actually gets rescaled
 

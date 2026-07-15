@@ -4,7 +4,8 @@ One place for the per-stage orchestration the ``human_optimization`` dispatcher
 drives. The three *kinematic* stages share the same machinery — load the inputs,
 per person build the world-frame ``q``, run :func:`~tools.human_optim.optimizer.optimize_person`
 over a phase list, write the refined-body npz — differing only in where ``q`` starts
-(converter vs the previous refinement), the weight columns their phases use, and (for
+(the scale stage's pre-fit — converter when absent — vs the previous refinement),
+the weight columns their phases use, and (for
 ``kinematics_2``) the manual contact annotation. ``dynamics`` is a separate force-only
 RNEA solve on the frozen ``q``.
 
@@ -202,6 +203,28 @@ def _fill_invalid_frames(arr: np.ndarray, valid: np.ndarray) -> np.ndarray:
     return arr[nearest]
 
 
+def _init_params(pred: Path, sp: dict, object_ids: np.ndarray, tag: str) -> tuple[dict, str]:
+    """The parameter source ``(params, name)`` the kinematic fit starts from.
+
+    The scale stage's pre-fit bodies (``geometry/prefit.npz``) when present —
+    depth-aligned and reprojection-refined, so the priors and the init-projection
+    anchor pin to a better pose than the raw converter's. The file is row-aligned
+    with ``smplx_params.npz`` (converter values on frames the pre-fit did not
+    touch) and stores the same classic params, so it swaps in directly; a clip
+    whose scale ran ruler-only (no pre-fit) keeps the converter params.
+    """
+    prefit_path = pred / "geometry" / "prefit.npz"
+    if not prefit_path.exists():
+        return sp, "converter"
+    pf = dict(np.load(prefit_path, allow_pickle=True))
+    if int(pf["num_frames"]) != int(sp["num_frames"]) or not np.array_equal(
+            np.asarray(pf["object_ids"], dtype=np.int32),
+            np.asarray(object_ids, dtype=np.int32)):
+        raise SystemExit(f"[{tag}] {prefit_path} does not match sam3d/smplx_params.npz — "
+                         "re-run estimate_scale")
+    return pf, "prefit"
+
+
 def _load_scene(pred: Path, knobs: dict, wfc: torch.Tensor, device, tag: str):
     """Scene cloud + camera-oriented PCA normals for the penetration/attraction terms.
 
@@ -337,12 +360,12 @@ def _save_body(out_path: Path, mid, out: dict, betas_out: list, object_ids: np.n
 # ─────────────────────────────── phase plans ─────────────────────────────
 
 def _kinematic_phases(cfg: HumanOptimConfig, stages_to_run) -> list[PhaseSpec]:
-    """Phases for the converter-anchored ``root`` / ``kinematics_1`` pass.
+    """Phases for the init-anchored ``root`` / ``kinematics_1`` pass.
 
     ``root`` (root SE3 only, no scene) uses the root column; ``kinematics_1``'s
     ``full`` → ``refine`` → ``lbfgs`` (all DOFs; scene on from refine) use the
     kinematics_1 column — all in one call so the priors stay anchored to the
-    converter pose.
+    starting pose (:func:`_init_params`: the scale pre-fit, else the converter).
     """
     phases: list[PhaseSpec] = []
     if "root" in stages_to_run:
@@ -378,8 +401,11 @@ def run_kinematic(source, pred: Path, cfg: HumanOptimConfig, stages_to_run,
                   device: str, *, overlay: bool = False) -> Path:
     """Run ``root`` and/or ``kinematics_1`` for every tracked person → ``human_optim/``.
 
-    Writes ``kinematic_1.npz`` when ``kinematics_1`` is in ``stages_to_run``, else the
-    intermediate ``root.npz`` (root-only placement).
+    ``q`` starts from the scale stage's pre-fit bodies when ``geometry/prefit.npz``
+    exists (else the converter params) — see :func:`_init_params`; the priors and
+    the init-projection anchor pin to that starting pose. Writes ``kinematic_1.npz``
+    when ``kinematics_1`` is in ``stages_to_run``, else the intermediate ``root.npz``
+    (root-only placement).
     """
     knobs = cfg.knobs
     pred = Path(pred)
@@ -396,6 +422,8 @@ def run_kinematic(source, pred: Path, cfg: HumanOptimConfig, stages_to_run,
     H, W = int(sp["video_height"]), int(sp["video_width"])
     object_ids = np.asarray(sp["object_ids"], dtype=np.int32)
     fps = float(tr.get("fps", 30.0))
+    params, init_src = _init_params(pred, sp, object_ids, tag)
+    print(f"[{tag}] init pose: {init_src}")
 
     extr = torch.as_tensor(tr["extrinsics"], dtype=torch.float32, device=device)       # (N,4,4)
     K = torch.as_tensor(tr["intrinsics_px_orig"], dtype=torch.float32, device=device)  # (N,3,3)
@@ -431,10 +459,10 @@ def run_kinematic(source, pred: Path, cfg: HumanOptimConfig, stages_to_run,
     for p in range(P):
         oid = int(object_ids[p])
         vmask = np.asarray(sp["valid_mask"][p], dtype=bool)
-        betas_mean = torch.as_tensor(sp["betas"][p][vmask].mean(0), dtype=torch.float32, device=device)
+        betas_mean = torch.as_tensor(params["betas"][p][vmask].mean(0), dtype=torch.float32, device=device)
 
         def t(k):  # per-frame (N, ...) param tensor; invalid frames held from nearest valid
-            return torch.as_tensor(_fill_invalid_frames(sp[k][p], vmask),
+            return torch.as_tensor(_fill_invalid_frames(params[k][p], vmask),
                                    dtype=torch.float32, device=device)
         betas_T = betas_mean[None].expand(N, -1)
         q_cam = mid.from_classic(betas_T, t("body_pose"), t("transl"), t("global_orient"),

@@ -15,7 +15,8 @@ joints frozen, no scene) then ``kinematics_1`` (``full`` → ``refine`` → ``lb
 ``kinematics_2`` reuses the same phase shape with its own column + the annotation
 terms. Priors and the init-projection anchor are pinned to the *call's input* pose
 and threaded across all its phases — so root and kinematics_1 share one call
-(anchored to the converter pose) rather than running as separate calls.
+(anchored to the caller's starting pose: the scale stage's pre-fit when present,
+else the converter) rather than running as separate calls.
 
 All posed-mesh inference stays in ``better_human``. This module *defines the
 problem* — the forward, the named loss terms, the phase plan — and hands the
@@ -51,7 +52,7 @@ from .visibility import front_facing_mask, vertex_normals
 @dataclass
 class Metrics:
     reproj_sap_px: float  # Sapiens Goliath-308 keypoint reprojection (score-weighted)
-    reproj_init_px: float  # body-joint drift from the converter-pose projection (init anchor)
+    reproj_init_px: float  # body-joint drift from the starting pose's projection (init anchor)
     chamfer_m: float
     accel: float
     jerk: float
@@ -168,9 +169,9 @@ def _metrics(mid, betas, q_world, *, extrinsics, K, depth_pad, depth_valid, targ
     w = (scores[:, corr.sap] >= score_thresh).float()
     err = (pred_px - tgt).norm(dim=-1)
     reproj_sap = float((w * err).sum() / w.sum().clamp_min(1.0))
-    # Init-anchor drift: mean body-joint pixel distance from the converter-pose
+    # Init-anchor drift: mean body-joint pixel distance from the starting pose's
     # projection (honest px, not GM). ~0 at init; grows as the 3D terms pull the
-    # body off its trusted converter 2D.
+    # body off its trusted starting 2D.
     if init_target is not None:
         ip = project(transform_points(jw[:, body_idx, :], extrinsics), K)
         reproj_init = float((ip - init_target).norm(dim=-1).mean())
@@ -242,9 +243,10 @@ def optimize_person(
 
     Priors (pose / root-orientation) and the init-projection anchor are pinned to
     ``q_world_init`` — the *call's input* pose — and held across every phase, so
-    ``root`` and ``kinematics_1`` belong to one call (anchored to the converter
-    pose). Each phase supplies its own weight column via :class:`PhaseSpec`; a term
-    whose weight is 0 in a phase contributes nothing there.
+    ``root`` and ``kinematics_1`` belong to one call (anchored to the caller's
+    starting pose: the scale pre-fit when present, else the converter). Each phase
+    supplies its own weight column via :class:`PhaseSpec`; a term whose weight is 0
+    in a phase contributes nothing there.
 
     ``contact_labels`` (optional ``(T, 52)`` int8 tri-state per SMPLXMid joint:
     ``1`` in-contact, ``0`` no-contact, ``-1`` unlabeled) turns on the

@@ -8,8 +8,10 @@ The four stages: ``root`` places each body rigidly (root SE3, joints frozen);
 ``kinematics_1`` runs the visually-guided kinematic fit (full → refine → L-BFGS);
 ``kinematics_2`` refines it against manual per-joint contact annotation;
 ``dynamics`` solves per-contact force via RNEA on the frozen ``q``. ``root`` +
-``kinematics_1`` share one converter-anchored optimization; the default chain is
-``root, kinematics_1`` (``kinematics_2`` needs annotation, ``dynamics`` needs contacts).
+``kinematics_1`` share one optimization anchored to the starting pose — the scale
+stage's pre-fit (``geometry/prefit.npz``) when present, else the converter; the
+default chain is ``root, kinematics_1`` (``kinematics_2`` needs annotation,
+``dynamics`` needs contacts).
 
 Run from CLI::
 

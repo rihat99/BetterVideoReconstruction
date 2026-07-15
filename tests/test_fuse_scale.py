@@ -139,6 +139,31 @@ def test_cloud_chamfer_matches_only_visible_vertices():
     assert float(both) == pytest.approx(0.0, abs=1e-6)           # hidden vert now allowed
 
 
+def test_kinematic_init_prefers_matching_prefit(tmp_path):
+    import scripts.stages.human_optimization  # noqa: F401 — puts better_human on sys.path
+    from tools.human_optim.stages import _init_params
+
+    sp = {"num_frames": np.int32(4), "object_ids": np.array([2], np.int32),
+          "transl": np.zeros((1, 4, 3), np.float32)}
+    oids = np.asarray(sp["object_ids"], np.int32)
+
+    params, name = _init_params(tmp_path, sp, oids, "t")   # no prefit.npz → converter
+    assert name == "converter" and params is sp
+
+    geo = tmp_path / "geometry"
+    geo.mkdir()
+    np.savez(geo / "prefit.npz", num_frames=np.int32(4), object_ids=oids,
+             transl=np.ones((1, 4, 3), np.float32))
+    params, name = _init_params(tmp_path, sp, oids, "t")
+    assert name == "prefit"
+    np.testing.assert_allclose(params["transl"], 1.0)
+
+    np.savez(geo / "prefit.npz", num_frames=np.int32(4),
+             object_ids=np.array([7], np.int32))           # stale tracking → hard error
+    with pytest.raises(SystemExit):
+        _init_params(tmp_path, sp, oids, "t")
+
+
 def test_joint_velocity_loss_matches_converter_motion():
     t = torch.linspace(0, 1, 4)[:, None, None]
     joints0 = t * torch.tensor([[[1.0, 0.0, 0.0]]])              # constant velocity

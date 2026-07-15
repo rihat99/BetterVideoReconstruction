@@ -24,9 +24,13 @@ cache, computed only when some active term needs them.
 
 ## What kinematics_1 starts from
 
-- The per-frame SMPL-X bodies from the converter (`sam3d/smplx_params.npz`), moved into
-  the world frame using the metric cameras from fusion. Shape (betas) is averaged over
-  the person's valid frames and then **frozen** — a person has one body.
+- The scale stage's **pre-fit bodies** (`geometry/prefit.npz`) when they exist — the
+  converter bodies already re-seated on their own depth points and re-projected (see
+  [scale.md](scale.md)) — else the raw converter bodies (`sam3d/smplx_params.npz`).
+  Either way the per-frame bodies are moved into the world frame using the metric
+  cameras from fusion, and the priors below anchor to this starting pose. Shape
+  (betas) is averaged over the person's valid frames and then **frozen** — a person
+  has one body.
 - Frames where the person was not tracked hold the nearest valid pose, and are excluded
   from every evidence term (their keypoint scores are zeroed, their depth cloud
   emptied, their frames masked out of the anchors).
@@ -41,11 +45,12 @@ below are the config names.
 ### Image terms
 
 - **`reproj_init` — the init anchor.** Each body joint is pinned to its *own* projected
-  pixel position at the starting pose. The converter pose already reprojects well
-  (~5 px), and matching a joint to its own projection needs no detector and no
-  correspondence table. It is the strongest 2D term. Its job: hold the body on the
-  image so the 3D terms can move it in depth without sliding it across the picture. It
-  cannot fix a converter error — only preserve what is already good.
+  pixel position at the starting pose. The starting pose already reprojects well
+  (the converter lands at ~5 px, the pre-fit better), and matching a joint to its own
+  projection needs no detector and no correspondence table. It is the strongest 2D
+  term. Its job: hold the body on the image so the 3D terms can move it in depth
+  without sliding it across the picture. It cannot fix a starting-pose error — only
+  preserve what is already good.
 - **`reproj_sapiens` — the detector cross-check.** The same robust reprojection against
   Sapiens keypoints (Goliath-308 scheme), weighted by detection score. Down-weighted
   relative to the anchor; it is an independent observation that can correct the
@@ -76,8 +81,8 @@ below are the config names.
 
 ### Priors
 
-- **`pose_prior`** — joint rotations stay near the converter's per-frame estimate. The
-  root is excluded, so placement stays free. This is what keeps occluded limbs sane.
+- **`pose_prior`** — joint rotations stay near the starting pose's per-frame estimate.
+  The root is excluded, so placement stays free. This is what keeps occluded limbs sane.
 - **`orient_prior`** — a gentle version of the same for the root *orientation* only.
   The smoothness stencil constrains the clip's end frames least, and without this the
   root orientation can run away at the boundary and break the image fit. Root
@@ -138,7 +143,7 @@ Adam first because the gradient scales differ wildly (metres vs quaternions, pix
 metres) — Adam's per-coordinate steps tolerate that; L-BFGS cold would stall. A fresh
 optimizer per phase so no stale momentum leaks across a DOF unfreeze. `root` and
 `kinematics_1` share one optimization call so the priors and the init anchor stay
-pinned to the converter pose across both.
+pinned to the starting pose across both.
 
 The scene candidates (the subset of the scene cloud near the body) are rebuilt at the
 start of each scene phase from the current pose, then reused for that phase's
