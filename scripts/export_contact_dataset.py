@@ -57,8 +57,10 @@ RIGHT_HAND_GROUP = [21] + list(range(37, 52))  # right_wrist + right fingers
 HAND_JOINTS = ((20, LEFT_HAND_GROUP), (21, RIGHT_HAND_GROUP))
 N_JOINTS_22 = 22
 N_JOINTS_52 = 52
-CONTACT_CONFIDENCE_SCHEMA = 4
-CONTACT_CONFIDENCE_METHOD = "motion-only-joint-label-v1"
+# Pinned copy of tools/human_optim/confidence.py's schema/method (kept literal
+# so the exporter stays torch-free); update together with that module.
+CONTACT_CONFIDENCE_SCHEMA = 5
+CONTACT_CONFIDENCE_METHOD = "depth-trust-motion-v1"
 
 
 def merge_contacts_52_to_22(

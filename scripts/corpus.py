@@ -33,12 +33,15 @@ from scene_db import ScenePaths, select_targets  # noqa: E402
 _STAGES_DIR = _REPO_ROOT / "scripts" / "stages"
 _DEFAULT_CONFIG = _REPO_ROOT / "configs" / "corpus.toml"
 _CONTACTS_CLI = _STAGES_DIR / "estimate_contacts.py"
-_CONFIDENCE_SCHEMA = 4
-_CONFIDENCE_METHOD = "motion-only-joint-label-v1"
+# Pinned copy of tools/human_optim/confidence.py's schema/method (kept literal
+# so the driver stays torch-free); update together with that module.
+_CONFIDENCE_SCHEMA = 5
+_CONFIDENCE_METHOD = "depth-trust-motion-v1"
 _IMPLEMENTATION_INPUTS = (
     _CONTACTS_CLI,
     _REPO_ROOT / "tools" / "human_optim" / "confidence.py",
     _REPO_ROOT / "tools" / "human_optim" / "contacts.py",
+    _REPO_ROOT / "tools" / "human_optim" / "depth_fit.py",
 )
 
 InvocationMode = Literal[
@@ -324,9 +327,10 @@ def _sha256(path: Path) -> str:
 def _is_fresh(out: Path, body: Path, geom: Path, config: Path) -> bool:
     """A resumable output is reusable only when its complete provenance matches."""
     scene, transform = geom / "scene.npz", geom / "transform.npz"
+    human = geom / "human.npz"
     # Include the implementation itself: a code-only occlusion/confidence fix
     # must invalidate --skip-existing even when the artifact schema is unchanged.
-    inputs = (body, scene, transform, config, *_IMPLEMENTATION_INPUTS)
+    inputs = (body, scene, transform, human, config, *_IMPLEMENTATION_INPUTS)
     if not out.is_file() or any(not path.is_file() for path in inputs):
         return False
     if out.stat().st_mtime < max(path.stat().st_mtime for path in inputs):
@@ -340,6 +344,7 @@ def _is_fresh(out: Path, body: Path, geom: Path, config: Path) -> bool:
                 and str(saved["source_body_sha256"]) == _sha256(body)
                 and str(saved["source_scene_sha256"]) == _sha256(scene)
                 and str(saved["source_transform_sha256"]) == _sha256(transform)
+                and str(saved["source_human_sha256"]) == _sha256(human)
             )
     except (KeyError, OSError, TypeError, ValueError):
         return False

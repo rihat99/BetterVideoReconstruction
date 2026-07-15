@@ -20,6 +20,7 @@ from .scene import ClipScene, _SKEL_ALPHA
 
 _LAYER_LABELS = (("body", "SMPL-X body"), ("skeleton", "body skeleton"),
                  ("confidence", "contact confidence"),
+                 ("depth_trust", "depth trust (spaghetti)"),
                  ("human", "human points"), ("scene", "scene points"),
                  ("normals", "scene normals"),
                  ("cameras", "cameras"), ("gravity", "gravity"))
@@ -46,6 +47,7 @@ class Viewer:
                          show_smplx=show_smplx, human_max_points=human_max_points,
                          video_dir=video_dir)
         self.layers = {"body": show_smplx, "skeleton": False, "confidence": True,
+                       "depth_trust": False,
                        "human": True, "scene": True, "normals": False,
                        "cameras": True, "gravity": False}
         self._surface = "points"    # surface-mesh rendering is off (code kept in ClipScene)
@@ -154,7 +156,7 @@ class Viewer:
                     return
                 if key in ("scene", "normals", "cameras", "gravity"):
                     self.scene.set_static_layer(key, self.layers[key])
-                else:  # body / skeleton / confidence / human are per-frame → re-apply the frame
+                else:  # body / skeleton / colour overlays / human are per-frame → re-apply
                     self.scene.apply_frame(self._cur())
         return cb
 

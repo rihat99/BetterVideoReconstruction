@@ -16,6 +16,7 @@ optimization — keep them current when the code changes:
 - [`docs/fusion.md`](docs/fusion.md) — up-to-scale clouds, relative two-pass voxel merge
 - [`docs/human_optimization.md`](docs/human_optimization.md) — the 4 stages, every loss term
 - [`docs/contacts.md`](docs/contacts.md) + [`docs/contact_confidence.md`](docs/contact_confidence.md) — contact labels + confidence
+- [`docs/depth_fit.md`](docs/depth_fit.md) — per-joint depth-fit metric (the "spaghettization" detector)
 
 ## Experimental branch — working principles
 
@@ -86,14 +87,15 @@ Default chain in order (rows 1–8; `human_optimization` runs its `root` +
 | 7 | `estimate_scale.py` | `sam3d/smplx_params.npz`, `vggt/camera.npz`, `sapiens/pose.npz`, `geometry/` | `geometry/scale.npz` + rescales `transform/scene/human.npz` in place (`metric=True`); `geometry/prefit.npz` (dual scale+body pre-fit bodies, unless `prefit=false`) |
 | 8 | `human_optimization.py` (`root`+`kinematics_1`) | `sam3d/smplx_params.npz`, `sapiens/pose.npz`, `geometry/` (init pose = `prefit.npz` when present) | `human_optim/kinematic_1.npz` (world-frame `q (P,N,211)` + `drift_pre` + `auto_labels`), optional overlay |
 | – | `human_optimization.py --stages kinematics_2` | `kinematic_1.npz`, labels (`data/<stem>.npz` manual, or `contacts_1.npz` auto — `[stages.kinematics_2].labels`) | `human_optim/kinematic_2.npz` |
-| – | `estimate_contacts.py` | a refined body (`--bodies`), `geometry/` | `human_optim/contacts_<tag>.npz` (per-joint labels + confidence) |
+| – | `estimate_contacts.py` | a refined body (`--bodies`), `geometry/` | `human_optim/contacts_<tag>.npz` (per-joint labels + confidence + depth-fit gap/trust) |
 | – | `estimate_gravity_geocalib.py` | frames, `geometry/transform.npz` | `geocalib/gravity.npz` (world-frame down + `reliable` flag) |
 | – | `human_optimization.py --stages dynamics` | `kinematic_2.npz`, `contacts_2.npz`, gravity | `human_optim/dynamics.npz` (world contact forces + joint torques) |
 
 Viewer: `scripts/view_3d.py out/<stem>/` (viser: fused scene + cameras + human
 points + bodies; the **`body source`** dropdown switches `original` / `prefit` /
 `kinematics` / `kinematics_2` / `dynamics`; a **`scene normals`** debug layer
-draws the per-point normal arrows). `--scenes` browses the DB.
+draws the per-point normal arrows; a **`depth trust (spaghetti)`** layer colors
+joints by the per-joint depth-fit metric). `--scenes` browses the DB.
 
 ## Run
 

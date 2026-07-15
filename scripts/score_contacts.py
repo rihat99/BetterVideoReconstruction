@@ -40,8 +40,9 @@ import torch  # noqa: E402
 
 from tools.geometry.normals import load_scene_cloud  # noqa: E402
 from tools.human_optim import (  # noqa: E402
-    drift_gated_contact, joint_drift, joint_guarded_min_sdf, joint_occlusion_counts,
-    merge_contact_spans, project,
+    DEPTH_FIT_DEFAULTS, NO_DATA_TRUST,
+    drift_gated_contact, joint_depth_fit, joint_drift, joint_guarded_min_sdf,
+    joint_occlusion_counts, merge_contact_spans, project,
     scene_sdf, transform_points, vertex_to_joint, world_from_cam,
 )
 from tools.human_optim import paths  # noqa: E402
@@ -648,6 +649,7 @@ def _reliability_one(pred_dir: str, config_path: Path, device: str, source=None,
     cc, cg = _load_contact_cfg(config_path)
     raw = tomllib.load(config_path.open("rb")) if config_path.exists() else {}
     cf = confidence_config(raw.get("contact_confidence", {}))
+    df = {**DEPTH_FIT_DEFAULTS, **raw.get("depth_fit", {})}
     bpath = Path(body_path) if body_path is not None else paths.body_path(pred, "kinematic_1")
     kin = dict(np.load(bpath, allow_pickle=True))
     tr = dict(np.load(pred / "geometry" / "transform.npz", allow_pickle=True))
@@ -661,6 +663,13 @@ def _reliability_one(pred_dir: str, config_path: Path, device: str, source=None,
     K = torch.as_tensor(tr["intrinsics_px_orig"], dtype=torch.float32, device=device)
     cam_centers = world_from_cam(extr)[:, :3, 3]
     scene_pts, scene_normals, scene_conf = _load_scene_readout(pred, cc, cam_centers, device)
+    human_path = pred / "geometry" / "human.npz"
+    human_cloud = None
+    if human_path.exists():
+        with np.load(human_path) as human:
+            human_cloud = tuple(torch.as_tensor(
+                np.asarray(human[name]), device=device)
+                for name in ("points", "frame_id", "obj_id"))
     mid = load_smplx_mid(_DEFAULT_SMPLX_MODEL, device)
     mid_names = list(mid.joint_names)
     occ_group_t = torch.as_tensor(occlusion_group_ids(mid_names), device=device)
@@ -730,8 +739,16 @@ def _reliability_one(pred_dir: str, config_path: Path, device: str, source=None,
             other_vertices=other_vw,
             perp_m=float(cf["occ_perp_m"]), front_m=float(cf["occ_front_m"]),
             subsample=int(cf["occ_subsample"]))
+        depth_trust = torch.full_like(gsdf, NO_DATA_TRUST)
+        if human_cloud is not None:
+            _, _, depth_trust = joint_depth_fit(
+                vw, *human_cloud, oid, extr, K, v2j, mid.num_joints,
+                cell_px=int(df["cell_px"]), min_points=int(df["min_points"]),
+                trust_scale_log=float(df["trust_scale_log"]))
+            valid_t = torch.as_tensor(vmask, dtype=torch.bool, device=device)[:, None]
+            depth_trust = torch.where(valid_t, depth_trust, torch.ones_like(depth_trust))
         terms = joint_label_confidence(
-            torch.as_tensor(jc, dtype=torch.bool, device=device), gsdf, gate_drift,
+            torch.as_tensor(jc, dtype=torch.bool, device=device), gsdf, gate_drift, depth_trust,
             px, jw_cam[..., 2], n_occ, height=H, width=W, cfg=cf,
             window_s=float(cg["window_s"]))
         lconf = terms["label_confidence"]
@@ -832,6 +849,10 @@ def _print_reliability(all_rec: list[dict], exclude: set[str], close: float, sti
         print(f"\n  missed contacts (pred=no-contact, ann=contact): n={int(missed.sum())}  "
               f"mean conf={mc.mean():.3f}  frac in lowest conf bin (<0.1)={float((mc < 0.1).mean()):.2f} "
               f"(want most low = honest unknown)")
+    correct_free = (~pred) & (~ann_pos)
+    if correct_free.any():
+        print(f"  correct no-contact coverage: n={int(correct_free.sum())}  "
+              f"mean conf={conf[correct_free].mean():.6f}")
 
 
 def _config_path(value: str | Path) -> Path:

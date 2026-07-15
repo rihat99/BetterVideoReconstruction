@@ -33,10 +33,12 @@ Run from CLI::
     .venv/bin/python scripts/stages/estimate_contacts.py \\
         --source video.mp4 --predictions out/video/ --config configs/human_optimization.toml
 
-Reads:  human_optim/kinematic_1.npz, geometry/scene.npz, geometry/transform.npz
+Reads:  human_optim/kinematic_1.npz, geometry/scene.npz, geometry/transform.npz,
+        geometry/human.npz (optional for old artifacts; supplies depth-fit diagnostics)
 Writes: human_optim/contacts_1.npz          (joint_contact (P,N,J) bool + signed/Euclidean
                                              scene-distance diagnostics + merged + auditable
-                                             visibility/evidence terms + label_confidence)
+                                             visibility/evidence terms + label_confidence +
+                                             per-joint depth gap/count/trust)
         human_optim/contacts_1_overlay.mp4  ([contacts].overlay; default on)
 """
 
@@ -60,14 +62,17 @@ import torch  # noqa: E402
 from tools.config import load_toml  # noqa: E402
 from tools.geometry.normals import load_scene_cloud  # noqa: E402
 from tools.human_optim import (  # noqa: E402
-    contact_from_sdf, drift_gated_contact, joint_drift, joint_guarded_min_sdf,
+    DEPTH_FIT_DEFAULTS, NO_DATA_TRUST,
+    contact_from_sdf, drift_gated_contact, joint_depth_fit, joint_drift,
+    joint_guarded_min_sdf,
     joint_occlusion_counts, lift_joint_contact, lift_joint_min_distance,
     merge_contact_spans, project, scene_sdf,
     transform_points, vertex_to_joint, world_from_cam,
 )
 from tools.human_optim import paths  # noqa: E402
 from tools.human_optim.confidence import (  # noqa: E402
-    CONTACT_CONFIDENCE_DEFAULTS, confidence_config, joint_label_confidence,
+    CONTACT_CONFIDENCE_DEFAULTS, CONTACT_CONFIDENCE_METHOD,
+    CONTACT_CONFIDENCE_SCHEMA, confidence_config, joint_label_confidence,
     occlusion_group_ids)
 from tools.human_optim.qmath import normalize_q  # noqa: E402
 from tools.smplx_robot import load_smplx_mid  # noqa: E402
@@ -94,6 +99,9 @@ def _load_config(path: Path) -> dict:
     c.setdefault("merge_max_gap_s", 2.0)   # …only gaps shorter than this
     c.setdefault("merge_sdf_m", 0.08)      # …re-grip guard: it stayed within this of the wall the whole gap
     c.setdefault("overlay", True)           # render the contact skeleton overlay
+    d = cfg.setdefault("depth_fit", {})
+    for key, val in DEPTH_FIT_DEFAULTS.items():
+        d.setdefault(key, val)
     g = cfg.setdefault("contact_gate", {})
     g.setdefault("window_s", 0.35)         # drift window (s) for the stillness gate
     g.setdefault("still_m", 0.025)         # net drift (m) at which stillness = 0.5 (gate kills frames >= 2·still_m)
@@ -138,6 +146,7 @@ def run(source: str | Path, predictions_dir: str | Path, config_path: str | Path
     cfg = _load_config(Path(config_path))
     device = cfg["runtime"]["device"]
     cc = cfg["contacts"]
+    df = cfg["depth_fit"]
     cg = cfg["contact_gate"]
     pred = Path(predictions_dir)
 
@@ -160,6 +169,17 @@ def run(source: str | Path, predictions_dir: str | Path, config_path: str | Path
     if not bool(tr.get("metric", True)):  # absent flag = old already-metric artifact
         raise SystemExit(f"geometry under {pred} is up-to-scale — run estimate_scale after fuse")
     sc = dict(np.load(scene_path, allow_pickle=True))
+    human_path = pred / "geometry" / "human.npz"
+    human_cloud = None
+    source_human_sha256 = ""
+    if human_path.exists():
+        source_human_sha256 = _sha256(human_path)
+        with np.load(human_path) as human:
+            human_cloud = tuple(torch.as_tensor(
+                np.asarray(human[name]), device=device)
+                for name in ("points", "frame_id", "obj_id"))
+    else:
+        print(f"[estimate_contacts] warning: missing {human_path}; depth-fit fields have no data")
     N, P = int(kin["num_frames"]), int(kin["num_people"])
     H, W = int(kin["video_height"]), int(kin["video_width"])
     object_ids = np.asarray(kin["object_ids"], dtype=np.int32)
@@ -186,6 +206,9 @@ def run(source: str | Path, predictions_dir: str | Path, config_path: str | Path
     joint_contact = np.zeros((P, N, J), dtype=bool)
     joint_sdf_cm = np.full((P, N, J), np.nan, dtype=np.float32)
     joint_distance_cm = np.full((P, N, J), np.nan, dtype=np.float32)
+    joint_depth_gap_cm = np.full((P, N, J), np.nan, dtype=np.float32)
+    joint_depth_points = np.zeros((P, N, J), dtype=np.float32)
+    joint_depth_trust = np.full((P, N, J), NO_DATA_TRUST, dtype=np.float32)
     joints_2d = np.full((P, N, J, 2), np.nan, dtype=np.float32)
     merged_all = np.zeros((P, N, J), dtype=bool)            #frames the span-merge bridged
     confidence_all = {name: np.zeros((P, N, J), np.float32) for name in
@@ -210,6 +233,20 @@ def run(source: str | Path, predictions_dir: str | Path, config_path: str | Path
         posed_people.append((v2j, jw, vw))
 
     for p, (v2j, jw, vw) in enumerate(posed_people):
+        if human_cloud is not None:
+            depth_gap, depth_points, depth_trust = joint_depth_fit(
+                vw, *human_cloud, int(object_ids[p]), extr, K, v2j, J,
+                cell_px=int(df["cell_px"]), min_points=int(df["min_points"]),
+                trust_scale_log=float(df["trust_scale_log"]))
+            gap_np = depth_gap.cpu().numpy()
+            points_np = depth_points.cpu().numpy()
+            trust_np = depth_trust.cpu().numpy()
+            gap_np[~valid_mask[p]] = np.nan
+            points_np[~valid_mask[p]] = 0.0
+            trust_np[~valid_mask[p]] = NO_DATA_TRUST
+            joint_depth_gap_cm[p] = gap_np
+            joint_depth_points[p] = points_np
+            joint_depth_trust[p] = trust_np
         sdf, dmin, conf = scene_sdf(vw, scene_pts, scene_normals, scene_conf,
                                     prune_margin_m=float(cc["prune_margin_m"]))
         # Raw (unguarded) per-joint min-sdf diagnostic — kept as the continuous channel.
@@ -280,8 +317,10 @@ def run(source: str | Path, predictions_dir: str | Path, config_path: str | Path
             other_vertices=other_vw,
             perp_m=float(cf["occ_perp_m"]), front_m=float(cf["occ_front_m"]),
             subsample=int(cf["occ_subsample"]))
+        depth_trust_t = torch.as_tensor(
+            joint_depth_trust[p], dtype=jw.dtype, device=device)
         terms = joint_label_confidence(
-            jc_final, gsdf, gate_drift, px, jw_cam[..., 2], n_occ,
+            jc_final, gsdf, gate_drift, depth_trust_t, px, jw_cam[..., 2], n_occ,
             height=H, width=W, cfg=cf,
             window_s=float(cg["window_s"]))
         for name, val in terms.items():
@@ -290,6 +329,16 @@ def run(source: str | Path, predictions_dir: str | Path, config_path: str | Path
         n_cf = int(jc_np.any(1).sum())
         print(f"[estimate_contacts] obj_id={int(object_ids[p])}: {n_cf}/{N} frames with "
               f"≥1 joint in contact ({int(jc_np.sum())} joint-frame contact instances)")
+        finite_joint = np.isfinite(joint_depth_gap_cm[p]).any(0)
+        if finite_joint.any():
+            med = np.full(J, np.nan, dtype=np.float32)
+            for j in np.flatnonzero(finite_joint):
+                med[j] = np.nanmedian(joint_depth_gap_cm[p, :, j])
+            worst = int(np.nanargmax(np.abs(med)))
+            print(f"[estimate_contacts] obj_id={int(object_ids[p])}: depth fit worst "
+                  f"{mid_names[worst]} median={float(med[worst]):+.1f}cm")
+        else:
+            print(f"[estimate_contacts] obj_id={int(object_ids[p])}: depth fit has no matched joints")
 
     bounded_terms = (
         "image_visibility", "occlusion_visibility", "visibility", "surface",
@@ -303,10 +352,18 @@ def run(source: str | Path, predictions_dir: str | Path, config_path: str | Path
         raise RuntimeError("invalid occluding-vertex count")
     if np.isinf(joint_sdf_cm).any() or np.isinf(joint_distance_cm).any():
         raise RuntimeError("joint scene diagnostics may be NaN when missing, but never infinite")
+    if (not np.isfinite(joint_depth_trust).all()
+            or bool(((joint_depth_trust < 0.0) | (joint_depth_trust > 1.0)).any())):
+        raise RuntimeError("invalid joint_depth_trust: expected finite values in [0,1]")
+    if np.isinf(joint_depth_gap_cm).any() or not np.isfinite(joint_depth_points).all():
+        raise RuntimeError("joint depth gap may be NaN when missing, but never infinite")
 
     save = dict(
         joint_contact=joint_contact, joint_sdf_cm=joint_sdf_cm,
         joint_distance_cm=joint_distance_cm, merged=merged_all,
+        joint_depth_gap_cm=joint_depth_gap_cm,
+        joint_depth_points=joint_depth_points,
+        joint_depth_trust=joint_depth_trust,
         joint_image_visibility=confidence_all["image_visibility"],
         joint_occlusion_visibility=confidence_all["occlusion_visibility"],
         joint_occluding_vertices=confidence_all["occluding_vertices"],
@@ -314,13 +371,15 @@ def run(source: str | Path, predictions_dir: str | Path, config_path: str | Path
         surface_evidence=confidence_all["surface"],
         motion_evidence=confidence_all["motion"],
         label_confidence=confidence_all["label_confidence"],
-        confidence_schema=np.int32(4),
-        confidence_method=np.str_("motion-only-joint-label-v1"),
+        confidence_schema=np.int32(CONTACT_CONFIDENCE_SCHEMA),
+        confidence_method=np.str_(CONTACT_CONFIDENCE_METHOD),
         confidence_motion_source=np.str_("drift_pre_with_final_fallback"),
         source_body=np.str_(kin_path.name), source_body_sha256=np.str_(source_body_sha256),
         source_scene=np.str_(scene_path.name), source_scene_sha256=np.str_(source_scene_sha256),
         source_transform=np.str_(transform_path.name),
         source_transform_sha256=np.str_(source_transform_sha256),
+        source_human=np.str_(human_path.name if human_cloud is not None else ""),
+        source_human_sha256=np.str_(source_human_sha256),
         object_ids=object_ids, joint_names=kin["joint_names"], parents=parents,
         valid_mask=kin["valid_mask"],
         num_people=np.int32(P), num_frames=np.int32(N),
@@ -334,6 +393,8 @@ def run(source: str | Path, predictions_dir: str | Path, config_path: str | Path
     )
     save.update({f"confidence_{key}": np.float32(value)
                  for key, value in cfg["contact_confidence"].items()})
+    save.update({f"depth_fit_{key}": np.float32(value)
+                 for key, value in cfg["depth_fit"].items()})
     out_path = paths.contacts_path(pred, tag)
     np.savez(out_path, **save)
     print(f"[estimate_contacts] wrote {out_path}")

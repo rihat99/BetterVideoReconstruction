@@ -140,6 +140,11 @@ merge_dist_m = 0.03    # max endpoint displacement across the gap (m)
 merge_max_gap_s = 2.0  # only bridge gaps shorter than this (s)
 merge_sdf_m = 0.08     # re-grip guard: it stayed within this signed distance of the wall the whole gap
 
+[depth_fit]
+cell_px = 8          # coarse z-buffer cell at original video resolution
+min_points = 5       # minimum matched cloud points for a finite joint gap
+trust_scale_log = 0.05  # trust = exp(-(median log-depth-ratio / scale)^2)
+
 # Continuous confidence in each FINAL per-joint contact/no-contact label.
 # The compact formula and units are documented in docs/contact_confidence.md.
 [contact_confidence]
@@ -147,7 +152,9 @@ surface_inner_m = -0.02 # contact evidence fades when the body is implausibly de
 surface_outer_m = 0.05  # contact evidence fades beyond this outside distance
 surface_soft_m = 0.01   # sigmoid softness for outside distance and penetration reliability
 penetration_floor = 0.40 # deeply buried contact stays uncertain, but is not erased by noisy scene normals
-motion_scale_mps = 0.10 # motion = 1-exp(-speed/scale); no dead zone near contact changes
+motion_scale_mps = 0.10 # far-wall speed scale for no-contact motion evidence
+motion_near_scale_mps = 0.15 # scale reached smoothly inside the 5 cm contact band
+motion_near_power = 3.0 # response rises smoothly from linear far away to cubic near the wall
 image_margin_px = 10.0  # visibility ramps continuously from image edge to this margin
 occ_perp_m = 0.02       # body vertices within this camera-ray radius can occlude a joint
 occ_front_m = 0.005     # vertex must be at least this far in front; small enough to catch palm/finger overlap

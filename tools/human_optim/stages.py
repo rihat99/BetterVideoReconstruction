@@ -33,6 +33,7 @@ from tools.smplx_robot.vertex_weights import geodesic_endeffector_weights
 
 from . import paths
 from .camera import fold_root_to_world, project, transform_points, world_from_cam
+from .confidence import CONTACT_CONFIDENCE_METHOD, CONTACT_CONFIDENCE_SCHEMA
 from .config import HumanOptimConfig
 from .keypoints import build_correspondence
 from .optimizer import PhaseSpec, optimize_person
@@ -621,10 +622,10 @@ def run_kinematics_2(source, pred: Path, cfg: HumanOptimConfig, device: str, *,
             raise SystemExit(
                 f"{cnt_path} is not a complete per-joint confidence artifact; "
                 "regenerate it with estimate_contacts") from exc
-        if schema != 4 or method != "motion-only-joint-label-v1":
+        if schema != CONTACT_CONFIDENCE_SCHEMA or method != CONTACT_CONFIDENCE_METHOD:
             raise SystemExit(
-                f"{cnt_path} has confidence schema/method {schema}/{method!r}; "
-                "expected 4/'motion-only-joint-label-v1', regenerate it")
+                f"{cnt_path} has confidence schema/method {schema}/{method!r}; expected "
+                f"{CONTACT_CONFIDENCE_SCHEMA}/{CONTACT_CONFIDENCE_METHOD!r}, regenerate it")
         expected = (len(cnt_oids), N, len(kin["joint_names"]))
         if cnt_contact.shape != expected or cnt_confidence.shape != expected:
             raise SystemExit(

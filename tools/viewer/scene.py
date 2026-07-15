@@ -34,6 +34,9 @@ _CONTACT_RGB, _FREE_RGB = (235, 45, 45), (60, 200, 90)
 # (contacts_1.npz ``label_confidence`` ∈ [0, 1], both classes): a neutral grey at ~0 →
 # these darker, saturated endpoints at ~1, so a more-certain label reads darker + bolder.
 _CONTACT_HI, _FREE_HI, _CONF_GREY = (150, 12, 12), (14, 120, 42), (150, 150, 150)
+# Depth trust override: calm green at trust=1 → bright magenta at trust=0;
+# missing depth gaps are a distinct neutral slate grey.
+_DEPTH_GOOD, _DEPTH_BAD, _DEPTH_NODATA = (90, 170, 120), (255, 0, 110), (105, 110, 125)
 # (``_FINGER_TOKENS`` — the hand joints excluded from the body skeleton — is imported
 # from ``loading`` so the skeleton build and the finger→wrist contact fold agree.)
 # cap on drawn camera frustums, so a long clip isn't a dense wire mess
@@ -60,6 +63,14 @@ def _conf_color(hot: bool, conf: float) -> tuple[int, int, int]:
     c = float(conf)
     t = min(max(c, 0.0), 1.0) if c == c else 0.0     # c == c is False for NaN
     return tuple(int(round(g + (h - g) * t)) for g, h in zip(_CONF_GREY, hi))
+
+
+def _depth_color(gap_cm: float, trust: float) -> tuple[int, int, int]:
+    """Joint-sphere RGB from depth trust; missing depth data is neutral slate grey."""
+    if not np.isfinite(gap_cm) or not np.isfinite(trust):
+        return _DEPTH_NODATA
+    t = 1.0 - float(np.clip(trust, 0.0, 1.0))
+    return tuple(int(round(g + (b - g) * t)) for g, b in zip(_DEPTH_GOOD, _DEPTH_BAD))
 
 
 class ClipScene:
@@ -188,6 +199,8 @@ class ClipScene:
         self.skel_nodes: dict[int, dict] = {}
         self._contact: dict[int, np.ndarray] = {}
         self._conf: dict[int, np.ndarray] = {}   # oid -> (N, J) label confidence, folded like contact
+        self._depth_gap: dict[int, np.ndarray] = {}
+        self._depth_trust: dict[int, np.ndarray] = {}
         self._skel_shown = False          # any skeleton node currently visible
         self._kin_translucent = False     # last-applied kinematic-mesh transparency
         kin = data.skinned.get("kinematics")
@@ -203,6 +216,12 @@ class ClipScene:
                 self._contact = {int(o): self.skel["contact"][i] for i, o in enumerate(c_oids)}
                 if self.skel.get("confidence") is not None:
                     self._conf = {int(o): self.skel["confidence"][i] for i, o in enumerate(c_oids)}
+                if self.skel.get("joint_depth_gap_cm") is not None:
+                    self._depth_gap = {int(o): self.skel["joint_depth_gap_cm"][i]
+                                       for i, o in enumerate(c_oids)}
+                if self.skel.get("joint_depth_trust") is not None:
+                    self._depth_trust = {int(o): self.skel["joint_depth_trust"][i]
+                                         for i, o in enumerate(c_oids)}
             cyl = _unit_cylinder()
             for p, person in enumerate(people):
                 if person is None:
@@ -501,6 +520,7 @@ class ClipScene:
         on = self.layers.get("skeleton", False) and self.active == "kinematics"
         # Confidence shading (on by default): grey→saturated red/green by label confidence.
         use_conf = self.layers.get("confidence", True)
+        use_depth = self.layers.get("depth_trust", False)
         if on != self._kin_translucent:
             for hp in self.skinned.get("kinematics", []):
                 if hp is not None:
@@ -519,11 +539,17 @@ class ClipScene:
                 bp = person["bone_pos"][f]                    # (J, 3) world joints
                 con = self._contact.get(int(kin_oids[p]))     # (N, J) bool or None
                 cf = self._conf.get(int(kin_oids[p]))         # (N, J) confidence or None
+                gap = self._depth_gap.get(int(kin_oids[p]))   # (N, J) gap cm or None
+                trust = self._depth_trust.get(int(kin_oids[p]))  # (N, J) trust or None
                 for j, sp in nd["spheres"].items():
                     if live:
                         sp.position = (float(bp[j, 0]), float(bp[j, 1]), float(bp[j, 2]))
                         hot = con is not None and f < len(con) and bool(con[f, j])
-                        if use_conf and cf is not None and f < len(cf):
+                        if use_depth:
+                            dg = gap[f, j] if gap is not None and f < len(gap) else np.nan
+                            dt = trust[f, j] if trust is not None and f < len(trust) else np.nan
+                            sp.color = _depth_color(dg, dt)
+                        elif use_conf and cf is not None and f < len(cf):
                             sp.color = _conf_color(hot, cf[f, j])
                         else:
                             sp.color = _CONTACT_RGB if hot else _FREE_RGB

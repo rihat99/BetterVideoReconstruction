@@ -74,11 +74,11 @@ def _load_dynamics(pred: Path) -> dict | None:
 
 
 def _load_skeleton(pred: Path) -> dict | None:
-    """Body-skeleton topology + per-joint scene contact (and its confidence) for the kinematic body.
+    """Body-skeleton topology + per-joint contact, confidence, and depth fit.
 
     The joint tree (``parents`` / ``joint_names``, 52-joint ``SMPLXMid`` order) comes
     from ``human_optim/kinematic_1.npz`` so the skeleton can be drawn even without a
-    contact pass; the per-joint contact flags — and the schema-4 per-joint
+    contact pass; the per-joint contact flags — and the schema-5 per-joint
     ``label_confidence`` ∈ [0, 1] (both classes) that shades the sphere — come from
     ``human_optim/contacts_1.npz`` when present (same joint order). ``None`` when no
     kinematic body exists.
@@ -92,6 +92,8 @@ def _load_skeleton(pred: Path) -> dict | None:
         "joint_names": [str(x) for x in kd["joint_names"]],      # (J,)
         "contact": None,                                         # (P, N, J) bool or None
         "confidence": None,                                      # (P, N, J) float or None
+        "joint_depth_gap_cm": None,                              # (P, N, J) float or None
+        "joint_depth_trust": None,                               # (P, N, J) float or None
         "contact_oids": None,                                    # (P,) or None
     }
     cf = pred / "human_optim" / "contacts_1.npz"
@@ -115,6 +117,17 @@ def _load_skeleton(pred: Path) -> dict | None:
                 RuntimeWarning, stacklevel=2)
             return out
         contact = contact.copy()                              # folding below must not mutate the npz
+        depth = {}
+        for key in ("joint_depth_gap_cm", "joint_depth_trust"):
+            if key not in cd.files:
+                continue
+            candidate = np.asarray(cd[key], np.float32)
+            if candidate.shape == expected:
+                depth[key] = candidate.copy()
+            else:
+                warnings.warn(
+                    f"ignoring incompatible {key} in {cf}; regenerate estimate_contacts",
+                    RuntimeWarning, stacklevel=2)
         conf = None
         try:
             schema = int(np.asarray(cd["confidence_schema"]).item())
@@ -124,7 +137,7 @@ def _load_skeleton(pred: Path) -> dict | None:
             with kin.open("rb") as body_file:
                 current_body_hash = hashlib.file_digest(body_file, "sha256").hexdigest()
             valid_confidence = (
-                schema == 4 and method == "motion-only-joint-label-v1"
+                schema == 5 and method == "depth-trust-motion-v1"
                 and candidate.shape == expected and np.isfinite(candidate).all()
                 and not bool(((candidate < 0.0) | (candidate > 1.0)).any())
                 and saved_body_hash == current_body_hash
@@ -143,7 +156,8 @@ def _load_skeleton(pred: Path) -> dict | None:
         # stage uses. Fold the confidence to match the OR: when the folded label is
         # contact, take the strongest touching vote (max over in-contact members); when
         # free, take the weakest member because the free label is an AND across all
-        # members. Mutates the copies; the npz is untouched.
+        # members. Depth fit takes the worst member: largest absolute gap and lowest
+        # trust. Mutates the copies; the npz is untouched.
         names = out["joint_names"]
         for side in ("left", "right"):
             wrist = names.index(f"{side}_wrist")
@@ -158,9 +172,21 @@ def _load_skeleton(pred: Path) -> dict | None:
                 mconf = conf[..., members]                    # (P, N, M)
                 c_hit = np.where(mcon, mconf, -np.inf).max(-1)  # strongest touching vote
                 conf[..., wrist] = np.where(folded, c_hit, mconf.min(-1))
+            gap = depth.get("joint_depth_gap_cm")
+            if gap is not None:
+                # worst member by magnitude, but keep its SIGNED value (sign
+                # distinguishes cloud-beyond-mesh stretch from cloud-in-front).
+                mgap = gap[..., members]
+                mag = np.where(np.isfinite(mgap), np.abs(mgap), -np.inf)
+                signed = np.take_along_axis(mgap, mag.argmax(-1)[..., None], -1)[..., 0]
+                gap[..., wrist] = np.where(np.isfinite(mag.max(-1)), signed, np.nan)
+            trust = depth.get("joint_depth_trust")
+            if trust is not None:
+                trust[..., wrist] = trust[..., members].min(-1)
             contact[..., wrist] = folded
         out["contact"] = contact
         out["confidence"] = conf
+        out.update(depth)
         out["contact_oids"] = contact_oids
     return out
 

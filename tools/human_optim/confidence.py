@@ -3,7 +3,7 @@
 The contact stage has already produced a binary label.  This module answers one
 smaller question: *how much should a learner trust that label in this frame?*
 
-Three continuous terms are enough:
+Four continuous terms are enough:
 
 ``visibility``
     The joint is in frame and not hidden by another body part in 3-D.  Visibility
@@ -17,15 +17,24 @@ Three continuous terms are enough:
     floor because imperfect scene normals can put a real contact inside the wall.
 
 ``motion``
-    Net joint speed over the contact readout's short window.  It rises from zero
-    immediately, rather than having the old 0.15 m/s dead zone.  This is the
-    strong witness for a no-contact limb approaching or leaving the wall.
+    Net joint speed over the contact readout's short window.  Its scale rises
+    smoothly near the guarded scene surface, so slow drift there stays uncertain
+    while a clear approach or departure remains strong.
+
+``depth trust``
+    Agreement between the posed body and the human depth cloud along camera rays.
+    It gates motion because both reconstructed joint position and drift become
+    unreliable when the local body fit is stretched in depth.
 
 For a contact label the evidence is ``surface``.  For a no-contact label it is
-only ``motion``. Final confidence is simply ``visibility * label_evidence``.
-There is no distance/floating-body detector and no binary-label persistence
-term: a stationary no-contact joint is deliberately untrusted even when the
-reconstruction places it far from the wall.
+depth-trusted ``motion``. Final confidence is simply
+``visibility * label_evidence``. Guarded distance only adjusts how much speed is
+needed to trust motion; it is never evidence by itself. There is no
+distance/floating-body detector and no binary-label persistence term: a
+stationary no-contact joint is deliberately untrusted even when the
+reconstruction places it far from the wall. This is essential because a
+whole-body floater can have a good local depth fit and a large apparent wall
+distance while its no-contact label is still wrong.
 
 The result is a heuristic training weight in ``[0, 1]``, not a calibrated
 probability.  The binary label itself remains unchanged.
@@ -36,6 +45,12 @@ import numpy as np
 import torch
 
 
+# Artifact version of the confidence written to contacts_<tag>.npz. Bump both
+# together. Light-weight consumers keep literal copies pinned to these values:
+# scripts/corpus.py, scripts/export_contact_dataset.py, tools/viewer/loading.py.
+CONTACT_CONFIDENCE_SCHEMA = 5
+CONTACT_CONFIDENCE_METHOD = "depth-trust-motion-v1"
+
 CONTACT_CONFIDENCE_DEFAULTS: dict[str, float] = {
     # Plausible signed-distance band for a contact.  Soft sigmoids avoid hard
     # thresholds while making deep burial lose, rather than gain, confidence.
@@ -43,9 +58,11 @@ CONTACT_CONFIDENCE_DEFAULTS: dict[str, float] = {
     "surface_outer_m": 0.05,
     "surface_soft_m": 0.01,
     "penetration_floor": 0.40,
-    # p_motion = 1-exp(-speed / motion_scale_mps).  At 0.1 m/s it is 0.63,
-    # versus the old formula which stayed exactly zero below 0.15 m/s.
+    # Motion scale and response power interpolate smoothly from the original far
+    # curve to a cubic near-surface curve using the contact band's sigmoid.
     "motion_scale_mps": 0.10,
+    "motion_near_scale_mps": 0.15,
+    "motion_near_power": 3.0,
     # Visibility.  The cubic smoothstep reaches exactly zero at occ_full body
     # vertices, so a clearly body-occluded joint is never exported as trustworthy.
     "image_margin_px": 10.0,
@@ -69,7 +86,8 @@ def confidence_config(overrides: dict | None = None) -> dict[str, float]:
             raise ValueError(f"contact_confidence.{key} must be finite")
     if numeric["surface_inner_m"] >= numeric["surface_outer_m"]:
         raise ValueError("contact_confidence.surface_inner_m must be < surface_outer_m")
-    for key in ("surface_soft_m", "motion_scale_mps",
+    for key in ("surface_soft_m", "motion_scale_mps", "motion_near_scale_mps",
+                "motion_near_power",
                 "image_margin_px", "occ_perp_m", "occ_front_m", "occ_subsample",
                 "occ_full"):
         if numeric[key] <= 0.0:
@@ -77,6 +95,11 @@ def confidence_config(overrides: dict | None = None) -> dict[str, float]:
     for key in ("penetration_floor",):
         if not 0.0 <= numeric[key] <= 1.0:
             raise ValueError(f"contact_confidence.{key} must be in [0, 1]")
+    if numeric["motion_near_scale_mps"] < numeric["motion_scale_mps"]:
+        raise ValueError(
+            "contact_confidence.motion_near_scale_mps must be >= motion_scale_mps")
+    if numeric["motion_near_power"] < 1.0:
+        raise ValueError("contact_confidence.motion_near_power must be >= 1")
     if not numeric["occ_subsample"].is_integer():
         raise ValueError("contact_confidence.occ_subsample must be an integer")
     return numeric
@@ -123,6 +146,7 @@ def joint_label_confidence(
     labels: torch.Tensor,
     guarded_sdf_m: torch.Tensor,
     drift_m: torch.Tensor,
+    depth_trust: torch.Tensor,
     projected_px: torch.Tensor,
     camera_depth_m: torch.Tensor,
     occluding_vertices: torch.Tensor,
@@ -144,6 +168,7 @@ def joint_label_confidence(
         raise ValueError(f"expected per-joint labels (N,J), got {tuple(shape)}")
     for name, value in (
         ("guarded_sdf_m", guarded_sdf_m), ("drift_m", drift_m),
+        ("depth_trust", depth_trust),
         ("camera_depth_m", camera_depth_m),
         ("occluding_vertices", occluding_vertices),
     ):
@@ -169,10 +194,20 @@ def joint_label_confidence(
     surface = near * penetration_reliability
     surface = torch.where(finite_guarded, surface, torch.zeros_like(surface))
 
-    # Motion starts contributing immediately and smoothly approaches one.
+    # Guarded distance adjusts the speed scale but never contributes evidence:
+    # zero speed therefore stays zero at every distance. Near the contact band,
+    # the inflated scale suppresses slow reconstruction drift while the cubic
+    # response preserves a clearly moving approach/leave witness.
     speed = torch.nan_to_num(drift_m, nan=0.0, posinf=0.0, neginf=0.0).clamp_min(0.0)
     speed = speed / float(window_s)
-    motion = -torch.expm1(-speed / c["motion_scale_mps"])
+    proximity = torch.sigmoid((c["surface_outer_m"] - d) / c["surface_soft_m"])
+    proximity = torch.where(finite_guarded, proximity, torch.zeros_like(proximity))
+    motion_scale = c["motion_scale_mps"] + proximity * (
+        c["motion_near_scale_mps"] - c["motion_scale_mps"])
+    motion_power = 1.0 + proximity * (c["motion_near_power"] - 1.0)
+    motion = -torch.expm1(-torch.pow(speed / motion_scale, motion_power))
+    trust = torch.nan_to_num(depth_trust, nan=0.0, posinf=0.0, neginf=0.0).clamp(0.0, 1.0)
+    motion = motion * trust
 
     # Continuous image-border visibility: zero at/outside the image boundary and
     # one after image_margin_px inside it.
@@ -190,9 +225,9 @@ def joint_label_confidence(
     visible_3d = _smoothstep01(1.0 - n_occ / c["occ_full"])
     visibility = image_visibility * visible_3d
 
-    # No-contact confidence is motion-only. Geometry must not make a stationary,
-    # floating, or depth-distorted limb look trustworthy merely because it is far
-    # from the reconstructed wall.
+    # No-contact confidence is depth-trusted motion only. Geometry must not make
+    # a stationary, floating, or depth-distorted limb look trustworthy merely
+    # because it is far from the reconstructed wall.
     label_evidence = torch.where(labels, surface, motion)
     label_confidence = visibility * label_evidence
 

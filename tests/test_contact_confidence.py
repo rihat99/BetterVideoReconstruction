@@ -13,11 +13,15 @@ from tools.human_optim.contacts import joint_occlusion_counts, lift_joint_min_di
 from tools.viewer.loading import _load_skeleton
 
 
-def _terms(*, labels, sdf, drift, occ=None, px=None, camera_depth=None):
+def _terms(*, labels, sdf, drift, depth_trust=None, occ=None, px=None, camera_depth=None):
     labels = torch.as_tensor(labels, dtype=torch.bool)
     sdf = torch.as_tensor(sdf, dtype=torch.float32)
     drift = torch.as_tensor(drift, dtype=torch.float32)
     shape = labels.shape
+    if depth_trust is None:
+        depth_trust = torch.ones(shape)
+    else:
+        depth_trust = torch.as_tensor(depth_trust, dtype=torch.float32)
     if occ is None:
         occ = torch.zeros(shape)
     else:
@@ -31,7 +35,7 @@ def _terms(*, labels, sdf, drift, occ=None, px=None, camera_depth=None):
     else:
         camera_depth = torch.as_tensor(camera_depth, dtype=torch.float32)
     return joint_label_confidence(
-        labels, sdf, drift, px, camera_depth, occ,
+        labels, sdf, drift, depth_trust, px, camera_depth, occ,
         height=100, width=100, window_s=0.35, cfg=confidence_config())
 
 
@@ -68,10 +72,37 @@ def test_approach_and_contact_transition_have_no_persistence_dip():
     assert terms["label_confidence"][1, 0] > 0.8
 
 
-def test_stationary_near_wall_no_contact_stays_uncertain():
-    terms = _terms(labels=[[False]], sdf=[[0.02]], drift=[[0.0]])
+def test_close_slow_no_contact_is_approximately_zero_confidence():
+    terms = _terms(labels=[[False]], sdf=[[0.02]], drift=[[0.014]])  # 0.04 m/s
+    assert 0.0 < terms["motion"][0, 0] < 0.025
+    assert terms["label_confidence"][0, 0] == terms["motion"][0, 0]
+
+
+def test_fast_near_wall_no_contact_stays_high_confidence():
+    terms = _terms(labels=[[False]], sdf=[[0.02]], drift=[[0.07]])  # 0.20 m/s
+    assert terms["motion"][0, 0] > 0.9
+    assert terms["label_confidence"][0, 0] > 0.9
+
+
+def test_slow_far_no_contact_stays_low_without_clearance_evidence():
+    near = _terms(labels=[[False]], sdf=[[0.02]], drift=[[0.014]])
+    far = _terms(labels=[[False]], sdf=[[1.0]], drift=[[0.014]])
+    assert near["motion"][0, 0] < 0.025
+    assert 0.3 < far["motion"][0, 0] < 0.35
+
+
+def test_zero_depth_trust_zeroes_no_contact_confidence():
+    terms = _terms(
+        labels=[[False]], sdf=[[1.0]], drift=[[0.35]], depth_trust=[[0.0]])
     assert terms["motion"][0, 0] == pytest.approx(0.0)
     assert terms["label_confidence"][0, 0] == pytest.approx(0.0)
+
+
+def test_depth_trust_does_not_change_contact_label_confidence():
+    trusted = _terms(labels=[[True]], sdf=[[0.0]], drift=[[0.0]], depth_trust=[[1.0]])
+    untrusted = _terms(labels=[[True]], sdf=[[0.0]], drift=[[0.0]], depth_trust=[[0.0]])
+    assert trusted["label_confidence"][0, 0] == pytest.approx(
+        untrusted["label_confidence"][0, 0])
 
 
 def test_stationary_far_no_contact_is_also_zero_confidence():
@@ -100,12 +131,12 @@ def test_implausibly_deep_contact_is_not_treated_as_certain():
 def test_motion_evidence_is_continuous_and_monotone_without_dead_zone():
     terms = _terms(
         labels=[[False], [False], [False], [False]],
-        sdf=[[0.0], [0.0], [0.0], [0.0]],
+        sdf=[[1.0], [1.0], [1.0], [1.0]],
         drift=[[0.0], [0.0035], [0.035], [0.35]],  # 0, .01, .1, 1 m/s
     )
     motion = terms["motion"][:, 0]
     assert motion[0] == pytest.approx(0.0)
-    assert 0.0 < motion[1] < motion[2] < motion[3] < 1.0
+    assert 0.0 < motion[1] < motion[2] < motion[3] <= 1.0
     assert motion[1] == pytest.approx(1.0 - np.exp(-0.1), abs=1e-6)
     assert motion[2] == pytest.approx(1.0 - np.exp(-1.0), abs=1e-6)
 
@@ -245,6 +276,10 @@ def test_confidence_config_rejects_invalid_ranges():
         confidence_config({"obsolete_gate": 0.5})
     with pytest.raises(ValueError, match="must be finite"):
         confidence_config({"motion_scale_mps": float("nan")})
+    with pytest.raises(ValueError, match="motion_near_scale_mps"):
+        confidence_config({"motion_scale_mps": 0.2, "motion_near_scale_mps": 0.1})
+    with pytest.raises(ValueError, match="motion_near_power"):
+        confidence_config({"motion_near_power": 0.5})
 
 
 def test_joint_drift_rejects_invalid_window_endpoints():
