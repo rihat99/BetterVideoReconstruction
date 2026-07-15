@@ -28,7 +28,7 @@ Three files under `geometry/`:
 - `scene.npz` — one static, merged point cloud of everything that is not a person:
   the wall, the holds, the ground. Per point: position, colour, VGGT depth
   confidence (max over the merged points), how many raw points merged into it
-  (`count`), and the voxel size used.
+  (`count`), a **surface normal** (see below), and the voxel size used.
 - `human.npz` — the person's depth points, kept **per frame and unmerged** (the
   person moves; merging frames would smear them). Per point: position, colour,
   confidence, `frame_id` (index into `frame_indices`) and `obj_id` (which person).
@@ -109,10 +109,41 @@ Per merged point: position = count-weighted centroid, confidence = max, colour =
 count-weighted mean.
 
 One honest limit: VGGT's depth for the same wall disagrees by a few centimetres
-between frames, so the merged wall is a *slab* about 1–4 cm thick (measured local
-surface σ 0.3–2.5 cm), not an ideal sheet. The merge collapses duplicates; it does
-not flatten this noise. Anything that needs a crisper surface has to average across
-the slab (the scene-normal estimation downstream effectively does).
+between frames, so the merged wall is a *slab* (measured local surface σ 0.3–2.5 cm),
+not an ideal sheet. The merge collapses duplicates; it does not flatten this noise.
+The next step removes the part of the slab that hides behind the rest.
+
+### Remove the hidden points (the slab's back)
+
+When VGGT's frames disagree by more than a voxel — up to a whole duplicated
+"ghost" copy of the wall a few voxels behind the real one — the merge keeps both
+layers, because they occupy different voxels. Those back points sit behind the
+front surface from *every* camera. The prune makes that the test:
+
+**keep a point only if, in at least one frame, it is within one voxel of the
+front-most point in its z-buffer bin.**
+
+The z-buffer bins are `voxel_px` pixels wide — the merge voxel's own image
+footprint — so the lateral test matches the cloud's resolution. The one-voxel
+depth band lets a surface that slants through a bin keep all of its points. Both
+quantities derive from the merge voxel, so the prune adds no knobs.
+
+Why this cannot eat real geometry: a genuinely occluded surface (a wall patch
+behind a hold, a corridor seen through a doorway) wins its own bins in the frames
+that actually saw it — it can only lose everywhere if something sits in front of
+it in *every* frame, and the only thing that does that is a duplicate estimate of
+the same surface. One copy always survives; we keep the front one.
+
+Measured on real clips: on clean reconstructions the prune is almost a no-op
+(~1% of points); on the clip with the worst multi-frame disagreement it removed
+30% of the merged points — coherent sheets with hundreds of raw observations
+each, sitting several voxels behind the front wall. Exactly the ghost layer.
+
+One known edge: a bin is several pixels wide, so right at a depth discontinuity
+(the rim of a hold) a wall point can share a bin with the hold in front of it
+and lose that frame's vote even though its own pixel saw it. It still survives
+through any frame that views the rim from a different angle; only under nearly
+static cameras could a one-bin-wide rim of real points be lost.
 
 ### Drop small clusters
 
@@ -122,6 +153,22 @@ These are floating depth fragments and off-surface blobs — for example an untr
 person VGGT placed in mid-air. Because the voxel size follows the pixel footprint,
 "25 voxels" corresponds to roughly the same *image area* across scenes, so the
 filter behaves consistently for near and far clips.
+
+### Normals are computed here, once
+
+Every surviving scene point gets a surface normal, saved in `scene.npz`. The
+normal is the smallest principal axis of the point's 16 nearest neighbours
+(local PCA), flipped to face the nearest camera — so "outward" consistently
+means "toward the cameras that saw the wall". These used to be recomputed by
+every downstream consumer (the kinematic stage's penetration term, the contact
+stages, the viewer); now they are computed once, after the pruning, on the final
+cloud. Consumers load them and subset them together with the points; geometry
+written before this change falls back to the old on-the-fly estimate. Normals
+are unit direction vectors, so the later metricization leaves them untouched.
+
+The viewer can show them: the **scene normals** layer draws one arrow per scene
+point, coloured by direction, sized by the merge voxel — a quick way to spot
+flipped or noisy normals.
 
 ## What fuse does not do
 
@@ -137,7 +184,7 @@ filter behaves consistently for near and far clips.
 
 | knob | default | meaning |
 |---|---|---|
-| `voxel_px` | 5.0 | scene merge voxel, in pixel footprints at the median scene depth |
+| `voxel_px` | 5.5 | scene merge voxel, in pixel footprints at the median scene depth (also sizes the hidden-point z-buffer bins) |
 | `conf_drop_q` | 0.3 | per-frame fraction of lowest-confidence depth dropped (scene only) |
 | `edge_rtol` | 0.04 | relative depth jump that marks a flying pixel; 0 disables |
 | `human_dilate` | 8 | px the person mask grows before being subtracted from the scene |

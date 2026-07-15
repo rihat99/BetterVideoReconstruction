@@ -22,9 +22,16 @@ saved files in place. This stage:
      grid — because a surface straddling a cell face otherwise leaves two
      near-coincident centroids on either side. The human is kept per-frame,
      unmerged (the person moves);
-  4. drops small disconnected voxel clusters from the scene — floating depth
+  4. prunes hidden scene points: VGGT's per-frame depth of the same wall differs
+     by a few cm, leaving a slab; only points that are the front-most projection
+     in at least one pixel of at least one frame survive (parameter-free
+     z-buffer visibility over the merged cloud);
+  5. drops small disconnected voxel clusters from the scene — floating depth
      fragments and off-surface blobs (e.g. an untracked bystander VGGT placed off
-     the wall).
+     the wall);
+  6. estimates one camera-oriented PCA normal per surviving scene point and saves
+     it with the cloud, so downstream stages (penetration SDF, contacts, viewer)
+     load normals instead of recomputing them.
 
 Per-clip I/O (``--source`` frames + ``--predictions out/<stem>/``)::
 
@@ -32,7 +39,7 @@ Per-clip I/O (``--source`` frames + ``--predictions out/<stem>/``)::
             vggt/camera.npz, vggt/depth/frame_*.npz     (needs [vggt] save_depth)
             sam3/<obj>/frame_*.png
     writes: geometry/transform.npz   extrinsics + original-res K (scale=1, metric=False)
-            geometry/scene.npz        merged background points (+ colour)
+            geometry/scene.npz        merged background points (+ colour + normals)
             geometry/human.npz        per-frame human points (frame_id, obj_id, colour)
 
 Standalone CLI::
@@ -60,6 +67,7 @@ from tools.config import load_toml, section
 from tools.geometry.backproject import backproject
 from tools.geometry.clean import clean_depth
 from tools.geometry.intrinsics import denormalize_K
+from tools.geometry.normals import estimate_point_normals
 from tools.geometry.voxel import group_reduce, large_component_mask, voxel_downsample
 from tools.mask_io import read_binary_mask
 from tools.source import resolve_source
@@ -131,6 +139,40 @@ def _merge_scene(points: torch.Tensor, conf: torch.Tensor, color: torch.Tensor,
     col2.index_add_(0, inv2, col1 * w.unsqueeze(1))
     col2 = (col2 / wsum.unsqueeze(1)).round().to(torch.uint8)
     return cent2, conf2, col2, wsum.to(torch.int32), coords
+
+
+def _visible_mask(points: torch.Tensor, extr: np.ndarray, K_px: np.ndarray,
+                  hv: int, wv: int, *, bin_px: float, voxel: float) -> torch.Tensor:
+    """Keep-mask: a point survives iff it sits within one voxel of the FRONT of
+    its z-buffer bin in at least one frame.
+
+    VGGT's per-frame depth of the same wall disagrees by a few cm, so the merged
+    wall is a slab; its back side hides behind the front surface in every view.
+    The z-buffer bins are ``bin_px`` pixels wide — the merge voxel's own image
+    footprint — so the lateral bin matches the cloud's resolution, and the depth
+    band is one ``voxel`` so a surface slanting through a bin keeps all its
+    points. A genuinely occluded surface (a wall patch behind a hold) still wins
+    its own bins in the frames that actually saw it, so real geometry survives.
+    Both quantities derive from the merge voxel — no extra knobs.
+    """
+    dev = points.device
+    keep = torch.zeros(points.shape[0], dtype=torch.bool, device=dev)
+    E = torch.from_numpy(extr).to(dev)
+    K = torch.from_numpy(K_px).to(dev)
+    bin_px = max(bin_px, 1.0)   # a sub-pixel bin would be a pixel z-buffer with a huge grid
+    wb = int(np.ceil(wv / bin_px))
+    nbins = int(np.ceil(hv / bin_px)) * wb
+    for k in range(E.shape[0]):
+        Xc = points @ E[k, :3, :3].T + E[k, :3, 3]
+        z = Xc[:, 2]
+        u = K[k, 0, 0] * Xc[:, 0] / z + K[k, 0, 2]
+        v = K[k, 1, 1] * Xc[:, 1] / z + K[k, 1, 2]
+        sel = torch.where((z > 0) & (u >= 0) & (u < wv) & (v >= 0) & (v < hv))[0]
+        bins = (v[sel] / bin_px).long() * wb + (u[sel] / bin_px).long()
+        zmin = torch.full((nbins,), torch.inf, dtype=z.dtype, device=dev)
+        zmin.scatter_reduce_(0, bins, z[sel], "amin", include_self=False)
+        keep[sel[z[sel] <= zmin[bins] + voxel]] = True
+    return keep
 
 
 def _prep_frame(pred, frame_path, idx, objs, climber_ids, args, hv, wv):
@@ -216,25 +258,44 @@ def _build_geometry(args, pred, cam, frame_indices, extr, K_px, objs, climber_id
         centroids, scene_confidence, scene_color, counts, coords = _merge_scene(
             all_scene, torch.cat(scene_conf), torch.cat(scene_col), voxel)
 
+        # Remove the slab's back side: keep only points visible from some camera.
+        vis = _visible_mask(centroids, extr, K_px, hv, wv,
+                            bin_px=args.voxel_px, voxel=voxel)
+        n_hidden = int((~vis).sum())
+        centroids, counts, coords = centroids[vis], counts[vis], coords[vis]
+        scene_confidence, scene_color = scene_confidence[vis], scene_color[vis]
+
         # Drop small disconnected clusters — floating depth fragments and off-surface
         # blobs (e.g. an untracked bystander VGGT placed off the wall).
         keep = large_component_mask(coords, args.min_scene_voxels)
         n_dropped = int((~keep).sum())
         centroids, counts = centroids[keep], counts[keep]
         scene_confidence, scene_color = scene_confidence[keep], scene_color[keep]
+
+        # One camera-oriented PCA normal per surviving point, saved with the cloud
+        # so downstream stages (penetration SDF, contacts, viewer) just load them.
+        if centroids.shape[0]:
+            cam_centers = torch.from_numpy(
+                -np.einsum("fji,fj->fi", extr[:, :3, :3], extr[:, :3, 3])).to(centroids)
+            scene_normals = estimate_point_normals(centroids, cam_centers)
+        else:
+            scene_normals = empty
     else:  # e.g. the person fills every frame — the human ruler can still run
-        voxel, n_dropped = 0.0, 0
+        voxel, n_dropped, n_hidden = 0.0, 0, 0
         centroids, counts = empty, empty[:, 0].to(torch.int32)
         scene_confidence, scene_color = empty[:, 0], empty.to(torch.uint8)
+        scene_normals = empty
     if human_pts:
         human_points, all_obj, all_fid = torch.cat(human_pts), torch.cat(human_obj), torch.cat(human_fid)
     else:
         human_points, all_obj, all_fid = empty, empty[:, 0].to(torch.int32), empty[:, 0].to(torch.int32)
     return dict(scene_points=centroids, scene_count=counts, scene_confidence=scene_confidence,
-                scene_color=scene_color, human_points=human_points,
+                scene_color=scene_color, scene_normals=scene_normals,
+                human_points=human_points,
                 human_color=torch.cat(human_col) if human_col else empty.to(torch.uint8),
                 human_confidence=torch.cat(human_conf) if human_conf else empty[:, 0],
-                human_frame_id=all_fid, human_obj_id=all_obj, n_dropped=n_dropped,
+                human_frame_id=all_fid, human_obj_id=all_obj,
+                n_hidden=n_hidden, n_dropped=n_dropped,
                 n_human=sum(int(t.shape[0]) for t in human_pts), src_fps=src_fps,
                 voxel=voxel)
 
@@ -282,6 +343,7 @@ def fuse(args: argparse.Namespace) -> None:
     # metricized state (crash mid-rescale) is detectable and self-healing.
     _save_cloud(out_dir / "scene.npz", built["scene_points"],
                 colors=built["scene_color"], confidence=built["scene_confidence"],
+                normals=built["scene_normals"],
                 count=built["scene_count"].to(torch.int32),
                 voxel_size=np.float32(built["voxel"]), world_scale=np.float32(1.0))
     _save_cloud(
@@ -292,8 +354,8 @@ def fuse(args: argparse.Namespace) -> None:
         frame_indices=frame_indices.astype(np.int32), world_scale=np.float32(1.0),
     )
     print(f"  scene {built['scene_points'].shape[0]} pts (voxel={built['voxel']:.4f}, "
-          f"{built['n_dropped']} dropped: small clusters) | human {built['n_human']} pts "
-          f"(climbers {climber_ids}) -> {out_dir}\n"
+          f"{built['n_hidden']} hidden pruned, {built['n_dropped']} dropped: small clusters) "
+          f"| human {built['n_human']} pts (climbers {climber_ids}) -> {out_dir}\n"
           f"  world is UP-TO-SCALE — run estimate_scale next to make it metric")
 
 

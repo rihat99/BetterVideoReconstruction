@@ -58,7 +58,7 @@ import numpy as np  # noqa: E402
 import torch  # noqa: E402
 
 from tools.config import load_toml  # noqa: E402
-from tools.geometry.normals import estimate_point_normals  # noqa: E402
+from tools.geometry.normals import load_scene_cloud  # noqa: E402
 from tools.human_optim import (  # noqa: E402
     contact_from_sdf, drift_gated_contact, joint_drift, joint_guarded_min_sdf,
     joint_occlusion_counts, lift_joint_contact, lift_joint_min_distance,
@@ -171,15 +171,12 @@ def run(source: str | Path, predictions_dir: str | Path, config_path: str | Path
     K = torch.as_tensor(tr["intrinsics_px_orig"], dtype=torch.float32, device=device)  # (N,3,3)
     cam_centers = world_from_cam(extr)[:, :3, 3]
 
-    scene_pts = torch.as_tensor(sc["points"], dtype=torch.float32, device=device)
-    scene_conf = torch.as_tensor(sc["confidence"], dtype=torch.float32, device=device)
-    q = float(cc.get("conf_drop_q", 0.0))          # quantile confidence gate (arbitrary VGGT conf scale)
-    if q > 0.0 and scene_conf.numel():
-        keep = scene_conf >= torch.quantile(scene_conf, q)
-        scene_pts, scene_conf = scene_pts[keep], scene_conf[keep]
-    scene_normals = estimate_point_normals(scene_pts, cam_centers, k=int(cc["normal_k"]))
-    print(f"[estimate_contacts] scene cloud {scene_pts.shape[0]} pts, PCA normals "
-          f"k={int(cc['normal_k'])}; close<{float(cc['close_thresh_m']) * 100:.0f}cm")
+    scene_pts, scene_normals, scene_conf = load_scene_cloud(
+        sc, cam_centers, conf_drop_q=float(cc.get("conf_drop_q", 0.0)),
+        k=int(cc["normal_k"]), device=device)
+    print(f"[estimate_contacts] scene cloud {scene_pts.shape[0]} pts, normals: "
+          f"{'fuse' if 'normals' in sc else 'PCA fallback'}; "
+          f"close<{float(cc['close_thresh_m']) * 100:.0f}cm")
 
     mid = load_smplx_mid(_DEFAULT_SMPLX_MODEL, device)
     J = mid.num_joints

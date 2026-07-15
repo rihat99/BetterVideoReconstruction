@@ -23,7 +23,7 @@ from pathlib import Path
 import numpy as np
 import torch
 
-from tools.geometry.normals import estimate_point_normals
+from tools.geometry.normals import load_scene_cloud
 from tools.smplx_robot import (
     load_smplx_mid, make_smplx_inertial_model, remap_q_bh_to_model,
 )
@@ -212,19 +212,13 @@ def _load_scene(pred: Path, knobs: dict, wfc: torch.Tensor, device, tag: str):
         print(f"[{tag}] no geometry/scene.npz; scene terms OFF")
         return None, None, None
     sc = dict(np.load(scene_path, allow_pickle=True))
-    scene_pts = torch.as_tensor(sc["points"], dtype=torch.float32, device=device)
-    scene_conf = torch.as_tensor(sc["confidence"], dtype=torch.float32, device=device)
-    # Quantile confidence gate: drop the lowest conf_drop_q fraction of scene voxels
-    # (the raw VGGT confidence scale is arbitrary, so the old absolute floor never
-    # fired). The scene is already per-frame conf-gated at fuse; this trims the
-    # least-reliable merged voxels before the penetration/attraction NN search.
-    q = float(knobs["penetration"].get("conf_drop_q", 0.0))
-    if q > 0.0 and scene_conf.numel():
-        keep = scene_conf >= torch.quantile(scene_conf, q)
-        scene_pts, scene_conf = scene_pts[keep], scene_conf[keep]
-    nk = int(knobs["penetration"]["normal_k"])
-    scene_normals = estimate_point_normals(scene_pts, wfc[:, :3, 3], k=nk)
-    print(f"[{tag}] scene terms ON ({scene_pts.shape[0]} pts, PCA normals k={nk})")
+    # Quantile confidence gate + fuse-stored normals (PCA fallback for old
+    # artifacts) — shared with estimate_contacts / score_contacts.
+    scene_pts, scene_normals, scene_conf = load_scene_cloud(
+        sc, wfc[:, :3, 3], conf_drop_q=float(knobs["penetration"].get("conf_drop_q", 0.0)),
+        k=int(knobs["penetration"]["normal_k"]), device=device)
+    src = "fuse" if "normals" in sc else "PCA fallback"
+    print(f"[{tag}] scene terms ON ({scene_pts.shape[0]} pts, normals: {src})")
     return scene_pts, scene_normals, scene_conf
 
 

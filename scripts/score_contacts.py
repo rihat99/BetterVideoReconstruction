@@ -38,7 +38,7 @@ import tomllib  # noqa: E402
 import numpy as np  # noqa: E402
 import torch  # noqa: E402
 
-from tools.geometry.normals import estimate_point_normals  # noqa: E402
+from tools.geometry.normals import load_scene_cloud  # noqa: E402
 from tools.human_optim import (  # noqa: E402
     drift_gated_contact, joint_drift, joint_guarded_min_sdf, joint_occlusion_counts,
     merge_contact_spans, project,
@@ -216,14 +216,8 @@ def _readout_signals(mid, betas, q, scale, scene_pts, scene_normals, scene_conf,
 def _load_scene_readout(pred: Path, cc: dict, cam_centers: torch.Tensor, device: str):
     """Scene cloud + PCA normals, gated exactly as ``estimate_contacts`` does."""
     sc = dict(np.load(pred / "geometry" / "scene.npz", allow_pickle=True))
-    scene_pts = torch.as_tensor(sc["points"], dtype=torch.float32, device=device)
-    scene_conf = torch.as_tensor(sc["confidence"], dtype=torch.float32, device=device)
-    q = float(cc.get("conf_drop_q", 0.0))
-    if q > 0.0 and scene_conf.numel():
-        keep = scene_conf >= torch.quantile(scene_conf, q)
-        scene_pts, scene_conf = scene_pts[keep], scene_conf[keep]
-    scene_normals = estimate_point_normals(scene_pts, cam_centers, k=int(cc["normal_k"]))
-    return scene_pts, scene_normals, scene_conf
+    return load_scene_cloud(sc, cam_centers, conf_drop_q=float(cc.get("conf_drop_q", 0.0)),
+                            k=int(cc["normal_k"]), device=device)
 
 
 def _load_contact_cfg(path: Path) -> tuple[dict, dict]:
