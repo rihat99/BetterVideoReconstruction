@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import gc
 import hashlib
 import json
 import math
@@ -652,6 +653,8 @@ def _run_farm_worker(
 ) -> int:
     """Run a geometry or human-optimization shard in-process, isolating scene failures."""
     sys.path.insert(0, str(_STAGES_DIR))
+    import torch  # noqa: E402  (worker-only; the orchestrator stays torch-free)
+
     if stage == "geometry":
         import estimate_scale as scale_stage  # noqa: E402
         import fuse_geometry as fuse_stage  # noqa: E402
@@ -713,6 +716,10 @@ def _run_farm_worker(
             traceback.print_exc()
         finally:
             _drop_farm(farm, spec)
+            # Release the allocator cache so co-located shards hold only their
+            # CURRENT scene's working set, not the peak of the biggest scene seen.
+            gc.collect()
+            torch.cuda.empty_cache()
     print(f"[worker] {ok}/{len(entries)} scene(s) have {spec.out_stage}/{spec.out_check}")
     return 0 if ok == len(entries) else 1
 
