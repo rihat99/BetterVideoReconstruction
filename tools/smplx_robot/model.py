@@ -20,12 +20,19 @@ if TYPE_CHECKING:
     from better_robot.data_model.model import Model
 
 
-def load_smplx_mid(model_path: str | Path, device: str | torch.device = "cpu") -> "SMPLXMid":
-    """Load a :class:`SMPLXMid` from a ``SMPLX_*.npz`` file."""
-    from better_human.smpl import SMPLXMid
+def load_smplx_mid(model_path: str | Path | None = None, device: str | torch.device = "cpu"):
+    """Load the 52-joint SMPL-X body used across the pipeline.
 
-    model = SMPLXMid(model_path=str(model_path))
-    return model.to(device).eval()
+    The body now comes from the rewritten BetterHuman via :func:`tools.body.load_body`
+    (a ``use_face=False`` :class:`better_human.SMPLX`, which reproduces the old
+    ``SMPLXMid`` 52-joint / ``q (211)`` surface — same ``forward`` / ``forward_shape``
+    / ``from_classic`` / ``to_classic`` and topology attributes). ``model_path`` is
+    kept for call-site compatibility but ignored: BetterHuman bundles its own
+    validated ``SMPLX_NEUTRAL.npz`` (the old ``../better_human`` weights are gone).
+    """
+    from tools.body import load_body
+
+    return load_body(device=device)
 
 
 def _parents_from_model(smplx_mid: "SMPLXMid") -> list[int]:

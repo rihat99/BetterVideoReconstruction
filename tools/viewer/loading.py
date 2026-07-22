@@ -276,17 +276,18 @@ def _load_video_frames(pred: Path, n_frames: int, *, video_dir: Path | None,
 
 
 def _load_smplx_mid(device: str):
-    """Load the 52-joint ``SMPLXMid`` model + resolve the torch device (``mid, dev``)."""
+    """Load the 52-joint SMPL-X body + resolve the torch device (``mid, dev``).
+
+    The body comes from the rewritten BetterHuman via :func:`tools.body.load_body`,
+    which reproduces the old ``SMPLXMid`` surface the viewer uses (``forward_shape``,
+    ``faces``, ``lbs_weights``, ``joint_names``, ``from_classic`` …).
+    """
     import torch
 
-    bh_src = _REPO_ROOT.parent / "better_human" / "src"
-    if bh_src.exists() and str(bh_src) not in sys.path:
-        sys.path.insert(0, str(bh_src))
-    from better_human.smpl import SMPLXMid
+    from tools.body import load_body
 
-    model_path = _REPO_ROOT.parent / "better_human" / "models" / "smplx" / "SMPLX_NEUTRAL.npz"
     dev = torch.device(device if torch.cuda.is_available() else "cpu")
-    return SMPLXMid(model_path=str(model_path)).to(dev).eval(), dev
+    return load_body(device=dev), dev
 
 
 def _smplx_kinematic_skinned(npz_path: Path, *, device: str = "cuda"):
