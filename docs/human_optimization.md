@@ -180,7 +180,6 @@ hands (resolved at the wrist), the two feet, and the two ankles — minimizing:
 |---|---|
 | `base_wrench` | squared base wrench — the physics residual |
 | `force_magnitude` | small L2 on the forces — picks the smallest forces that explain the motion |
-| `friction_cone` | keeps each foot/ankle force inside a friction cone (see below); hands are exempt |
 | `force_smooth_mag` | discourages frame-to-frame change in force **magnitude** on persistent contacts |
 | `force_smooth_dir` | the same for force **direction**, smoothed more gently — the force may re-aim faster than it changes size |
 | `torque_smooth` | the same for the joint torques |
@@ -190,16 +189,19 @@ A joint carries a force only on the frames it is labelled in contact.
 **Friction cone.** A hold or foothold can only *push* on the body, never pull, and it can
 only push sideways so much before the foot slips. The forces it is allowed to apply
 therefore form a cone around the surface normal, opening to a half-angle θ (default 45°,
-so the sideways force may be at most `tan θ = 1` times the outward push). The
-`friction_cone` term penalises any foot or ankle force that leaves this cone — including
-one aimed *into* the surface (a pull), which is why feet and ankles need no separate
-no-pull rule. The surface normal at each contact comes from the fused scene cloud: we take
-the nearest scene points to the joint and average their stored normals, which already
-point out of the wall toward the climber. A contact gets no cone when the joint is too far
-from any surface, or when the neighbouring normals disagree with each other (a thin hold or
-a concave corner averages opposing normals to nothing — better no cone than one aimed
-arbitrarily). Hands are left out on purpose — a climbing hand grips a hold and pulls down
-and inward on it, so its force is genuinely bilateral.
+so the sideways force may be at most `tan θ = 1` times the outward push). The cone is not
+a loss term — it is built into the force itself. At each coned contact the force is a sum
+of the cone's four *edge directions* (the normal tilted by θ toward each side), each
+scaled by a learned non-negative amount. Any such sum lies inside the pyramid those edges
+span, so the force can never leave the cone or pull — by construction, with no weight to
+tune. (The pyramid is inscribed in the round cone, so between its edges it is slightly
+stricter than θ.) The surface normal at each contact comes from the fused scene cloud: we
+take the nearest scene points to the joint and average their stored normals, which already
+point out of the wall toward the climber. A contact whose joint is too far from any
+surface, or whose neighbouring normals disagree (a thin hold or a concave corner averages
+opposing normals to nothing), falls back to a free force with no cone — better none than
+one aimed arbitrarily. Hands are left out on purpose — a climbing hand grips a hold and
+pulls down and inward on it, so its force is genuinely bilateral.
 
 Force smoothness is split in two so the **magnitude** of a contact force can be held
 steadier than its **direction**: `force_smooth_mag` damps the along-force change and

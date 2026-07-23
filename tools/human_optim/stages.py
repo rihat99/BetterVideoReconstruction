@@ -810,6 +810,26 @@ def _cone_normals(joint_xyz: torch.Tensor, scene_pts: torch.Tensor,
     return normals, valid_t
 
 
+def _cone_generators(normals: torch.Tensor, mu: float) -> torch.Tensor:
+    """Unit edge directions ``(..., 4, 3)`` of the friction pyramid around ``normals``.
+
+    Per normal ``n̂`` a tangent basis ``(t1, t2)`` is built and each edge is
+    ``normalize(n̂ ± μ·t)`` — a direction on the cone boundary at half-angle
+    ``atan μ``. Any nonnegative combination of the four edges lies in the pyramid
+    they span, which is inscribed in the true cone (exact along the edge planes,
+    slightly conservative between them).
+    """
+    n = normals
+    seed = torch.zeros_like(n)
+    seed[..., 0] = 1.0
+    seed[n[..., 0].abs() > 0.9] = torch.tensor([0.0, 1.0, 0.0], device=n.device)
+    t1 = torch.cross(n, seed, dim=-1)
+    t1 = t1 / t1.norm(dim=-1, keepdim=True).clamp_min(1e-9)
+    t2 = torch.cross(n, t1, dim=-1)
+    edges = torch.stack([n + mu * t1, n - mu * t1, n + mu * t2, n - mu * t2], dim=-2)
+    return edges / edges.norm(dim=-1, keepdim=True).clamp_min(1e-9)
+
+
 def _solve_person(mid, betas, q_bh, contact_bool, valid, gravity_world, *,
                   weights, groups, dyn_opt, fps, device, label="",
                   scene_pts=None, scene_normals=None, friction=None):
@@ -860,12 +880,14 @@ def _solve_person(mid, betas, q_bh, contact_bool, valid, gravity_world, *,
 
     # Friction cones on the non-hand contact groups (feet + ankles): a wall/floor contact can
     # only push, and its tangential force is capped at μ·(normal force); hands are bilateral
-    # (grasp + pull) and get none. One surface normal per (frame, cone joint) from the scene
-    # cloud, detached (q frozen ⇒ joint positions static). The geometry is precomputed whenever
-    # the scene is present so the readout can report the cone violation even at weight 0; the
-    # cone loss itself is added only when friction_cone > 0.
+    # (grasp + pull) and keep a free force vector. The cone is enforced BY CONSTRUCTION: on
+    # cone entries the force is a softplus-nonnegative combination of the four pyramid edge
+    # directions, so it cannot leave the pyramid inscribed in the cone — no penalty term, no
+    # weight. Normals come from the scene cloud, detached (q frozen ⇒ joint positions static);
+    # a cone entry without a usable normal (far surface, incoherent patch) falls back to a
+    # free vector, like a hand.
     cone_cols = [c for c, gn in enumerate(group_names) if "hand" not in gn]
-    cone_n = cone_mask = None
+    cone_n = cone_mask = cone_w = gen = None
     mu = math.tan(math.radians(float(friction["half_angle_deg"]))) if friction else 1.0
     if cone_cols and friction is not None and scene_pts is not None and scene_pts.shape[0]:
         cone_ids = contact_ids[cone_cols]
@@ -874,34 +896,53 @@ def _solve_person(mid, betas, q_bh, contact_bool, valid, gravity_world, *,
             joint_xyz, scene_pts, scene_normals,
             int(friction["normal_k"]), float(friction["max_dist_m"]))
         cone_mask = (mask[:, cone_cols].bool() & cone_valid).to(dtype)     # (N, Cc)
+        if bool(cone_mask.any()):
+            gen = _cone_generators(cone_n, mu).detach()                    # (N, Cc, 4, 3)
+            cone_w = torch.zeros((N, C, 1), dtype=dtype, device=dev)
+            cone_w[:, cone_cols, 0] = cone_mask
 
     def cone_violation(f: torch.Tensor) -> torch.Tensor:
-        """``relu(‖f_t‖ − μ·f_n)`` per (frame, cone joint): the cone + unilaterality residual.
+        """``relu(‖f_t‖ − μ·f_n)`` per (frame, cone joint) vs the TRUE cone — a readout.
 
-        ``f_n = f·n̂`` (signed normal component), ``f_t = f − f_n n̂``. A pulling contact
-        (``f_n < 0``) grows the residual, so this one term also forbids pulling. The
-        tangential norm is eps-safe (plain ``.norm()`` has no gradient at 0)."""
+        ``f_n = f·n̂`` (signed normal component), ``f_t = f − f_n n̂``. Generator forces
+        lie in the pyramid inscribed in the cone, so this should be ~0; it is printed
+        as an invariant check, not optimized."""
         fc = f[:, cone_cols]                                               # (N, Cc, 3)
         f_n = (fc * cone_n).sum(-1)                                        # (N, Cc)
         f_t = fc - f_n[..., None] * cone_n
         ft = f_t.pow(2).sum(-1).add(1e-12).sqrt()
         return torch.relu(ft - mu * f_n)
 
-    f_world = torch.zeros((N, C, 3), dtype=dtype, device=dev, requires_grad=True)
+    # Leaves: a free world force per (frame, group), and — on cone entries — four
+    # generator activations whose softplus replaces it. softplus (not relu/square) so no
+    # activation has a dead zero-gradient point and the map is smooth for L-BFGS.
+    f_free = torch.zeros((N, C, 3), dtype=dtype, device=dev, requires_grad=True)
+    gen_u = None
+    if gen is not None:
+        gen_u = torch.zeros((N, len(cone_cols), 4), dtype=dtype, device=dev, requires_grad=True)
+
+    def compose_forces() -> torch.Tensor:
+        """World force ``(N, C, 3)``: pyramid-generator force on cone entries, free elsewhere."""
+        if gen_u is None:
+            return f_free
+        lam = torch.nn.functional.softplus(gen_u)                          # (N, Cc, 4) ≥ 0
+        f_cone = torch.einsum("ncg,ncgd->ncd", lam, gen)                   # (N, Cc, 3) in the pyramid
+        full = torch.zeros((N, C, 3), dtype=dtype, device=dev)
+        full[:, cone_cols] = f_cone
+        return cone_w * full + (1.0 - cone_w) * f_free
+
     w_base = float(weights["base_wrench"])
     w_mag = float(weights["force_magnitude"])
     w_fs_mag = float(weights.get("force_smooth_mag", 0.0))
     w_fs_dir = float(weights.get("force_smooth_dir", 0.0))
-    w_cone = float(weights.get("friction_cone", 0.0))
     w_ts = float(weights["torque_smooth"])
 
     def closure():
         opt.zero_grad()
+        f_world = compose_forces()
         fext, f_eff = _build_fext(f_world, mask, R_w2l, contact_ids, model.njoints)
         tau = rnea(model, q_model, v, a, fext=fext)
         loss = 0.5 * ((w_base * tau[..., :6]).pow(2).sum() + (w_mag * f_eff).pow(2).sum())
-        if w_cone > 0.0 and cone_mask is not None:
-            loss = loss + 0.5 * (w_cone * cone_mask * cone_violation(f_world)).pow(2).sum()
         if N > 1:
             # Split force smoothness into magnitude vs direction via the orthogonal decomposition
             # about the mean direction u: df_par is the |f|-change part, df_perp the direction part.
@@ -919,7 +960,8 @@ def _solve_person(mid, betas, q_bh, contact_bool, valid, gravity_world, *,
 
     if C > 0 and bool(mask.any()):
         opt = torch.optim.LBFGS(
-            [f_world], lr=float(dyn_opt["lr"]), max_iter=int(dyn_opt["max_iter"]),
+            [f_free] if gen_u is None else [f_free, gen_u],
+            lr=float(dyn_opt["lr"]), max_iter=int(dyn_opt["max_iter"]),
             history_size=int(dyn_opt["history_size"]), tolerance_grad=float(dyn_opt["tolerance_grad"]),
             tolerance_change=float(dyn_opt["tolerance_change"]), line_search_fn="strong_wolfe")
         with torch.no_grad():
@@ -929,7 +971,7 @@ def _solve_person(mid, betas, q_bh, contact_bool, valid, gravity_world, *,
         base0 = float("nan")
 
     with torch.no_grad():
-        f_final = (f_world * mask[..., None]).detach()                        # (N, C, 3)
+        f_final = (compose_forces() * mask[..., None]).detach()               # (N, C, 3)
         fext, _ = _build_fext(f_final, mask, R_w2l, contact_ids, model.njoints)
         tau = rnea(model, q_model, v, a, fext=fext)                           # (N, nv)
         base_wrench = tau[..., :6].cpu().numpy().astype(np.float32)           # (N, 6): force | torque
@@ -973,8 +1015,8 @@ def _solve_person(mid, betas, q_bh, contact_bool, valid, gravity_world, *,
             vp = valid_pair.bool()
             tjit = float(dtq[vp].mean()) if bool(vp.any()) else 0.0
 
-    # Cone violation of the solved forces (Newtons), reported whenever the cone geometry is
-    # available: a friction_cone=0 run shows the pre-cone violation, a weighted run the residual.
+    # Cone violation of the solved forces vs the TRUE cone (Newtons) — generator forces live
+    # in the inscribed pyramid, so this must read ~0; a nonzero value means a broken invariant.
     cone_pairs, cviol_mean, cviol_max = 0, 0.0, 0.0
     if cone_mask is not None:
         with torch.no_grad():
