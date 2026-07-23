@@ -1,8 +1,11 @@
-# Human optimization: the four-stage body refinement
+# Human optimization: the body refinement stages
 
-`scripts/stages/human_optimization.py` — one dispatcher, four stages: `root`,
-`kinematics_1`, `kinematics_2`, `dynamics`. One config,
-`configs/human_optimization.toml`. The default chain runs `root` + `kinematics_1`.
+`scripts/stages/human_optimization.py` — one dispatcher over the body-refinement
+stages: `root`, `kinematics_1`, `kinematics_2`, `dynamics`, and the experimental
+`kindyn_1` (joint kinematics + dynamics). One config,
+`configs/human_optimization.toml`. The default chain runs `root` + `kinematics_1`;
+the rest are opt-in (`kinematics_2` needs contact annotations, `dynamics` and
+`kindyn_1` need them too).
 
 This doc explains the optimization problem each stage solves, every loss term, and the
 decisions behind them.
@@ -225,6 +228,58 @@ By default the stage refines the `kinematics_1` body (`[stages.dynamics].bodies`
 can point at `kinematics_2` instead) and runs on the GPU. The reworked BetterRobot RNEA
 is fast in plain PyTorch; its Warp kernel, though available, measured slower for this
 force-plus-gradient solve, so the torch path is used.
+
+## kindyn_1 — joint kinematics + dynamics
+
+The chain above is **sequential**: `kinematics_1/2` fit the motion using only what
+the camera sees, then `dynamics` solves the contact forces on that finished,
+**frozen** pose. So the physics never gets a say in the motion — if the pose is a
+little off, the force solve just absorbs the error into a large leftover base
+wrench. `kindyn_1` breaks that one-way street: it optimizes the pose **and** the
+contact forces **together**, so the physics residual can push back on the motion.
+
+It starts from the converged `kinematics_2` body and its manual contact annotation
+(the same labels `kinematics_2` uses — no auto-detection here). The objective is the
+full `kinematics_2` objective (reprojection, chamfer, priors, motion smoothness,
+scene penetration, the annotation terms) **plus** the `dynamics` terms
+(`base_wrench`, `force_magnitude`, `force_smooth_mag`/`_dir`, `torque_smooth`), with
+one free world-force vector per contact group per frame added as extra optimization
+variables. This first version keeps the force model simple: **no friction cones**
+(as the pose moves, the precomputed scene normals the cones need go stale; cones can
+come back later).
+
+**How it runs.** Forces are established first by a quick frozen-pose solve (like the
+`dynamics` stage's, but with free forces — no cones — and this stage's weights) so
+they start physically reasonable — with zero forces the body is in freefall and the
+base wrench says nothing useful about the pose. Then a single joint **L-BFGS** polish
+moves the pose and forces together. L-BFGS is the right tool here: the pose and the
+~1000 N forces live on wildly different scales, and a fixed-step optimizer (Adam)
+cannot co-adapt them — it leaves the forces frozen and lets the pose flail against a
+stale physics residual, which wrecks the motion. L-BFGS's line search keeps every
+step from overshooting, so the pose settles gently onto the physically-solved forces.
+In practice the forces do not move at all during the joint phase — their gradient is
+~10⁸× smaller than the pose's, below the shared line search's step resolution — so
+the stage is effectively *solved forces + pose refinement against them*, and the
+whole win comes from the **pose** shifting to be consistent with the physics. (That
+also means the saved forces are the ones solved at the *starting* pose; re-solving
+them at the final pose gives a slightly different, self-consistent pair — a possible
+future alternation step.)
+
+**The weights.** The kinematic columns of `kindyn_1` are copied straight from
+`kinematics_2`, so the visual fit is asked for exactly as before. The five dynamics
+weights are **linear** (the term is `0.5·Σ residual²` and the weight multiplies it,
+like every other engine term) — unlike the standalone `dynamics` stage, which folds
+the weight inside the square. `base_wrench` is tiny (`1e-5`) on purpose: the base
+wrench is on the order of 1000 N while the visual losses are order 1–100, so at
+weight 1 it would simply overwrite the visual fit. The three smoothness terms keep
+the `dynamics` stage's ratios to `base_wrench` exactly; `force_magnitude` ends up
+~100× heavier relative to `base_wrench` than in the `dynamics` stage (that stage
+folds its 0.01 *inside* the square, making it effectively 1e-4 of base — here the
+linear 0.01 ratio is kept). This only shapes the warm-start (the force terms are
+constant while the forces sit frozen in the joint phase) and the tuned result met
+its targets, so the value stays. Tuned on `boulder_1`: the base wrench drops far
+below the sequential value while the chamfer and reprojection grow only a few
+percent.
 
 ## What is deliberately absent
 

@@ -27,9 +27,13 @@ gradient masking and per-term logging.
 from __future__ import annotations
 
 from dataclasses import dataclass
+from typing import TYPE_CHECKING
 
 import numpy as np
 import torch
+
+if TYPE_CHECKING:
+    from .kindyn import DynamicsSpec
 
 from .camera import project, transform_points
 from .contacts import (
@@ -231,6 +235,7 @@ def optimize_person(
     frame_valid: torch.Tensor | None = None,
     cam_centers: torch.Tensor | None = None,
     auto_contact: dict | None = None,
+    dynamics: DynamicsSpec | None = None,
 ) -> tuple[torch.Tensor, Metrics, Metrics, dict]:
     """Optimize one person over ``phases``. Returns ``(q_world_opt, before, after, aux)``.
 
@@ -277,6 +282,15 @@ def optimize_person(
 
     The body is used at its native (converter) size — the metric geometry is
     already sized to it by the human-anchored ``estimate_scale`` stage upstream.
+
+    ``dynamics`` (optional :class:`~tools.human_optim.kindyn.DynamicsSpec`) turns
+    on the **kindyn_1** joint kinematics + dynamics mode: a world-force leaf per
+    contact group per frame is added, the RNEA base wrench / torques are threaded
+    through the shared forward (recomputed from the *current* ``q`` so the physics
+    residual pulls on the pose), the five dynamics terms are registered, and the
+    forces are warm-started at the initial pose before the phases run. The solved
+    forces + diagnostics are returned in ``aux['dynamics']``. ``None`` keeps the
+    pure kinematic behaviour.
     """
     T = q_world_init.shape[0]
     betas = betas_mean[None].expand(T, -1).contiguous()
@@ -425,11 +439,19 @@ def optimize_person(
         st.put_lazy("accel", lambda: st["d1"][1:] - st["d1"][:-1])
         st.put_lazy("jerk", lambda: st["accel"][1:] - st["accel"][:-1])
         st.put_lazy("snap", lambda: st["jerk"][1:] - st["jerk"][:-1])
+        if dynamics is not None:
+            dynamics.populate(st, f_world)
         return st
 
     problem = Problem(_forward)
     q = problem.add_leaf("q", q_world_init)
     nq = q.shape[1]
+    # kindyn_1: a world-force leaf per contact group per frame + the five dynamics
+    # terms (registered here, active only where their kindyn column weight is > 0).
+    f_world = None
+    if dynamics is not None:
+        f_world = problem.add_leaf("f_world", dynamics.zero_forces())
+        dynamics.register(problem, f_world)
 
     def _build_scene_cand():
         """Per-frame padded scene candidates from the *current* pose, or None.
@@ -603,6 +625,11 @@ def optimize_person(
               on_start=_phase_start(ph))
         for ph in phases
     ]
+    # kindyn_1: seed the forces at the (frozen) initial pose so the base-wrench
+    # gradient on q is meaningful from the first phase (zero forces ⇒ freefall).
+    if dynamics is not None:
+        with torch.no_grad():
+            f_world.copy_(dynamics.warmstart(normalize_q(q_world_init, mid.num_joints)))
     run_phases(problem, engine_phases, lr=float(oc["lr"]), lr_decay=float(oc["lr_decay"]),
                lr_lbfgs=float(oc["lr_lbfgs"]), lbfgs_history=int(oc["lbfgs_history"]))
 
@@ -610,4 +637,6 @@ def optimize_person(
         q_opt = normalize_q(q.detach(), mid.num_joints)
     aux = {"drift_pre": auto_drift_pre[0],                         # (T, J) refine-start drift, or None
            "auto_labels": contact_labels if use_auto else None}   # (T, J) int8 frozen labels, or None
+    if dynamics is not None:
+        aux["dynamics"] = dynamics.extract(q_opt, f_world.detach(), mid)
     return q_opt, before, mk(q_opt), aux

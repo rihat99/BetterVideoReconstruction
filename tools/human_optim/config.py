@@ -1,10 +1,10 @@
 """Parse ``configs/human_optimization.toml`` into per-stage weights + shared knobs.
 
-The grouped ``[loss_weights.*]`` tables store each loss weight as a length-4 array
-``[root, kinematics_1, kinematics_2, dynamics]`` — the single source of truth for
-every weight. :func:`load_config` flattens them into one ``{term: weight}`` dict
-per stage (the shape the losses read), so the runner just picks a stage's dict per
-optimization phase. Per-stage ``iters`` and the shared operational knob sections
+The grouped ``[loss_weights.*]`` tables store each loss weight as a length-5 array
+``[root, kinematics_1, kinematics_2, dynamics, kindyn_1]`` — the single source of
+truth for every weight. :func:`load_config` flattens them into one ``{term: weight}``
+dict per stage (the shape the losses read), so the runner just picks a stage's dict
+per optimization phase. Per-stage ``iters`` and the shared operational knob sections
 (``[optimizer]``, ``[chamfer]``, …) pass through unchanged.
 """
 
@@ -14,7 +14,7 @@ import tomllib
 from dataclasses import dataclass
 from pathlib import Path
 
-STAGE_ORDER = ("root", "kinematics_1", "kinematics_2", "dynamics")
+STAGE_ORDER = ("root", "kinematics_1", "kinematics_2", "dynamics", "kindyn_1")
 
 
 @dataclass(frozen=True)
