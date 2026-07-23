@@ -34,6 +34,10 @@ _DYN_LAYER_LABELS = (("dyn_torque", "joint torques (sphere size)"),
                      ("dyn_root_force", "root force"),
                      ("dyn_root_torque", "root torque"))
 
+# Layer checkboxes that only colour the kinematic skeleton overlay — hidden unless the
+# active body source is one the overlay draws (see ``ClipScene.overlay_sources``).
+_OVERLAY_LAYER_KEYS = ("confidence", "depth_trust")
+
 # World-frame up vector per ``--up`` axis, mirroring ``SceneApi.set_up_direction``.
 # ``set_up_direction`` rotates the scene root (it does NOT set the camera's
 # ``up_direction``), so the standard view's camera up is exactly this vector — the
@@ -57,10 +61,10 @@ class Viewer:
                          video_dir=video_dir)
         self.layers = {"body": show_smplx, "skeleton": False, "confidence": True,
                        "depth_trust": False,
-                       "human": True, "scene": True, "normals": False,
+                       "human": False, "scene": True, "normals": False,
                        "cameras": True, "gravity": False,
-                       # dynamics section (all on by default)
-                       "dyn_torque": True, "dyn_fingers": True, "dyn_forces": True,
+                       # force/torque section (torque scaling + fingers off by default)
+                       "dyn_torque": False, "dyn_fingers": False, "dyn_forces": True,
                        "dyn_root_force": True, "dyn_root_torque": True}
         self._surface = "points"    # surface-mesh rendering is off (code kept in ClipScene)
         self.cache: dict[Path, ClipData] = {}
@@ -120,8 +124,10 @@ class Viewer:
                 c.on_update(self._make_layer_cb(key))
                 self.checkboxes[key] = c
         # Force/torque gets its own section — toggles that apply while a force body
-        # source (dynamics / kindyn_1) is active. Collapsed by default to keep it tidy.
-        with g.add_folder("dynamics", expand_by_default=False):
+        # source (dynamics / kindyn_1) is active. Collapsed by default to keep it tidy;
+        # the whole folder is hidden while a non-force source is active.
+        self.dyn_folder = g.add_folder("dynamics", expand_by_default=False)
+        with self.dyn_folder:
             for key, label in _DYN_LAYER_LABELS:
                 c = g.add_checkbox(label, self.layers[key])
                 c.on_update(self._make_layer_cb(key))
@@ -183,6 +189,20 @@ class Viewer:
         with self._lock:
             if self.scene is not None and self.body.value not in ("", "(none)"):
                 self.scene.set_active_body(self.body.value)
+                self._apply_ctx_visibility(self.body.value)
+
+    def _apply_ctx_visibility(self, src: str) -> None:
+        """Show only the controls that affect the active body source ``src`` (instant, no
+        rebuild; hidden controls keep their value). The scene reports which sources each
+        control category applies to; global layers (scene / cameras / human / …) never move.
+        """
+        sc = self.scene
+        if sc is None:
+            return
+        for key in _OVERLAY_LAYER_KEYS:
+            self.checkboxes[key].visible = src in sc.overlay_sources
+        self.dyn_folder.visible = src in sc.force_sources        # the whole dyn_* section
+        self.body_opacity.visible = src in sc.translucency_sources
 
     def _on_scene_ps(self) -> None:
         with self._lock:
@@ -328,6 +348,9 @@ class Viewer:
             self.body.value = self.scene.default_body or "(none)"
             if srcs:
                 self.scene.set_active_body(self.body.value)
+            # Reapply here too: an unchanged default source name across clips fires no
+            # dropdown callback, but the new clip's source categories may differ.
+            self._apply_ctx_visibility(self.body.value)
 
             # Recreate the frame slider — its range is per-clip (viser sliders
             # can't be re-ranged in place). Rebuild it in the playback folder.

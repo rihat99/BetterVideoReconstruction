@@ -23,11 +23,15 @@ from .helpers import (
 )
 from .loading import _FINGER_TOKENS, ClipData, ensure_scene_mesh
 
-# dynamics sphere-floor / bone radius / max torque grow factor / metres-per-newton
-_DYN_R0, _DYN_RB, _DYN_MAXS, _DYN_FSCALE = 0.022, 0.012, 3.0, 5e-4
+# dynamics sphere-floor / bone radius / max torque grow factor / metres-per-newton for
+# the contact-force arrows
+_DYN_R0, _DYN_RB, _DYN_MAXS, _DYN_FSCALE = 0.022, 0.012, 3.0, 1.2e-3
 # root residual-wrench arrows: metres per newton-metre for the torque part (the force
 # part reuses _DYN_FSCALE so it is directly comparable to the contact-force arrows)
-_DYN_TSCALE = 2e-3
+_DYN_TSCALE = 4.8e-3
+# contact-force arrow colour — a saturated blue that reads against the grey scene
+# cloud and the red skeleton
+_DYN_FORCE_RGB = (50, 120, 255)
 # body-skeleton overlay: fixed joint-sphere radius / bone radius (m) and the
 # default kinematic mesh opacity while the skeleton shows over it (slider-tunable).
 _SKEL_R, _SKEL_RB, _SKEL_ALPHA = 0.028, 0.012, 0.7
@@ -205,8 +209,8 @@ class ClipScene:
         self._conf: dict[int, np.ndarray] = {}   # oid -> (N, J) label confidence, folded like contact
         self._depth_gap: dict[int, np.ndarray] = {}
         self._depth_trust: dict[int, np.ndarray] = {}
-        self._skel_shown = False          # any skeleton node currently visible
-        self._kin_translucent = False     # last-applied kinematic-mesh transparency
+        self._skel_shown = False          # any kinematic-skeleton node currently visible
+        self._translucent: str | None = None   # active source whose mesh is currently translucent
         kin = data.skinned.get("kinematics")
         if kin is not None and self.skel is not None:
             _f, kin_oids, people = kin
@@ -251,7 +255,6 @@ class ClipScene:
         self.forces = data.forces                          # {source: force dict}
         self.force_nodes: dict[str, list[dict]] = {}
         self._dyn_finger: dict[str, np.ndarray] = {}       # source -> (J,) finger/palm mask
-        self._force_translucent: str | None = None         # source whose mesh is currently translucent
         for source, dyn in self.forces.items():
             unit_cyl = _unit_cylinder()
             Jd = dyn["jw"].shape[2]
@@ -288,6 +291,17 @@ class ClipScene:
             (s for s in ("kinematics", "kinematics_2", "prefit", "original", "dynamics")
              if s in self.body_source_names), None)
         self.active = self.default_body
+
+        # Which sources own a drawable skeleton, and which contextual GUI controls
+        # apply to which source (read by the viewer to hide inapplicable controls):
+        #   force sources     → the ``dyn_*`` overlays + the torque skeleton
+        #   overlay sources   → the ``confidence`` / ``depth_trust`` skeleton colouring
+        #   translucency ones → the body-opacity slider (a mesh a skeleton can overlay)
+        self.force_sources = set(self.forces)
+        self.overlay_sources = {"kinematics"} if self.skel_nodes else set()
+        self._skeleton_sources = self.force_sources | self.overlay_sources
+        self.translucency_sources = {s for s in self.skinned
+                                     if s in self._skeleton_sources}
 
         self._apply_static_layers()
         self.info_md = self._build_info()
@@ -468,18 +482,14 @@ class ClipScene:
                 h.scale = scale
 
     def set_mesh_opacity(self, alpha: float) -> None:
-        """Live-update the mesh opacity used while a joint skeleton overlays a body —
-        the kinematics skeleton overlay and the active force source's own mesh."""
+        """Live-update the mesh opacity used while a skeleton overlays the active body's
+        mesh (the kinematic 22-joint overlay or a force source's own mesh)."""
         self.mesh_opacity = float(alpha)
-        targets = (["kinematics"] if self._kin_translucent else [])
-        if self._force_translucent is not None:
-            targets.append(self._force_translucent)
-        if targets:
+        if self._translucent is not None:
             with self.server.atomic():
-                for name in targets:
-                    for hp in self.skinned.get(name, []):
-                        if hp is not None:
-                            hp[0].opacity = self.mesh_opacity
+                for hp in self.skinned.get(self._translucent, []):
+                    if hp is not None:
+                        hp[0].opacity = self.mesh_opacity
 
     def set_active_body(self, src: str) -> None:
         """Select the body source and re-pose it at the current frame."""
@@ -511,10 +521,14 @@ class ClipScene:
         self._human_frame = target
 
     def _apply_bodies(self, f: int) -> None:
-        show = self.layers["body"]
+        """Draw the active source as two independent layers: its mesh (``body`` layer)
+        and its skeleton (``skeleton`` layer). Any combination works; the mesh goes
+        translucent only when both show, so the skeleton reads through it."""
         src = self.active
+        mesh_on = self.layers["body"]
+        skel_on = self.layers.get("skeleton", False)
         for name, handles in self.skinned.items():
-            on = show and src == name
+            on = mesh_on and src == name
             for hp in handles:
                 if hp is None:
                     continue
@@ -526,28 +540,23 @@ class ClipScene:
                     for j, bone in enumerate(handle.bones):
                         bone.wxyz, bone.position = bw[j], bp[j]
         self._apply_skeleton(f)
-        self._apply_force_translucency(src if show else None)
         for source in self.forces:
-            self._apply_dynamics(source, f, show and src == source)
+            self._apply_dynamics(source, f, src == source, skel_on and src == source)
+        self._apply_translucency()
 
     # -- body-skeleton overlay --
     def _apply_skeleton(self, f: int) -> None:
-        """Pose + contact-colour the kinematic body skeleton and set the kinematic
-        mesh's transparency — both gated on the ``skeleton`` layer + active source.
+        """Pose + contact-colour the kinematic 22-joint body skeleton — gated on the
+        ``skeleton`` layer + the ``kinematics`` source. (The mesh translucency it needs
+        is applied centrally in :meth:`_apply_translucency`.)
 
-        The mesh opacity is pushed only on a state change (once per toggle), and the
-        per-joint pose/visibility loop is skipped entirely while the skeleton is
+        The per-joint pose/visibility loop is skipped entirely while the skeleton is
         hidden and already torn down, so idle playback stays cheap.
         """
         on = self.layers.get("skeleton", False) and self.active == "kinematics"
         # Confidence shading (on by default): grey→saturated red/green by label confidence.
         use_conf = self.layers.get("confidence", True)
         use_depth = self.layers.get("depth_trust", False)
-        if on != self._kin_translucent:
-            for hp in self.skinned.get("kinematics", []):
-                if hp is not None:
-                    hp[0].opacity = self.mesh_opacity if on else None
-            self._kin_translucent = on
         if not on and not self._skel_shown:
             return
         kin = self.data.skinned.get("kinematics")
@@ -593,41 +602,49 @@ class ClipScene:
         self._skel_shown = on
 
     # -- force / torque layers (dynamics, kindyn_1) --
-    def _apply_force_translucency(self, src: str | None) -> None:
-        """Make the active force source's own mesh translucent so its torque skeleton
-        reads through it, and restore any previously translucent mesh.
+    def _apply_translucency(self) -> None:
+        """Make the active source's mesh translucent when its skeleton also shows over
+        it, so the skeleton reads through; restore any previously translucent mesh.
 
-        The force-only ``dynamics`` source has no mesh (nothing to fade), so this only
-        bites for ``kindyn_1``, whose skinned body would otherwise hide the torque
-        spheres. Pushed only on a state change, mirroring the kinematics skeleton overlay.
+        One rule for both skeletons — the kinematic 22-joint overlay and a force
+        source's torque skeleton. The force-only ``dynamics`` source has no mesh, so it
+        never triggers this. Pushed only on a state change, so idle playback stays cheap.
         """
-        want = src if (src in self.forces and src in self.skinned) else None
-        if want == self._force_translucent:
+        src = self.active
+        want = (src if (src in self.skinned and self.layers["body"]
+                        and self.layers.get("skeleton", False)
+                        and src in self._skeleton_sources) else None)
+        if want == self._translucent:
             return
-        for target, opacity in ((self._force_translucent, None), (want, self.mesh_opacity)):
+        for target, opacity in ((self._translucent, None), (want, self.mesh_opacity)):
             if target is not None:
                 for hp in self.skinned.get(target, []):
                     if hp is not None:
                         hp[0].opacity = opacity
-        self._force_translucent = want
+        self._translucent = want
 
-    def _apply_dynamics(self, source: str, f: int, on: bool) -> None:
+    def _apply_dynamics(self, source: str, f: int, active: bool, skel_on: bool) -> None:
+        """Draw one force source's overlays. The torque skeleton (spheres + bones)
+        follows the ``skeleton`` layer; the contact-force and root-wrench arrows follow
+        their own ``dyn_*`` toggles — everything only while ``source`` is the active one.
+        """
         dyn = self.forces[source]
         nodes = self.force_nodes[source]
         finger = self._dyn_finger[source]
         ly = self.layers
-        scale_torque = ly.get("dyn_torque", True)     # sphere size ∝ joint torque
-        show_fingers = ly.get("dyn_fingers", True)    # show finger / palm joints
+        scale_torque = ly.get("dyn_torque", False)    # sphere size ∝ joint torque
+        show_fingers = ly.get("dyn_fingers", False)   # show finger / palm joints
         for p in range(dyn["P"]):
             nd = nodes[p]
-            live = on and f < dyn["valid"].shape[1] and bool(dyn["valid"][p, f])
+            valid = active and f < dyn["valid"].shape[1] and bool(dyn["valid"][p, f])
+            skel_live = valid and skel_on                # torque skeleton follows the skeleton layer
             jw, tm = dyn["jw"][p, f], dyn["tm"][p, f]
             fw = dyn["fw"][p, f]                          # (J, 3) solved contact force
             fmag = np.linalg.norm(fw, axis=-1)           # (J,)
             jc = dyn.get("jc")                           # (P, N, J) contact labels or None
             con = jc[p, f] if jc is not None and f < jc.shape[1] else None
             for j, sp in enumerate(nd["spheres"]):
-                if live and (show_fingers or not finger[j]):
+                if skel_live and (show_fingers or not finger[j]):
                     sp.position = (float(jw[j, 0]), float(jw[j, 1]), float(jw[j, 2]))
                     # scale by joint torque, but not the root (j==0): its wrench is the arrows
                     s = (1.0 + min(float(tm[j]) / dyn["ref"], 1.0) * (_DYN_MAXS - 1.0)
@@ -644,7 +661,7 @@ class ClipScene:
                 a, b = jw[par], jw[j]
                 d = b - a
                 L = float(np.linalg.norm(d))
-                if live and L > 1e-6 and (show_fingers or not (finger[j] or finger[par])):
+                if skel_live and L > 1e-6 and (show_fingers or not (finger[j] or finger[par])):
                     h.position = (float((a[0] + b[0]) * 0.5), float((a[1] + b[1]) * 0.5),
                                   float((a[2] + b[2]) * 0.5))
                     h.wxyz = _wxyz_shortest_arc_z(d)
@@ -652,30 +669,31 @@ class ClipScene:
                     h.visible = True
                 else:
                     h.visible = False
-            # Contact-force arrows (cyan) at the contact joints — remove the old node
-            # before re-adding (reusing the handle would leak a node every frame).
+            # Contact-force arrows at the contact joints — their own toggle, independent
+            # of the skeleton layer. Remove the old node before re-adding (reusing the
+            # handle would leak a node every frame).
             if nd["forces"] is not None:
                 nd["forces"].remove()
                 nd["forces"] = None
-            if live and ly.get("dyn_forces", True):
+            if valid and ly.get("dyn_forces", True):
                 idx = np.flatnonzero(fmag > 1e-3)
                 if idx.size:
                     seg = np.stack([jw[idx], jw[idx] + fw[idx] * _DYN_FSCALE], axis=1)
                     nd["forces"] = self.server.scene.add_arrows(
                         f"/clip/{source}/p{nd['oid']:02d}/forces", points=seg.astype(np.float32),
-                        colors=(45, 200, 255), shaft_radius=0.012,
+                        colors=_DYN_FORCE_RGB, shaft_radius=0.012,
                         head_radius=0.028, head_length=0.05)
             # Root residual wrench: force (green) and torque (magenta) at the pelvis,
-            # each independently toggleable. A physically-consistent solve drives these
-            # toward zero, so short arrows are good — they show what the contact forces
-            # failed to explain.
+            # each on its own toggle. A physically-consistent solve drives these toward
+            # zero, so short arrows are good — they show what the contact forces failed
+            # to explain.
             bw = dyn.get("bw")
             root = jw[0]
             self._root_arrow(source, nd, "root_force",
-                             live and bw is not None and ly.get("dyn_root_force", True),
+                             valid and bw is not None and ly.get("dyn_root_force", True),
                              root, None if bw is None else bw[p, f, :3] * _DYN_FSCALE, (60, 220, 90))
             self._root_arrow(source, nd, "root_torque",
-                             live and bw is not None and ly.get("dyn_root_torque", True),
+                             valid and bw is not None and ly.get("dyn_root_torque", True),
                              root, None if bw is None else bw[p, f, 3:] * _DYN_TSCALE, (220, 60, 220))
 
     def _root_arrow(self, source, nd, slot, active, root, vec, color) -> None:

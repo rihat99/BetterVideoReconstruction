@@ -24,8 +24,10 @@ For each clip it shows, in the metric world frame:
   (``smplx_params.npz``, folded to the world frame);
 * ``kinematics`` / ``kinematics_2`` — the refined world-frame bodies
   (``human_optim/kinematic_{1,2}.npz``);
-* ``dynamics`` — the 52-joint skeleton as torque-scaled spheres + bones + cyan
-  contact-force arrows (no mesh).
+* ``kindyn_1`` — the joint kinematics+dynamics body (``human_optim/kindyn_1.npz``),
+  a skinned mesh that also carries force/torque data;
+* ``dynamics`` — force-only (no mesh): the 52-joint torque-scaled sphere/bone
+  skeleton (via the independent ``skeleton`` layer) + blue contact-force arrows.
 
 The three mesh sources are each one skinned mesh per person, posed per frame (LBS
 in the browser, one upload) over a single averaged ``betas`` identity.
