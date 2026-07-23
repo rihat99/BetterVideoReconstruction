@@ -38,9 +38,8 @@ for _p in (str(_BETTER_HUMAN_SRC), str(_REPO_ROOT)):
 import argparse  # noqa: E402
 
 from tools.human_optim.config import STAGE_ORDER, load_config  # noqa: E402
-from tools.human_optim.stages import (  # noqa: E402
-    run_dynamics, run_kinematic, run_kinematics_2,
-)
+from tools.human_optim.dynamics import run_dynamics  # noqa: E402
+from tools.human_optim.stages import run_kinematic, run_kinematics_2  # noqa: E402
 
 _DEFAULT_CONFIG = _REPO_ROOT / "configs" / "human_optimization.toml"
 
