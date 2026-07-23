@@ -46,9 +46,16 @@ def _load_gravity(pred: Path) -> dict | None:
     return {"g": g, "is_fallback": source == "fallback_down", "spread": spread}
 
 
-def _load_dynamics(pred: Path) -> dict | None:
-    """Numpy arrays for the force-only dynamics skeleton (``human_optim/dynamics.npz``)."""
-    f = pred / "human_optim" / "dynamics.npz"
+def _load_force_data(pred: Path, filename: str) -> dict | None:
+    """Numpy arrays for a force/torque body source (``human_optim/<filename>``).
+
+    Shared by the two stages that solve contact forces: ``dynamics.npz`` (force-only)
+    and ``kindyn_1.npz`` (kinematics + dynamics). Both store the same force fields, so
+    the viewer draws them the same way. ``joint_contact`` is optional — ``kindyn_1.npz``
+    omits it, and the caller then reads which joints are in contact from where the
+    solved contact force is non-zero.
+    """
+    f = pred / "human_optim" / filename
     if not f.exists():
         return None
     dd = np.load(f, allow_pickle=True)
@@ -482,7 +489,7 @@ class ClipData:
     fov_y: np.ndarray
     gravity: dict | None
     skinned: dict          # name -> (faces, object_ids, people); "original" first
-    dynamics: dict | None
+    forces: dict           # force source name ("dynamics"/"kindyn_1") -> force dict
     skeleton: dict | None  # kinematic body-skeleton topology + per-joint contact
     n_frames: int
     # scene-surface meshes, built lazily and cached per method ("bpa"/"poisson");
@@ -553,7 +560,8 @@ def load_clip_data(pred: Path, *, device: str, show_smplx: bool,
             orig = _smplx_params_skinned(pred / "sam3d" / "smplx_params.npz", extr, device=device)
             if orig is not None:
                 skinned["original"] = orig
-        for name, fn in (("kinematics", "kinematic_1.npz"), ("kinematics_2", "kinematic_2.npz")):
+        for name, fn in (("kinematics", "kinematic_1.npz"), ("kinematics_2", "kinematic_2.npz"),
+                         ("kindyn_1", "kindyn_1.npz")):
             if (pred / "human_optim" / fn).exists():
                 skinned[name] = _smplx_kinematic_skinned(pred / "human_optim" / fn, device=device)
         # prefit: the scale stage's dual scale+body alignment (camera frame, like original).
@@ -561,6 +569,14 @@ def load_clip_data(pred: Path, *, device: str, show_smplx: bool,
             pf = _smplx_params_skinned(pred / "geometry" / "prefit.npz", extr, device=device)
             if pf is not None:
                 skinned["prefit"] = pf
+
+    # Force/torque sources, in display order — the force-only dynamics stage and the
+    # kinematics+dynamics stage, whichever exist. Same fields, drawn the same way.
+    forces: dict = {}
+    for name, fn in (("dynamics", "dynamics.npz"), ("kindyn_1", "kindyn_1.npz")):
+        fd = _load_force_data(pred, fn)
+        if fd is not None:
+            forces[name] = fd
 
     video_frames, play_fps = _load_video_frames(pred, len(extr), video_dir=video_dir)
     return ClipData(
@@ -572,7 +588,7 @@ def load_clip_data(pred: Path, *, device: str, show_smplx: bool,
         fov_y=np.radians(transform["fov_y_deg"].astype(np.float64)),
         gravity=_load_gravity(pred),
         skinned=skinned,
-        dynamics=_load_dynamics(pred),
+        forces=forces,
         skeleton=_load_skeleton(pred) if show_smplx else None,
         n_frames=len(extr),
         scene_normals=sn,

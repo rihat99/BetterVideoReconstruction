@@ -25,9 +25,9 @@ _LAYER_LABELS = (("body", "SMPL-X body"), ("skeleton", "body skeleton"),
                  ("normals", "scene normals"),
                  ("cameras", "cameras"), ("gravity", "gravity"))
 
-# Dynamics-only display toggles (their own sidebar folder; only bite while the
-# ``dynamics`` body source is active). Joints are always coloured by contact
-# (green free / red in-contact); these switch the extra overlays on and off.
+# Force/torque display toggles (their own sidebar folder; only bite while a force
+# body source — ``dynamics`` or ``kindyn_1`` — is active). Joints are always coloured
+# by contact (green free / red in-contact); these switch the extra overlays on and off.
 _DYN_LAYER_LABELS = (("dyn_torque", "joint torques (sphere size)"),
                      ("dyn_fingers", "fingers / palm"),
                      ("dyn_forces", "contact forces"),
@@ -119,8 +119,8 @@ class Viewer:
                 c = g.add_checkbox(label, self.layers[key])
                 c.on_update(self._make_layer_cb(key))
                 self.checkboxes[key] = c
-        # Dynamics gets its own section — many toggles that only apply to the
-        # dynamics body source. Collapsed by default to keep the sidebar tidy.
+        # Force/torque gets its own section — toggles that apply while a force body
+        # source (dynamics / kindyn_1) is active. Collapsed by default to keep it tidy.
         with g.add_folder("dynamics", expand_by_default=False):
             for key, label in _DYN_LAYER_LABELS:
                 c = g.add_checkbox(label, self.layers[key])
