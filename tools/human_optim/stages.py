@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import dataclasses
 import hashlib
+import math
 from pathlib import Path
 
 import numpy as np
@@ -774,8 +775,44 @@ def _build_fext(f_world, mask, R_w2l, contact_ids, njoints):
     return fext, f_eff
 
 
+def _cone_normals(joint_xyz: torch.Tensor, scene_pts: torch.Tensor,
+                  scene_normals: torch.Tensor, k: int, max_dist: float
+                  ) -> tuple[torch.Tensor, torch.Tensor]:
+    """Surface normal per ``(frame, cone joint)`` from the scene cloud, detached.
+
+    ``joint_xyz`` is ``(T, Cc, 3)`` world joint positions. For each one, average the
+    stored normals of its ``k`` nearest scene points and normalize — the fuse normals
+    point out of the wall toward the climber, i.e. the direction a pushing contact
+    force on the body should have. Returns ``(normals (T, Cc, 3), valid (T, Cc))``;
+    ``valid`` is ``False`` where the nearest scene point is beyond ``max_dist`` (joint
+    too far from any surface for a meaningful cone) or where the neighbours' normals
+    disagree (mean magnitude < 0.5 — e.g. a thin hold or concave corner averages
+    opposing normals to ~zero, and normalizing that would aim the cone arbitrarily).
+    ``q`` is frozen, so this is a one-time precompute done on CPU with a KDTree.
+    """
+    from scipy.spatial import cKDTree
+
+    T, Cc, _ = joint_xyz.shape
+    dev = joint_xyz.device
+    pts = scene_pts.detach().cpu().numpy()
+    nrm = scene_normals.detach().cpu().numpy()
+    query = joint_xyz.detach().cpu().numpy().reshape(-1, 3)          # (T*Cc, 3)
+    kk = min(int(k), pts.shape[0])
+    dist, idx = cKDTree(pts).query(query, k=kk)
+    idx = idx.reshape(query.shape[0], kk)
+    dist = dist.reshape(query.shape[0], kk)
+    n = nrm[idx].mean(axis=1)                                        # (T*Cc, 3)
+    coherence = np.linalg.norm(n, axis=-1)                           # 1 = neighbours agree, 0 = cancel
+    n /= np.maximum(coherence[:, None], 1e-9)
+    valid = (dist[:, 0] <= float(max_dist)) & (coherence >= 0.5)
+    normals = torch.as_tensor(n.reshape(T, Cc, 3), dtype=torch.float32, device=dev)
+    valid_t = torch.as_tensor(valid.reshape(T, Cc), dtype=torch.bool, device=dev)
+    return normals, valid_t
+
+
 def _solve_person(mid, betas, q_bh, contact_bool, valid, gravity_world, *,
-                  weights, groups, dyn_opt, fps, device, label=""):
+                  weights, groups, dyn_opt, fps, device, label="",
+                  scene_pts=None, scene_normals=None, friction=None):
     """Solve world-frame contact forces for one person. Returns a result dict."""
     from better_robot.dynamics import rnea
     from better_robot.kinematics import forward_kinematics
@@ -821,10 +858,41 @@ def _solve_person(mid, betas, q_bh, contact_bool, valid, gravity_world, *,
     valid_pair = (valid_t[1:] & valid_t[:-1]).to(dtype)                    # (N-1,)
     fpair = (mask[1:] * mask[:-1] * valid_pair[:, None]) if C else None    # (N-1, C)
 
+    # Friction cones on the non-hand contact groups (feet + ankles): a wall/floor contact can
+    # only push, and its tangential force is capped at μ·(normal force); hands are bilateral
+    # (grasp + pull) and get none. One surface normal per (frame, cone joint) from the scene
+    # cloud, detached (q frozen ⇒ joint positions static). The geometry is precomputed whenever
+    # the scene is present so the readout can report the cone violation even at weight 0; the
+    # cone loss itself is added only when friction_cone > 0.
+    cone_cols = [c for c, gn in enumerate(group_names) if "hand" not in gn]
+    cone_n = cone_mask = None
+    mu = math.tan(math.radians(float(friction["half_angle_deg"]))) if friction else 1.0
+    if cone_cols and friction is not None and scene_pts is not None and scene_pts.shape[0]:
+        cone_ids = contact_ids[cone_cols]
+        joint_xyz = oMi[:, cone_ids, :3]                                   # (N, Cc, 3)
+        cone_n, cone_valid = _cone_normals(
+            joint_xyz, scene_pts, scene_normals,
+            int(friction["normal_k"]), float(friction["max_dist_m"]))
+        cone_mask = (mask[:, cone_cols].bool() & cone_valid).to(dtype)     # (N, Cc)
+
+    def cone_violation(f: torch.Tensor) -> torch.Tensor:
+        """``relu(‖f_t‖ − μ·f_n)`` per (frame, cone joint): the cone + unilaterality residual.
+
+        ``f_n = f·n̂`` (signed normal component), ``f_t = f − f_n n̂``. A pulling contact
+        (``f_n < 0``) grows the residual, so this one term also forbids pulling. The
+        tangential norm is eps-safe (plain ``.norm()`` has no gradient at 0)."""
+        fc = f[:, cone_cols]                                               # (N, Cc, 3)
+        f_n = (fc * cone_n).sum(-1)                                        # (N, Cc)
+        f_t = fc - f_n[..., None] * cone_n
+        ft = f_t.pow(2).sum(-1).add(1e-12).sqrt()
+        return torch.relu(ft - mu * f_n)
+
     f_world = torch.zeros((N, C, 3), dtype=dtype, device=dev, requires_grad=True)
     w_base = float(weights["base_wrench"])
     w_mag = float(weights["force_magnitude"])
-    w_fs = float(weights["force_smooth"])
+    w_fs_mag = float(weights.get("force_smooth_mag", 0.0))
+    w_fs_dir = float(weights.get("force_smooth_dir", 0.0))
+    w_cone = float(weights.get("friction_cone", 0.0))
     w_ts = float(weights["torque_smooth"])
 
     def closure():
@@ -832,9 +900,18 @@ def _solve_person(mid, betas, q_bh, contact_bool, valid, gravity_world, *,
         fext, f_eff = _build_fext(f_world, mask, R_w2l, contact_ids, model.njoints)
         tau = rnea(model, q_model, v, a, fext=fext)
         loss = 0.5 * ((w_base * tau[..., :6]).pow(2).sum() + (w_mag * f_eff).pow(2).sum())
+        if w_cone > 0.0 and cone_mask is not None:
+            loss = loss + 0.5 * (w_cone * cone_mask * cone_violation(f_world)).pow(2).sum()
         if N > 1:
+            # Split force smoothness into magnitude vs direction via the orthogonal decomposition
+            # about the mean direction u: df_par is the |f|-change part, df_perp the direction part.
             df = f_world[1:] - f_world[:-1]                                # (N-1, C, 3)
-            loss = loss + 0.5 * w_fs * (fpair[..., None] * df.pow(2)).sum()
+            u = f_world[1:] + f_world[:-1]
+            u = u / u.norm(dim=-1, keepdim=True).clamp_min(1e-9)
+            df_par = (df * u).sum(-1, keepdim=True) * u
+            df_perp = df - df_par
+            loss = loss + 0.5 * w_fs_mag * (fpair[..., None] * df_par.pow(2)).sum()
+            loss = loss + 0.5 * w_fs_dir * (fpair[..., None] * df_perp.pow(2)).sum()
             dtau = tau[1:, 6:] - tau[:-1, 6:]                             # (N-1, nv-6)
             loss = loss + 0.5 * w_ts * (valid_pair[:, None] * dtau.pow(2)).sum()
         loss.backward()
@@ -880,18 +957,37 @@ def _solve_person(mid, betas, q_bh, contact_bool, valid, gravity_world, *,
     act = mask.bool().any(dim=1).cpu().numpy()
     mean_f = float(fnorm.sum(dim=-1)[mask.bool().any(dim=1)].mean()) if act.any() else 0.0
 
-    fjit = tjit = 0.0
+    fjit_mag = fjit_dir = tjit = 0.0
     if N > 1:
         with torch.no_grad():
-            df = (f_final[1:] - f_final[:-1]).norm(dim=-1)                    # (N-1, C)
+            df = f_final[1:] - f_final[:-1]                                   # (N-1, C, 3)
+            u = f_final[1:] + f_final[:-1]
+            u = u / u.norm(dim=-1, keepdim=True).clamp_min(1e-9)
+            dperp = (df - (df * u).sum(-1, keepdim=True) * u).norm(dim=-1)    # (N-1, C) direction jitter
+            dmag = (f_final[1:].norm(dim=-1) - f_final[:-1].norm(dim=-1)).abs()  # (N-1, C) magnitude jitter
             fp = (mask[1:] * mask[:-1]).bool()
-            fjit = float(df[fp].mean()) if bool(fp.any()) else 0.0
+            if bool(fp.any()):
+                fjit_mag = float(dmag[fp].mean())
+                fjit_dir = float(dperp[fp].mean())
             dtq = (tau[1:, 6:] - tau[:-1, 6:]).norm(dim=-1)                   # (N-1,)
             vp = valid_pair.bool()
             tjit = float(dtq[vp].mean()) if bool(vp.any()) else 0.0
+
+    # Cone violation of the solved forces (Newtons), reported whenever the cone geometry is
+    # available: a friction_cone=0 run shows the pre-cone violation, a weighted run the residual.
+    cone_pairs, cviol_mean, cviol_max = 0, 0.0, 0.0
+    if cone_mask is not None:
+        with torch.no_grad():
+            viol = cone_violation(f_final)[cone_mask.bool()]
+            cone_pairs = int(viol.numel())
+            if cone_pairs:
+                cviol_mean, cviol_max = float(viol.mean()), float(viol.max())
+
+    cone_str = f"  cone[{cone_pairs}] viol μ={cviol_mean:.1f} max={cviol_max:.1f} N" if cone_mask is not None else ""
     print(f"  [{label}] mass={total_mass:.1f}kg  contact-frames={int(act.sum())}/{N}  "
           f"base wrench {base0:.1f}→{base1:.2f}  mean|f|={mean_f:.0f} N "
-          f"(weight≈{total_mass * _GRAVITY_MAG:.0f} N)  jitter |Δf|={fjit:.1f} N |Δτ|={tjit:.2f}")
+          f"(weight≈{total_mass * _GRAVITY_MAG:.0f} N)  jitter |Δ|f||={fjit_mag:.1f} |Δf⊥|={fjit_dir:.1f} N "
+          f"|Δτ|={tjit:.2f}{cone_str}")
 
     return dict(
         joints_world=joints_world, torque_mag=torque_mag, force_world=force_world,
@@ -937,6 +1033,23 @@ def run_dynamics(pred: Path, cfg: HumanOptimConfig, device: str, *, bodies="kine
     print(f"[human_optim/dynamics] {pred.name}: P={P} N={N} fps={fps:.1f}  bodies={bodies}  "
           f"gravity={gravity_world.round(2)} ({gsrc})")
 
+    # Scene cloud for the friction cones (feet/ankles). A missing scene or [friction] section
+    # ⇒ no cone (old artifacts still run). Camera centers orient the fuse-stored normals.
+    friction = knobs.get("friction")
+    scene_pts = scene_normals = None
+    scene_path = pred / "geometry" / "scene.npz"
+    transform_path = pred / "geometry" / "transform.npz"
+    if friction is not None and scene_path.exists() and transform_path.exists():
+        sc = dict(np.load(scene_path, allow_pickle=True))
+        tr = dict(np.load(transform_path, allow_pickle=True))
+        cam_centers = world_from_cam(
+            torch.as_tensor(tr["extrinsics"], dtype=torch.float32, device=device))[:, :3, 3]
+        scene_pts, scene_normals, _ = load_scene_cloud(
+            sc, cam_centers, conf_drop_q=0.0, k=int(friction["normal_k"]), device=device)
+        print(f"[human_optim/dynamics] friction cones ON ({scene_pts.shape[0]} scene pts)")
+    else:
+        print("[human_optim/dynamics] no scene/[friction] — friction cones OFF")
+
     mid = load_smplx_mid(_DEFAULT_SMPLX_MODEL, device)
     J = mid.num_joints
     joints_world = np.zeros((P, N, J, 3), np.float32)
@@ -959,6 +1072,7 @@ def run_dynamics(pred: Path, cfg: HumanOptimConfig, device: str, *, bodies="kine
             gravity_world, weights=weights,
             groups=knobs["contact"]["groups"], dyn_opt=knobs["dynamics_optimizer"],
             fps=fps, device=device, label=f"obj {oid}",
+            scene_pts=scene_pts, scene_normals=scene_normals, friction=friction,
         )
         joints_world[p] = res["joints_world"]
         torque_mag[p] = res["torque_mag"]

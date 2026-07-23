@@ -53,7 +53,9 @@ ann_acceleration    = [   0,    0,    0,    0 ]   # OFF — near-redundant with 
 [loss_weights.dynamics]
 base_wrench         = [   0,    0,    0,  1.0 ]
 force_magnitude     = [   0,    0,    0, 0.01 ]
-force_smooth        = [   0,    0,    0, 0.10 ]
+friction_cone       = [   0,    0,    0,  1.0 ]   # feet/ankles push only, tangential force ≤ μ·normal (hands excluded — they grasp/pull); N, like base_wrench
+force_smooth_mag    = [   0,    0,    0, 0.20 ]   # smooth the force MAGNITUDE across persisting contacts (harder than direction)
+force_smooth_dir    = [   0,    0,    0, 0.05 ]   # smooth the force DIRECTION (may adapt faster than magnitude)
 torque_smooth       = [   0,    0,    0, 0.10 ]
 
 [optimizer]
@@ -175,6 +177,18 @@ occ_full = 5.0          # 3-D visibility reaches exactly zero at this occluding-
 # frames it is labelled in contact. Body mass + inertia come baked from BetterHuman.
 [contact]
 groups = ["left_hand", "right_hand", "left_foot", "right_foot", "left_ankle", "right_ankle"]
+
+# Friction cone for the non-hand contact groups (feet + ankles). A foot/ankle contact can
+# only PUSH along the surface normal and its sideways (tangential) force is capped at μ·(normal
+# force), μ = tan(half_angle_deg). The normal is read from the fused scene cloud: average the
+# stored normals of the normal_k nearest scene points to the joint (they point out of the wall
+# toward the climber). A joint whose nearest scene point is beyond max_dist_m — or whose
+# neighboring normals disagree (they average to ~nothing on thin holds / concave corners) —
+# gets no cone. Ankle centers sit a few cm inside the leg, so keep max_dist_m generous.
+[friction]
+half_angle_deg = 45.0   # μ = tan(45°) = 1
+normal_k = 16
+max_dist_m = 0.30
 
 [dynamics_optimizer]
 max_iter = 200

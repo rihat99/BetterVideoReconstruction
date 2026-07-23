@@ -180,12 +180,31 @@ hands (resolved at the wrist), the two feet, and the two ankles — minimizing:
 |---|---|
 | `base_wrench` | squared base wrench — the physics residual |
 | `force_magnitude` | small L2 on the forces — picks the smallest forces that explain the motion |
-| `force_smooth` | discourages frame-to-frame force flicker on persistent contacts |
+| `friction_cone` | keeps each foot/ankle force inside a friction cone (see below); hands are exempt |
+| `force_smooth_mag` | discourages frame-to-frame change in force **magnitude** on persistent contacts |
+| `force_smooth_dir` | the same for force **direction**, smoothed more gently — the force may re-aim faster than it changes size |
 | `torque_smooth` | the same for the joint torques |
 
-A joint carries a force only on the frames it is labelled in contact. There is
-deliberately **no upward-only constraint**: a climber's hand pulls down and inward on a
-hold.
+A joint carries a force only on the frames it is labelled in contact.
+
+**Friction cone.** A hold or foothold can only *push* on the body, never pull, and it can
+only push sideways so much before the foot slips. The forces it is allowed to apply
+therefore form a cone around the surface normal, opening to a half-angle θ (default 45°,
+so the sideways force may be at most `tan θ = 1` times the outward push). The
+`friction_cone` term penalises any foot or ankle force that leaves this cone — including
+one aimed *into* the surface (a pull), which is why feet and ankles need no separate
+no-pull rule. The surface normal at each contact comes from the fused scene cloud: we take
+the nearest scene points to the joint and average their stored normals, which already
+point out of the wall toward the climber. A contact gets no cone when the joint is too far
+from any surface, or when the neighbouring normals disagree with each other (a thin hold or
+a concave corner averages opposing normals to nothing — better no cone than one aimed
+arbitrarily). Hands are left out on purpose — a climbing hand grips a hold and pulls down
+and inward on it, so its force is genuinely bilateral.
+
+Force smoothness is split in two so the **magnitude** of a contact force can be held
+steadier than its **direction**: `force_smooth_mag` damps the along-force change and
+`force_smooth_dir` the sideways (re-aiming) change, using an orthogonal split about the
+mean direction. Equal weights reproduce the old single `force_smooth` term exactly.
 
 The body's mass and per-segment inertia are **baked by BetterHuman**. The SMPL-X body
 is itself a BetterRobot model, and BetterHuman integrates real closed per-part meshes to
