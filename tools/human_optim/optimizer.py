@@ -40,9 +40,9 @@ from tools.optim import Phase, Problem, State, run_phases
 
 from .losses import (
     attraction_penalty, chamfer_loss, clearance_penalty, init_reprojection_gm,
-    joint_velocity_loss, pad_frames, penetration_penalty, pose_prior_loss,
-    radial_velocity_loss, root_orient_prior_loss, sapiens_reprojection_gm,
-    scene_penetration, scene_signed_distance,
+    joint_acceleration_loss, joint_velocity_loss, pad_frames, penetration_penalty,
+    pose_prior_loss, radial_velocity_loss, root_orient_prior_loss,
+    sapiens_reprojection_gm, scene_penetration, scene_signed_distance,
 )
 from .motion import tangent_difference
 from .qmath import normalize_q
@@ -306,6 +306,7 @@ def optimize_person(
     use_auto = auto_contact is not None and not use_ann and _wmax("ann_attraction") > 0.0
     ann_at_cfg = auto_contact if use_auto else (knobs["ann_attraction"] if use_ann else None)
     ann_rep_cfg = knobs["ann_repulsion"] if use_ann else None   # clearance repulsion is manual-only
+    ann_vel_ang_w = float(knobs.get("ann_velocity", {}).get("angular_weight", 0.0))  # angular/linear ratio
 
     depth_pad, depth_valid = pad_frames(depth_points, channels=3,
                                         device=q_world_init.device, dtype=q_world_init.dtype)
@@ -399,8 +400,10 @@ def optimize_person(
         st = State()
         qn = normalize_q(q, mid.num_joints)
         out = mid.forward(betas, qn)
+        jw7 = out.joints_world.tensor()          # (T, J, 7) world SE3: position + scalar-last quat
         st.put("qn", qn)
-        st.put("jw", out.joints_world.tensor()[..., :3])
+        st.put("jw", jw7[..., :3])
+        st.put("jwq", jw7[..., 3:7])
         st.put("vw", out.vertices)
 
         def _vis():
@@ -557,10 +560,21 @@ def optimize_person(
         def _velocity(st):
             if contact_labels is None:
                 return q.new_zeros(())
-            loss, speed_cms, n_steps = joint_velocity_loss(
-                st["jw"], contact_labels, fps=fps, joint_weight=contact_conf)
-            return loss, {"cm_s": speed_cms, "n": n_steps}
+            loss, speed_cms, ang_deg_s, n_steps = joint_velocity_loss(
+                st["jw"], contact_labels, fps=fps, joint_weight=contact_conf,
+                world_quats=st["jwq"], angular_weight=ann_vel_ang_w)
+            return loss, {"cm_s": speed_cms, "deg_s": ang_deg_s, "n": n_steps}
         problem.add_term("ann_velocity", _velocity)
+
+        # Contact acceleration damper (steady, jerk-free holds) — the Cartesian 2nd
+        # difference of the same in-contact joints; needs only the world joints.
+        def _acceleration(st):
+            if contact_labels is None:
+                return q.new_zeros(())
+            loss, accel_cms2, n_stencils = joint_acceleration_loss(
+                st["jw"], contact_labels, fps=fps, joint_weight=contact_conf)
+            return loss, {"cm_s2": accel_cms2, "n": n_stencils}
+        problem.add_term("ann_acceleration", _acceleration)
 
     # ── run the phases in order ──────────────────────────────────────────────
     # Adam (per-coordinate steps) tolerates the very different gradient scales here

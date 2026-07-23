@@ -25,9 +25,7 @@ import numpy as np
 import torch
 
 from tools.geometry.normals import load_scene_cloud
-from tools.smplx_robot import (
-    load_smplx_mid, make_smplx_inertial_model, remap_q_bh_to_model,
-)
+from tools.smplx_robot import load_smplx_mid
 from tools.smplx_robot.dynamics import velocity_acceleration_from_trajectory
 from tools.smplx_robot.vertex_weights import geodesic_endeffector_weights
 
@@ -735,7 +733,13 @@ def run_kinematics_2(source, pred: Path, cfg: HumanOptimConfig, device: str, *,
 # ─────────────────────────── dynamics (force-only RNEA) ───────────────────
 
 def _contact_catalog(joint_names: list[str]) -> dict[str, tuple[str, list[str]]]:
-    """``group_name -> (representative_joint, member_joints)`` for SMPLXMid."""
+    """``group_name -> (representative_joint, member_joints)`` for SMPLXMid.
+
+    A hand folds its wrist + finger joints onto the wrist (fingers are too small to
+    carry their own force point); every other group is a single joint. Foot and
+    ankle stay **separate** so a planted foot can push through two contact points —
+    the six default groups are the two hands, two feet and two ankles.
+    """
     have = set(joint_names)
     cat: dict[str, tuple[str, list[str]]] = {}
     for side in ("left", "right"):
@@ -744,10 +748,7 @@ def _contact_catalog(joint_names: list[str]) -> dict[str, tuple[str, list[str]]]
             if n.startswith(f"{side}_") and any(f in n for f in _FINGER)
         ]
         cat[f"{side}_hand"] = (f"{side}_wrist", [n for n in hand if n in have])
-        foot = [n for n in (f"{side}_ankle", f"{side}_foot") if n in have]
-        rep = f"{side}_foot" if f"{side}_foot" in have else f"{side}_ankle"
-        cat[f"{side}_foot"] = (rep, foot)
-        for jn in ("knee", "elbow", "hip"):
+        for jn in ("foot", "ankle", "knee", "elbow", "hip"):
             n = f"{side}_{jn}"
             if n in have:
                 cat[f"{side}_{jn}"] = (n, [n])
@@ -773,10 +774,10 @@ def _build_fext(f_world, mask, R_w2l, contact_ids, njoints):
     return fext, f_eff
 
 
-def _solve_person(mid, betas, scale, q_bh, contact_bool, valid, gravity_world, *,
-                  weights, inertia, groups, dyn_opt, fps, device, label=""):
+def _solve_person(mid, betas, q_bh, contact_bool, valid, gravity_world, *,
+                  weights, groups, dyn_opt, fps, device, label=""):
     """Solve world-frame contact forces for one person. Returns a result dict."""
-    import better_robot as br
+    from better_robot.dynamics import rnea
     from better_robot.kinematics import forward_kinematics
 
     dev = torch.device(device)
@@ -785,17 +786,17 @@ def _solve_person(mid, betas, scale, q_bh, contact_bool, valid, gravity_world, *
     N = q_bh.shape[0]
     dt = 1.0 / float(fps)
 
-    model = make_smplx_inertial_model(
-        mid, betas, float(scale), total_mass_kg=float(inertia["total_mass_kg"]),
-        density=float(inertia["density"]), device=dev, dtype=dtype,
-    )
+    # BetterHuman already bakes the BetterRobot model with real per-part inertia at
+    # these betas (closed part meshes — not convex hulls; native q order → no remap).
+    # We only override gravity to the scene's world-down direction.
+    model = mid.shaped(betas.to(dev)).robot
     g = torch.as_tensor(gravity_world, dtype=dtype, device=dev)
     g = g / (g.norm() + 1e-9) * _GRAVITY_MAG
     g6 = torch.cat([g, torch.zeros(3, dtype=dtype, device=dev)])
-    model = dataclasses.replace(model, gravity=g6)
-    total_mass = float(model.body_inertias[1:, 0].sum())
+    model = dataclasses.replace(model, values=dataclasses.replace(model.values, gravity=g6))
+    total_mass = float(model.values.body_inertias[..., 1:, 0].sum())
 
-    q_model = remap_q_bh_to_model(normalize_q(q_bh.to(dev), J), mid, model)
+    q_model = normalize_q(q_bh.to(dev), J)
     with torch.no_grad():
         v, a = velocity_acceleration_from_trajectory(model, q_model, dt)
         oMi = forward_kinematics(model, q_model).joint_pose_world          # (N, njoints, 7)
@@ -821,7 +822,6 @@ def _solve_person(mid, betas, scale, q_bh, contact_bool, valid, gravity_world, *
     fpair = (mask[1:] * mask[:-1] * valid_pair[:, None]) if C else None    # (N-1, C)
 
     f_world = torch.zeros((N, C, 3), dtype=dtype, device=dev, requires_grad=True)
-    data = model.create_data(batch_shape=(N,), device=dev, dtype=dtype)
     w_base = float(weights["base_wrench"])
     w_mag = float(weights["force_magnitude"])
     w_fs = float(weights["force_smooth"])
@@ -830,7 +830,7 @@ def _solve_person(mid, betas, scale, q_bh, contact_bool, valid, gravity_world, *
     def closure():
         opt.zero_grad()
         fext, f_eff = _build_fext(f_world, mask, R_w2l, contact_ids, model.njoints)
-        tau = br.rnea(model, data, q_model, v, a, fext=fext)
+        tau = rnea(model, q_model, v, a, fext=fext)
         loss = 0.5 * ((w_base * tau[..., :6]).pow(2).sum() + (w_mag * f_eff).pow(2).sum())
         if N > 1:
             df = f_world[1:] - f_world[:-1]                                # (N-1, C, 3)
@@ -846,7 +846,7 @@ def _solve_person(mid, betas, scale, q_bh, contact_bool, valid, gravity_world, *
             history_size=int(dyn_opt["history_size"]), tolerance_grad=float(dyn_opt["tolerance_grad"]),
             tolerance_change=float(dyn_opt["tolerance_change"]), line_search_fn="strong_wolfe")
         with torch.no_grad():
-            base0 = float((br.rnea(model, data, q_model, v, a).clone()[..., :6]).pow(2).sum().sqrt())
+            base0 = float((rnea(model, q_model, v, a)[..., :6]).pow(2).sum().sqrt())
         opt.step(closure)
     else:
         base0 = float("nan")
@@ -854,7 +854,8 @@ def _solve_person(mid, betas, scale, q_bh, contact_bool, valid, gravity_world, *
     with torch.no_grad():
         f_final = (f_world * mask[..., None]).detach()                        # (N, C, 3)
         fext, _ = _build_fext(f_final, mask, R_w2l, contact_ids, model.njoints)
-        tau = br.rnea(model, data, q_model, v, a, fext=fext)                  # (N, nv)
+        tau = rnea(model, q_model, v, a, fext=fext)                           # (N, nv)
+        base_wrench = tau[..., :6].cpu().numpy().astype(np.float32)           # (N, 6): force | torque
         base1 = float(tau[..., :6].pow(2).sum().sqrt())
 
         idx_vs = [int(x) for x in model.idx_vs]
@@ -874,6 +875,7 @@ def _solve_person(mid, betas, scale, q_bh, contact_bool, valid, gravity_world, *
     inval = ~np.asarray(valid, bool)
     torque_mag[inval] = 0.0
     force_world[inval] = 0.0
+    base_wrench[inval] = 0.0
     fnorm = f_final.norm(dim=-1)                                              # (N, C)
     act = mask.bool().any(dim=1).cpu().numpy()
     mean_f = float(fnorm.sum(dim=-1)[mask.bool().any(dim=1)].mean()) if act.any() else 0.0
@@ -893,6 +895,7 @@ def _solve_person(mid, betas, scale, q_bh, contact_bool, valid, gravity_world, *
 
     return dict(
         joints_world=joints_world, torque_mag=torque_mag, force_world=force_world,
+        base_wrench=base_wrench,
         contact_forces=f_final.cpu().numpy().astype(np.float32),
         joint_torques=tau.cpu().numpy().astype(np.float32),
         total_mass=np.float32(total_mass),
@@ -901,7 +904,7 @@ def _solve_person(mid, betas, scale, q_bh, contact_bool, valid, gravity_world, *
     )
 
 
-def run_dynamics(pred: Path, cfg: HumanOptimConfig, device: str, *, bodies="kinematic_2") -> Path:
+def run_dynamics(pred: Path, cfg: HumanOptimConfig, device: str, *, bodies="kinematic_1") -> Path:
     """Force-only RNEA on a refined body → ``human_optim/dynamics.npz``."""
     knobs = cfg.knobs
     weights = cfg.weights_for("dynamics")
@@ -940,6 +943,7 @@ def run_dynamics(pred: Path, cfg: HumanOptimConfig, device: str, *, bodies="kine
     torque_mag = np.zeros((P, N, J), np.float32)
     contact_forces_world = np.zeros((P, N, J, 3), np.float32)
     joint_torques = np.zeros((P, N, 6 + 3 * (J - 1)), np.float32)
+    base_wrench = np.zeros((P, N, 6), np.float32)                              # root residual force | torque
     total_mass = np.zeros(P, np.float32)
     rep_names_p: list = []
     raw_forces_p: list = []
@@ -949,11 +953,10 @@ def run_dynamics(pred: Path, cfg: HumanOptimConfig, device: str, *, bodies="kine
         cp = cnt_oids.index(oid) if oid in cnt_oids else p
         res = _solve_person(
             mid, torch.as_tensor(kin["betas"][p], dtype=torch.float32),
-            float(kin["scale"][p]) if "scale" in kin else 1.0,
             torch.as_tensor(kin["q"][p], dtype=torch.float32),
             torch.as_tensor(joint_contact[cp], dtype=torch.bool, device=device),
             np.asarray(kin["valid_mask"][p], bool),
-            gravity_world, weights=weights, inertia=knobs["inertia"],
+            gravity_world, weights=weights,
             groups=knobs["contact"]["groups"], dyn_opt=knobs["dynamics_optimizer"],
             fps=fps, device=device, label=f"obj {oid}",
         )
@@ -961,6 +964,7 @@ def run_dynamics(pred: Path, cfg: HumanOptimConfig, device: str, *, bodies="kine
         torque_mag[p] = res["torque_mag"]
         contact_forces_world[p] = res["force_world"]
         joint_torques[p] = res["joint_torques"]
+        base_wrench[p] = res["base_wrench"]
         total_mass[p] = res["total_mass"]
         rep_names_p.append(res["rep_joint_names"])
         raw_forces_p.append(res["contact_forces"])
@@ -970,6 +974,7 @@ def run_dynamics(pred: Path, cfg: HumanOptimConfig, device: str, *, bodies="kine
         out_path,
         joints_world=joints_world, torque_mag=torque_mag,
         contact_forces_world=contact_forces_world, joint_torques=joint_torques,
+        base_wrench=base_wrench,
         contact_forces=np.stack(raw_forces_p, 0),
         contact_force_joints=np.array(rep_names_p, dtype="<U16"),
         total_mass=total_mass, gravity_world=gravity_world.astype(np.float32),

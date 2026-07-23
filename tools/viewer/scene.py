@@ -24,6 +24,9 @@ from .loading import _FINGER_TOKENS, ClipData, ensure_scene_mesh
 
 # dynamics sphere-floor / bone radius / max torque grow factor / metres-per-newton
 _DYN_R0, _DYN_RB, _DYN_MAXS, _DYN_FSCALE = 0.022, 0.012, 3.0, 5e-4
+# root residual-wrench arrows: metres per newton-metre for the torque part (the force
+# part reuses _DYN_FSCALE so it is directly comparable to the contact-force arrows)
+_DYN_TSCALE = 2e-3
 # body-skeleton overlay: fixed joint-sphere radius / bone radius (m) and the
 # default kinematic mesh opacity while the skeleton shows over it (slider-tunable).
 _SKEL_R, _SKEL_RB, _SKEL_ALPHA = 0.028, 0.012, 0.7
@@ -263,13 +266,19 @@ class ClipScene:
                                             unit_cyl, visible=False)
                     bones.append((h, j, par))
                 self.dyn_nodes.append({"oid": oid, "spheres": spheres, "bones": bones,
-                                       "forces": None})
+                                       "forces": None, "root_force": None, "root_torque": None})
+            # Per-joint finger/palm mask (for the dynamics fingers toggle).
+            jnames = self.dyn.get("joint_names")
+            self._dyn_finger = np.array(
+                [any(t in n for t in _FINGER_TOKENS) for n in jnames], bool
+            ) if jnames else np.zeros(Jd, bool)
 
-        # Available body sources (display order) + default (most refined present).
+        # Available body sources (display order) + default. kinematics_2 is selectable
+        # but kinematic_1 stays the default view (it is the validated default chain).
         self.body_source_names = (
             list(data.skinned) + (["dynamics"] if self.dyn is not None else []))
         self.default_body = next(
-            (s for s in ("kinematics_2", "kinematics", "prefit", "original", "dynamics")
+            (s for s in ("kinematics", "kinematics_2", "prefit", "original", "dynamics")
              if s in self.body_source_names), None)
         self.active = self.default_body
 
@@ -573,15 +582,26 @@ class ClipScene:
     # -- dynamics --
     def _apply_dynamics(self, f: int, on: bool) -> None:
         dyn = self.dyn
+        ly = self.layers
+        scale_torque = ly.get("dyn_torque", True)     # sphere size ∝ joint torque
+        show_fingers = ly.get("dyn_fingers", True)    # show finger / palm joints
+        finger = self._dyn_finger
         for p in range(dyn["P"]):
             nd = self.dyn_nodes[p]
             live = on and f < dyn["valid"].shape[1] and bool(dyn["valid"][p, f])
             jw, tm = dyn["jw"][p, f], dyn["tm"][p, f]
+            jc = dyn.get("jc")
+            con = jc[p, f] if jc is not None and f < jc.shape[1] else None
             for j, sp in enumerate(nd["spheres"]):
-                if live:
+                if live and (show_fingers or not finger[j]):
                     sp.position = (float(jw[j, 0]), float(jw[j, 1]), float(jw[j, 2]))
-                    s = 1.0 + min(float(tm[j]) / dyn["ref"], 1.0) * (_DYN_MAXS - 1.0)
+                    # scale by joint torque, but not the root (j==0): its wrench is the arrows
+                    s = (1.0 + min(float(tm[j]) / dyn["ref"], 1.0) * (_DYN_MAXS - 1.0)
+                         if scale_torque and j != 0 else 1.0)
                     sp.scale = (s, s, s)
+                    # green when free, red only when this joint is in contact
+                    hot = con is not None and bool(con[j])
+                    sp.color = _CONTACT_RGB if hot else _FREE_RGB
                     sp.visible = True
                 else:
                     sp.visible = False
@@ -589,7 +609,7 @@ class ClipScene:
                 a, b = jw[par], jw[j]
                 d = b - a
                 L = float(np.linalg.norm(d))
-                if live and L > 1e-6:
+                if live and L > 1e-6 and (show_fingers or not (finger[j] or finger[par])):
                     h.position = (float((a[0] + b[0]) * 0.5), float((a[1] + b[1]) * 0.5),
                                   float((a[2] + b[2]) * 0.5))
                     h.wxyz = _wxyz_shortest_arc_z(d)
@@ -597,12 +617,12 @@ class ClipScene:
                     h.visible = True
                 else:
                     h.visible = False
-            # Force arrows vary per frame — remove the old node before re-adding
-            # (reusing the handle would leak a node every frame).
+            # Contact-force arrows (cyan) at the 6 contact joints — remove the old node
+            # before re-adding (reusing the handle would leak a node every frame).
             if nd["forces"] is not None:
                 nd["forces"].remove()
                 nd["forces"] = None
-            if live:
+            if live and ly.get("dyn_forces", True):
                 fw = dyn["fw"][p, f]
                 idx = np.flatnonzero(np.linalg.norm(fw, axis=-1) > 1e-3)
                 if idx.size:
@@ -611,9 +631,34 @@ class ClipScene:
                         f"/clip/dynamics/p{nd['oid']:02d}/forces", points=seg.astype(np.float32),
                         colors=(45, 200, 255), shaft_radius=0.012,
                         head_radius=0.028, head_length=0.05)
+            # Root residual wrench: force (green) and torque (magenta) at the pelvis,
+            # each independently toggleable. A physically-consistent solve drives these
+            # toward zero, so short arrows are good — they show what the contact forces
+            # failed to explain.
+            bw = dyn.get("bw")
+            root = jw[0]
+            self._root_arrow(nd, "root_force",
+                             live and bw is not None and ly.get("dyn_root_force", True),
+                             root, None if bw is None else bw[p, f, :3] * _DYN_FSCALE, (60, 220, 90))
+            self._root_arrow(nd, "root_torque",
+                             live and bw is not None and ly.get("dyn_root_torque", True),
+                             root, None if bw is None else bw[p, f, 3:] * _DYN_TSCALE, (220, 60, 220))
+
+    def _root_arrow(self, nd, slot, active, root, vec, color) -> None:
+        """Redraw one root arrow (force or torque) — remove-then-add each frame."""
+        if nd[slot] is not None:
+            nd[slot].remove()
+            nd[slot] = None
+        if active and vec is not None and float(np.linalg.norm(vec)) > 1e-4:
+            seg = np.stack([[root, root + vec]], axis=0).astype(np.float32)   # (1, 2, 3)
+            nd[slot] = self.server.scene.add_arrows(
+                f"/clip/dynamics/p{nd['oid']:02d}/{slot}", points=seg, colors=color,
+                shaft_radius=0.014, head_radius=0.032, head_length=0.06)
 
     def dispose(self) -> None:
         """Remove every node this clip added — one root removal cascades to all."""
         for nd in self.dyn_nodes:
             nd["forces"] = None  # lives under /clip → cascade-removed with the root
+            nd["root_force"] = None
+            nd["root_torque"] = None
         self.root.remove()

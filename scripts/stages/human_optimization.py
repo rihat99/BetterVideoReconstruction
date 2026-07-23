@@ -70,8 +70,8 @@ def run(source, predictions_dir, config_path, *, stages=None, annotations=None) 
                          labels_mode=str(k2.get("labels", "manual")))
     if "dynamics" in requested:
         dyn = opts.get("dynamics", {})
-        run_dynamics(pred, cfg, dyn.get("device", "cpu"),
-                     bodies=str(dyn.get("bodies", "kinematic_2")))
+        run_dynamics(pred, cfg, dyn.get("device", "cuda"),
+                     bodies=str(dyn.get("bodies", "kinematic_1")))
 
 
 def main(argv=None) -> int:

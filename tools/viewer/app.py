@@ -25,6 +25,15 @@ _LAYER_LABELS = (("body", "SMPL-X body"), ("skeleton", "body skeleton"),
                  ("normals", "scene normals"),
                  ("cameras", "cameras"), ("gravity", "gravity"))
 
+# Dynamics-only display toggles (their own sidebar folder; only bite while the
+# ``dynamics`` body source is active). Joints are always coloured by contact
+# (green free / red in-contact); these switch the extra overlays on and off.
+_DYN_LAYER_LABELS = (("dyn_torque", "joint torques (sphere size)"),
+                     ("dyn_fingers", "fingers / palm"),
+                     ("dyn_forces", "contact forces"),
+                     ("dyn_root_force", "root force"),
+                     ("dyn_root_torque", "root torque"))
+
 # World-frame up vector per ``--up`` axis, mirroring ``SceneApi.set_up_direction``.
 # ``set_up_direction`` rotates the scene root (it does NOT set the camera's
 # ``up_direction``), so the standard view's camera up is exactly this vector — the
@@ -49,7 +58,10 @@ class Viewer:
         self.layers = {"body": show_smplx, "skeleton": False, "confidence": True,
                        "depth_trust": False,
                        "human": True, "scene": True, "normals": False,
-                       "cameras": True, "gravity": False}
+                       "cameras": True, "gravity": False,
+                       # dynamics section (all on by default)
+                       "dyn_torque": True, "dyn_fingers": True, "dyn_forces": True,
+                       "dyn_root_force": True, "dyn_root_torque": True}
         self._surface = "points"    # surface-mesh rendering is off (code kept in ClipScene)
         self.cache: dict[Path, ClipData] = {}
         self.scene: ClipScene | None = None
@@ -104,6 +116,13 @@ class Viewer:
         with g.add_folder("layers"):
             self.checkboxes = {}
             for key, label in _LAYER_LABELS:
+                c = g.add_checkbox(label, self.layers[key])
+                c.on_update(self._make_layer_cb(key))
+                self.checkboxes[key] = c
+        # Dynamics gets its own section — many toggles that only apply to the
+        # dynamics body source. Collapsed by default to keep the sidebar tidy.
+        with g.add_folder("dynamics", expand_by_default=False):
+            for key, label in _DYN_LAYER_LABELS:
                 c = g.add_checkbox(label, self.layers[key])
                 c.on_update(self._make_layer_cb(key))
                 self.checkboxes[key] = c

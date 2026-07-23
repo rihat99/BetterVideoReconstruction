@@ -89,7 +89,7 @@ Default chain in order (rows 1–8; `human_optimization` runs its `root` +
 | – | `human_optimization.py --stages kinematics_2` | `kinematic_1.npz`, labels (`data/<stem>.npz` manual, or `contacts_1.npz` auto — `[stages.kinematics_2].labels`) | `human_optim/kinematic_2.npz` |
 | – | `estimate_contacts.py` | a refined body (`--bodies`), `geometry/` | `human_optim/contacts_<tag>.npz` (per-joint labels + confidence + depth-fit gap/trust) |
 | – | `estimate_gravity_geocalib.py` | frames, `geometry/transform.npz` | `geocalib/gravity.npz` (world-frame down + `reliable` flag) |
-| – | `human_optimization.py --stages dynamics` | `kinematic_2.npz`, `contacts_2.npz`, gravity | `human_optim/dynamics.npz` (world contact forces + joint torques) |
+| – | `human_optimization.py --stages dynamics` | a refined body + its contacts (default `kinematic_1.npz` + `contacts_1.npz`; `[stages.dynamics].bodies`), gravity | `human_optim/dynamics.npz` (world contact forces at 6 joints — hands/feet/ankles — + joint torques + per-frame root `base_wrench`) |
 
 Viewer: `scripts/view_3d.py out/<stem>/` (viser: fused scene + cameras + human
 points + bodies; the **`body source`** dropdown switches `original` / `prefit` /
@@ -133,7 +133,7 @@ BetterVideoReconstruction/
 │   ├── source.py / mask_io.py / precompute_runner.py
 │   ├── adapters/                  # stateless model wrappers (sapiens2, vggt_omega, geocalib)
 │   ├── mhr_to_smplx/              # MHR → SMPL-X fitter (pip smplx)
-│   ├── smplx_robot/               # SMPLXMid ↔ BetterRobot 52-joint model; inertia + dynamics
+│   ├── smplx_robot/               # SMPL-X body loader + frozen-q trajectory finite-diff (model + inertia now come baked off the BetterHuman body)
 │   ├── human_optim/               # the stage machinery: losses/optimizer/stages/prefit/contacts/confidence/…
 │   ├── geometry/                  # depth clean + backproject + voxel + normals + human scale
 │   └── viewer/                    # view_3d internals

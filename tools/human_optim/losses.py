@@ -413,14 +413,16 @@ def joint_velocity_loss(
     *,
     fps: float,
     joint_weight: torch.Tensor | None = None,  # (T, J) float in [0,1] — per-joint confidence weight
-) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    world_quats: torch.Tensor | None = None,   # (T, J, 4) scalar-last world joint orientation
+    angular_weight: float = 0.0,               # angular term weight relative to the linear one
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
     """Damp the world velocity of joints a human annotated as in contact.
 
     A joint touching the wall should be (near-)stationary while the contact lasts,
     so for each frame-to-frame step we penalize the squared world displacement of
     every joint flagged in contact at **both** ends of the step::
 
-        L = mean_{t, j : contact[t,j]==1 ∧ contact[t+1,j]==1} ‖p_{t+1,j} − p_{t,j}‖²
+        L_lin = mean_{t, j : contact[t,j]==1 ∧ contact[t+1,j]==1} ‖p_{t+1,j} − p_{t,j}‖²
 
     (the constant ``fps²`` folds into the weight, as in :func:`smoothness_loss`).
     Gating on both frames matches the dynamics stage's ``fpair`` convention: the
@@ -431,13 +433,22 @@ def joint_velocity_loss(
     :mod:`tools.human_optim.velocity` — because the body-frame rotation preserves
     norm; but the finite difference of the posed world joints is directly
     differentiable through ``q`` (that Jacobian path is detached), so we use it as
-    the loss. Gradients flow through ``joints_world`` only. Returns
-    ``(loss, mean_speed_cm_s, n_contact_steps)`` — the latter two detached
-    diagnostics (mean in-contact joint speed cm/s, and how many (frame, joint)
-    steps were penalized)."""
+    the loss. Gradients flow through ``joints_world`` only.
+
+    A joint that grips also should not *twist*: when ``world_quats`` is given and
+    ``angular_weight > 0`` the same in-contact gate additionally damps the
+    joint's **angular** velocity — the frame-to-frame change of its world
+    orientation, measured as ``1 − (q_t · q_{t+1})²`` (= ``sin²(θ/2)`` for a
+    relative rotation ``θ``, the same quaternion distance the pose priors use).
+    The combined loss is ``L_lin + angular_weight · L_ang``. Holding position is
+    the harder constraint (linear jitter in metres vs the dimensionless angular
+    distance), so ``angular_weight`` is meant to be small. Returns
+    ``(loss, mean_speed_cm_s, mean_ang_deg_s, n_contact_steps)`` — the middle two
+    detached diagnostics (mean in-contact joint linear speed cm/s and angular
+    speed deg/s), and how many (frame, joint) steps were penalized."""
     if joints_world.shape[0] < 2:
         z = joints_world.new_zeros(())
-        return z, z, joints_world.new_zeros((), dtype=torch.long)
+        return z, z, z, joints_world.new_zeros((), dtype=torch.long)
     dp = joints_world[1:] - joints_world[:-1]            # (T-1, J, 3) world displacement / step
     sp2 = (dp * dp).sum(dim=-1)                          # (T-1, J) squared per-step speed (×fps²→weight)
     pair = (contact_labels[:-1] == 1) & (contact_labels[1:] == 1)  # in contact at BOTH ends of the step
@@ -446,10 +457,59 @@ def joint_velocity_loss(
         gate = gate * torch.minimum(joint_weight[:-1], joint_weight[1:])
     n = gate.sum()
     loss = (sp2 * gate).sum() / n.clamp_min(1.0)
+    ang_deg_s = joints_world.new_zeros(())
+    if world_quats is not None and angular_weight > 0.0:
+        dot = (world_quats[1:] * world_quats[:-1]).sum(dim=-1)      # (T-1, J) cos(θ/2), sign-ambiguous
+        loss = loss + angular_weight * ((1.0 - dot.square()) * gate).sum() / n.clamp_min(1.0)
+        with torch.no_grad():
+            theta = 2.0 * torch.acos(dot.abs().clamp(max=1.0))     # relative rotation angle (rad)
+            ang_deg_s = (torch.rad2deg(theta) * gate).sum() / n.clamp_min(1.0) * float(fps)
     with torch.no_grad():
         speed_cm_s = ((sp2.sqrt() * gate).sum() / n.clamp_min(1.0)) * float(fps) * 100.0
         n_steps = pair.sum()
-    return loss, speed_cm_s.detach(), n_steps
+    return loss, speed_cm_s.detach(), ang_deg_s.detach(), n_steps
+
+
+def joint_acceleration_loss(
+    joints_world: torch.Tensor,    # (T, J, 3) posed (scaled) world joints — grad through q
+    contact_labels: torch.Tensor,  # (T, J) int8 tri-state: 1 = annotated in-contact this frame
+    *,
+    fps: float,
+    joint_weight: torch.Tensor | None = None,  # (T, J) float in [0,1] — per-joint confidence weight
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    """Damp the world (Cartesian) ACCELERATION of joints a human annotated as in contact.
+
+    The sibling of :func:`joint_velocity_loss` one time-derivative up: a gripping
+    joint should move not just slowly but *steadily* — no jerk into or out of the
+    hold. For every 3-frame stencil we penalize the squared world second difference
+    of each joint flagged in contact across **all three** frames::
+
+        L = mean_{t, j : contact[t−1,j]=contact[t,j]=contact[t+1,j]=1}
+                ‖p_{t+1,j} − 2 p_{t,j} + p_{t−1,j}‖²
+
+    That second difference is the joint origin's LOCAL_WORLD_ALIGNED linear
+    acceleration (the world-axis 2nd time derivative of its position), with the
+    constant ``fps²`` folded into the weight as in :func:`smoothness_loss`. Gating on
+    all three frames drops the enter/exit steps and any stencil that touches an
+    invalid frame (held frames carry label ``-1`` ≠ 1). Gradients flow through
+    ``joints_world`` only. Returns ``(loss, mean_accel_cm_s2, n_contact_stencils)`` —
+    the latter two detached diagnostics."""
+    if joints_world.shape[0] < 3:
+        z = joints_world.new_zeros(())
+        return z, z, joints_world.new_zeros((), dtype=torch.long)
+    d2 = joints_world[2:] - 2.0 * joints_world[1:-1] + joints_world[:-2]   # (T-2, J, 3) world 2nd diff
+    a2 = (d2 * d2).sum(dim=-1)                                             # (T-2, J) squared per-stencil accel
+    trip = ((contact_labels[:-2] == 1) & (contact_labels[1:-1] == 1)      # in contact at all 3 stencil frames
+            & (contact_labels[2:] == 1))
+    gate = trip.to(a2.dtype)
+    if joint_weight is not None:                        # down-weight uncertain contacts (min over the stencil)
+        gate = gate * torch.minimum(torch.minimum(joint_weight[:-2], joint_weight[1:-1]), joint_weight[2:])
+    n = gate.sum()
+    loss = (a2 * gate).sum() / n.clamp_min(1.0)
+    with torch.no_grad():
+        accel_cm_s2 = ((a2.sqrt() * gate).sum() / n.clamp_min(1.0)) * float(fps) ** 2 * 100.0
+        n_stencils = trip.sum()
+    return loss, accel_cm_s2.detach(), n_stencils
 
 
 def pose_prior_loss(

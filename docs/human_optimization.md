@@ -115,8 +115,15 @@ nearest scene point and gets a signed distance (negative = behind the surface).
   penetration the region behind it — they partition the signed-distance axis and never
   fight. This term exists because nothing else pulls the body toward the *scene*
   (chamfer targets the person's own depth, penetration only pushes).
-- **`ann_velocity`** — damps the world velocity of in-contact joints. A gripping hand
-  should be still.
+- **`ann_velocity`** — damps the world velocity of in-contact joints — both how fast
+  they *translate* and how fast they *rotate* (the angular part carries a smaller weight,
+  `[ann_velocity].angular_weight`). A gripping hand should hold both its place and its
+  facing. The joint's world position/orientation differenced over time already *is* its
+  LOCAL_WORLD_ALIGNED velocity, so no Jacobian is needed.
+- **`ann_acceleration`** — the same idea one derivative up: damps the world *acceleration*
+  of in-contact joints (steady, jerk-free holds). Off by default — a joint already held
+  still by `ann_velocity` is already low-acceleration, so it only earns its keep if
+  `ann_velocity` is lowered to let a contact slide slowly.
 - **`ann_repulsion`** — pushes joints labeled *not in contact* out past the contact
   threshold. Only meaningful with manual labels (see kinematics_2); automatic labels
   carry no negatives.
@@ -164,9 +171,10 @@ this body still gates on pre-enforcement stillness.
 With the kinematic trajectory **frozen**, solve for the world-frame contact forces.
 RNEA (recursive Newton-Euler) computes, for a given motion, the forces and torques each
 joint must produce. The body's root is a free-flyer — nothing can push on it — so a
-physically consistent solution must make the six root components (the *base wrench*)
-vanish. The optimizer (L-BFGS) finds per-frame forces at the contact joints (hands
-resolved at the wrist, feet) minimizing:
+physically consistent solution must make the six root components vanish. Those six are
+the *base wrench*: a 3D residual force plus a 3D residual torque left over at the pelvis.
+The optimizer (L-BFGS) finds per-frame forces at the **six contact joints** — the two
+hands (resolved at the wrist), the two feet, and the two ankles — minimizing:
 
 | term | what |
 |---|---|
@@ -175,12 +183,27 @@ resolved at the wrist, feet) minimizing:
 | `force_smooth` | discourages frame-to-frame force flicker on persistent contacts |
 | `torque_smooth` | the same for the joint torques |
 
-There is deliberately **no upward-only constraint**: a climber's hand pulls down and
-inward on a hold. Segment inertias come from per-part convex hulls of the body mesh
-normalized to a total mass (70 kg default). Gravity direction comes from the GeoCalib
-stage (world-frame; falls back to world-down when unreliable). Velocities and
-accelerations are central finite differences of the frozen `q` — not denoised, by
-decision: the forces should explain the reconstructed motion, not a prettified one.
+A joint carries a force only on the frames it is labelled in contact. There is
+deliberately **no upward-only constraint**: a climber's hand pulls down and inward on a
+hold.
+
+The body's mass and per-segment inertia are **baked by BetterHuman**. The SMPL-X body
+is itself a BetterRobot model, and BetterHuman integrates real closed per-part meshes to
+get each segment's mass, centre of mass and inertia (about 72 kg at the neutral shape,
+and it shifts with the person's `betas`). This stage therefore no longer builds its own
+inertia — it reads the body's, which is both simpler and more faithful than the old
+convex-hull estimate that had to be rescaled to a fixed 70 kg.
+
+Gravity direction comes from the GeoCalib stage (world-frame; falls back to world-down
+when unreliable). Velocities and accelerations are central finite differences of the
+frozen `q` — not denoised, by decision: the forces should explain the reconstructed
+motion, not a prettified one. The per-frame base wrench is saved so the viewer can draw
+the leftover root force and torque as arrows at the pelvis (the **root wrench** layer).
+
+By default the stage refines the `kinematics_1` body (`[stages.dynamics].bodies`, which
+can point at `kinematics_2` instead) and runs on the GPU. The reworked BetterRobot RNEA
+is fast in plain PyTorch; its Warp kernel, though available, measured slower for this
+force-plus-gradient solve, so the torch path is used.
 
 ## What is deliberately absent
 

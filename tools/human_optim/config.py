@@ -54,7 +54,8 @@ def load_config(path: str | Path) -> HumanOptimConfig:
 
     knob_sections = ("optimizer", "chamfer", "keypoints", "reproj_init", "penetration",
                      "contact_gate", "auto_contact", "ann_attraction",
-                     "ann_repulsion", "contacts", "contact", "inertia", "dynamics_optimizer")
+                     "ann_repulsion", "ann_velocity", "contacts", "contact",
+                     "dynamics_optimizer")
     knobs = {name: dict(raw[name]) for name in knob_sections if name in raw}
 
     return HumanOptimConfig(

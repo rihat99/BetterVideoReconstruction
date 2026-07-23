@@ -20,8 +20,8 @@ overlay = false          # debug overlay → human_optim/kinematic_2_overlay.mp4
 labels = "manual"        # contact labels: "manual" (data/<stem>.npz) | "auto" (contacts_1, confidence-weighted)
 
 [stages.dynamics]
-device = "cpu"
-bodies = "kinematic_2"   # which refined body the force solve reads (kinematic_1 | kinematic_2)
+device = "cuda"          # GPU: the new BetterRobot batched-adjoint torch RNEA is fast (warp measured slower for this fwd+bwd solve)
+bodies = "kinematic_1"   # which refined body the force solve reads (kinematic_1 | kinematic_2)
 
 #                       root  kin1  kin2  dyn
 [loss_weights.kinematic]
@@ -36,24 +36,25 @@ accel_root          = [  24,   24,   24,    0 ]
 accel_joint         = [  48,   48,   48,    0 ]
 jerk_root           = [ 300,  300,  300,    0 ]
 jerk_joint          = [ 500,  500,  500,    0 ]
-snap_root           = [ 300,  300,    0,    0 ]   # 4th-diff snap on top of accel/jerk — highest-freq root jitter
-snap_joint          = [ 500,  500,    0,    0 ]
-radial_velocity     = [   0,  100,    0,    0 ]   # damp joint velocity along the viewing ray (worst-constrained axis); kin1 only
+snap_root           = [ 300,  300,  300,    0 ]   # 4th-diff snap on top of accel/jerk — highest-freq root jitter
+snap_joint          = [ 500,  500,  500,    0 ]
+radial_velocity     = [   0,  100,  100,    0 ]   # damp joint velocity along the viewing ray (worst-constrained axis); kin1 + kin2
 
 [loss_weights.scene]
 penetration         = [   0, 4000, 4000,    0 ]   # push posed verts out of geometry/scene.npz (reported, not a fit gate)
 
 [loss_weights.annotation]
 # Label-driven; labels are AUTO-detected in kinematics_1 (frozen), MANUAL in kinematics_2.
-ann_attraction      = [   0,   10,   20,    0 ]   # pull in-contact-joint verts onto the wall
+ann_attraction      = [   0,   10,   20,    0 ]   # pull in-contact-joint verts onto the wall (UNBOUNDED pull — stays small; ≥100 diverges the fit)
 ann_repulsion       = [   0,    0, 4000,    0 ]   # push no-contact verts off — MANUAL only (auto labels carry no negatives)
-ann_velocity        = [   0,  500,  500,    0 ]   # damp in-contact joints' velocity (fit-neutral: readout reads pre-enforcement drift_pre)
+ann_velocity        = [   0,  500, 4000,    0 ]   # damp in-contact joints' linear + angular velocity (readout reads pre-enforcement drift_pre)
+ann_acceleration    = [   0,    0,    0,    0 ]   # OFF — near-redundant with a strong ann_velocity (a still joint is already low-accel); wired + ready, raise to damp in-contact joints' Cartesian (LOCAL_WORLD_ALIGNED) acceleration if ann_velocity is lowered to allow slow sliding contacts
 
 [loss_weights.dynamics]
 base_wrench         = [   0,    0,    0,  1.0 ]
 force_magnitude     = [   0,    0,    0, 0.01 ]
-force_smooth        = [   0,    0,    0, 0.02 ]
-torque_smooth       = [   0,    0,    0, 0.02 ]
+force_smooth        = [   0,    0,    0, 0.10 ]
+torque_smooth       = [   0,    0,    0, 0.10 ]
 
 [optimizer]
 lr = 0.01
@@ -104,6 +105,14 @@ clearance_m = 0.03
 max_dist_m = 0.15
 max_pen_m = 0.10
 huber_m = 0.02
+
+# Contact velocity damper. The ann_velocity weight damps an in-contact joint's LINEAR
+# world velocity; angular_weight adds its ANGULAR velocity (world-orientation change) at
+# this fraction of the linear weight. A gripping joint should not twist, but holding
+# position matters more (metres vs a dimensionless quaternion distance), so keep it small.
+# Applies to both kinematics_1 and kinematics_2.
+[ann_velocity]
+angular_weight = 0.1
 
 # kin1 auto-contact frozen-label DETECTOR + attraction pull band (looser enter/exit than the readout).
 # GUARD: max_dist_m must exceed band_m AND detect_exit_m, and prune_margin_m >= max_dist_m, or detections die silently.
@@ -161,12 +170,11 @@ occ_front_m = 0.005     # vertex must be at least this far in front; small enoug
 occ_subsample = 2500    # deterministic body-vertex sample used by the occlusion count
 occ_full = 5.0          # 3-D visibility reaches exactly zero at this occluding-vertex count
 
+# Force application points for the dynamics stage: two hands (wrist + fingers folded
+# onto the wrist), two feet, two ankles — six joints. A joint carries a force only on
+# frames it is labelled in contact. Body mass + inertia come baked from BetterHuman.
 [contact]
-groups = ["left_hand", "right_hand", "left_foot", "right_foot"]
-
-[inertia]
-total_mass_kg = 70.0
-density = 1000.0
+groups = ["left_hand", "right_hand", "left_foot", "right_foot", "left_ankle", "right_ankle"]
 
 [dynamics_optimizer]
 max_iter = 200

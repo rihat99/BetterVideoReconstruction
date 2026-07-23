@@ -60,10 +60,28 @@ def _load_dynamics(pred: Path) -> dict | None:
     ref = float(np.percentile(tmv, 95)) if tmv.size else 1.0
     if ref <= 1e-6:
         ref = float(tmv.max()) if tmv.size and tmv.max() > 0 else 1.0
+    names = [str(n) for n in dd["joint_names"]] if "joint_names" in dd.files else None
+    jc = dd["joint_contact"].astype(bool) if "joint_contact" in dd.files else None
+    if jc is not None and names is not None:
+        # Fold each hand's finger contacts onto its wrist so the wrist sphere (the
+        # hand's single force point) turns red whenever the hand grips — the contact
+        # sits on the fingers/palm, so the wrist's own label alone misses most grips.
+        for side in ("left", "right"):
+            wrist = f"{side}_wrist"
+            if wrist in names:
+                w = names.index(wrist)
+                fingers = [i for i, n in enumerate(names)
+                           if n.startswith(f"{side}_") and any(t in n for t in _FINGER_TOKENS)]
+                if fingers:
+                    jc[:, :, w] |= jc[:, :, fingers].any(axis=2)
     return {
         "jw": dd["joints_world"].astype(np.float32),            # (P, N, J, 3)
         "tm": tm,
         "fw": dd["contact_forces_world"].astype(np.float32),    # (P, N, J, 3)
+        "bw": (dd["base_wrench"].astype(np.float32)             # (P, N, 6): root force | torque
+               if "base_wrench" in dd.files else None),
+        "jc": jc,                                               # (P, N, J): per-joint in-contact (fingers folded to wrist)
+        "joint_names": names,                                   # (J,) native names (finger toggle)
         "valid": valid,
         "parents": np.asarray(dd["parents"], np.int32),         # (J,)
         "oids": (np.asarray(dd["object_ids"], np.int32) if "object_ids" in dd.files
@@ -535,8 +553,7 @@ def load_clip_data(pred: Path, *, device: str, show_smplx: bool,
             orig = _smplx_params_skinned(pred / "sam3d" / "smplx_params.npz", extr, device=device)
             if orig is not None:
                 skinned["original"] = orig
-        # kinematics_2 temporarily excluded from the viewer (not actively worked on).
-        for name, fn in (("kinematics", "kinematic_1.npz"),):
+        for name, fn in (("kinematics", "kinematic_1.npz"), ("kinematics_2", "kinematic_2.npz")):
             if (pred / "human_optim" / fn).exists():
                 skinned[name] = _smplx_kinematic_skinned(pred / "human_optim" / fn, device=device)
         # prefit: the scale stage's dual scale+body alignment (camera frame, like original).
@@ -555,7 +572,7 @@ def load_clip_data(pred: Path, *, device: str, show_smplx: bool,
         fov_y=np.radians(transform["fov_y_deg"].astype(np.float64)),
         gravity=_load_gravity(pred),
         skinned=skinned,
-        dynamics=None,   # dynamics temporarily excluded from the viewer (not actively worked on)
+        dynamics=_load_dynamics(pred),
         skeleton=_load_skeleton(pred) if show_smplx else None,
         n_frames=len(extr),
         scene_normals=sn,
