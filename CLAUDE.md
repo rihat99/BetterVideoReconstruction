@@ -17,6 +17,7 @@ optimization — keep them current when the code changes:
 - [`docs/human_optimization.md`](docs/human_optimization.md) — the 4 stages, every loss term
 - [`docs/contacts.md`](docs/contacts.md) + [`docs/contact_confidence.md`](docs/contact_confidence.md) — contact labels + confidence
 - [`docs/depth_fit.md`](docs/depth_fit.md) — per-joint depth-fit metric (the "spaghettization" detector)
+- [`docs/contact_points.md`](docs/contact_points.md) — investigation (not implemented): contact on mesh points instead of joints
 
 ## Experimental branch — working principles
 

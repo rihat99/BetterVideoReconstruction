@@ -91,3 +91,4 @@ and conventions.
 - [`docs/human_optimization.md`](docs/human_optimization.md) — the four-stage refinement, every loss term.
 - [`docs/contacts.md`](docs/contacts.md) — per-joint contact detection.
 - [`docs/contact_confidence.md`](docs/contact_confidence.md) — per-joint contact-confidence formula and artifact schema.
+- [`docs/contact_points.md`](docs/contact_points.md) — investigation (not implemented): moving contact from joints to points on the mesh surface.
