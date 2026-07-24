@@ -159,15 +159,48 @@ The scene candidates (the subset of the scene cloud near the body) are rebuilt a
 start of each scene phase from the current pose, then reused for that phase's
 iterations — the cloud is static and the body barely moves within a phase.
 
-## kinematics_2 — annotation-guided refinement
+## kinematics_2 — contact-patch repair
 
-Same problem, restarted from the `kinematics_1` result, with contact labels supplied
-from outside: manual per-joint annotations (`data/<stem>.npz`), or the pipeline's own
-`contacts_1.npz` in auto mode (positives only, weighted by per-joint label confidence).
-Manual labels enable the full label set — attraction on in-contact joints, clearance
-repulsion on no-contact joints, velocity damping — in every phase. The honest
-`drift_pre` from kinematics_1 is passed through unchanged, so the contact readout on
-this body still gates on pre-enforcement stillness.
+A repair stage, restarted from the `kinematics_1` result, driven by manual per-joint
+contact annotations (`data/<stem>.npz`; both the 10-joint and the 14-joint schema).
+Its job is to move the body — sometimes tens of centimetres — until every annotated
+contact actually touches the wall. Chamfer is **off** here (the human depth cloud is
+exactly the spaghetti-prone evidence being repaired); reprojection and the pose priors
+are what keep the repair from diverging.
+
+The pull is per **contact instance** — one annotated group (a hand, a foot, an ankle…)
+on one frame. For each instance a small **target patch** is built once per phase: the
+scene points that are visible where that limb appears in the image (projecting within
+`radius_px` of the limb, confidence-gated, the `patch_k` nearest kept). Pulling toward
+the wall *seen at the limb's pixel* keeps the pull nearly reprojection-neutral. An
+instance with no such wall points is reported unresolved and simply not pulled — a
+missing hold cannot be repaired honestly. Two terms act on each instance's single
+closest vertex:
+
+- **`ann_acquisition`** — a pseudo-Huber pull on the distance to the patch: a bounded,
+  roughly constant force from far away that fades out at contact. Only the group's
+  closest vertex is pulled — a contact label means *some* surface point touches, not
+  the whole hand.
+- **`ann_seating`** — near the surface, drives that vertex's signed distance to a few
+  millimetres *inside* the wall (contacts should touch or slightly penetrate). It is
+  symmetric: after an overshoot it pushes back out, which is what prevents the body
+  from being buried.
+
+An earlier version that simply strengthened `ann_attraction` (which pulls *all* of a
+group's vertices) buried the body many centimetres into the wall on every test scene:
+once the front vertices cross the surface and drop out of the loss, the back vertices
+keep pulling. The per-instance closest-vertex form makes that failure impossible
+rather than tuned away.
+
+Scene terms (and the patches) are on from the **root phase** — the rigid root phase
+does the bulk push toward the wall, then `full` and `refine` re-settle the pose
+(no L-BFGS here: the per-phase patches form an active set whose churn breaks its line
+search). Clearance repulsion on no-contact joints and the in-contact velocity damper
+run as before. People whose annotation is absent or marked `ignored` are copied
+through from `kinematic_1` untouched, and the honest `drift_pre` from kinematics_1 is
+passed through unchanged, so the contact readout on this body still gates on
+pre-enforcement stillness. The acquisition weight is the floater knob: it sets the
+force balance against reprojection, and was chosen by sweep (see the config comments).
 
 ## dynamics — force-only RNEA
 

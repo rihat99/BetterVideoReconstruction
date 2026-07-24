@@ -379,16 +379,24 @@ def _kinematic_phases(cfg: HumanOptimConfig, stages_to_run) -> list[PhaseSpec]:
 
 
 def _kinematics_2_phases(cfg: HumanOptimConfig) -> list[PhaseSpec]:
-    """Phases for ``kinematics_2`` (all use the kinematics_2 column; gentle re-settle
-    from the kinematics_1 fit, then the annotation-driven scene refinement)."""
+    """Phases for ``kinematics_2`` (all use the kinematics_2 column).
+
+    Scene is on from the ``root`` phase so the contact-patch repair (ann_acquisition +
+    ann_seating) acts from the start — the rigid ``root`` phase does the bulk push toward
+    the wall, then ``full`` → ``refine`` re-settle the pose. The scene candidates and the
+    per-instance target patches both re-prune at every phase start (from the current pose).
+    L-BFGS is off for kinematics_2 (its iters default to 0): the per-phase contact patches
+    make an active set whose churn invalidates strong-Wolfe curvature. 0-iter phases are
+    dropped so their (discarded) on_start candidate + patch build never runs."""
     it = cfg.iters["kinematics_2"]
     w = cfg.weights_for("kinematics_2")
-    return [
-        PhaseSpec("root", w, it.get("root", 0), _ROOT_DOF, False, "adam"),
-        PhaseSpec("full", w, it.get("full", 0), _ALL_DOF, False, "adam"),
+    specs = [
+        PhaseSpec("root", w, it.get("root", 0), _ROOT_DOF, True, "adam"),
+        PhaseSpec("full", w, it.get("full", 0), _ALL_DOF, True, "adam"),
         PhaseSpec("refine", w, it.get("refine", 0), _ALL_DOF, True, "adam"),
         PhaseSpec("lbfgs", w, it.get("lbfgs", 0), _ALL_DOF, True, "lbfgs"),
     ]
+    return [s for s in specs if s.iters > 0]
 
 
 # ─────────────────────── kinematic stages (root / kin1) ───────────────────
@@ -527,22 +535,57 @@ _ANN_TO_SMPLX: dict[str, list[str]] = {
     "right_elbow": ["right_elbow"],
 }
 
+# The 14-joint schema (its own l/r ankle + shoulder labels, and its 'foot' means the TOE,
+# not the whole ankle+foot region). Hands stay wrist+fingers; foot maps to the toe joint
+# only (ankle is its own label); the rest map to their same-named SMPLXMid joints.
+_ANN_TO_SMPLX_14: dict[str, list[str]] = {
+    "left_hand": _hand_smplx_joints("left"),
+    "right_hand": _hand_smplx_joints("right"),
+    "left_foot": ["left_foot"],
+    "right_foot": ["right_foot"],
+    "left_ankle": ["left_ankle"],
+    "right_ankle": ["right_ankle"],
+    "left_knee": ["left_knee"],
+    "right_knee": ["right_knee"],
+    "left_elbow": ["left_elbow"],
+    "right_elbow": ["right_elbow"],
+    "left_shoulder": ["left_shoulder"],
+    "right_shoulder": ["right_shoulder"],
+    "left_hip": ["left_hip"],
+    "right_hip": ["right_hip"],
+}
+
+
+def _ann_mapping(ann_names: list[str]) -> dict[str, list[str]]:
+    """The annotation→SMPLXMid group mapping for this schema, by EXACT joint-name set.
+
+    The ``ann_names`` set must match the legacy 10-joint schema (:data:`_ANN_TO_SMPLX`) or the
+    14-joint schema (:data:`_ANN_TO_SMPLX_14`) exactly — a partial or misspelled annotation
+    raises (with the observed names) rather than silently dropping the unmatched joints."""
+    names = set(ann_names)
+    if names == set(_ANN_TO_SMPLX):
+        return _ANN_TO_SMPLX
+    if names == set(_ANN_TO_SMPLX_14):
+        return _ANN_TO_SMPLX_14
+    raise ValueError(
+        f"unrecognized contact annotation schema {sorted(ann_names)}; expected the 10-joint "
+        f"{sorted(_ANN_TO_SMPLX)} or the 14-joint {sorted(_ANN_TO_SMPLX_14)} joint set")
+
 
 def _contact_labels(contacts_p: np.ndarray, ann_names: list[str],
                     mid_names: list[str], N: int) -> np.ndarray:
-    """Expand one person's ``(J_ann, N_ann)`` annotation into ``(N, 52)`` SMPLXMid labels."""
-    if "left_ankle" in ann_names:   # the 14-joint schema marker (data_2 annotations)
-        raise ValueError(
-            "kinematics_2 only supports the legacy 10-joint annotation schema; this annotation "
-            "has its own ankle labels (14-joint schema, e.g. data_2/) whose 'foot' means the "
-            "toe — the 10-joint _ANN_TO_SMPLX mapping (foot = ankle+foot) would mislabel it")
+    """Expand one person's ``(J_ann, N_ann)`` annotation into ``(N, 52)`` SMPLXMid labels.
+
+    The schema (10- or 14-joint) is resolved by :func:`_ann_mapping` (exact-name match).
+    """
+    mapping = _ann_mapping(ann_names)
     Na = contacts_p.shape[1]
     if Na != N:
         raise ValueError(f"annotation has {Na} frames but the body trajectory has {N}")
     mid_idx = {n: i for i, n in enumerate(mid_names)}
     ann_idx = {n: i for i, n in enumerate(ann_names)}
     lab = np.full((N, len(mid_names)), -1, dtype=np.int8)
-    for ann_name, smplx_joints in _ANN_TO_SMPLX.items():
+    for ann_name, smplx_joints in mapping.items():
         if ann_name not in ann_idx:
             continue
         series = contacts_p[ann_idx[ann_name]]
@@ -600,7 +643,7 @@ def run_kinematics_2(source, pred: Path, cfg: HumanOptimConfig, device: str, *,
     scene_pts, scene_normals, scene_conf = _load_scene(pred, knobs, wfc, device, tag)
 
     # Label source: our own contacts_1 (auto) or the human annotation (manual).
-    cnt = ann_contacts = ann_names = ann_oids = cnt_oids = None
+    cnt = ann_contacts = ann_names = ann_oids = cnt_oids = ann_ignored = None
     cnt_contact = cnt_confidence = None
     if labels_mode == "auto":
         cnt_path = paths.contacts_path(pred, "1")
@@ -651,6 +694,7 @@ def run_kinematics_2(source, pred: Path, cfg: HumanOptimConfig, device: str, *,
         ann_contacts = ann["contacts"]
         ann_names = [str(x) for x in ann["joint_names"]]
         ann_oids = [int(x) for x in ann["object_ids"]]
+        ann_ignored = np.asarray(ann["ignored"], bool) if "ignored" in ann else np.zeros(len(ann_oids), bool)
         print(f"[{tag}] annotation {ann_path} — {ann_contacts.shape[0]} people, joints {ann_names}, ids {ann_oids}")
 
     mid, fvids, corr, sub, chamfer_w = _body_context(knobs, device)
@@ -658,10 +702,29 @@ def run_kinematics_2(source, pred: Path, cfg: HumanOptimConfig, device: str, *,
     torch.manual_seed(0)
     phases = _kinematics_2_phases(cfg)
 
+    # Contact-patch repair groups (manual mode): each annotation group's member SMPLXMid joint
+    # indices, from the same schema mapping _contact_labels uses. Drives ann_acquisition/seating.
+    contact_groups = None
+    if ann_names is not None:
+        jidx = {n: i for i, n in enumerate(mid_names)}
+        contact_groups = [g for g in ([jidx[j] for j in members if j in jidx]
+                                      for members in _ann_mapping(ann_names).values()) if g]
+
     out = _new_out()
     betas_out = []
     for p in range(P):
         oid = int(object_ids[p])
+        # Manual mode: a person whose annotation object is ignored (or absent) gets NO labels and
+        # its kinematic_1 arrays are copied through byte-for-byte — no label-less re-refine drift,
+        # no normalize/to_classic round-trip.
+        if labels_mode != "auto" and (oid not in ann_oids or bool(ann_ignored[ann_oids.index(oid)])):
+            why = "absent" if oid not in ann_oids else "ignored"
+            print(f"[{tag}] person obj_id={oid}: annotation {why} — copying kinematic_1 through unchanged")
+            for key in out:
+                out[key].append(np.asarray(kin[key][p], np.float32))
+            betas_out.append(np.asarray(kin["betas"][p], np.float32))
+            continue
+
         vmask = np.asarray(kin["valid_mask"][p], dtype=bool)
         betas_mean = torch.as_tensor(kin["betas"][p], dtype=torch.float32, device=device)
         q_world = torch.as_tensor(kin["q"][p], dtype=torch.float32, device=device).clone()
@@ -687,14 +750,12 @@ def run_kinematics_2(source, pred: Path, cfg: HumanOptimConfig, device: str, *,
                       f"{' (confidence-weighted)' if contact_conf is not None else ''}")
             else:
                 print(f"[{tag}] obj_id={oid}: no auto contacts (re-refine only)")
-        elif oid in ann_oids:
+        else:   # manual mode reaches here only for a labelled, non-ignored person
             lab = _contact_labels(ann_contacts[ann_oids.index(oid)], ann_names, mid_names, N)
             lab[~vmask] = -1
             contact_labels = torch.as_tensor(lab, dtype=torch.int8, device=device)
             nc = int((lab == 1).any(1).sum()); nn = int((lab == 0).any(1).sum())
             print(f"[{tag}] person obj_id={oid}: contacts on {nc} frames, no-contact on {nn} frames")
-        else:
-            print(f"[{tag}] person obj_id={oid}: NO annotation (re-refine only)")
 
         print(f"[{tag}] person obj_id={oid} ({int(vmask.sum())}/{N} valid) …")
         q_opt, before, after, _ = optimize_person(
@@ -702,8 +763,8 @@ def run_kinematics_2(source, pred: Path, cfg: HumanOptimConfig, device: str, *,
             target_kp=target_kp, scores=scores, corr=corr, frame_vertex_ids=fvids,
             sub=sub, knobs=knobs, phases=phases,
             scene_pts=scene_pts, scene_normals=scene_normals, scene_conf=scene_conf, fps=fps,
-            contact_labels=contact_labels, contact_conf=contact_conf,
-            chamfer_weights=chamfer_w, frame_valid=frame_valid, cam_centers=cam_centers)
+            contact_labels=contact_labels, contact_conf=contact_conf, contact_groups=contact_groups,
+            image_hw=(H, W), chamfer_weights=chamfer_w, frame_valid=frame_valid, cam_centers=cam_centers)
         print(f"    before: {before}\n    after:  {after}")
         _append_classic(out, mid, betas_T, q_opt)
         betas_out.append(betas_mean.cpu().numpy().astype(np.float32))

@@ -407,6 +407,64 @@ def attraction_penalty(
     return loss, gap_cm.detach(), n_attr
 
 
+def acquisition_penalty(
+    v_star: torch.Tensor,   # (I, 3) posed member vertex (grad through q)
+    p_star: torch.Tensor,   # (I, 3) its nearest target-patch point (detached)
+    *,
+    delta_m: float,
+    resolved_count: int,
+) -> tuple[torch.Tensor, torch.Tensor, int]:
+    """Long-range pull of ONE vertex per positive contact instance toward its target patch.
+
+    A contact label means SOME surface point of the group touches the wall, so only the
+    group's single closest posed vertex ``v*`` is pulled toward its nearest patch point ``p*``
+    (both chosen detached, upstream) — not the whole Voronoi patch. The penalty is a
+    pseudo-Huber of the Euclidean gap ``d = ‖v* − p*‖``: ``ρ = δ²·(√(1 + (d/δ)²) − 1)`` —
+    quadratic within ``δ`` (fades to 0 at contact) and ~linear far away (bounded, ~constant
+    gradient), so a distant instance keeps a steady pull without a runaway force. Mean over the
+    FIXED per-phase resolved-instance count (patches built once), so instances do not dilute
+    each other as the fit moves. Gradient flows through ``v*`` only. Returns
+    ``(loss, mean_gap_cm, n_instances)`` — the latter two detached diagnostics."""
+    d = (v_star - p_star).norm(dim=-1)                              # (I,)
+    rho = (delta_m * delta_m) * (torch.sqrt(1.0 + (d / delta_m).square()) - 1.0)
+    loss = rho.sum() / max(int(resolved_count), 1)
+    with torch.no_grad():
+        gap_cm = d.mean() * 100.0 if d.numel() else d.new_zeros(())
+    return loss, gap_cm.detach(), int(d.shape[0])
+
+
+def seating_penalty(
+    v_star: torch.Tensor,   # (I, 3) posed member vertex (grad through q)
+    p_star: torch.Tensor,   # (I, 3) its nearest target-patch point (detached)
+    n_star: torch.Tensor,   # (I, 3) that point's outward unit normal (detached)
+    *,
+    target_m: float,
+    band_m: float,
+    huber_m: float,
+    resolved_count: int,
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    """Near-field SYMMETRIC seat of the acquisition vertex at slight penetration.
+
+    Where :func:`acquisition_penalty` only closes the gap, this fixes WHERE the vertex sits on
+    the patch plane: the signed distance ``s = (v* − p*)·n*`` is driven to ``target_m`` (a few
+    mm inside) by a Huber on ``|s − target_m|``, active only within ``±band_m`` of the surface
+    (detached gate — outside the band acquisition owns the pull). Being symmetric it also
+    pushes the vertex back OUT once it overshoots inward — the anti-burial term the penetration
+    guards' dropout cannot provide. Mean over the SAME fixed resolved-instance count as
+    acquisition, so an instance entering/leaving the band does not rescale the others'
+    gradient. Gradient flows through ``v*``. Returns ``(loss, mean_seat_cm, n_active)`` — the
+    latter two detached diagnostics."""
+    s = ((v_star - p_star) * n_star).sum(dim=-1)                    # (I,) patch-plane signed distance
+    active = s.detach().abs() <= band_m
+    rho = _huber((s - target_m).abs(), huber_m)                     # symmetric Huber toward target_m
+    a = active.to(rho.dtype)
+    loss = (rho * a).sum() / max(int(resolved_count), 1)
+    with torch.no_grad():
+        seat_cm = ((s * a).sum() / a.sum().clamp_min(1)) * 100.0
+        n_active = active.sum()
+    return loss, seat_cm.detach(), n_active
+
+
 def joint_velocity_loss(
     joints_world: torch.Tensor,    # (T, J, 3) posed (scaled) world joints — grad through q
     contact_labels: torch.Tensor,  # (T, J) int8 tri-state: 1 = annotated in-contact this frame
