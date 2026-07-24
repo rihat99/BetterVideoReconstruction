@@ -199,54 +199,61 @@ class ClipScene:
                 hs.append((h, person))
             self.skinned[name] = hs
 
-        # -- body-skeleton overlay for the kinematic body (spheres + bones), hidden --
-        # Joints come from the kinematic body's per-frame world joints; a sphere is
-        # red in scene contact (contacts_1.npz) / green free, and the mesh goes
+        # -- body-skeleton overlays (spheres + bones), hidden — one per refined body
+        # source that carries a skeleton dict ("kinematics" from contacts_1,
+        # "kinematics_2" from contacts_2). Joints come from that body's per-frame world
+        # joints; a sphere is red in scene contact / green free, and the mesh goes
         # translucent while the skeleton overlays it. Fingers are excluded.
-        self.skel = data.skeleton
-        self.skel_nodes: dict[int, dict] = {}
-        self._contact: dict[int, np.ndarray] = {}
-        self._conf: dict[int, np.ndarray] = {}   # oid -> (N, J) label confidence, folded like contact
-        self._depth_gap: dict[int, np.ndarray] = {}
-        self._depth_trust: dict[int, np.ndarray] = {}
-        self._skel_shown = False          # any kinematic-skeleton node currently visible
+        self.skels = data.skeletons
+        self.skel_nodes: dict[str, dict[int, dict]] = {}     # source -> oid -> nodes
+        self._contact: dict[str, dict[int, np.ndarray]] = {}
+        self._conf: dict[str, dict[int, np.ndarray]] = {}    # (N, J) label confidence, folded
+        self._depth_gap: dict[str, dict[int, np.ndarray]] = {}
+        self._depth_trust: dict[str, dict[int, np.ndarray]] = {}
+        self._skel_src: str | None = None      # source whose skeleton nodes are visible
         self._translucent: str | None = None   # active source whose mesh is currently translucent
-        kin = data.skinned.get("kinematics")
-        if kin is not None and self.skel is not None:
-            _f, kin_oids, people = kin
-            names, parents = self.skel["joint_names"], self.skel["parents"]
+        for source, skel in self.skels.items():
+            body = data.skinned.get(source)
+            if body is None:
+                continue
+            _f, body_oids, people = body
+            names, parents = skel["joint_names"], skel["parents"]
             joints = [j for j, nm in enumerate(names)
                       if not any(t in nm for t in _FINGER_TOKENS)]
             jointset = set(joints)
-            if self.skel["contact"] is not None:
-                c_oids = (self.skel["contact_oids"] if self.skel["contact_oids"] is not None
-                          else np.arange(self.skel["contact"].shape[0]))
-                self._contact = {int(o): self.skel["contact"][i] for i, o in enumerate(c_oids)}
-                if self.skel.get("confidence") is not None:
-                    self._conf = {int(o): self.skel["confidence"][i] for i, o in enumerate(c_oids)}
-                if self.skel.get("joint_depth_gap_cm") is not None:
-                    self._depth_gap = {int(o): self.skel["joint_depth_gap_cm"][i]
-                                       for i, o in enumerate(c_oids)}
-                if self.skel.get("joint_depth_trust") is not None:
-                    self._depth_trust = {int(o): self.skel["joint_depth_trust"][i]
-                                         for i, o in enumerate(c_oids)}
+            if skel["contact"] is not None:
+                c_oids = (skel["contact_oids"] if skel["contact_oids"] is not None
+                          else np.arange(skel["contact"].shape[0]))
+                self._contact[source] = {int(o): skel["contact"][i] for i, o in enumerate(c_oids)}
+                if skel.get("confidence") is not None:
+                    self._conf[source] = {int(o): skel["confidence"][i]
+                                          for i, o in enumerate(c_oids)}
+                if skel.get("joint_depth_gap_cm") is not None:
+                    self._depth_gap[source] = {int(o): skel["joint_depth_gap_cm"][i]
+                                               for i, o in enumerate(c_oids)}
+                if skel.get("joint_depth_trust") is not None:
+                    self._depth_trust[source] = {int(o): skel["joint_depth_trust"][i]
+                                                 for i, o in enumerate(c_oids)}
             cyl = _unit_cylinder()
+            nodes: dict[int, dict] = {}
             for p, person in enumerate(people):
                 if person is None:
                     continue
-                oid = int(kin_oids[p])
+                oid = int(body_oids[p])
                 spheres = {j: ss.add_icosphere(
-                    f"/clip/skeleton/p{oid:02d}/joint_{j:02d}", radius=_SKEL_R,
+                    f"/clip/skeleton/{source}/p{oid:02d}/joint_{j:02d}", radius=_SKEL_R,
                     color=_FREE_RGB, position=(0.0, 0.0, 0.0), visible=False) for j in joints}
                 bones = []
                 for j in joints:
                     par = int(parents[j])
                     if par < 0 or par not in jointset:
                         continue
-                    h = ss.add_mesh_trimesh(f"/clip/skeleton/p{oid:02d}/bone_{j:02d}",
+                    h = ss.add_mesh_trimesh(f"/clip/skeleton/{source}/p{oid:02d}/bone_{j:02d}",
                                             cyl, visible=False)
                     bones.append((h, j, par))
-                self.skel_nodes[oid] = {"spheres": spheres, "bones": bones}
+                nodes[oid] = {"spheres": spheres, "bones": bones}
+            if nodes:
+                self.skel_nodes[source] = nodes
 
         # -- force/torque skeletons (spheres + bones), one per force source
         #    ("dynamics" and/or "kindyn_1"), hidden; forces added per frame. Node paths
@@ -298,7 +305,7 @@ class ClipScene:
         #   overlay sources   → the ``confidence`` / ``depth_trust`` skeleton colouring
         #   translucency ones → the body-opacity slider (a mesh a skeleton can overlay)
         self.force_sources = set(self.forces)
-        self.overlay_sources = {"kinematics"} if self.skel_nodes else set()
+        self.overlay_sources = set(self.skel_nodes)
         self._skeleton_sources = self.force_sources | self.overlay_sources
         self.translucency_sources = {s for s in self.skinned
                                      if s in self._skeleton_sources}
@@ -545,33 +552,48 @@ class ClipScene:
         self._apply_translucency()
 
     # -- body-skeleton overlay --
+    def _hide_skeleton_nodes(self, source: str) -> None:
+        for nd in self.skel_nodes.get(source, {}).values():
+            for sp in nd["spheres"].values():
+                sp.visible = False
+            for h, _j, _par in nd["bones"]:
+                h.visible = False
+
     def _apply_skeleton(self, f: int) -> None:
-        """Pose + contact-colour the kinematic 22-joint body skeleton — gated on the
-        ``skeleton`` layer + the ``kinematics`` source. (The mesh translucency it needs
-        is applied centrally in :meth:`_apply_translucency`.)
+        """Pose + contact-colour the active body source's 22-joint skeleton — gated on
+        the ``skeleton`` layer + a source with skeleton nodes ("kinematics" coloured by
+        contacts_1, "kinematics_2" by contacts_2). (The mesh translucency it needs is
+        applied centrally in :meth:`_apply_translucency`.)
 
         The per-joint pose/visibility loop is skipped entirely while the skeleton is
         hidden and already torn down, so idle playback stays cheap.
         """
-        on = self.layers.get("skeleton", False) and self.active == "kinematics"
+        src = self.active if (self.layers.get("skeleton", False)
+                              and self.active in self.skel_nodes) else None
         # Confidence shading (on by default): grey→saturated red/green by label confidence.
         use_conf = self.layers.get("confidence", True)
         use_depth = self.layers.get("depth_trust", False)
-        if not on and not self._skel_shown:
+        if src is None and self._skel_src is None:
             return
-        kin = self.data.skinned.get("kinematics")
-        if kin is not None:
-            _f, kin_oids, people = kin
+        if self._skel_src is not None and self._skel_src != src:
+            self._hide_skeleton_nodes(self._skel_src)     # switching source / turning off
+        if src is not None:
+            _f, body_oids, people = self.data.skinned[src]
+            nodes = self.skel_nodes[src]
+            contact = self._contact.get(src, {})
+            conf_d = self._conf.get(src, {})
+            gap_d = self._depth_gap.get(src, {})
+            trust_d = self._depth_trust.get(src, {})
             for p, person in enumerate(people):
-                nd = None if person is None else self.skel_nodes.get(int(kin_oids[p]))
+                nd = None if person is None else nodes.get(int(body_oids[p]))
                 if nd is None:
                     continue
-                live = on and f < len(person["valid"]) and bool(person["valid"][f])
+                live = f < len(person["valid"]) and bool(person["valid"][f])
                 bp = person["bone_pos"][f]                    # (J, 3) world joints
-                con = self._contact.get(int(kin_oids[p]))     # (N, J) bool or None
-                cf = self._conf.get(int(kin_oids[p]))         # (N, J) confidence or None
-                gap = self._depth_gap.get(int(kin_oids[p]))   # (N, J) gap cm or None
-                trust = self._depth_trust.get(int(kin_oids[p]))  # (N, J) trust or None
+                con = contact.get(int(body_oids[p]))          # (N, J) bool or None
+                cf = conf_d.get(int(body_oids[p]))            # (N, J) confidence or None
+                gap = gap_d.get(int(body_oids[p]))            # (N, J) gap cm or None
+                trust = trust_d.get(int(body_oids[p]))        # (N, J) trust or None
                 for j, sp in nd["spheres"].items():
                     if live:
                         sp.position = (float(bp[j, 0]), float(bp[j, 1]), float(bp[j, 2]))
@@ -599,7 +621,7 @@ class ClipScene:
                         h.visible = True
                     else:
                         h.visible = False
-        self._skel_shown = on
+        self._skel_src = src
 
     # -- force / torque layers (dynamics, kindyn_1) --
     def _apply_translucency(self) -> None:

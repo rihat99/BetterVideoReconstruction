@@ -94,7 +94,9 @@ Default chain in order (rows 1–8; `human_optimization` runs its `root` +
 
 Viewer: `scripts/view_3d.py out/<stem>/` (viser: fused scene + cameras + human
 points + bodies; the **`body source`** dropdown switches `original` / `prefit` /
-`kinematics` / `kinematics_2` / `dynamics`; a **`scene normals`** debug layer
+`kinematics` / `kinematics_2` / `kindyn_1` / `kindyn_manual` / `dynamics`; the
+skeleton + contact/confidence/depth-trust layers draw for both `kinematics`
+(from `contacts_1`) and `kinematics_2` (from `contacts_2`); a **`scene normals`** debug layer
 draws the per-point normal arrows; a **`depth trust (spaghetti)`** layer colors
 joints by the per-joint depth-fit metric). `--scenes` browses the DB.
 

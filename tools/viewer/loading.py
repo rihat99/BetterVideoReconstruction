@@ -49,11 +49,12 @@ def _load_gravity(pred: Path) -> dict | None:
 def _load_force_data(pred: Path, filename: str) -> dict | None:
     """Numpy arrays for a force/torque body source (``human_optim/<filename>``).
 
-    Shared by the two stages that solve contact forces: ``dynamics.npz`` (force-only)
-    and ``kindyn_1.npz`` (kinematics + dynamics). Both store the same force fields, so
-    the viewer draws them the same way. ``joint_contact`` is optional — ``kindyn_1.npz``
-    omits it, and the caller then reads which joints are in contact from where the
-    solved contact force is non-zero.
+    Shared by every source that solves contact forces: ``dynamics.npz`` (force-only)
+    and the kinematics+dynamics bodies ``kindyn_1.npz`` / ``kindyn_manual.npz`` (the
+    manual-annotation reference chain). All store the same force fields, so the viewer
+    draws them the same way. ``joint_contact`` is optional — the kindyn npz omit it,
+    and the caller then reads which joints are in contact from where the solved
+    contact force is non-zero.
     """
     f = pred / "human_optim" / filename
     if not f.exists():
@@ -98,17 +99,19 @@ def _load_force_data(pred: Path, filename: str) -> dict | None:
     }
 
 
-def _load_skeleton(pred: Path) -> dict | None:
+def _load_skeleton(pred: Path, body_fn: str = "kinematic_1.npz",
+                   contacts_fn: str = "contacts_1.npz") -> dict | None:
     """Body-skeleton topology + per-joint contact, confidence, and depth fit.
 
     The joint tree (``parents`` / ``joint_names``, 52-joint ``SMPLXMid`` order) comes
-    from ``human_optim/kinematic_1.npz`` so the skeleton can be drawn even without a
+    from ``human_optim/<body_fn>`` so the skeleton can be drawn even without a
     contact pass; the per-joint contact flags — and the schema-5/6/7 per-joint
     ``label_confidence`` ∈ [0, 1] (both classes) that shades the sphere — come from
-    ``human_optim/contacts_1.npz`` when present (same joint order). ``None`` when no
-    kinematic body exists.
+    ``human_optim/<contacts_fn>`` when present (same joint order). Each refined body
+    pairs with the contact artifact measured ON it (kinematic_1 ↔ contacts_1,
+    kinematic_2 ↔ contacts_2). ``None`` when no such body exists.
     """
-    kin = pred / "human_optim" / "kinematic_1.npz"
+    kin = pred / "human_optim" / body_fn
     if not kin.exists():
         return None
     kd = np.load(kin, allow_pickle=True)
@@ -121,7 +124,7 @@ def _load_skeleton(pred: Path) -> dict | None:
         "joint_depth_trust": None,                               # (P, N, J) float or None
         "contact_oids": None,                                    # (P,) or None
     }
-    cf = pred / "human_optim" / "contacts_1.npz"
+    cf = pred / "human_optim" / contacts_fn
     if cf.exists():
         cd = np.load(cf, allow_pickle=True)
         expected = (
@@ -491,8 +494,8 @@ class ClipData:
     fov_y: np.ndarray
     gravity: dict | None
     skinned: dict          # name -> (faces, object_ids, people); "original" first
-    forces: dict           # force source name ("dynamics"/"kindyn_1") -> force dict
-    skeleton: dict | None  # kinematic body-skeleton topology + per-joint contact
+    forces: dict           # force source name ("dynamics"/"kindyn_1"/"kindyn_manual") -> force dict
+    skeletons: dict        # body source name -> skeleton topology + per-joint contact dict
     n_frames: int
     # scene-surface meshes, built lazily and cached per method ("bpa"/"poisson");
     # a present key maps to (verts, faces, vertex_colors, vertex_normals) or None.
@@ -563,7 +566,7 @@ def load_clip_data(pred: Path, *, device: str, show_smplx: bool,
             if orig is not None:
                 skinned["original"] = orig
         for name, fn in (("kinematics", "kinematic_1.npz"), ("kinematics_2", "kinematic_2.npz"),
-                         ("kindyn_1", "kindyn_1.npz")):
+                         ("kindyn_1", "kindyn_1.npz"), ("kindyn_manual", "kindyn_manual.npz")):
             if (pred / "human_optim" / fn).exists():
                 skinned[name] = _smplx_kinematic_skinned(pred / "human_optim" / fn, device=device)
         # prefit: the scale stage's dual scale+body alignment (camera frame, like original).
@@ -575,7 +578,8 @@ def load_clip_data(pred: Path, *, device: str, show_smplx: bool,
     # Force/torque sources, in display order — the force-only dynamics stage and the
     # kinematics+dynamics stage, whichever exist. Same fields, drawn the same way.
     forces: dict = {}
-    for name, fn in (("dynamics", "dynamics.npz"), ("kindyn_1", "kindyn_1.npz")):
+    for name, fn in (("dynamics", "dynamics.npz"), ("kindyn_1", "kindyn_1.npz"),
+                     ("kindyn_manual", "kindyn_manual.npz")):
         fd = _load_force_data(pred, fn)
         if fd is not None:
             forces[name] = fd
@@ -591,7 +595,11 @@ def load_clip_data(pred: Path, *, device: str, show_smplx: bool,
         gravity=_load_gravity(pred),
         skinned=skinned,
         forces=forces,
-        skeleton=_load_skeleton(pred) if show_smplx else None,
+        skeletons=({name: sk for name, body_fn, contacts_fn in
+                    (("kinematics", "kinematic_1.npz", "contacts_1.npz"),
+                     ("kinematics_2", "kinematic_2.npz", "contacts_2.npz"))
+                    if (sk := _load_skeleton(pred, body_fn, contacts_fn)) is not None}
+                   if show_smplx else {}),
         n_frames=len(extr),
         scene_normals=sn,
         scene_voxel=float(scene["voxel_size"]) if "voxel_size" in scene.files else 0.0,

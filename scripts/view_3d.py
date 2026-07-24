@@ -23,9 +23,13 @@ For each clip it shows, in the metric world frame:
 * ``original`` — the raw, pre-optimization SAM-3D-Body → SMPL-X converter output
   (``smplx_params.npz``, folded to the world frame);
 * ``kinematics`` / ``kinematics_2`` — the refined world-frame bodies
-  (``human_optim/kinematic_{1,2}.npz``);
-* ``kindyn_1`` — the joint kinematics+dynamics body (``human_optim/kindyn_1.npz``),
-  a skinned mesh that also carries force/torque data;
+  (``human_optim/kinematic_{1,2}.npz``); both draw the skeleton overlay with
+  contact / confidence / depth-trust colouring from their own contact artifact
+  (``contacts_1`` / ``contacts_2``);
+* ``kindyn_1`` / ``kindyn_manual`` — the joint kinematics+dynamics bodies
+  (``human_optim/kindyn_{1,manual}.npz``; ``kindyn_manual`` is the
+  manual-annotation reference chain), skinned meshes that also carry
+  force/torque data;
 * ``dynamics`` — force-only (no mesh): the 52-joint torque-scaled sphere/bone
   skeleton (via the independent ``skeleton`` layer) + blue contact-force arrows.
 
