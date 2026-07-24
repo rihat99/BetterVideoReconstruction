@@ -102,6 +102,52 @@ positives are near-and-still hovering limbs 0.5–9 cm from the cloud — at the
 ambiguity floor of the annotation and the point cloud. The confidence weight
 (next doc) is what marks them.
 
+### Relative gap pricing (2026-07-24) — measured effect
+
+The gap penalty first priced each limb's **absolute** wall distance. On a
+floating (mis-registered) body every limb reads far, so the solve preferred
+leaving gravity unbalanced over paying for any force — the force witness never
+fired on the very bodies it exists to rescue. It now prices the distance
+**beyond the frame's nearest group**: prefer nearer limbs, never refuse to
+allocate. The same change lets `contacts_2` run the full completion on the
+`kinematics_2` body (whose stillness witness is the forwarded `drift_pre`).
+
+Scores against manual annotation at the **artifact level** (the saved
+per-joint labels folded onto the annotation groups, every valid labeled
+frame, no span merge — a stricter protocol than the macro table above), on
+the 12 annotated local scenes (sport_climb excluded: its `kinematic_1` body
+drifts ~60 cm per stillness window, so no honest stillness witness exists and
+its labels stay sparse under any pricing):
+
+| pooled, 12 scenes | P | R | F1 | P/R/F1 with foot∪ankle folded |
+|---|---|---|---|---|
+| contacts_1, absolute gap (before) | 0.783 | 0.664 | 0.719 | — |
+| contacts_1, relative gap | 0.794 | 0.725 | 0.758 | 0.900 / 0.728 / 0.805 |
+| contacts_2 (on the `kinematics_2` body) | 0.771 | 0.753 | 0.762 | 0.880 / 0.756 / 0.813 |
+
+Nine scenes are unchanged to the third digit; the recall comes from the
+floaters (gtIGgs R 0.17 → 0.57 at P 0.985; contacts_2 reaches 0.64). The
+foot∪ankle fold matters because annotators almost never label the ankle
+(right_ankle has zero positives in the whole set) while heel-on-surface
+predictions land there — about half of the raw false positives are that
+naming convention, not geometry.
+
+**Effect on confidence.** On `contacts_1` the confidence stays reliable
+after the change: label precision rises monotonically across confidence bins
+(0.70 / 0.74 / 0.77 / 0.83 / 0.89 for bins of 0.2), and true positives
+average 0.54 vs 0.33 for false ones. The new force-added floater labels
+arrive with LOW confidence — the surface witness honestly sees a floating
+body — which is exactly right for consumers that trust confidence;
+`kinematics_2` ignores confidence for its pull for the same reason, and
+tests the label against reprojection instead. On `contacts_2` the confidence
+is optimistic and mildly non-monotone in the mid band (0.67 / 0.83 / 0.71 /
+0.58 / 0.86): its surface witness is measured on a body the labels
+themselves seated, so a false positive that got pulled onto the wall
+inherits surface evidence (false positives average 0.57 there). The ≥ 0.8
+band still holds P 0.86 and carries most positives. Treat `contacts_2`
+confidence as an upper bound; the source-conditional caps were calibrated on
+the `kinematic_1` body.
+
 ### Rules that keep it honest
 
 - Completion runs only on a body that carries the pre-enforcement drift
