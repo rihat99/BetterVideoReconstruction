@@ -41,6 +41,27 @@ def test_hand_fold_rejects_bad_shape_and_confidence():
         export.merge_contacts_52_to_22(np.zeros_like(bad, bool), bad)
 
 
+def test_gravity_is_the_first_cameras_image_down_axis_in_world():
+    # Camera 0 rolled 30° about its optical axis: world-down is that rolled image-down axis.
+    angle = np.float32(np.radians(30.0))
+    cam_to_world = np.array(
+        [[np.cos(angle), -np.sin(angle), 0.0],
+         [np.sin(angle), np.cos(angle), 0.0],
+         [0.0, 0.0, 1.0]], np.float32,
+    )
+    extrinsics = np.tile(np.eye(4, dtype=np.float32), (3, 1, 1))
+    extrinsics[0, :3, :3] = cam_to_world.T  # stored as cam_from_world
+
+    gravity = export.gravity_from_first_camera(extrinsics)
+
+    assert gravity.dtype == np.float32
+    np.testing.assert_allclose(gravity, cam_to_world[:, 1], atol=1e-6)
+    np.testing.assert_allclose(
+        export.gravity_from_first_camera(np.eye(4, dtype=np.float32)[None]),
+        [0.0, 1.0, 0.0], atol=1e-6,
+    )
+
+
 def test_manual_mapping_is_by_name_and_only_14_joints_are_scored():
     names = list(reversed(export.ANNOTATION_JOINTS))
     ann_oids = [10, 20]

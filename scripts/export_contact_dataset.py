@@ -19,8 +19,12 @@ weakest member when it is free (minimum over all 16 parts): the folded free labe
 AND, so one occluded/unknown finger makes the whole-hand free label uncertain. The 3D
 viewer uses the same fold.
 
+Every scene also carries its camera: per-frame ``intrinsics`` + ``extrinsics`` (metric,
+after the human-ruler rescale) and a ``gravity_world`` direction — see
+:func:`gravity_from_first_camera` for what that last one assumes.
+
 Train scenes carry the 22-joint auto-labels + confidence. Test scenes carry the
-SAM-3D-Body inputs (bbox / mask / intrinsics); their contact labels come from the manual
+SAM-3D-Body inputs (bbox / mask / camera); their contact labels come from the manual
 annotation (``--fill-test``): the 14-joint tri-state annotation mapped onto the 22 body
 joints as ``joint_contact_22`` (bool) + an ``annotated_22`` score mask. Only those 14
 joints can be scored: unlabeled (-1) values, ignored people, and the other eight SMPL-X
@@ -57,6 +61,8 @@ RIGHT_HAND_GROUP = [21] + list(range(37, 52))  # right_wrist + right fingers
 HAND_JOINTS = ((20, LEFT_HAND_GROUP), (21, RIGHT_HAND_GROUP))
 N_JOINTS_22 = 22
 N_JOINTS_52 = 52
+# 3 adds the per-frame camera (extrinsics + gravity_world + cam_scale) to every scene.
+DATASET_SCHEMA_VERSION = 3
 # Pinned copy of tools/human_optim/confidence.py's schema/method (kept literal
 # so the exporter stays torch-free); update together with that module.
 CONTACT_CONFIDENCE_SCHEMA = 7
@@ -97,6 +103,22 @@ def merge_contacts_52_to_22(
         jc22[..., wrist] = lbl
         conf22[..., wrist] = np.where(lbl, conf_touch, conf_free)
     return jc22, conf22
+
+
+def gravity_from_first_camera(extrinsics: np.ndarray) -> np.ndarray:
+    """World-frame down direction, assumed from the first camera being level.
+
+    The corpus has no measured gravity (the GeoCalib stage is only reliable outdoors
+    and was never run over it), so the dataset states the assumption instead of
+    hiding it: camera 0 is level, i.e. its ``+y`` axis — image down, OpenCV — points
+    down in the world. ``extrinsics`` are ``cam_from_world``, so that direction is
+    ``R[0]ᵀ · ŷ``. Replace this one function when real gravity becomes available.
+
+    :param extrinsics: ``(N, 4, 4)`` ``cam_from_world`` matrices.
+    :returns: ``(3,)`` float32 unit vector pointing down in the world.
+    """
+    down = np.asarray(extrinsics[0, :3, :3], np.float32).T @ np.array([0.0, 1.0, 0.0], np.float32)
+    return (down / np.linalg.norm(down)).astype(np.float32)
 
 
 def _expected_names(n: int, suffix: str) -> set[str]:
@@ -282,9 +304,17 @@ def export_scene(task: dict) -> dict:
     valid = np.asarray(contacts["valid_mask"], bool)                 # (P, N)
     bbox = np.asarray(boxes["bboxes_per_obj"], np.int32)             # (P, N, 4) xyxy px
     intr = np.asarray(transform["intrinsics_px_orig"], np.float32)   # (N, 3, 3) orig res
+    extr = np.asarray(transform["extrinsics"], np.float32)           # (N, 4, 4) cam_from_world
     _require_shape(sid, "valid_mask", valid, (p, n))
     _require_shape(sid, "bboxes_per_obj", bbox, (p, n, 4))
     _require_shape(sid, "intrinsics_px_orig", intr, (n, 3, 3))
+    _require_shape(sid, "extrinsics", extr, (n, 4, 4))
+    if not bool(np.asarray(transform["metric"]).item()):
+        raise ValueError(
+            f"{sid}: geometry is still up-to-scale (metric=False) — run estimate_scale "
+            "before exporting cameras")
+    if not np.isfinite(extr).all():
+        raise ValueError(f"{sid}: extrinsics contain non-finite values")
     if len(joint_names) != N_JOINTS_22 or joint_names[20:] != ["left_wrist", "right_wrist"]:
         raise ValueError(f"{sid}: unexpected SMPL-X joint order: {joint_names}")
     _require_sequential_frames(sid, "sam3/bboxes", boxes, n)
@@ -305,6 +335,9 @@ def export_scene(task: dict) -> dict:
         frame_indices=np.arange(n, dtype=np.int32),
         bbox=bbox,
         intrinsics=intr,
+        extrinsics=extr,
+        gravity_world=gravity_from_first_camera(extr),
+        cam_scale=np.float32(transform["scale"]),
         valid_mask=valid,
         joint_names_22=np.asarray(joint_names),
         video_height=np.int32(contacts["video_height"]),
@@ -550,7 +583,7 @@ def _finalize_test_index(out_root: Path, summ: list[dict]) -> None:
         with dpath.open() as f:
             info = json.load(f)
         filled = [s for s in summ if not s.get("missing")]
-        info["schema_version"] = 2
+        info["schema_version"] = DATASET_SCHEMA_VERSION
         info.setdefault("labels", {})["test"] = (
             "manual annotation (14-joint, mapped to 22 SMPL-X body joints); "
             "joint_contact_22 (bool) + annotated_22 (score mask)")
@@ -719,7 +752,7 @@ def main(argv: list[str] | None = None) -> int:
     if rope_supported is not None:
         corpus_filter += f" AND vlm_rope_supported={rope_supported}"
     info = dict(
-        schema_version=2, name=args.out.name,
+        schema_version=DATASET_SCHEMA_VERSION, name=args.out.name,
         source_data_root=str(args.data_root),
         corpus_filter=corpus_filter,
         n_scenes={s: len(summaries[s]) for s in want_splits},
@@ -730,6 +763,11 @@ def main(argv: list[str] | None = None) -> int:
                    "in contact, else min over all 16 parts (free is an AND; matches the 3D viewer)",
         intrinsics="per-frame 3x3 pixels at original resolution (geometry/transform.npz "
                    "intrinsics_px_orig)",
+        extrinsics="per-frame 4x4 cam_from_world, OpenCV axes (x right, y down, z forward); "
+                   "translation in metres — the world is already metric (cam_scale applied)",
+        gravity_world="(3,) unit vector pointing down in the world. ASSUMED, not measured: "
+                      "camera 0 is taken to be level, so world-down is its image-down axis",
+        cam_scale="the metric scale the pipeline applied to this scene's world (provenance)",
         bbox="xyxy absolute pixels, original resolution (SAM-3 tracker bboxes_per_obj)",
         frames="full-frame RGB JPEG, one per video frame, cv2-sequential decode order",
         masks="per-person binary PNG (0/255), original resolution",
