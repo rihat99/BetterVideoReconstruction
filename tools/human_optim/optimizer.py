@@ -43,10 +43,10 @@ from .keypoints import smooth_tracks
 from tools.optim import Phase, Problem, State, run_phases
 
 from .losses import (
-    attraction_penalty, chamfer_loss, clearance_penalty, init_reprojection_gm,
-    joint_acceleration_loss, joint_velocity_loss, pad_frames, penetration_penalty,
-    pose_prior_loss, radial_velocity_loss, root_orient_prior_loss,
-    sapiens_reprojection_gm, scene_penetration, scene_signed_distance,
+    acquisition_penalty, attraction_penalty, chamfer_loss, clearance_penalty,
+    init_reprojection_gm, joint_acceleration_loss, joint_velocity_loss, pad_frames,
+    penetration_penalty, pose_prior_loss, radial_velocity_loss, root_orient_prior_loss,
+    sapiens_reprojection_gm, scene_penetration, scene_signed_distance, seating_penalty,
 )
 from .motion import tangent_difference
 from .qmath import normalize_q
@@ -156,6 +156,104 @@ def _padded_scene_candidates(vertices_sub_det: torch.Tensor, scene_pts: torch.Te
 
 
 @torch.no_grad()
+def _build_contact_patches(
+    vw_sub: torch.Tensor,        # (T, Ns, 3) posed subsampled verts (detached), current pose
+    group_vert_ids: list,        # per group: LongTensor of subsampled-vertex ids owned by the group
+    group_active: torch.Tensor,  # (T, G) bool — group labeled in-contact at this valid frame
+    scene_pts: torch.Tensor, scene_normals: torch.Tensor, scene_conf: torch.Tensor,
+    extrinsics: torch.Tensor, K: torch.Tensor, image_h: int, image_w: int,
+    *, radius_px: float, patch_k: int, conf_thresh: float,
+) -> dict:
+    """Per positive (frame, annotation-group) instance: a small TARGET PATCH of wall points.
+
+    A contact label means SOME surface point of the group touches the wall, so the target
+    is the wall visible where the limb appears — NOT the whole Voronoi patch. For each frame
+    with an in-contact group, the scene is projected once; the patch is the scene points whose
+    projection lands within ``radius_px`` of the group's member-vertex pixel centroid (confident
+    + in front of the camera), capped to the ``patch_k`` nearest in 3D to the member centroid,
+    with their stored normals. An instance is UNRESOLVED — no pull, counted — when the group's
+    member centroid is behind the camera or its pixel centroid falls outside the ``image_h`` /
+    ``image_w`` frame (plus a ``radius_px`` margin), or its footprint sees no qualifying wall
+    point. The camera / bounds guard matters because :func:`~tools.human_optim.camera.project`
+    clamps negative depth, so a behind-camera limb would otherwise resolve a bogus patch.
+    Returns ``{"bundles": [(member_ids, frames, pts, nrm, valid)], "resolved": int,
+    "unresolved": int}``, one bundle per group (``pts/nrm`` padded to ``patch_k``; ``valid``
+    masks the pad)."""
+    T, G = vw_sub.shape[0], len(group_vert_ids)
+    dev, dt = vw_sub.device, vw_sub.dtype
+    conf_ok = scene_conf > conf_thresh
+    acc = [([], [], [], []) for _ in range(G)]          # per group: frames, pts, nrm, valid
+    resolved = unresolved = 0
+    for t in range(T):
+        if not bool(group_active[t].any()):
+            continue
+        cam = transform_points(scene_pts[None], extrinsics[t:t + 1])[0]   # (S, 3) camera frame
+        in_front = cam[:, 2] > 1e-6
+        uv = project(cam[None], K[t:t + 1])[0]                            # (S, 2) pixels
+        for g in range(G):
+            if not bool(group_active[t, g]):
+                continue
+            vmem = vw_sub[t][group_vert_ids[g]]                           # (M, 3) member verts, world
+            vmem_cam = transform_points(vmem[None], extrinsics[t:t + 1])[0]   # (M, 3) camera frame
+            if float(vmem_cam[:, 2].mean()) <= 0.0:                       # limb centroid behind the camera
+                unresolved += 1
+                continue
+            px_c = project(vmem_cam[None], K[t:t + 1])[0].mean(0)         # (2,) member pixel centroid
+            if not (-radius_px <= float(px_c[0]) <= image_w + radius_px
+                    and -radius_px <= float(px_c[1]) <= image_h + radius_px):   # off-image limb
+                unresolved += 1
+                continue
+            near = ((uv - px_c).norm(dim=-1) < radius_px) & in_front & conf_ok
+            if not bool(near.any()):
+                unresolved += 1
+                continue
+            cp, cn = scene_pts[near], scene_normals[near]
+            k = min(int(patch_k), cp.shape[0])
+            idx = (cp - vmem.mean(0)).norm(dim=-1).topk(k, largest=False).indices
+            pts, nrm = cp[idx], cn[idx]                                   # (k, 3)
+            valid = torch.zeros(patch_k, dtype=torch.bool, device=dev)
+            valid[:k] = True
+            if k < patch_k:                                              # pad to a common width
+                pts = torch.cat([pts, pts.new_zeros(patch_k - k, 3)], 0)
+                nrm = torch.cat([nrm, nrm.new_zeros(patch_k - k, 3)], 0)
+            acc[g][0].append(t); acc[g][1].append(pts); acc[g][2].append(nrm); acc[g][3].append(valid)
+            resolved += 1
+    bundles = []
+    for g in range(G):
+        fr, ptl, nrl, val = acc[g]
+        if fr:
+            bundles.append((group_vert_ids[g], torch.tensor(fr, dtype=torch.long, device=dev),
+                            torch.stack(ptl, 0), torch.stack(nrl, 0), torch.stack(val, 0)))
+    return {"bundles": bundles, "resolved": resolved, "unresolved": unresolved}
+
+
+def _contact_instance_nn(vw_sub: torch.Tensor, patches: dict):
+    """Per resolved instance: the closest ``(member vertex, patch point)`` pair.
+
+    Returns ``(v_star, p_star, n_star, count)`` — ``v_star (I, 3)`` the posed member vertex
+    (gradient flows through it), ``p_star`` / ``n_star`` its nearest patch point + that point's
+    normal (both detached constants), ``count`` = resolved instances (the fixed loss
+    denominator). The ``argmin`` over member-verts × patch-points is detached. ``None`` when
+    there are no resolved instances."""
+    bundles = patches["bundles"]
+    if not bundles:
+        return None
+    INF = torch.finfo(vw_sub.dtype).max
+    vs, ps, ns = [], [], []
+    for member_ids, frames, pts, nrm, valid in bundles:
+        posed = vw_sub[frames][:, member_ids]                            # (n, M, 3) grad through vw_sub
+        n, M, k = posed.shape[0], posed.shape[1], pts.shape[1]
+        with torch.no_grad():
+            d = torch.cdist(posed.detach(), pts).masked_fill(~valid[:, None, :], INF)  # (n, M, k)
+            flat = d.reshape(n, M * k).argmin(dim=1)                     # (n,)
+            vi, pi = flat // k, flat % k
+        ar = torch.arange(n, device=vw_sub.device)
+        vs.append(posed[ar, vi])                                         # (n, 3) grad
+        ps.append(pts[ar, pi]); ns.append(nrm[ar, pi])
+    return torch.cat(vs, 0), torch.cat(ps, 0), torch.cat(ns, 0), int(patches["resolved"])
+
+
+@torch.no_grad()
 def _metrics(mid, betas, q_world, *, extrinsics, K, depth_pad, depth_valid, target_kp,
             scores, corr, frame_vertex_ids, sub, score_thresh, chunk=16,
             body_idx=None, init_target=None,
@@ -231,6 +329,8 @@ def optimize_person(
     scene_conf: torch.Tensor | None = None, fps: float = 30.0,
     contact_labels: torch.Tensor | None = None,
     contact_conf: torch.Tensor | None = None,
+    contact_groups: list | None = None,
+    image_hw: tuple[int, int] | None = None,
     chamfer_weights: torch.Tensor | None = None,
     frame_valid: torch.Tensor | None = None,
     cam_centers: torch.Tensor | None = None,
@@ -264,6 +364,15 @@ def optimize_person(
     and the velocity damper's per-joint contribution by each joint's label
     confidence, so an uncertain auto-label pulls proportionally less; ``None`` keeps
     every labelled joint at weight 1.
+
+    ``contact_groups`` (optional ``list[list[int]]`` — each annotation group's member
+    SMPLXMid joint indices) turns on the **kinematics_2 contact-patch repair**: per
+    positive ``(frame, group)`` instance a target patch of wall points is built once per
+    scene phase (:func:`_build_contact_patches`) and the ``ann_acquisition`` /
+    ``ann_seating`` terms pull the group's single closest vertex onto it and seat it at
+    slight penetration. Off (``None``) or at zero acquisition/seating weight it is inert.
+    ``image_hw`` (``(H, W)``) is required for it — the patch builder uses it to reject a
+    group whose pixel footprint falls off-image (or behind the camera).
 
     ``auto_contact`` (optional dict) enables **kinematics_1** auto-contact mode: when
     ``contact_labels`` is not supplied and the ``ann_attraction`` weight is > 0, labels
@@ -321,6 +430,12 @@ def optimize_person(
     ann_at_cfg = auto_contact if use_auto else (knobs["ann_attraction"] if use_ann else None)
     ann_rep_cfg = knobs["ann_repulsion"] if use_ann else None   # clearance repulsion is manual-only
     ann_vel_ang_w = float(knobs.get("ann_velocity", {}).get("angular_weight", 0.0))  # angular/linear ratio
+    # kinematics_2 contact-patch repair (ann_acquisition + ann_seating): per positive
+    # (frame, annotation-group) instance, pull ONE closest vertex toward a per-instance
+    # target patch of wall points and seat it at slight penetration. Needs the annotation
+    # group→member-joint mapping (contact_groups) and non-zero acquisition/seating weight.
+    use_contact_patch = (use_ann and contact_groups is not None and image_hw is not None
+                         and (_wmax("ann_acquisition") > 0.0 or _wmax("ann_seating") > 0.0))
 
     depth_pad, depth_valid = pad_frames(depth_points, channels=3,
                                         device=q_world_init.device, dtype=q_world_init.dtype)
@@ -339,6 +454,23 @@ def optimize_person(
     if use_auto:
         auto_group_mask = torch.zeros(mid.num_joints, dtype=torch.bool, device=q_world_init.device)
         auto_group_mask[auto_contact["group_joints"]] = True   # only these joints may be labeled 1
+
+    # kinematics_2 contact-patch groups: per annotation group, the subsampled-vertex ids it owns
+    # (via v2j_sub) + a per-frame in-contact flag (any member joint labeled 1). A group with no
+    # owned subsampled vertex is dropped — there is no vertex to seat.
+    group_vert_ids: list = []
+    group_active = None
+    if use_contact_patch:
+        cols = []
+        for members in contact_groups:
+            mj = torch.as_tensor(members, dtype=torch.long, device=q_world_init.device)
+            vids = torch.nonzero((v2j_sub[:, None] == mj[None, :]).any(1), as_tuple=False).squeeze(1)
+            if vids.numel() == 0:
+                continue
+            group_vert_ids.append(vids)
+            cols.append((contact_labels[:, mj] == 1).any(dim=1))   # (T,) group in-contact this frame
+        group_active = (torch.stack(cols, 1) if cols
+                        else torch.zeros((T, 0), dtype=torch.bool, device=q_world_init.device))
 
     # per-vertex label-confidence weight (kinematics_2-on-auto). Scales the attraction; the
     # velocity damper takes the per-joint conf directly. None ⇒ every active vertex weighted 1.
@@ -409,6 +541,8 @@ def optimize_person(
     # phase's on_start — None outside scene phases), so the lazy "sig" state entry
     # and the scene terms always read the running phase's candidates.
     scene_cell: dict = {"cand": None}
+    # kinematics_2 contact patches (per scene phase's on_start; None outside scene phases).
+    patch_cell: dict = {"patches": None}
 
     def _forward() -> State:
         st = State()
@@ -433,8 +567,16 @@ def optimize_person(
                 return None
             return scene_signed_distance(st["vw"][:, sub], *cand, chunk=chunk)
 
+        def _inst_nn():
+            # Per-instance closest (member vertex, patch point), shared by acquisition + seating.
+            patches = patch_cell["patches"]
+            if patches is None:
+                return None
+            return _contact_instance_nn(st["vw"][:, sub], patches)
+
         st.put_lazy("vismask", _vis)
         st.put_lazy("sig", _sig)
+        st.put_lazy("inst_nn", _inst_nn)
         st.put_lazy("d1", lambda: tangent_difference(st["qn"], mid.num_joints))
         st.put_lazy("accel", lambda: st["d1"][1:] - st["d1"][:-1])
         st.put_lazy("jerk", lambda: st["accel"][1:] - st["accel"][:-1])
@@ -575,6 +717,35 @@ def optimize_person(
                 active_mask=nocontact_v)
             return loss, {"cm": gap_cm, "n": n_push}
         problem.add_term("ann_repulsion", _repulsion)
+
+    # kinematics_2 contact-patch repair: acquisition pulls each positive instance's single
+    # closest vertex toward its target patch (long-range, bounded pseudo-Huber); seating then
+    # seats that vertex at slight penetration and — being symmetric — pushes it back OUT after
+    # overshoot (the anti-burial term). Both read the one shared per-instance NN "inst_nn".
+    if use_contact_patch:
+        aq_cfg = knobs["ann_acquisition"]
+        se_cfg = knobs["ann_seating"]
+
+        def _acquisition(st):
+            nn = st["inst_nn"]
+            if nn is None:
+                return q.new_zeros(())
+            v_star, p_star, _, cnt = nn
+            loss, d_cm, n = acquisition_penalty(v_star, p_star, delta_m=float(aq_cfg["delta_m"]),
+                                                resolved_count=cnt)
+            return loss, {"cm": d_cm, "n": n}
+        problem.add_term("ann_acquisition", _acquisition)
+
+        def _seating(st):
+            nn = st["inst_nn"]
+            if nn is None:
+                return q.new_zeros(())
+            v_star, p_star, n_star, cnt = nn
+            loss, seat_cm, n = seating_penalty(
+                v_star, p_star, n_star, target_m=float(se_cfg["target_m"]),
+                band_m=float(se_cfg["band_m"]), huber_m=float(se_cfg["huber_m"]), resolved_count=cnt)
+            return loss, {"cm": seat_cm, "n": n}
+        problem.add_term("ann_seating", _seating)
     if use_ann or use_auto:
         # Velocity damper (slow in-contact joints) needs only the world joints, so it
         # runs in every phase the labels are present (refine + lbfgs for auto, all
@@ -617,6 +788,19 @@ def optimize_person(
                                  for g, m in auto_contact["group_members"].items() if m)
                 print(f"    [auto-contact] frozen labels @ {ph.name}: "
                       f"{int((lab == 1).any(1).sum())}/{lab.shape[0]} frames w/ contact  ({per_g})")
+            if use_contact_patch and use_pen and ph.scene:
+                with torch.no_grad():
+                    vw_sub0 = mid.forward(betas, normalize_q(q, mid.num_joints)).vertices[:, sub]
+                aq_cfg = knobs["ann_acquisition"]
+                patch_cell["patches"] = _build_contact_patches(
+                    vw_sub0, group_vert_ids, group_active, scene_pts, scene_normals, scene_conf,
+                    extrinsics, K, image_hw[0], image_hw[1], radius_px=float(aq_cfg["radius_px"]),
+                    patch_k=int(aq_cfg["patch_k"]), conf_thresh=float(aq_cfg["conf_thresh"]))
+                pk = patch_cell["patches"]
+                print(f"    [contact-patch] {pk['resolved']} resolved / {pk['unresolved']} "
+                      f"unresolved instances @ {ph.name}")
+            else:
+                patch_cell["patches"] = None
         return on_start
 
     engine_phases = [
