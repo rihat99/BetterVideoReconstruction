@@ -57,6 +57,7 @@ cover/
 
 # Django stuff:
 *.log
+peter
 local_settings.py
 db.sqlite3
 db.sqlite3-journal
@@ -225,6 +226,7 @@ data/
 data_2/
 out/
 out_2/
+peter/
 temp/
 scratch/
 *.log
