@@ -595,6 +595,60 @@ def _contact_labels(contacts_p: np.ndarray, ann_names: list[str],
     return lab
 
 
+def load_auto_contacts(pred: Path, tag: str, body_path: Path, N: int,
+                       body_joint_names: list[str], stage_tag: str):
+    """Load + validate ``contacts_<tag>.npz`` as an auto label source.
+
+    ``body_path`` is the body the contacts were measured ON (and that the caller
+    is about to refine) — sha256 provenance ties the artifact to it, plus to the
+    scene and transform. Returns ``(cnt_oids, contact, confidence)`` where
+    ``contact`` is ``(Pc, N, 52)`` bool and ``confidence`` ``(Pc, N, 52)`` float32.
+    """
+    cnt_path = paths.contacts_path(pred, tag)
+    if not cnt_path.exists():
+        raise SystemExit(f"missing {cnt_path} — run estimate_contacts "
+                         f"(--bodies {body_path.stem}) first")
+    cnt = dict(np.load(cnt_path, allow_pickle=True))
+    cnt_oids = [int(x) for x in cnt["object_ids"]]
+    try:
+        schema = int(np.asarray(cnt["confidence_schema"]).item())
+        method = str(np.asarray(cnt["confidence_method"]).item())
+        cnt_contact = np.asarray(cnt["joint_contact"], bool)
+        cnt_confidence = np.asarray(cnt["label_confidence"], np.float32)
+    except (KeyError, TypeError, ValueError) as exc:
+        raise SystemExit(
+            f"{cnt_path} is not a complete per-joint confidence artifact; "
+            "regenerate it with estimate_contacts") from exc
+    if schema != CONTACT_CONFIDENCE_SCHEMA or method != CONTACT_CONFIDENCE_METHOD:
+        raise SystemExit(
+            f"{cnt_path} has confidence schema/method {schema}/{method!r}; expected "
+            f"{CONTACT_CONFIDENCE_SCHEMA}/{CONTACT_CONFIDENCE_METHOD!r}, regenerate it")
+    expected = (len(cnt_oids), N, len(body_joint_names))
+    if cnt_contact.shape != expected or cnt_confidence.shape != expected:
+        raise SystemExit(
+            f"{cnt_path} contact/confidence shapes must both be {expected}, got "
+            f"{cnt_contact.shape} and {cnt_confidence.shape}")
+    if (not np.isfinite(cnt_confidence).all()
+            or bool(((cnt_confidence < 0.0) | (cnt_confidence > 1.0)).any())):
+        raise SystemExit(f"{cnt_path} label_confidence must be finite and in [0,1]")
+    cnt_names = [str(x) for x in np.asarray(cnt["joint_names"]).tolist()]
+    if cnt_names != body_joint_names:
+        raise SystemExit(f"{cnt_path} joint order does not match {body_path}")
+    provenance = (
+        (body_path, "source_body_sha256"),
+        (pred / "geometry" / "scene.npz", "source_scene_sha256"),
+        (pred / "geometry" / "transform.npz", "source_transform_sha256"),
+    )
+    for source_path, hash_key in provenance:
+        with source_path.open("rb") as source_file:
+            expected_hash = hashlib.file_digest(source_file, "sha256").hexdigest()
+        if hash_key not in cnt or str(np.asarray(cnt[hash_key]).item()) != expected_hash:
+            raise SystemExit(
+                f"{cnt_path} is stale for {source_path}; regenerate estimate_contacts")
+    print(f"[{stage_tag}] AUTO labels from {cnt_path.name}, ids {cnt_oids}")
+    return cnt_oids, cnt_contact, cnt_confidence
+
+
 def resolve_annotation_path(source, annotations) -> Path:
     """The annotation npz: explicit ``--annotations``, else ``<source>.npz`` / ``data/<stem>.npz`` / ``data_2/<stem>.npz``."""
     if annotations is not None:
@@ -616,8 +670,11 @@ def run_kinematics_2(source, pred: Path, cfg: HumanOptimConfig, device: str, *,
     ``labels_mode='manual'`` (default) uses the human annotation ``data/<stem>.npz``;
     ``'auto'`` uses our own ``contacts_1.npz`` labels instead —
     positives-only (in-contact → ``+1``, else ``-1``, **never** ``0``, so the
-    clearance repulsion stays inert by construction), each weighted by schema-4
-    per-joint ``label_confidence``.
+    clearance repulsion stays inert by construction). Positives drive the same
+    contact-patch repair (``ann_acquisition``/``ann_seating`` instances over the
+    14 limb groups) as manual labels, ungated — witnesses report ~0 confidence on
+    a floating body, so a confidence gate would veto exactly the repair this stage
+    exists for. Per-joint ``label_confidence`` weights only the velocity damping.
     """
     knobs = cfg.knobs
     pred = Path(pred)
@@ -643,51 +700,12 @@ def run_kinematics_2(source, pred: Path, cfg: HumanOptimConfig, device: str, *,
     scene_pts, scene_normals, scene_conf = _load_scene(pred, knobs, wfc, device, tag)
 
     # Label source: our own contacts_1 (auto) or the human annotation (manual).
-    cnt = ann_contacts = ann_names = ann_oids = cnt_oids = ann_ignored = None
+    ann_contacts = ann_names = ann_oids = cnt_oids = ann_ignored = None
     cnt_contact = cnt_confidence = None
     if labels_mode == "auto":
-        cnt_path = paths.contacts_path(pred, "1")
-        if not cnt_path.exists():
-            raise SystemExit(f"missing {cnt_path} — run estimate_contacts (--bodies kinematic_1) first")
-        cnt = dict(np.load(cnt_path, allow_pickle=True))
-        cnt_oids = [int(x) for x in cnt["object_ids"]]
-        try:
-            schema = int(np.asarray(cnt["confidence_schema"]).item())
-            method = str(np.asarray(cnt["confidence_method"]).item())
-            cnt_contact = np.asarray(cnt["joint_contact"], bool)
-            cnt_confidence = np.asarray(cnt["label_confidence"], np.float32)
-        except (KeyError, TypeError, ValueError) as exc:
-            raise SystemExit(
-                f"{cnt_path} is not a complete per-joint confidence artifact; "
-                "regenerate it with estimate_contacts") from exc
-        if schema != CONTACT_CONFIDENCE_SCHEMA or method != CONTACT_CONFIDENCE_METHOD:
-            raise SystemExit(
-                f"{cnt_path} has confidence schema/method {schema}/{method!r}; expected "
-                f"{CONTACT_CONFIDENCE_SCHEMA}/{CONTACT_CONFIDENCE_METHOD!r}, regenerate it")
-        expected = (len(cnt_oids), N, len(kin["joint_names"]))
-        if cnt_contact.shape != expected or cnt_confidence.shape != expected:
-            raise SystemExit(
-                f"{cnt_path} contact/confidence shapes must both be {expected}, got "
-                f"{cnt_contact.shape} and {cnt_confidence.shape}")
-        if (not np.isfinite(cnt_confidence).all()
-                or bool(((cnt_confidence < 0.0) | (cnt_confidence > 1.0)).any())):
-            raise SystemExit(f"{cnt_path} label_confidence must be finite and in [0,1]")
-        cnt_names = [str(x) for x in np.asarray(cnt["joint_names"]).tolist()]
         kin_names = [str(x) for x in np.asarray(kin["joint_names"]).tolist()]
-        if cnt_names != kin_names:
-            raise SystemExit(f"{cnt_path} joint order does not match {kin_path}")
-        provenance = (
-            (kin_path, "source_body_sha256"),
-            (pred / "geometry" / "scene.npz", "source_scene_sha256"),
-            (pred / "geometry" / "transform.npz", "source_transform_sha256"),
-        )
-        for source_path, hash_key in provenance:
-            with source_path.open("rb") as source_file:
-                expected_hash = hashlib.file_digest(source_file, "sha256").hexdigest()
-            if hash_key not in cnt or str(np.asarray(cnt[hash_key]).item()) != expected_hash:
-                raise SystemExit(
-                    f"{cnt_path} is stale for {source_path}; regenerate estimate_contacts")
-        print(f"[{tag}] AUTO labels from {cnt_path.name} (contacts_1), ids {cnt_oids}")
+        cnt_oids, cnt_contact, cnt_confidence = load_auto_contacts(
+            pred, "1", kin_path, N, kin_names, tag)
     else:
         ann_path = resolve_annotation_path(source, annotations)
         ann = dict(np.load(ann_path, allow_pickle=True))
@@ -702,13 +720,17 @@ def run_kinematics_2(source, pred: Path, cfg: HumanOptimConfig, device: str, *,
     torch.manual_seed(0)
     phases = _kinematics_2_phases(cfg)
 
-    # Contact-patch repair groups (manual mode): each annotation group's member SMPLXMid joint
-    # indices, from the same schema mapping _contact_labels uses. Drives ann_acquisition/seating.
-    contact_groups = None
-    if ann_names is not None:
-        jidx = {n: i for i, n in enumerate(mid_names)}
-        contact_groups = [g for g in ([jidx[j] for j in members if j in jidx]
-                                      for members in _ann_mapping(ann_names).values()) if g]
+    # Contact-patch repair groups: each annotation group's member SMPLXMid joint indices.
+    # Manual mode uses the annotation's own schema mapping (same one _contact_labels uses);
+    # auto mode uses the 14-joint group structure directly — contacts_1 labels live on the
+    # SMPLXMid joints, so a group is a positive instance whenever any member joint is labeled.
+    # Auto instances are deliberately NOT confidence-gated: on a floating body the witnesses
+    # correctly report ~0 confidence, and gating there would kill exactly the repair we want —
+    # the pull tests the label, reproj + priors referee it. Drives ann_acquisition/seating.
+    group_map = _ann_mapping(ann_names) if ann_names is not None else _ANN_TO_SMPLX_14
+    jidx = {n: i for i, n in enumerate(mid_names)}
+    contact_groups = [g for g in ([jidx[j] for j in members if j in jidx]
+                                  for members in group_map.values()) if g]
 
     out = _new_out()
     betas_out = []

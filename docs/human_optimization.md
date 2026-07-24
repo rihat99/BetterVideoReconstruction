@@ -161,10 +161,16 @@ iterations — the cloud is static and the body barely moves within a phase.
 
 ## kinematics_2 — contact-patch repair
 
-A repair stage, restarted from the `kinematics_1` result, driven by manual per-joint
-contact annotations (`data/<stem>.npz`; both the 10-joint and the 14-joint schema).
-Its job is to move the body — sometimes tens of centimetres — until every annotated
-contact actually touches the wall. Chamfer is **off** here (the human depth cloud is
+A repair stage, restarted from the `kinematics_1` result, driven by per-joint
+contact labels. The pipeline default is **auto**: our own `contacts_1.npz`
+(detector + completion labels, positives-only). Manual annotations
+(`data/<stem>.npz`; 10- or 14-joint schema) remain available via
+`[stages.kinematics_2] labels = "manual"` but are metrics-only in the pipeline.
+Auto positives are deliberately **not** confidence-gated: on a floating body every
+witness correctly reports ~0 confidence, and gating would veto exactly the repair
+this stage exists for — the pull tests the label, reprojection and the priors
+referee it. Its job is to move the body — sometimes tens of centimetres — until
+every labeled contact actually touches the wall. Chamfer is **off** here (the human depth cloud is
 exactly the spaghetti-prone evidence being repaired); reprojection and the pose priors
 are what keep the repair from diverging.
 
@@ -271,10 +277,13 @@ little off, the force solve just absorbs the error into a large leftover base
 wrench. `kindyn_1` breaks that one-way street: it optimizes the pose **and** the
 contact forces **together**, so the physics residual can push back on the motion.
 
-It starts from the converged `kinematics_2` body and its manual contact annotation
-(the same labels `kinematics_2` uses — no auto-detection here). The objective is the
-full `kinematics_2` objective (reprojection, chamfer, priors, motion smoothness,
-scene penetration, the annotation terms) **plus** the `dynamics` terms
+It starts from the converged `kinematics_2` body and its contact labels — by
+default `contacts_2.npz`, the readout measured on that very body
+(`[stages.kindyn_1] labels = "manual"` switches back to the annotation). The
+objective is the full `kinematics_2` objective (reprojection, priors, motion
+smoothness, scene penetration, the annotation terms — chamfer is off here too:
+kindyn starts from the repaired body, and chamfer would pull it back toward the
+spaghetti-prone depth the repair just left) **plus** the `dynamics` terms
 (`base_wrench`, `force_magnitude`, `force_smooth_mag`/`_dir`, `torque_smooth`), with
 one free world-force vector per contact group per frame added as extra optimization
 variables. This first version keeps the force model simple: **no friction cones**

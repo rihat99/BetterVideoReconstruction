@@ -168,8 +168,16 @@ def solve_static_support(mid, betas: torch.Tensor, q: torch.Tensor, valid: np.nd
     vel = np.gradient(group_pos, axis=0) * float(fps)
     vel[~np.asarray(valid, bool)] = 0.0
     vmag = torch.as_tensor(np.linalg.norm(vel, axis=-1), dtype=dtype, device=dev)   # (N, C)
-    dist_m = torch.as_tensor(np.minimum(np.asarray(group_dist_cm, np.float64) / 100.0, 1.0),
-                             dtype=dtype, device=dev)                  # (N, C) m, capped at 1
+    # Gap penalty distance is RELATIVE to the frame's nearest group. Absolute pricing
+    # kills the force witness on a mis-registered (floating) body: with every group far,
+    # all force is so expensive the solve leaves gravity unbalanced and |f| never crosses
+    # the threshold — on the bodies the witness exists to rescue. Relative pricing keeps
+    # the penalty's real job (prefer allocating weight to nearer groups) while the weight
+    # still has to land somewhere; the drift guard keeps protecting moving limbs.
+    d = np.asarray(group_dist_cm, np.float64) / 100.0                  # (N, C) m, inf = unseen
+    dmin = d.min(axis=1, keepdims=True)
+    d = d - np.where(np.isfinite(dmin), dmin, 0.0)   # all-unseen frames keep d = inf (→ cap)
+    dist_m = torch.as_tensor(np.minimum(d, 1.0), dtype=dtype, device=dev)   # capped at 1
 
     f_free = torch.zeros((N, C, 3), dtype=dtype, device=dev, requires_grad=True)
     gen_u = None

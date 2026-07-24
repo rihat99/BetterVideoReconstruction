@@ -211,11 +211,13 @@ def run(source: str | Path, predictions_dir: str | Path, config_path: str | Path
     # dynamics-stage knobs; its friction cones read the ungated scene cloud (conf_drop_q=0,
     # matching the dynamics stage). Gravity follows the dynamics convention: geocalib
     # world-down when present, else world-down [0, 1, 0].
-    # Completion runs ONLY on the kinematics_1 body: its gates read the persisted
-    # pre-enforcement drift. A kinematics_2 body carries no drift_pre — attraction and
-    # damping have already acted on it, so stillness re-measured there is manufactured
-    # evidence, not a witness. contacts_2 therefore stays detector-only.
-    do_completion = bodies == "kinematic_1"
+    # Completion runs only when the body carries the persisted pre-enforcement drift
+    # (``drift_pre``): its stillness gates need that honest witness. kinematics_1 saves it
+    # at refine start, and kinematics_2 forwards it unchanged — attraction and damping have
+    # acted on the kin2 POSE, but the stillness evidence still predates any enforcement.
+    # An old body npz without drift_pre stays detector-only (re-measured stillness there
+    # would be manufactured evidence).
+    do_completion = "drift_pre" in kin
     comp_ctx = load_dynamics_context(config_path)
     comp_knobs = cc["completion"]
     grav_path = pred / "geocalib" / "gravity.npz"

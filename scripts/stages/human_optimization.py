@@ -77,7 +77,8 @@ def run(source, predictions_dir, config_path, *, stages=None, annotations=None) 
     if "kindyn_1" in requested:
         kd = opts.get("kindyn_1", {})
         run_kindyn(source, pred, cfg, cfg.device, annotations=annotations,
-                   overlay=bool(kd.get("overlay", False)))
+                   overlay=bool(kd.get("overlay", False)),
+                   labels_mode=str(kd.get("labels", "manual")))
 
 
 def main(argv=None) -> int:

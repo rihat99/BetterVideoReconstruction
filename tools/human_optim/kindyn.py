@@ -46,7 +46,8 @@ from .dynamics import _GRAVITY_MAG, _build_fext, _contact_catalog, _world_to_loc
 from .optimizer import PhaseSpec, optimize_person
 from .stages import (
     _ALL_DOF, _DEFAULT_SMPLX_MODEL, _body_context, _contact_labels, _load_scene,
-    _new_out, _append_classic, _person_visual_inputs, _save_body, resolve_annotation_path,
+    _new_out, _append_classic, _person_visual_inputs, _save_body, load_auto_contacts,
+    resolve_annotation_path,
 )
 
 
@@ -347,14 +348,16 @@ def _kindyn_phases(cfg: HumanOptimConfig) -> list[PhaseSpec]:
 
 
 def run_kindyn(source, pred: Path, cfg: HumanOptimConfig, device: str, *,
-               annotations=None, overlay: bool = False) -> Path:
+               annotations=None, overlay: bool = False, labels_mode: str = "manual") -> Path:
     """Joint kinematics + dynamics refinement of ``kinematic_2.npz`` → ``human_optim/kindyn_1.npz``.
 
-    Starts from the converged ``kinematic_2`` body and its manual contact
-    annotation, and optimizes the pose and per-contact-group forces together. The
-    output carries the refined-body fields (same schema as ``kinematic_2.npz``)
-    plus the solved force fields, so it works both as a body source and as an
-    inspectable force artifact.
+    Starts from the converged ``kinematic_2`` body and its contact labels, and
+    optimizes the pose and per-contact-group forces together. The output carries
+    the refined-body fields (same schema as ``kinematic_2.npz``) plus the solved
+    force fields, so it works both as a body source and as an inspectable force
+    artifact. ``labels_mode='manual'`` (default) reads the human annotation
+    ``data/<stem>.npz``; ``'auto'`` reads our own ``contacts_2.npz`` — the
+    contact readout measured on the very body this stage starts from.
     """
     knobs = cfg.knobs
     pred = Path(pred)
@@ -390,13 +393,18 @@ def run_kindyn(source, pred: Path, cfg: HumanOptimConfig, device: str, *,
         gravity_world = np.array([0.0, 1.0, 0.0], np.float32)
         gsrc = "fallback_down(no geocalib)"
 
-    ann_path = resolve_annotation_path(source, annotations)
-    ann = dict(np.load(ann_path, allow_pickle=True))
-    ann_contacts = ann["contacts"]
-    ann_names = [str(x) for x in ann["joint_names"]]
-    ann_oids = [int(x) for x in ann["object_ids"]]
     print(f"[{tag}] {pred.name}: P={P} N={N} fps={fps:.1f}  gravity={gravity_world.round(2)} ({gsrc})")
-    print(f"[{tag}] annotation {ann_path} — joints {ann_names}, ids {ann_oids}")
+    ann_contacts = ann_names = ann_oids = cnt_oids = cnt_contact = None
+    if labels_mode == "auto":
+        kin_names = [str(x) for x in np.asarray(kin["joint_names"]).tolist()]
+        cnt_oids, cnt_contact, _ = load_auto_contacts(pred, "2", kin_path, N, kin_names, tag)
+    else:
+        ann_path = resolve_annotation_path(source, annotations)
+        ann = dict(np.load(ann_path, allow_pickle=True))
+        ann_contacts = ann["contacts"]
+        ann_names = [str(x) for x in ann["joint_names"]]
+        ann_oids = [int(x) for x in ann["object_ids"]]
+        print(f"[{tag}] annotation {ann_path} — joints {ann_names}, ids {ann_oids}")
 
     weights = cfg.weights_for("kindyn_1")
     groups = knobs["contact"]["groups"]
@@ -424,7 +432,14 @@ def run_kindyn(source, pred: Path, cfg: HumanOptimConfig, device: str, *,
             pose, human, oid, N, vmask, knobs, device,
             mid=mid, betas_T=betas_T, q_world=q_world, extr=extr, K=K)
 
-        if oid in ann_oids:
+        if labels_mode == "auto" and oid in cnt_oids:
+            jc = cnt_contact[cnt_oids.index(oid)]                          # (N, 52)
+            lab = np.where(jc, np.int8(1), np.int8(-1)).astype(np.int8)    # +1 / -1, NEVER 0
+            lab[~vmask] = -1
+            contact_labels = torch.as_tensor(lab, dtype=torch.int8, device=device)
+            nc = int((lab == 1).any(1).sum())
+            print(f"[{tag}] obj_id={oid}: AUTO contacts on {nc} frames")
+        elif labels_mode != "auto" and oid in ann_oids:
             lab = _contact_labels(ann_contacts[ann_oids.index(oid)], ann_names, mid_names, N)
             lab[~vmask] = -1
             contact_labels = torch.as_tensor(lab, dtype=torch.int8, device=device)
@@ -433,7 +448,7 @@ def run_kindyn(source, pred: Path, cfg: HumanOptimConfig, device: str, *,
         else:
             contact_labels = torch.full((N, mid.num_joints), -1, dtype=torch.int8, device=device)
             contact_labels[~vmask] = -1
-            print(f"[{tag}] person obj_id={oid}: NO annotation (kinematic re-fit, no forces)")
+            print(f"[{tag}] person obj_id={oid}: NO contact labels (kinematic re-fit, no forces)")
 
         spec = build_dynamics_spec(
             mid, betas_mean, contact_labels, vmask, gravity_world,

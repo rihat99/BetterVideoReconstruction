@@ -28,29 +28,29 @@ overlay = false          # reprojected-keypoint debug overlay → human_optim/ki
 # active set that churns and invalidates strong-Wolfe curvature.
 iters = { root = 100, full = 200, refine = 250, lbfgs = 0 }
 overlay = false          # debug overlay → human_optim/kinematic_2_overlay.mp4
-labels = "manual"        # contact labels: "manual" (data/<stem>.npz) | "auto" (contacts_1, confidence-weighted)
+labels = "auto"          # contact labels: "auto" (contacts_1 — the pipeline default; manual annotations are metrics-only) | "manual" (data/<stem>.npz)
 
 [stages.dynamics]
 device = "cuda"          # GPU: the new BetterRobot batched-adjoint torch RNEA is fast (warp measured slower for this fwd+bwd solve)
 bodies = "kinematic_1"   # which refined body the force solve reads (kinematic_1 | kinematic_2)
 
 [stages.kindyn_1]
-# Joint kinematics + dynamics. Starts from the converged kinematic_2 body + its manual contact
-# annotation (data/<stem>.npz) and optimizes pose AND per-contact-group forces together, so the
+# Joint kinematics + dynamics. Starts from the converged kinematic_2 body + its contact labels
+# (contacts_2 by default) and optimizes pose AND per-contact-group forces together, so the
 # RNEA base wrench can reshape the motion instead of only being absorbed by forces. Forces are
 # warm-started (a frozen-q solve, [dynamics_optimizer] knobs), then ONE joint L-BFGS phase
 # fine-tunes pose + forces together — Adam was tried and is destructive here (it cannot
 # co-adapt N-scale forces to a moving pose; the wrench spikes and the motion wrecks). No
 # friction cones in this first version (as q moves the precomputed scene normals go stale).
 iters = { lbfgs = 150 }  # one joint L-BFGS polish (pose + forces); Adam can't co-adapt N-scale forces
-labels = "manual"        # manual contact annotation only — no auto labels, no contact detection
+labels = "auto"          # contact labels: "auto" (contacts_2 — the pipeline default; manual annotations are metrics-only) | "manual" (data/<stem>.npz)
 overlay = false          # reprojected-keypoint debug overlay → human_optim/kindyn_1_overlay.mp4
 
 #                       root  kin1  kin2   dyn  kindyn1
 [loss_weights.kinematic]
 reproj_sapiens      = [   8,    8,    8,    0,    8 ]
 reproj_init         = [  30,   30,   30,    0,   30 ]
-chamfer             = [  10,   10,    0,    0,   10 ]   # OFF in kinematics_2 — the contact stage repairs against the annotation, not the (spaghetti-prone) human depth
+chamfer             = [  10,   10,    0,    0,    0 ]   # OFF in kinematics_2 AND kindyn_1 — both start from the repaired body; chamfer would pull it back toward the (spaghetti-prone) human depth the repair just left
 pose_prior          = [ 300,  300,  300,    0,  300 ]
 orient_prior        = [  50,   50,   50,    0,   50 ]
 

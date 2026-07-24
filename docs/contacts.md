@@ -64,8 +64,10 @@ A small per-person optimization takes the body's weight (about 600 N) and
 decides how to split it among the six candidate support points — the two
 wrists, two ankles, two feet. Force on a fast-moving limb is expensive (the
 work penalty, using the raw un-smoothed limb speed), force far from the wall
-is expensive (the gap penalty), and foot/ankle forces must stay inside
-friction cones built from the scene normals. The solve is **static**: body
+is expensive (the gap penalty — priced on the distance *beyond the frame's
+nearest group*, so on a mis-registered body where every limb reads "far" the
+weight still lands on the least-far limbs instead of nowhere), and foot/ankle
+forces must stay inside friction cones built from the scene normals. The solve is **static**: body
 velocities and accelerations are zeroed. That is not an approximation we hope
 is fine — re-running the original dynamic solve with motion zeroed changed
 under 3 % of labels and none of the scores, so the motion terms were dead
@@ -102,10 +104,11 @@ ambiguity floor of the annotation and the point cloud. The confidence weight
 
 ### Rules that keep it honest
 
-- Completion runs only on the `kinematic_1` body. It needs the
-  pre-enforcement drift; a `kinematic_2` body has already been pulled by
-  contact attraction, so stillness measured there is manufactured.
-  `contacts_2` stays detector-only.
+- Completion runs only on a body that carries the pre-enforcement drift
+  (`drift_pre`). `kinematic_1` saves it at refine start and `kinematic_2`
+  forwards it unchanged, so both are eligible; stillness re-measured on an
+  enforced body would be manufactured evidence, and an old npz without
+  `drift_pre` stays detector-only.
 - A completed label must never be judged by how much it helps a later stage —
   the dynamics solve will happily use any force point it is given. Validation
   is against manual annotations only.
@@ -117,8 +120,15 @@ ambiguity floor of the annotation and the point cloud. The confidence weight
 The dynamics residual as a per-frame contact *score*: chance level. Reading
 the gravity direction out of the residual: unidentifiable (the residual norm
 is invariant to it). Trajectory smoothing for label quality: no effect.
-A relative (closest-limb) gap penalty: rejected — it makes far limbs cheaper
-exactly on floating scenes. Known open issue: for clips longer than VGGT's
+A relative (closest-limb) gap penalty was first rejected here — "it makes far
+limbs cheaper exactly on floating scenes" — and then adopted (2026-07-24) for
+that same reason: with absolute pricing the solve on a floating body prefers
+leaving gravity unbalanced (every limb is expensive), so the force witness
+never fires on the bodies it exists to rescue. Measured on the 13 annotated
+local scenes: healthy scenes byte-identical, pooled precision +1 pt, and the
+floater gtIGgs goes R 0.17 → 0.57 at P 0.985. The drift guard still blocks
+scenes whose reconstruction is too unstable to witness stillness
+(sport_climb stays unchanged). Known open issue: for clips longer than VGGT's
 frame cap the frame axis is subsampled while `fps` stays native, which
 stretches every temporal window in this stage — currently unreachable (all
 corpus scenes are under the cap).
