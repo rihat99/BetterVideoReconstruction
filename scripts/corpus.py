@@ -36,13 +36,16 @@ _DEFAULT_CONFIG = _REPO_ROOT / "configs" / "corpus.toml"
 _CONTACTS_CLI = _STAGES_DIR / "estimate_contacts.py"
 # Pinned copy of tools/human_optim/confidence.py's schema/method (kept literal
 # so the driver stays torch-free); update together with that module.
-_CONFIDENCE_SCHEMA = 5
-_CONFIDENCE_METHOD = "depth-trust-motion-v1"
+_CONFIDENCE_SCHEMA = 7
+_CONFIDENCE_METHOD = "source-conditional-v1"
 _IMPLEMENTATION_INPUTS = (
     _CONTACTS_CLI,
     _REPO_ROOT / "tools" / "human_optim" / "confidence.py",
     _REPO_ROOT / "tools" / "human_optim" / "contacts.py",
     _REPO_ROOT / "tools" / "human_optim" / "depth_fit.py",
+    _REPO_ROOT / "tools" / "human_optim" / "completion.py",
+    _REPO_ROOT / "tools" / "human_optim" / "dynamics.py",
+    _REPO_ROOT / "tools" / "human_optim" / "friction.py",
 )
 
 InvocationMode = Literal[
@@ -481,6 +484,7 @@ def _contacts_entry(
         "clip": str(paths.clip_path(row)),
         "body": str(body),
         "geometry": str(geom),
+        "geocalib": str(paths.feature_dir("geocalib", sid)),  # optional gravity input
         "output": str(_out_path(paths, out_paths, STAGES["contacts"], sid, tag)),
     }
 
@@ -756,6 +760,9 @@ def _run_contacts_worker(
                 (farm / "human_optim").mkdir()
                 (farm / "human_optim" / f"{bodies}.npz").symlink_to(body.resolve())
                 (farm / "geometry").symlink_to(geom.resolve())
+                geocalib = Path(entry["geocalib"]) if "geocalib" in entry else None
+                if geocalib is not None and geocalib.is_dir():  # optional gravity input
+                    (farm / "geocalib").symlink_to(geocalib.resolve())
                 cmd = [
                     sys.executable,
                     str(_CONTACTS_CLI),

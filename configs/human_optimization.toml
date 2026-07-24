@@ -173,6 +173,22 @@ merge_dist_m = 0.03    # max endpoint displacement across the gap (m)
 merge_max_gap_s = 2.0  # only bridge gaps shorter than this (s)
 merge_sdf_m = 0.08     # re-grip guard: it stayed within this signed distance of the wall the whole gap
 
+# Contact completion: after the detector labels, add the contacts it missed and union them on
+# (add-only). Two looser signals per contact group (hands/feet/ankles): loosened distance+drift
+# gates, and a static support-force solve (allocates body weight among the six groups each frame;
+# a group carrying > force_theta_bw of body weight while still is in contact). Each component is
+# min_span-filtered before the union; additions land on the group's own joint only. Reuses the
+# [contact].groups, [loss_weights.dynamics], [dynamics_optimizer] and [friction] sections for the
+# solve. See tools/human_optim/completion.py and docs/contacts.md.
+[contacts.completion]
+gate_dist_cm = 30.0    # gate: group within this distance of the scene (cm)
+gate_drift_m = 0.08    # gate: group net window drift below this (m)
+force_theta_bw = 0.05  # force: solved |f| above this fraction of body weight
+force_drift_m = 0.15   # force: group drift below this (m); looser than the gate
+min_span = 3           # drop completion runs shorter than this many frames
+work_vstar_mps = 0.2   # work penalty soft velocity: force on a faster limb is expensive
+gap_dstar_m = 0.05     # gap penalty soft distance: force further from the wall is expensive
+
 [depth_fit]
 cell_px = 8          # coarse z-buffer cell at original video resolution
 min_points = 5       # minimum matched cloud points for a finite joint gap
@@ -189,10 +205,17 @@ motion_scale_mps = 0.10 # far-wall speed scale for no-contact motion evidence
 motion_near_scale_mps = 0.15 # scale reached smoothly inside the 5 cm contact band
 motion_near_power = 3.0 # response rises smoothly from linear far away to cubic near the wall
 image_margin_px = 10.0  # visibility ramps continuously from image edge to this margin
-occ_perp_m = 0.02       # body vertices within this camera-ray radius can occlude a joint
-occ_front_m = 0.005     # vertex must be at least this far in front; small enough to catch palm/finger overlap
-occ_subsample = 2500    # deterministic body-vertex sample used by the occlusion count
-occ_full = 5.0          # 3-D visibility reaches exactly zero at this occluding-vertex count
+occ_margin_m = 0.05     # body surface this far in front of a joint (along its camera ray) half-hides it
+occ_soft_m = 0.01       # sigmoid softness of the occlusion-gap visibility ramp
+# Source-conditional caps: how a contact was decided caps how far a witness can trust it.
+gate_only_cap = 0.50     # gate-added contact, no force corroboration (the near-and-still false-positive floor)
+gate_force_cap = 0.85    # gate contact fully corroborated by solved contact force
+force_only_cap = 0.70    # force-added contact (misregistration rescue; positionally uncertain)
+force_share_scale = 0.25 # |f|/body-weight scale of the force ramp (evidence and corroboration)
+# Missing-depth no-contact caps default OFF (1.0): the premise was refuted on the ground
+# truth (docs/contact_confidence.md). Lower a knob to re-enable the cap for study.
+nodata_cap = 1.00        # no-contact label with an absent local depth witness
+nodata_force_cap = 1.00  # no-contact, absent depth, but the static solve allocates ~no force here
 
 # Force application points for the dynamics stage: two hands (wrist + fingers folded
 # onto the wrist), two feet, two ankles — six joints. A joint carries a force only on

@@ -103,7 +103,7 @@ def _load_skeleton(pred: Path) -> dict | None:
 
     The joint tree (``parents`` / ``joint_names``, 52-joint ``SMPLXMid`` order) comes
     from ``human_optim/kinematic_1.npz`` so the skeleton can be drawn even without a
-    contact pass; the per-joint contact flags — and the schema-5 per-joint
+    contact pass; the per-joint contact flags — and the schema-5/6/7 per-joint
     ``label_confidence`` ∈ [0, 1] (both classes) that shades the sphere — come from
     ``human_optim/contacts_1.npz`` when present (same joint order). ``None`` when no
     kinematic body exists.
@@ -162,7 +162,9 @@ def _load_skeleton(pred: Path) -> dict | None:
             with kin.open("rb") as body_file:
                 current_body_hash = hashlib.file_digest(body_file, "sha256").hexdigest()
             valid_confidence = (
-                schema == 5 and method == "depth-trust-motion-v1"
+                (schema, method) in (
+                    (5, "depth-trust-motion-v1"), (6, "ray-occlusion-motion-v1"),
+                    (7, "source-conditional-v1"))
                 and candidate.shape == expected and np.isfinite(candidate).all()
                 and not bool(((candidate < 0.0) | (candidate > 1.0)).any())
                 and saved_body_hash == current_body_hash

@@ -100,94 +100,115 @@ def contact_from_sdf(
     return (sdf < close_thresh_m) & (dmin < max_dist_m) & (conf > conf_thresh)
 
 
+_MT_EPS = 1e-8
+
+
+def _moller_trumbore(
+    origin: torch.Tensor, dirs: torch.Tensor,
+    v0: torch.Tensor, v1: torch.Tensor, v2: torch.Tensor,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Ray-triangle intersection for ``K`` rays vs ``F`` triangles (one shared origin).
+
+    :param origin: ``(3,)`` common ray origin (the camera centre).
+    :param dirs: ``(K, 3)`` unit ray directions.
+    :param v0: ``(F, 3)`` first triangle vertex; ``v1`` / ``v2`` the other two.
+    :returns: ``(t_hit (K, F), hit (K, F) bool)`` — ``t_hit`` is the along-ray distance
+        to the intersection. A triangle with a non-finite (NaN) vertex never registers
+        a hit, so invalid frames and missing other-person meshes drop out for free.
+    """
+    num_rays, num_faces = dirs.shape[0], v0.shape[0]
+    edge1 = v1 - v0                                            # (F,3)
+    edge2 = v2 - v0                                            # (F,3)
+    pvec = torch.linalg.cross(
+        dirs[:, None, :].expand(-1, num_faces, -1),
+        edge2[None, :, :].expand(num_rays, -1, -1))            # (K,F,3)
+    det = (edge1[None] * pvec).sum(-1)                         # (K,F)
+    inv_det = 1.0 / torch.where(det.abs() < _MT_EPS, torch.full_like(det, _MT_EPS), det)
+    tvec = origin - v0                                         # (F,3)
+    bary_u = (tvec[None] * pvec).sum(-1) * inv_det             # (K,F)
+    qvec = torch.linalg.cross(tvec, edge1)                    # (F,3)
+    bary_v = (dirs[:, None, :] * qvec[None]).sum(-1) * inv_det  # (K,F)
+    t_hit = (edge2[None] * qvec[None]).sum(-1) * inv_det       # (K,F)
+    hit = ((det.abs() >= _MT_EPS) & (bary_u >= 0.0) & (bary_v >= 0.0)
+           & (bary_u + bary_v <= 1.0) & (t_hit > _MT_EPS))
+    return t_hit, hit
+
+
 @torch.no_grad()
-def joint_occlusion_counts(
+def joint_occlusion_gap(
     vertices: torch.Tensor,        # (T, V, 3) posed world-frame vertices
     joints: torch.Tensor,          # (T, J, 3) posed world-frame joint centres
     cam_centers: torch.Tensor,     # (T, 3) world camera centres
+    faces: torch.Tensor,           # (F, 3) long SMPL-X triangles (shared topology)
     v2j: torch.Tensor,             # (V,) long vertex→joint
     occlusion_group: torch.Tensor, # (J,) nonnegative local-surface group id per joint
     *,
-    other_vertices: torch.Tensor | None = None,  # (T,Vo,3) or (T,Pother,V,3)
-    perp_m: float = 0.02,
-    front_m: float = 0.005,
-    subsample: int = 2500,
-    chunk: int = 16,
+    other_vertices: torch.Tensor | None = None,  # (T,V,3) or (T,Pother,V,3)
 ) -> torch.Tensor:
-    """Per-(frame, joint) count of body vertices that occlude the joint from the camera ``(T, J)``.
+    """Per-(frame, joint) in-front body-occlusion gap along the camera→joint ray ``(T, J)``.
 
-    A vertex occludes joint ``j`` when it lies within ``perp_m`` of the camera→joint
-    ray and at least ``front_m`` in front of that joint's own local skin surface.
-    The local surface is the frontmost near-ray vertex in ``j``'s local group; the
-    joint centre is only a fallback when no such vertex was sampled. This removes
-    the unavoidable skin in front of an internal joint centre without a large blind
-    zone. A candidate's nearest joint must be outside the target's local group.
+    Casts one ray from the camera centre through each joint centre and intersects it
+    (Möller–Trumbore) with the **full-resolution** triangles of the target person and
+    of every other tracked person. The gap, in metres, is::
 
-    Vertices from ``other_vertices`` always count as outside the target's local
-    group, so another optimized person can occlude the joint too. The target and
-    each other person's mesh are uniformly subsampled to ``subsample`` for speed;
-    a crowded frame therefore does not dilute any one person's sampling density.
-    The count is a monotone occlusion margin: 0 = fully visible, large = deeply
-    hidden behind another body region.
+        gap = joint_depth − nearest_hit_depth   (hits strictly in front of the joint)
+
+    the thickness of body surface standing in front of the joint. Only intersections
+    nearer than the joint centre count, so a positive gap always means a surface sits
+    between the camera and the joint (occluded). A surface at or behind the joint is not
+    an occluder: with nothing in front the gap is ``NaN`` (clear) — the same value the
+    joint gets when no triangle is hit at all.
+
+    A triangle is the joint's **own** skin (never an occluder) when any of its three
+    vertices is owned — via ``v2j`` — by a joint in the target joint's
+    ``occlusion_group``. Other people's triangles are never own, so another tracked
+    person can occlude the joint. ``other_vertices`` shares the target's ``faces``
+    topology (the same ``V`` vertices per person); a triangle with a non-finite vertex
+    (an invalid frame, or a missing other-person mesh) never registers a hit.
     """
     T, V, _ = vertices.shape
     J = joints.shape[1]
-    if perp_m <= 0.0 or front_m <= 0.0 or subsample <= 0 or chunk <= 0:
-        raise ValueError("occlusion distances, subsample, and chunk must be positive")
-    if V > subsample:
-        vidx = torch.linspace(0, V - 1, subsample, device=vertices.device).long()
-        vertices, v2j = vertices[:, vidx], v2j[vidx]
     if occlusion_group.shape != (J,) or bool((occlusion_group < 0).any()):
         raise ValueError("occlusion_group must contain one nonnegative group ID per joint")
-    group_of_v = occlusion_group[v2j]                                      # (Vs,)
+    device = vertices.device
+    faces = faces.long()
+    num_faces = faces.shape[0]
+
+    verts_all, faces_all = vertices, faces
     if other_vertices is not None:
         if (other_vertices.ndim not in (3, 4) or other_vertices.shape[0] != T
-                or other_vertices.shape[-1] != 3):
-            raise ValueError("other_vertices must have shape (T,Vo,3) or (T,Pother,V,3)")
-        people = (other_vertices[:, None]
-                  if other_vertices.ndim == 3 else other_vertices)
-        sampled_people = []
-        for person in people.unbind(dim=1):
-            if person.shape[1] > subsample:
-                oidx = torch.linspace(
-                    0, person.shape[1] - 1, subsample,
-                    device=person.device).long()
-                person = person[:, oidx]
-            sampled_people.append(person)
-        other_vertices = torch.cat(sampled_people, dim=1)
-        vertices = torch.cat((vertices, other_vertices), dim=1)
-        group_of_v = torch.cat((
-            group_of_v,
-            torch.full(
-                (other_vertices.shape[1],), -1, dtype=group_of_v.dtype,
-                device=group_of_v.device),
-        ))
-    valid_occ = (group_of_v[:, None] != occlusion_group[None, :])           # (Vs,J) may this vertex occlude j?
-    own_surface = ~valid_occ
-    n_occ = torch.zeros((T, J), device=vertices.device)
-    for s in range(0, T, chunk):
-        e = min(s + chunk, T)
-        C = cam_centers[s:e]                                                 # (F,3)
-        u = joints[s:e] - C[:, None, :]                                      # (F,J,3)
-        L = u.norm(dim=-1)                                                   # (F,J) joint depth along ray
-        uhat = u / L[..., None].clamp_min(1e-9)
-        w = vertices[s:e] - C[:, None, :]                                    # (F,Vs,3)
-        depth = torch.einsum("fvc,fjc->fvj", w, uhat)                        # (F,Vs,J)
-        perp = (w[:, :, None, :] - depth[..., None] * uhat[:, None, :, :]).norm(dim=-1)
-        on_ray = (perp < perp_m) & (depth > 0.0)
-        own_depth = torch.where(
-            on_ray & own_surface[None], depth, torch.full_like(depth, float("inf"))
-        ).amin(dim=1)                                                         # (F,J)
-        # A sampled local vertex can lie behind its internal joint centre (for
-        # example on the back side of a limb). It must never move the visibility
-        # reference behind the joint and let another behind-joint vertex count as
-        # an occluder.
-        reference_depth = torch.minimum(
-            torch.where(torch.isfinite(own_depth), own_depth, L), L)
-        occ = (on_ray & valid_occ[None]
-               & (depth < (reference_depth[:, None, :] - front_m)))
-        n_occ[s:e] = occ.sum(dim=1).float()
-    return n_occ
+                or other_vertices.shape[-1] != 3 or other_vertices.shape[-2] != V):
+            raise ValueError(
+                "other_vertices must have shape (T,V,3) or (T,Pother,V,3) with the target's V")
+        people = other_vertices[:, None] if other_vertices.ndim == 3 else other_vertices
+        verts_all = torch.cat((vertices, *people.unbind(dim=1)), dim=1)   # (T,(1+Po)*V,3)
+        faces_all = torch.cat(
+            [faces + k * V for k in range(1 + people.shape[1])], dim=0)   # ((1+Po)*F,3)
+
+    # Per-face own-group test: a target triangle is own for joint j when ANY of its 3
+    # vertices belongs to j's occlusion group (conservative — avoids seam holes). Other
+    # people's faces carry a sentinel group that matches no joint, so are never own.
+    face_group = torch.full((faces_all.shape[0], 3), -1, dtype=torch.long, device=device)
+    face_group[:num_faces] = occlusion_group[v2j][faces]                  # (F,3)
+    own_mask = (occlusion_group[:, None, None] == face_group[None]).any(dim=-1)  # (J,Ftot)
+
+    inf = torch.tensor(float("inf"), device=device, dtype=vertices.dtype)
+    gap = torch.empty((T, J), device=device, dtype=vertices.dtype)
+    for t in range(T):                                                    # one frame bounds memory
+        origin = cam_centers[t]
+        direction = joints[t] - origin                                   # (J,3)
+        length = direction.norm(dim=-1)                                  # (J,)
+        dirs = direction / length.clamp_min(1e-9)[:, None]
+        v0, v1, v2 = (verts_all[t][faces_all[:, k]] for k in range(3))   # (Ftot,3) each
+        t_hit, hit = _moller_trumbore(origin, dirs, v0, v1, v2)          # (J,Ftot)
+        # An occluder must sit strictly in FRONT of the joint: eps < t_hit < ray length − eps.
+        # The lower bound is already in `hit`; a hit at or behind the joint centre is not an
+        # occluder, so when none survives the joint is clear (NaN gap), like no hit at all.
+        in_front = hit & ~own_mask & (t_hit < length[:, None] - _MT_EPS)
+        nearest = torch.where(in_front, t_hit, inf).amin(dim=1)          # (J,)
+        gap[t] = torch.where(torch.isfinite(nearest), length - nearest,
+                             torch.full_like(length, float("nan")))
+    return gap
 
 
 def vertex_to_joint(vertices: torch.Tensor, joints: torch.Tensor) -> torch.Tensor:

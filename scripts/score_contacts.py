@@ -42,7 +42,7 @@ from tools.geometry.normals import load_scene_cloud  # noqa: E402
 from tools.human_optim import (  # noqa: E402
     DEPTH_FIT_DEFAULTS, NO_DATA_TRUST,
     drift_gated_contact, joint_depth_fit, joint_drift, joint_guarded_min_sdf,
-    joint_occlusion_counts, merge_contact_spans, project,
+    joint_occlusion_gap, merge_contact_spans, project,
     scene_sdf, transform_points, vertex_to_joint, world_from_cam,
 )
 from tools.human_optim import paths  # noqa: E402
@@ -673,6 +673,7 @@ def _reliability_one(pred_dir: str, config_path: Path, device: str, source=None,
     mid = load_smplx_mid(_DEFAULT_SMPLX_MODEL, device)
     mid_names = list(mid.joint_names)
     occ_group_t = torch.as_tensor(occlusion_group_ids(mid_names), device=device)
+    faces_t = mid.faces.to(device).long()
     exit_below = max(float(cc["exit_thresh_m"]), close); min_frames = int(cc["min_frames"])
 
     ann_path = resolve_annotation_path(source or pred, None)
@@ -734,23 +735,26 @@ def _reliability_one(pred_dir: str, config_path: Path, device: str, source=None,
                 others.append(torch.where(
                     other_valid, pose[1], torch.full_like(pose[1], float("nan"))))
             other_vw = torch.stack(others, dim=1)
-        n_occ = joint_occlusion_counts(
-            vw, jw, cam_centers, v2j, occ_group_t,
-            other_vertices=other_vw,
-            perp_m=float(cf["occ_perp_m"]), front_m=float(cf["occ_front_m"]),
-            subsample=int(cf["occ_subsample"]))
+        occ_gap = joint_occlusion_gap(
+            vw, jw, cam_centers, faces_t, v2j, occ_group_t, other_vertices=other_vw)
         depth_trust = torch.full_like(gsdf, NO_DATA_TRUST)
+        depth_points = torch.zeros_like(gsdf)
         if human_cloud is not None:
-            _, _, depth_trust = joint_depth_fit(
+            _, depth_points, depth_trust = joint_depth_fit(
                 vw, *human_cloud, oid, extr, K, v2j, mid.num_joints,
                 cell_px=int(df["cell_px"]), min_points=int(df["min_points"]),
                 trust_scale_log=float(df["trust_scale_log"]))
             valid_t = torch.as_tensor(vmask, dtype=torch.bool, device=device)[:, None]
             depth_trust = torch.where(valid_t, depth_trust, torch.ones_like(depth_trust))
+        # This diagnostic scores the detector-only readout (no completion solve), so every
+        # contact is detector source (bit 1) and there is no force witness.
+        jc_t_bool = torch.as_tensor(jc, dtype=torch.bool, device=device)
+        source_t = jc_t_bool.to(torch.int64)                    # detector bit where in contact
+        share_t = torch.full_like(gsdf, float("nan"))
         terms = joint_label_confidence(
-            torch.as_tensor(jc, dtype=torch.bool, device=device), gsdf, gate_drift, depth_trust,
-            px, jw_cam[..., 2], n_occ, height=H, width=W, cfg=cf,
-            window_s=float(cg["window_s"]))
+            jc_t_bool, gsdf, gate_drift, depth_trust, depth_points, source_t, share_t,
+            px, jw_cam[..., 2], occ_gap, height=H, width=W, cfg=cf,
+            window_s=float(cg["window_s"]), min_depth_points=int(df["min_points"]))
         lconf = terms["label_confidence"]
         surface = terms["surface"]
         speed = (gate_drift / max(float(cg["window_s"]), 1e-6)).cpu().numpy()
@@ -829,6 +833,8 @@ def _print_reliability(all_rec: list[dict], exclude: set[str], close: float, sti
     print(f"\n=== CONFIDENCE RELIABILITY  (close={close*100:.0f}cm still={still:.3f}, "
           f"merge={merge_dist:.3f}m gate={gate_source})"
           f"{'  excl ' + ', '.join(dropped) if dropped else ''} ===")
+    print("  NOTE: evaluates DETECTOR-ONLY labels (no completion solve); does not exercise "
+          "the schema-7 completion source caps (gate/force confidence tiers).")
     print(f"  scored coarse-joint-frames: {conf.size}  (pred-contact {int(pred.sum())}, "
           f"pred-no-contact {int((~pred).sum())})")
     for name, cls in (("PRED CONTACT (label_confidence should track precision)", pred),

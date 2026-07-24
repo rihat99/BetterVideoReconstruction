@@ -1,179 +1,201 @@
-# Per-joint contact-label confidence (schema 5)
+# Per-joint contact-label confidence (schema 7)
 
-`label_confidence` is a continuous weight in `[0, 1]`. It says how much a
-learner should trust one final contact or no-contact label. It is not a
-calibrated probability. Zero means “ignore this label.” Confidence never
-changes the binary label.
+Every contact label the stage writes — contact *and* no-contact — gets a
+weight `label_confidence` between 0 and 1. It answers one question: **how much
+should a learner trust this label on this frame?** Zero means "ignore this
+label." It is a training weight, not a calibrated probability, and it never
+changes the binary label itself.
 
-Schema 5 uses four terms:
+## The idea in one paragraph
 
-- `joint_visibility` says whether the joint can be seen in the image and in 3-D.
-- `surface_evidence` supports a contact label near a plausible scene surface.
-- `motion_evidence` supports a no-contact label when motion is clear and the
-  local human depth fit is trustworthy.
-- `joint_depth_trust` measures agreement between the posed body and the human
-  depth cloud along the same camera rays.
-
-There is no wall-clearance evidence term. Wall distance only changes the speed
-scale inside `motion_evidence`. Distance alone can never raise confidence. This
-matters for a floating reconstruction. Its local depth fit can look good while
-its apparent distance from the wall is wrong.
-
-Let
+Three things decide the weight. First, **can we even see the joint?** A joint
+that is out of frame or hidden behind a body cannot be trusted either way, so
+visibility multiplies everything. Second, **how strong is the evidence for
+this label's class?** For a contact label, evidence means the body surface
+really sits on the wall. For a no-contact label, evidence means the joint
+clearly moved — a still joint proves nothing. Third — and this is what
+schema 7 added — **where did the label come from?** The completion pass
+creates some labels from "near and still" (gates) and some from the support
+solve (force). A label must not be certified by the same signal that created
+it, so each source gets a **ceiling** on its evidence, and only a different,
+semi-independent signal can raise that ceiling.
 
 ```text
-smoothstep(x) = u²(3 - 2u), where u = clamp(x, 0, 1)
-sigmoid(x)    = 1 / (1 + exp(-x))
+label_confidence = visibility × evidence-capped-by-source
 ```
 
-The formulas below use defaults from `configs/human_optimization.toml`.
+## How to read the numbers
+
+All examples assume the joint is fully visible.
+
+| situation | confidence | why |
+|---|---:|---|
+| detector contact, on the wall | 0.92 | top tier: the detector is precise (0.983), it earns full surface evidence |
+| gate-added contact, on the wall | 0.50 | capped: "near and still" both made the label and would confirm it — this is where the hovering false positives live |
+| gate-added contact carrying half body weight | 0.80 | the force witness is semi-independent, so real load lifts the gate cap |
+| force-added contact 20 cm off the wall | 0.61 | a misregistration rescue: probably a real grip on a misplaced body, but positionally uncertain — capped at 0.70 |
+| no-contact, joint moving 0.2 m/s | 0.91 | clear motion is the one honest no-contact witness |
+| no-contact, joint still | ~0.00 | a still joint proves nothing, at any distance from the wall |
+| anything, joint hidden behind a body | 0.00 | visibility multiplies everything |
+
+The pattern to remember: **red spheres in the viewer come in tiers.** Bright
+red = the detector saw it on the wall. Medium red = the support solve loads
+it. Dim red = it was merely near and still. Green fades to grey wherever the
+"proof" would just be stillness.
 
 ## Visibility
 
-```text
-edge  = min(x, y, W - 1 - x, H - 1 - y)
-image = smoothstep(edge / 10 px) × [camera_depth > 0]
+Two factors, multiplied.
 
-body_visibility = smoothstep(1 - n_occluding_vertices / 5)
-joint_visibility = image × body_visibility
-```
+**In the image.** The joint's projection must be inside the frame (a soft
+10-pixel border) and in front of the camera.
 
-Occlusion uses a deterministic sample of 2,500 vertices per tracked body. A
-candidate must be within 2 cm of the camera-to-joint ray. It must also be at
-least 5 mm in front of that joint's local visible skin. Complete hands and
-ankle/foot pairs are local groups. Their own members do not occlude one another.
-Other tracked people use separate samples and can occlude the target person.
-
-Five or more occluding vertices give zero confidence for both label classes.
-Counts from one to four reduce visibility smoothly. An out-of-frame,
-behind-camera, or non-finite projection also gives zero visibility.
-
-## Contact evidence
-
-Let `d` be the guarded signed body-surface distance in meters. Positive is
-outside the scene. Negative is inside it.
+**Not behind a body.** One exact ray is cast from the camera through the
+joint center and intersected with the full-resolution triangles of every
+tracked person. If the nearest surface *in front of* the joint stands more
+than a few centimeters before it, the joint is hidden:
 
 ```text
-near                    = sigmoid((0.05 - d) / 0.01)
-not_deep                = sigmoid((d - (-0.02)) / 0.01)
-penetration_reliability = 0.40 + 0.60 × not_deep
-
-surface_evidence = near × penetration_reliability
+occlusion_gap   = joint_depth − nearest_in-front_surface_depth   (NaN if none)
+body_visibility = sigmoid((0.05 m − gap) / 0.01 m)               (1 when NaN)
 ```
 
-Evidence fades beyond 5 cm outside the wall. Deep penetration is suspicious
-geometry, not proof of contact. A missing guarded distance gives zero contact
-evidence.
+So visibility is ~1 for gaps well under 5 cm, one half at exactly 5 cm, and
+~0 beyond. A joint's *own* skin never hides it: triangles whose corners
+belong to the joint's own group are skipped. The groups are each whole hand,
+each ankle+foot pair, and the whole axial torso (pelvis, spines, hips,
+collars, neck, shoulders) — a joint center buried inside its own body block
+would otherwise always look "occluded". Other people's triangles are never
+own, so another climber in front does hide the joint.
 
-## No-contact evidence
+One ray is enough because the measured gaps are strongly bimodal: a surface
+is almost always either clearly in front (a real occluder, tens of cm) or at
+the joint itself (its own skin) — grazing cases in between are ~0.04 % of
+frames.
 
-Let `m` be net joint displacement over the centered contact window. Let `T` be
-the window duration, normally `0.35 s`. Speed is `v = max(m, 0) / T`.
+## Evidence for a contact label
 
-Let `q` be scene proximity. It changes the speed scale smoothly. It is zero
-when guarded scene distance is missing.
+The raw ingredient is **surface evidence**: how plausibly the body surface
+sits on the wall. With `d` the guarded signed distance to the scene (meters,
+positive outside the wall):
 
 ```text
-q = sigmoid((0.05 m - d) / 0.01 m)
-s = 0.10 m/s + q × (0.15 m/s - 0.10 m/s)
-p = 1 + q × (3 - 1)
-
-raw_motion      = 1 - exp(-(v / s)^p)
-motion_evidence = joint_depth_trust × raw_motion
+near     = sigmoid((0.05 − d) / 0.01)        fades out past 5 cm outside
+not_deep = sigmoid((d + 0.02) / 0.01)        deep burial is suspect geometry
+surface  = near × (0.40 + 0.60 × not_deep)   ≈ 0.92 right on the wall
 ```
 
-The response is the original exponential far from the surface. It becomes
-cubic near the surface. The larger near-wall scale also asks for more motion
-near a possible contact. Together these changes keep slow near-wall drift close
-to zero while a clear pass still rises quickly. At zero speed the result is
-zero for every distance.
+Then the source cap. The label's `contact_source` bitmask says who created
+it (1 = detector, 2 = gate, 4 = force), and `share` is the solved contact
+force at the joint as a fraction of body weight, with
+`force_ramp = 1 − exp(−share / 0.25)`:
 
-Depth trust is
-`exp(-(median(log(z_cloud / z_mesh)) / 0.05)²)`. A value of one means the local
-human depth agrees with the body. A value near zero means the local body fit is
-stretched in depth. When fewer than five cloud points match a joint, depth
-trust is one. Missing data leaves existing motion evidence unchanged.
+| source | evidence | ceiling |
+|---|---|---|
+| detector | `surface` | none — top tier |
+| gate (no detector) | `min(surface, 0.50 + 0.35·force_ramp)` | 0.50, lifted to 0.85 by force |
+| force only | `min(0.70, max(surface, 0.70·force_ramp))` | 0.70 |
 
-The motion source is the persisted pre-enforcement drift when available. Final
-body drift is the per-element fallback. This stops attraction or damping from
-manufacturing apparent stillness after the measurement.
+Why the caps: a gate label was *created* because the joint was near the wall
+and still, so nearness and stillness would endorse it in a circle — and the
+known false positives (a hand hovering 3 cm beside a hold) are exactly
+near-and-still. The solved force is the one signal that is semi-independent
+of that geometry, so it, and only it, lifts the gate ceiling. A force-only
+label is the opposite case: an honest rescue on a misregistered body, real
+but positionally uncertain, so it tops out at 0.70. Only the six group
+joints (wrists, ankles, feet) ever carry gate or force bits; every other
+joint is detector-only and unaffected.
 
-The first table holds depth trust at one. “Near” uses `d = 0.02 m`. “Far” uses
-the limiting `q = 0` scale.
+## Evidence for a no-contact label
 
-| speed | raw motion, near | raw motion, far |
-|---:|---:|---:|
-| 0.000 m/s | 0.000 | 0.000 |
-| 0.005 m/s | 0.000 | 0.049 |
-| 0.010 m/s | 0.000 | 0.095 |
-| 0.020 m/s | 0.003 | 0.181 |
-| 0.040 m/s | 0.022 | 0.330 |
-| 0.050 m/s | 0.042 | 0.393 |
-| 0.100 m/s | 0.276 | 0.632 |
-| 0.200 m/s | 0.911 | 0.865 |
-
-Missing or non-finite drift gives zero motion evidence. Motion is also missing
-when the current frame or a centered-window endpoint is an invalid tracking
-frame.
-
-## Final weight
+The only honest witness for "not touching" is **motion**: the joint clearly
+moved through the window. With `v` the net displacement speed over the
+~0.35 s window (from the pre-enforcement drift, so the optimizer's own
+damping cannot fake stillness):
 
 ```text
-label_evidence = surface_evidence  if joint_contact is true
-                 motion_evidence   otherwise
-
-label_confidence = joint_visibility × label_evidence
+scale rises from 0.10 to 0.15 m/s near the wall, response steepens to cubic
+motion   = 1 − exp(−(v / scale)^power)
+evidence = depth_trust × motion
 ```
 
-Depth trust affects only no-contact labels. Contact labels keep their existing
-surface evidence.
+Distance is deliberately **not** no-contact evidence: a whole-body floater
+sits far from the reconstructed wall while its limbs truly touch, so "far
+away" must never make a no-contact label look trustworthy. `depth_trust`
+discounts motion measured on a body whose local depth fit is stretched
+(the spaghettization detector), because both position and drift are then
+unreliable.
 
-These worked examples use full visibility unless stated otherwise.
+A cap for "the depth witness is missing" exists (`nodata_cap`,
+`nodata_force_cap`) but **ships disabled** (both 1.0): on the annotated data
+its premise is false — no-contact labels without a depth witness are just as
+reliable (test set: 25.8 % vs 25.6 % miss rate) or *more* reliable (tuning
+set: 36.3 % vs 48.8 %) than those with one. The mechanism stays for study;
+lowering the knobs below 1.0 re-enables it.
 
-| label and inputs | label confidence |
-|---|---:|
-| no-contact, `d=2 cm`, `v=0.04 m/s`, depth trust `1` | 0.022 |
-| no-contact, `d=2 cm`, `v=0.20 m/s`, depth trust `1` | 0.911 |
-| no-contact, `d=2 cm`, `v=0.20 m/s`, depth trust `0.25` | 0.228 |
-| no-contact, any finite speed, depth trust `0` | 0.000 |
-| contact, `d=2 cm`, depth trust `0` or `1` | 0.942 |
-| contact, `d=2 cm`, visibility `0.5` | 0.471 |
+## Knobs (`[contact_confidence]`)
+
+| knob | default | meaning |
+|---|---:|---|
+| `gate_only_cap` | 0.50 | ceiling for a gate-only contact |
+| `gate_force_cap` | 0.85 | gate ceiling under full force corroboration |
+| `force_only_cap` | 0.70 | ceiling for a force-only contact |
+| `force_share_scale` | 0.25 | body-weight fraction where the force ramp saturates |
+| `occ_margin_m` / `occ_soft_m` | 0.05 / 0.01 | occlusion-gap threshold and softness |
+| `image_margin_px` | 10 | soft image border |
+| `nodata_cap` / `nodata_force_cap` | 1.0 / 1.0 | missing-depth no-contact cap — off (premise refuted) |
+| surface / motion knobs | — | the band and speed scales shown in the formulas above |
 
 ## Saved fields
 
-`estimate_contacts` writes these fields to `human_optim/contacts_1.npz`. It uses
-`contacts_2.npz` for `kinematic_2`.
+`estimate_contacts` writes these to `human_optim/contacts_1.npz`
+(`contacts_2.npz` from a kinematics_2 body is detector-only — no completion,
+no force witness).
 
 | Field | Shape | Meaning |
 |---|---|---|
 | `joint_contact` | `(P, N, J)` bool | Final binary contact label |
+| `contact_source` | `(P, N, J)` int8 | Provenance bitmask 1=detector, 2=gate, 4=force |
+| `force_share` | `(P, N, J)` float | Solved force / body weight at the six limb joints; NaN elsewhere |
+| `body_weight_n` | `(P,)` float | Total baked mass × g per person |
 | `label_confidence` | `(P, N, J)` float | Final per-joint training weight |
-| `joint_visibility` | `(P, N, J)` float | Image × 3-D body visibility |
+| `joint_visibility` | `(P, N, J)` float | Image × body visibility |
 | `joint_image_visibility` | `(P, N, J)` float | Image-border and camera-depth term |
 | `joint_occlusion_visibility` | `(P, N, J)` float | Smooth body-occlusion term |
-| `joint_occluding_vertices` | `(P, N, J)` float | Sampled-body occluder count |
-| `surface_evidence` | `(P, N, J)` float | Contact-label evidence |
-| `motion_evidence` | `(P, N, J)` float | Proximity-adaptive, depth-trusted no-contact evidence actually used |
+| `joint_occlusion_gap_cm` | `(P, N, J)` float | In-front occlusion gap (cm); NaN when nothing is in front |
+| `surface_evidence` | `(P, N, J)` float | Raw contact evidence (uncapped) |
+| `motion_evidence` | `(P, N, J)` float | Raw depth-trusted no-contact evidence (uncapped) |
 | `joint_depth_gap_cm` | `(P, N, J)` float | Signed median camera-ray depth gap; NaN with too few matches |
 | `joint_depth_points` | `(P, N, J)` float | Matched human-cloud point count |
-| `joint_depth_trust` | `(P, N, J)` float | Smooth local human-depth fit trust |
+| `joint_depth_trust` | `(P, N, J)` float | Local human-depth fit trust |
 | `joint_sdf_cm` | `(P, N, J)` float | Unguarded signed-distance diagnostic |
 | `joint_distance_cm` | `(P, N, J)` float | Euclidean scene-distance diagnostic; not a confidence input |
 | `merged` | `(P, N, J)` bool | Label was filled by span merging |
-| `confidence_schema` | scalar | `5` |
-| `confidence_method` | scalar string | `depth-trust-motion-v1` |
+| `confidence_schema` | scalar | `7` |
+| `confidence_method` | scalar string | `source-conditional-v1` |
 | `confidence_motion_source` | scalar string | `drift_pre_with_final_fallback` |
 
-The artifact also stores source hashes and every effective confidence knob.
-Invalid tracked frames have every confidence term set to zero. Manual
-annotations are used only for evaluation.
+The artifact also stores source hashes and every effective knob. Invalid
+tracked frames have every term set to zero. Manual annotations are used only
+for evaluation.
 
-## Limitations
+## What confidence can and cannot do
 
-- The weight is not learned or calibrated.
-- Net displacement can miss out-and-back motion inside the centered window.
-- Motion magnitude does not distinguish approaching, leaving, or sliding.
-- Body occlusion is a sampled-vertex proxy. Thin occluders can be missed.
-- Wall and hold occlusion are not modeled.
-- The depth-fit metric does not detect a whole-body floater.
-- Confidence does not repair an incorrect binary contact label.
+Measured on the annotated corpora (selective-risk curves,
+`scripts/diagnostics/confidence_risk.py`): keeping the top half of contact
+labels by confidence raises their precision from 0.961 to **0.983** on the
+frozen test set (the v5 algebra managed 0.972), at essentially unchanged
+mean confidence. But no confidence reaches precision 1.0: the curves
+saturate at the labels' own agreement with the annotations (~0.98 test,
+~0.93 tuning), because the residual errors — near-and-still hovers at the
+annotation's own ambiguity floor — look identical to true contacts in every
+available signal. Confidence finds the uncertain places; it cannot outrun
+the labels.
+
+Limitations, for the record: the weight is not learned or calibrated; net
+displacement can miss out-and-back motion inside the window; motion does not
+distinguish approaching, leaving, or sliding; wall and hold occlusion are
+not modeled; the depth-fit metric does not flag a whole-body floater; force
+is only semi-independent of geometry (the solve's gap penalty uses
+distance), so it lifts a cap but never by itself proves a label; and
+confidence does not repair a wrong binary label.

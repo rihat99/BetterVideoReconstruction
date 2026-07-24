@@ -59,8 +59,8 @@ N_JOINTS_22 = 22
 N_JOINTS_52 = 52
 # Pinned copy of tools/human_optim/confidence.py's schema/method (kept literal
 # so the exporter stays torch-free); update together with that module.
-CONTACT_CONFIDENCE_SCHEMA = 5
-CONTACT_CONFIDENCE_METHOD = "depth-trust-motion-v1"
+CONTACT_CONFIDENCE_SCHEMA = 7
+CONTACT_CONFIDENCE_METHOD = "source-conditional-v1"
 
 
 def merge_contacts_52_to_22(

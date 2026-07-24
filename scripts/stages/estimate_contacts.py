@@ -62,10 +62,10 @@ import torch  # noqa: E402
 from tools.config import load_toml  # noqa: E402
 from tools.geometry.normals import load_scene_cloud  # noqa: E402
 from tools.human_optim import (  # noqa: E402
-    DEPTH_FIT_DEFAULTS, NO_DATA_TRUST,
-    contact_from_sdf, drift_gated_contact, joint_depth_fit, joint_drift,
+    COMPLETION_DEFAULTS, DEPTH_FIT_DEFAULTS, NO_DATA_TRUST,
+    complete_person, contact_from_sdf, drift_gated_contact, joint_depth_fit, joint_drift,
     joint_guarded_min_sdf,
-    joint_occlusion_counts, lift_joint_contact, lift_joint_min_distance,
+    joint_occlusion_gap, lift_joint_contact, lift_joint_min_distance, load_dynamics_context,
     merge_contact_spans, project, scene_sdf,
     transform_points, vertex_to_joint, world_from_cam,
 )
@@ -99,6 +99,9 @@ def _load_config(path: Path) -> dict:
     c.setdefault("merge_max_gap_s", 2.0)   # …only gaps shorter than this
     c.setdefault("merge_sdf_m", 0.08)      # …re-grip guard: it stayed within this of the wall the whole gap
     c.setdefault("overlay", True)           # render the contact skeleton overlay
+    comp = c.setdefault("completion", {})   # detector-completion knobs (defaults in completion.py)
+    for key, val in COMPLETION_DEFAULTS.items():
+        comp.setdefault(key, val)
     d = cfg.setdefault("depth_fit", {})
     for key, val in DEPTH_FIT_DEFAULTS.items():
         d.setdefault(key, val)
@@ -202,17 +205,60 @@ def run(source: str | Path, predictions_dir: str | Path, config_path: str | Path
     J = mid.num_joints
     mid_names = list(mid.joint_names)
     occ_group_t = torch.as_tensor(occlusion_group_ids(mid_names), device=device)
+    faces_t = mid.faces.to(device).long()
+
+    # Contact completion setup (static support solve + union readout). It borrows the
+    # dynamics-stage knobs; its friction cones read the ungated scene cloud (conf_drop_q=0,
+    # matching the dynamics stage). Gravity follows the dynamics convention: geocalib
+    # world-down when present, else world-down [0, 1, 0].
+    # Completion runs ONLY on the kinematics_1 body: its gates read the persisted
+    # pre-enforcement drift. A kinematics_2 body carries no drift_pre — attraction and
+    # damping have already acted on it, so stillness re-measured there is manufactured
+    # evidence, not a witness. contacts_2 therefore stays detector-only.
+    do_completion = bodies == "kinematic_1"
+    comp_ctx = load_dynamics_context(config_path)
+    comp_knobs = cc["completion"]
+    grav_path = pred / "geocalib" / "gravity.npz"
+    source_gravity = ""
+    source_gravity_sha256 = ""
+    if grav_path.exists():
+        gd = np.load(grav_path)
+        gravity_world = np.asarray(gd["gravity_world"], np.float32)
+        gsrc = str(gd["source"]) if "source" in gd.files else "geocalib"
+        source_gravity = grav_path.name
+        source_gravity_sha256 = _sha256(grav_path)
+        gravity_source = "geocalib"
+    else:
+        gravity_world = np.array([0.0, 1.0, 0.0], np.float32)
+        gsrc = "fallback_down(no geocalib)"
+        gravity_source = "fallback_world_down"
+    cone_pts = cone_normals = None
+    if do_completion and comp_ctx.friction is not None:
+        cone_pts, cone_normals, _ = load_scene_cloud(
+            sc, cam_centers, conf_drop_q=0.0,
+            k=int(comp_ctx.friction["normal_k"]), device=device)
+    if do_completion:
+        print(f"[estimate_contacts] completion: {len(comp_ctx.groups)} groups, "
+              f"gravity={gravity_world.round(2)} ({gsrc}), "
+              f"friction cones {'ON' if cone_pts is not None else 'OFF'}")
+    else:
+        print(f"[estimate_contacts] completion: OFF for {bodies} (post-enforcement body)")
 
     joint_contact = np.zeros((P, N, J), dtype=bool)
+    contact_source = np.zeros((P, N, J), dtype=np.int8)   # per joint-frame: 1=detector, 2=gate, 4=force
+    limb_force_n = np.zeros((P, N, len(comp_ctx.groups)), dtype=np.float32)
+    force_share = np.full((P, N, J), np.nan, dtype=np.float32)  # |f|/body-weight at the six limb joints; NaN = no force witness
+    body_weight_n = np.full(P, np.nan, dtype=np.float32)   # total baked mass × g per person
     joint_sdf_cm = np.full((P, N, J), np.nan, dtype=np.float32)
     joint_distance_cm = np.full((P, N, J), np.nan, dtype=np.float32)
     joint_depth_gap_cm = np.full((P, N, J), np.nan, dtype=np.float32)
+    joint_occlusion_gap_cm = np.full((P, N, J), np.nan, dtype=np.float32)
     joint_depth_points = np.zeros((P, N, J), dtype=np.float32)
     joint_depth_trust = np.full((P, N, J), NO_DATA_TRUST, dtype=np.float32)
     joints_2d = np.full((P, N, J, 2), np.nan, dtype=np.float32)
     merged_all = np.zeros((P, N, J), dtype=bool)            #frames the span-merge bridged
     confidence_all = {name: np.zeros((P, N, J), np.float32) for name in
-                      ("image_visibility", "occlusion_visibility", "occluding_vertices",
+                      ("image_visibility", "occlusion_visibility",
                        "visibility", "surface", "motion", "label_confidence")}
 
     # Pose everyone once. Besides avoiding repeated model inference, retaining the
@@ -291,12 +337,42 @@ def run(source: str | Path, predictions_dir: str | Path, config_path: str | Path
 
         jc_np = jc.cpu().numpy()
         jc_np[~valid_mask[p]] = False
-        joint_contact[p] = jc_np
         joint_sdf_cm[p] = jsdf.cpu().numpy()
         joint_distance_cm[p] = (jdmin * 100.0).cpu().numpy()
         joints_2d[p] = px.cpu().numpy()
         merged_np = merged_bool.cpu().numpy(); merged_np[~valid_mask[p]] = False
         merged_all[p] = merged_np
+
+        # Contact completion: the static support solve + loosened gates, unioned onto the
+        # detector labels (add-only). Additions land on each group's own joint; the source
+        # bitmask records where each label came from. Confidence below then runs on the
+        # COMPLETED labels.
+        detector_np = jc_np.copy()
+        src = np.where(detector_np, np.int8(1), np.int8(0))
+        if do_completion:
+            comp = complete_person(
+                mid, torch.as_tensor(kin["betas"][p], dtype=torch.float32, device=device),
+                torch.as_tensor(kin["q"][p], dtype=torch.float32, device=device),
+                valid_mask[p], mid_names,
+                detector_contact=detector_np, joint_distance_cm=joint_distance_cm[p],
+                gate_drift=gate_drift, gravity_world=gravity_world, fps=fps,
+                cone_pts=cone_pts, cone_normals_t=cone_normals, ctx=comp_ctx,
+                knobs=comp_knobs, device=device)
+            for c, j in enumerate(comp["rep_idx"]):
+                jc_np[:, j] |= comp["gate_span"][:, c] | comp["force_span"][:, c]
+                src[comp["gate_span"][:, c], j] |= 2
+                src[comp["force_span"][:, c], j] |= 4
+            limb_force_n[p] = comp["limb_force_n"]
+            bw = comp["body_weight_n"]
+            body_weight_n[p] = bw
+            # Force share |f|/body-weight at each group's own joint feeds the
+            # source-conditional confidence. A failed solve (bw = inf) leaves the
+            # share NaN, so those frames carry no force witness.
+            if np.isfinite(bw) and bw > 0.0:
+                for c, j in enumerate(comp["rep_idx"]):
+                    force_share[p, :, j] = comp["limb_force_n"][:, c] / bw
+        joint_contact[p] = jc_np
+        contact_source[p] = src
         # Per-joint confidence in the FINAL label.  The binary label is unchanged;
         # the readout only assigns its continuous training weight.
         jc_final = torch.as_tensor(jc_np, dtype=torch.bool, device=device)
@@ -312,17 +388,24 @@ def run(source: str | Path, predictions_dir: str | Path, config_path: str | Path
                 others.append(torch.where(
                     other_valid, person[2], torch.full_like(person[2], float("nan"))))
             other_vw = torch.stack(others, dim=1)
-        n_occ = joint_occlusion_counts(
-            vw, jw, cam_centers, v2j, occ_group_t,
-            other_vertices=other_vw,
-            perp_m=float(cf["occ_perp_m"]), front_m=float(cf["occ_front_m"]),
-            subsample=int(cf["occ_subsample"]))
+        occ_gap = joint_occlusion_gap(
+            vw, jw, cam_centers, faces_t, v2j, occ_group_t, other_vertices=other_vw)
         depth_trust_t = torch.as_tensor(
             joint_depth_trust[p], dtype=jw.dtype, device=device)
+        depth_points_t = torch.as_tensor(
+            joint_depth_points[p], dtype=jw.dtype, device=device)
+        source_t = torch.as_tensor(contact_source[p], dtype=torch.int64, device=device)
+        share_t = torch.as_tensor(force_share[p], dtype=jw.dtype, device=device)
         terms = joint_label_confidence(
-            jc_final, gsdf, gate_drift, depth_trust_t, px, jw_cam[..., 2], n_occ,
-            height=H, width=W, cfg=cf,
-            window_s=float(cg["window_s"]))
+            jc_final, gsdf, gate_drift, depth_trust_t, depth_points_t, source_t, share_t,
+            px, jw_cam[..., 2], occ_gap, height=H, width=W, cfg=cf,
+            window_s=float(cg["window_s"]), min_depth_points=int(df["min_points"]))
+        # Occlusion gap (cm) is a NaN-or-finite diagnostic, not a bounded [0,1] term:
+        # keep its NaN (no surface in front) and NaN the invalid frames, exactly like
+        # joint_depth_gap_cm — never route it through the [0,1] zeroing below.
+        gap_cm = terms.pop("occlusion_gap") * 100.0
+        gap_cm[~valid_mask[p]] = np.nan
+        joint_occlusion_gap_cm[p] = gap_cm
         for name, val in terms.items():
             val[~valid_mask[p]] = 0.0
             confidence_all[name][p] = val
@@ -347,9 +430,8 @@ def run(source: str | Path, predictions_dir: str | Path, config_path: str | Path
         value = confidence_all[name]
         if not np.isfinite(value).all() or bool(((value < 0.0) | (value > 1.0)).any()):
             raise RuntimeError(f"invalid confidence term {name}: expected finite values in [0,1]")
-    if (not np.isfinite(confidence_all["occluding_vertices"]).all()
-            or bool((confidence_all["occluding_vertices"] < 0.0).any())):
-        raise RuntimeError("invalid occluding-vertex count")
+    if np.isinf(joint_occlusion_gap_cm).any():
+        raise RuntimeError("joint occlusion gap may be NaN when missing, but never infinite")
     if np.isinf(joint_sdf_cm).any() or np.isinf(joint_distance_cm).any():
         raise RuntimeError("joint scene diagnostics may be NaN when missing, but never infinite")
     if (not np.isfinite(joint_depth_trust).all()
@@ -357,16 +439,32 @@ def run(source: str | Path, predictions_dir: str | Path, config_path: str | Path
         raise RuntimeError("invalid joint_depth_trust: expected finite values in [0,1]")
     if np.isinf(joint_depth_gap_cm).any() or not np.isfinite(joint_depth_points).all():
         raise RuntimeError("joint depth gap may be NaN when missing, but never infinite")
+    # Completion outputs: solved forces must be finite (a non-finite solve is caught upstream
+    # and falls back to zeros), and any body weight the solve produced must be positive. The
+    # NaN (completion skipped / no witness) and +inf (solve failed) sentinels are left as-is.
+    if not np.isfinite(limb_force_n).all():
+        raise RuntimeError("limb_force_n must be finite (a non-finite solve force reached save)")
+    computed_weight = np.isfinite(body_weight_n)
+    if bool((body_weight_n[computed_weight] <= 0.0).any()):
+        raise RuntimeError("body_weight_n must be positive where the support solve produced a mass")
 
     save = dict(
         joint_contact=joint_contact, joint_sdf_cm=joint_sdf_cm,
         joint_distance_cm=joint_distance_cm, merged=merged_all,
+        contact_source=contact_source, limb_force_n=limb_force_n,
+        force_share=force_share, body_weight_n=body_weight_n,
+        completion_groups=np.array(list(comp_ctx.groups)),
+        completion_method=np.str_(
+            "static-support-v1" if do_completion else "skipped(post-enforcement body)"),
+        contact_label_schema=np.int32(1),
+        contact_label_method=np.str_(
+            "completed-static-support-v1" if do_completion else "detector-v1"),
         joint_depth_gap_cm=joint_depth_gap_cm,
         joint_depth_points=joint_depth_points,
         joint_depth_trust=joint_depth_trust,
         joint_image_visibility=confidence_all["image_visibility"],
         joint_occlusion_visibility=confidence_all["occlusion_visibility"],
-        joint_occluding_vertices=confidence_all["occluding_vertices"],
+        joint_occlusion_gap_cm=joint_occlusion_gap_cm,
         joint_visibility=confidence_all["visibility"],
         surface_evidence=confidence_all["surface"],
         motion_evidence=confidence_all["motion"],
@@ -380,6 +478,9 @@ def run(source: str | Path, predictions_dir: str | Path, config_path: str | Path
         source_transform_sha256=np.str_(source_transform_sha256),
         source_human=np.str_(human_path.name if human_cloud is not None else ""),
         source_human_sha256=np.str_(source_human_sha256),
+        source_gravity=np.str_(source_gravity),
+        source_gravity_sha256=np.str_(source_gravity_sha256),
+        gravity_source=np.str_(gravity_source),
         object_ids=object_ids, joint_names=kin["joint_names"], parents=parents,
         valid_mask=kin["valid_mask"],
         num_people=np.int32(P), num_frames=np.int32(N),
@@ -395,6 +496,10 @@ def run(source: str | Path, predictions_dir: str | Path, config_path: str | Path
                  for key, value in cfg["contact_confidence"].items()})
     save.update({f"depth_fit_{key}": np.float32(value)
                  for key, value in cfg["depth_fit"].items()})
+    save.update({f"completion_{key}": (np.int32(value) if key == "min_span" else np.float32(value))
+                 for key, value in comp_knobs.items()})
+    if not np.array_equal(joint_contact, contact_source != 0):
+        raise RuntimeError("label provenance mismatch: joint_contact != (contact_source != 0)")
     out_path = paths.contacts_path(pred, tag)
     np.savez(out_path, **save)
     print(f"[estimate_contacts] wrote {out_path}")

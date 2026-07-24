@@ -14,6 +14,11 @@ from .camera import (
     transform_points,
     world_from_cam,
 )
+from .completion import (
+    COMPLETION_DEFAULTS,
+    complete_person,
+    load_dynamics_context,
+)
 from .contacts import (
     contact_from_sdf,
     drift_gated_contact,
@@ -21,7 +26,7 @@ from .contacts import (
     joint_drift,
     joint_guarded_min_sdf,
     lift_joint_min_distance,
-    joint_occlusion_counts,
+    joint_occlusion_gap,
     lift_joint_contact,
     merge_contact_spans,
     scene_sdf,
@@ -51,13 +56,16 @@ __all__ = [
     "project",
     "transform_points",
     "world_from_cam",
+    "COMPLETION_DEFAULTS",
+    "complete_person",
+    "load_dynamics_context",
     "contact_from_sdf",
     "drift_gated_contact",
     "hysteresis_spans",
     "joint_drift",
     "joint_guarded_min_sdf",
     "lift_joint_min_distance",
-    "joint_occlusion_counts",
+    "joint_occlusion_gap",
     "lift_joint_contact",
     "merge_contact_spans",
     "scene_sdf",
