@@ -29,6 +29,11 @@ sweeps every clip); the rest run one subprocess per clip, clip by clip, so a
 finished clip is inspectable while the batch is still going. Every step is
 resumable: a step whose output already exists is skipped.
 
+``--shard i/n`` takes every n-th clip, so n runs on n GPUs fill one output tree
+between them without hand-writing ``--clips`` lists. The manifest is named after
+the clip selection (see :func:`_manifest_name`), so the shards never read each
+other's.
+
 A clip that fails is reported and skipped — one bad clip never kills the batch.
 
 Knobs live in the TOMLs (``configs/pipeline_peter.toml`` for the model +
@@ -42,6 +47,9 @@ Usage::
         --clips 01_hanging --steps fuse,scale,kinematics_1
     CUDA_VISIBLE_DEVICES=3 uv run python scripts/run_peter.py --dataset campus_board \
         --views cam_left,cam_right
+    # two GPUs over one dataset: one process each, disjoint halves of the clips
+    CUDA_VISIBLE_DEVICES=3 uv run python scripts/run_peter.py --dataset climb_wall --shard 1/2
+    CUDA_VISIBLE_DEVICES=6 uv run python scripts/run_peter.py --dataset climb_wall --shard 2/2
 """
 from __future__ import annotations
 
@@ -205,6 +213,15 @@ def _track_extra_views(out_root: Path, clips: list[Path], views: list[str], conf
             _link(_sam3_dir(out_root / clip.name, views, v), view_root / clip.name / "sam3")
 
 
+def _parse_shard(text: str) -> tuple[int, int]:
+    """``"2/3"`` → ``(2, 3)``: this shard's 1-based index and the number of shards."""
+    index, _, total = text.partition("/")
+    shard, n_shards = int(index), int(total or 1)
+    if not 1 <= shard <= n_shards:
+        raise SystemExit(f"[run_peter] bad --shard {text!r}: need 1 <= i <= n in 'i/n'")
+    return shard, n_shards
+
+
 def _report_people(out_root: Path, clips: list[Path], views: list[str]) -> None:
     """Print how many people SAM 3 tracked per clip and view (expected: exactly one)."""
     import numpy as np
@@ -235,6 +252,9 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--steps", default=None,
                         help=f"comma-separated subset of {','.join(ALL_STEPS)} (default: all; "
                              f"several views run only {','.join(MULTI_STEPS)})")
+    parser.add_argument("--shard", default="1/1",
+                        help="'i/n': process every n-th clip, so n runs on n GPUs share "
+                             "one output tree (default: 1/1, all clips)")
     parser.add_argument("--config", type=Path,
                         default=_REPO_ROOT / "configs" / "pipeline_peter.toml",
                         help="model + geometry stage TOML")
@@ -265,6 +285,10 @@ def main(argv: list[str] | None = None) -> int:
             raise SystemExit(f"[run_peter] unknown clip(s): {sorted(missing)}")
     if not clips:
         raise SystemExit(f"[run_peter] no clip under {dataset_dir} has all of {views}")
+    shard, n_shards = _parse_shard(args.shard)
+    clips = clips[shard - 1::n_shards]
+    if not clips:
+        raise SystemExit(f"[run_peter] shard {shard}/{n_shards} is empty")
 
     known = ALL_STEPS if len(views) == 1 else MULTI_STEPS
     steps = [s.strip() for s in args.steps.split(",")] if args.steps else list(known)
@@ -275,7 +299,8 @@ def main(argv: list[str] | None = None) -> int:
 
     out_root.mkdir(parents=True, exist_ok=True)
     manifest = _write_manifest(out_root / _manifest_name(clips), clips, out_root, views)
-    print(f"[run_peter] {len(clips)} clip(s) x {len(views)} view(s) → {out_root}\n"
+    print(f"[run_peter] {len(clips)} clip(s) x {len(views)} view(s) → {out_root}"
+          f"{'' if n_shards == 1 else f' (shard {shard}/{n_shards})'}\n"
           f"[run_peter] steps: {steps}")
 
     for step in [s for s in steps if s in MANIFEST_STEPS]:
