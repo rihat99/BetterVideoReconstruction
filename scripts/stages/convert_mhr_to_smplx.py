@@ -82,7 +82,8 @@ _MAPPING_NPZ = (
     / "mhr2smplx_mapping.npz"
 )
 # Parent of the ``smplx/`` model folder (smplx.create appends model_type).
-_DEFAULT_SMPLX_MODELS = _REPO_ROOT.parent / "better_human" / "models"
+# The licensed weights live with BetterHuman, same tree tools/body.py loads from.
+_DEFAULT_SMPLX_MODELS = _REPO_ROOT.parent / "BetterHuman" / "models"
 
 # Per-person overlay colours (RGB), matching estimate_body_sam3d so a person
 # keeps the same colour across the body and SMPL-X overlays. Cycles if needed.
