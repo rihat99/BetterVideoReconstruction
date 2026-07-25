@@ -170,6 +170,45 @@ The viewer can show them: the **scene normals** layer draws one arrow per scene
 point, coloured by direction, sized by the merge voxel — a quick way to spot
 flipped or noisy normals.
 
+## Several camera views
+
+Some clips are filmed by more than one camera at once — the `peter/campus_board`
+rig has two, `cam_left.mp4` and `cam_right.mp4`, running in sync. Those views are
+reconstructed **together**: the vggt stage puts every view's frames into one
+forward, so all the cameras come out in one shared world. Fuse then takes one
+`--source` per view (comma-separated, in the order `camera.npz` lists them) and
+backprojects all of them into the same cloud.
+
+Two ideas keep this from spreading through the rest of the pipeline:
+
+- **`camera.npz` is a list of views into the solve; `transform.npz` is a camera
+  track.** The camera file may hold `T` rows spanning several views, tagged by
+  `view_ids`. Fuse writes `transform.npz` and `human.npz` from the **view-0 rows
+  only** — one row per time step, exactly what they have always been. Every stage
+  after fuse therefore needs no changes at all. This is not cosmetic: the SMPL-X
+  bodies are expressed in view 0's per-frame camera, so if `transform.npz` stopped
+  being row-aligned with view 0's frames, every body would be placed wrong.
+- **Only view 0 has people.** Extra views are used for the scene cloud and nothing
+  else. Their masks still carve the climber out of the background (a person fused
+  into a static scene cloud would smear across it), but their points never enter
+  `human.npz`. The scale stage rasterizes human points into one view's depth map
+  with last-write-wins, so points seen from behind would corrupt it.
+
+Each view's files live under its own name: masks in `sam3/<view>/` (view 0 keeps
+plain `sam3/`, the layout every other stage reads), depth in
+`vggt/depth/<view>/`. A single-view clip's view name is the empty string, so all
+these paths collapse back to the flat layout and old outputs keep loading
+unchanged.
+
+One consequence to be aware of: **the hidden-point prune gets weaker, not
+stronger.** It keeps a point that is front-most in *any* camera row, so adding
+rows can only add keeps. Measured on a two-view campus_board clip, 12% of the
+final cloud consists of points that lie inside view 0's frustum, were never
+front-most there, and survive only because view 1 saw them. Some of those are
+genuine surfaces view 0 could not see — which is the whole point of the second
+camera — and some are the ghost slab the prune exists to remove. The two are not
+currently told apart.
+
 ## What fuse does not do
 
 - **It does not fix "floaters".** When VGGT places the person's depth at a

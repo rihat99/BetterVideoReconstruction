@@ -142,8 +142,18 @@ def infer_sequence(
     mode: str = DEFAULT_MODE,
     device: str = "cuda",
     compute_depth: bool = True,
+    frame_chunk: int | None = None,
+    token_chunk: int | None = None,
 ) -> dict:
     """Multi-view forward over a clip's ``frame_paths`` (already subsampled).
+
+    ``frame_chunk`` / ``token_chunk`` cap how much of the clip the aggregator holds in
+    flight at once — frames per chunk for the frame-local parts, tokens per chunk for
+    the cross-frame attention. Both ``None`` (the default) runs the whole clip in one
+    go. Chunking changes how much is in flight, not the arithmetic: it is bit-identical
+    when a chunk spans the whole clip, and otherwise matches to bf16 rounding (~3e-4
+    relative on depth), because a different chunk size makes cuBLAS pick a different
+    kernel tiling.
 
     Returns a dict with per-frame:
 
@@ -162,6 +172,9 @@ def infer_sequence(
 
     paths = [str(p) for p in frame_paths]
     images = load_and_preprocess_images(paths, mode=mode, image_resolution=image_resolution).to(device)
+
+    model.aggregator.frame_chunk = frame_chunk
+    model.aggregator.token_chunk = token_chunk
 
     with torch.inference_mode():
         pred = model(images)

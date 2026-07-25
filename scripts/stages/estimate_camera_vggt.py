@@ -10,10 +10,21 @@ Memory scales with frame count (~43 GB peak for 500 frames @ 512 on an A100, per
 the upstream benchmark). Clips longer than ``--max-frames`` (default 500) are
 uniformly subsampled; the selected *original* frame indices are recorded in
 ``frame_indices`` so depth / cameras stay aligned to the source clip.
+``[vggt].frame_chunk`` / ``token_chunk`` split the forward so a long sequence
+still fits in memory (0 = off, the whole sequence at once).
+
+**Several camera views.** A manifest entry may list ``sources`` — one video per
+camera of a synchronized rig. All views then go into ONE forward, so every
+camera lands in one common world frame. The saved arrays are a flat list of
+*views into the solve*: ``T`` rows, view 0's rows first, with ``view_ids``
+saying which view each row came from. ``max_frames`` caps frames **per view**,
+so the views stay aligned in time. A single-view clip is just the ``V = 1``
+case: ``view_ids`` is all zeros and its view name is empty, which keeps every
+path flat and every array exactly what it was before.
 
 Per-item I/O (``<save-dir>/<stem>/``)::
 
-    reads:  the source video / folder of frames / single image
+    reads:  the source video / folder of frames / single image (one per view)
     writes: vggt/camera.npz
               extrinsics       (T, 4, 4) f32  camera-from-world, OpenCV
               intrinsics       (T, 3, 3) f32  *normalized* (fx/W, fy/H);
@@ -21,15 +32,19 @@ Per-item I/O (``<save-dir>/<stem>/``)::
                                               tools.geometry.intrinsics.denormalize_K
               intrinsics_px    (T, 3, 3) f32  pixel units at the VGGT resolution
               fov_x_deg / fov_y_deg (T,) f32
-              frame_indices    (T,)     i32   original indices of processed frames
-              image_height / image_width      original frame resolution
+              frame_indices    (T,)     i32   original frame index of each row,
+                                              within its OWN view
+              view_ids         (T,)     i32   which view each row came from
+              view_names       (V,)     str   view names; ('',) when there is one
+              image_height / image_width      original frame resolution (view 0)
               vggt_height  / vggt_width       VGGT inference resolution
               num_frames / num_frames_total   processed vs. source frame counts
               image_resolution / mode / checkpoint   inference settings
               scale            'up_to_scale'  (VGGT depth/translation are NOT
                                               metric; one arbitrary per-clip scale)
-            vggt/depth/frame_NNNNNN.npz   (with [vggt].save_depth; NNNNNN is the
-              original frame index)
+            vggt/depth/<view name>/frame_NNNNNN.npz   (with [vggt].save_depth;
+              NNNNNN is the original frame index. The view name is empty for a
+              single-view clip, i.e. the usual flat vggt/depth/frame_*.npz)
               depth (H, W) f16, depth_conf (H, W) f16   at the VGGT resolution
 
 Standalone CLI::
@@ -93,20 +108,33 @@ class CameraVggtStep:
         if self.args.skip_existing and out_npz.exists():
             raise SkipItem(f"vggt already done: {out_npz}")
 
+        views = item.views
+        # One view keeps the empty name, so every per-view path stays flat.
+        view_names = [""] if len(views) == 1 else [v.stem for v in views]
+
         with tempfile.TemporaryDirectory(prefix="vggt_frames_") as tmp_root:
-            frame_paths, _ = resolve_source(item.source_path, Path(tmp_root))
-            n_total = len(frame_paths)
-            if n_total == 0:
-                raise SkipItem(f"no frames resolved from {item.source_path}")
+            # Each view decodes into its own subdir so the frames cannot collide.
+            view_frames = []
+            for v, src in enumerate(views):
+                frame_paths, _ = resolve_source(src, Path(tmp_root) / str(v))
+                if not frame_paths:
+                    raise SkipItem(f"no frames resolved from {src}")
+                view_frames.append(frame_paths)
 
             # Original frame resolution (before VGGT's internal resize).
-            bgr0 = cv2.imread(str(frame_paths[0]))
+            bgr0 = cv2.imread(str(view_frames[0][0]))
             if bgr0 is None:
-                raise RuntimeError(f"cannot read frame {frame_paths[0]}")
+                raise RuntimeError(f"cannot read frame {view_frames[0][0]}")
             img_h, img_w = bgr0.shape[:2]
 
-            sel = uniform_subsample(n_total, self.args.max_frames)
-            sel_paths = [frame_paths[i] for i in sel]
+            # Subsample PER VIEW, not across the concatenation: max_frames means
+            # "frames kept per view", which is what keeps the views in step.
+            sel = [uniform_subsample(len(paths), self.args.max_frames) for paths in view_frames]
+            sel_paths = [paths[i] for paths, keep in zip(view_frames, sel) for i in keep]
+            frame_indices = np.concatenate(sel).astype(np.int32)
+            view_ids = np.concatenate(
+                [np.full(len(keep), v, np.int32) for v, keep in enumerate(sel)])
+            n_total = sum(len(paths) for paths in view_frames)
 
             res = infer_sequence(
                 self.model,
@@ -115,6 +143,8 @@ class CameraVggtStep:
                 mode=self.args.mode,
                 device=self.args.device,
                 compute_depth=self.args.save_depth,
+                frame_chunk=self.args.frame_chunk or None,
+                token_chunk=self.args.token_chunk or None,
             )
 
             vggt_dir.mkdir(parents=True, exist_ok=True)
@@ -125,12 +155,14 @@ class CameraVggtStep:
                 intrinsics_px=res["intrinsics_px"],
                 fov_x_deg=res["fov_x_deg"],
                 fov_y_deg=res["fov_y_deg"],
-                frame_indices=sel.astype(np.int32),
+                frame_indices=frame_indices,
+                view_ids=view_ids,
+                view_names=np.array(view_names),
                 image_height=np.int32(img_h),
                 image_width=np.int32(img_w),
                 vggt_height=np.int32(res["vggt_height"]),
                 vggt_width=np.int32(res["vggt_width"]),
-                num_frames=np.int32(len(sel)),
+                num_frames=np.int32(len(sel_paths)),
                 num_frames_total=np.int32(n_total),
                 image_resolution=np.int32(self.args.image_resolution),
                 mode=np.str_(self.args.mode),
@@ -138,24 +170,28 @@ class CameraVggtStep:
                 scale=np.str_("up_to_scale"),
             )
             if self.args.save_depth and "depth" in res:
-                self._save_depth(vggt_dir / "depth", sel, res)
+                self._save_depth(vggt_dir / "depth", frame_indices, view_ids, view_names, res)
 
             print(
-                f"  {len(sel)}/{n_total} frame(s) "
+                f"  {len(sel_paths)}/{n_total} frame(s) from {len(views)} view(s) "
                 f"orig {img_w}x{img_h} -> vggt {res['vggt_width']}x{res['vggt_height']}, "
                 f"fov_x mean={float(res['fov_x_deg'].mean()):.2f}deg -> {out_npz}"
             )
 
     @staticmethod
-    def _save_depth(depth_dir: Path, sel: np.ndarray, res: dict) -> None:
-        depth_dir.mkdir(parents=True, exist_ok=True)
+    def _save_depth(depth_dir: Path, frame_indices: np.ndarray, view_ids: np.ndarray,
+                    view_names: list[str], res: dict) -> None:
+        """One ``frame_NNNNNN.npz`` per row, under that row's view subdir."""
+        for name in view_names:
+            (depth_dir / name).mkdir(parents=True, exist_ok=True)
         depth = res["depth"]
         conf = res.get("depth_conf")
-        for k, orig_idx in enumerate(sel):
+        for k, (orig_idx, v) in enumerate(zip(frame_indices, view_ids)):
             save: dict[str, np.ndarray] = {"depth": depth[k].astype(np.float16)}
             if conf is not None:
                 save["depth_conf"] = conf[k].astype(np.float16)
-            np.savez_compressed(depth_dir / f"frame_{int(orig_idx):06d}.npz", **save)
+            out = depth_dir / view_names[int(v)] / f"frame_{int(orig_idx):06d}.npz"
+            np.savez_compressed(out, **save)
 
 
 def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
@@ -172,6 +208,8 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         "image_resolution": DEFAULT_IMAGE_RESOLUTION,
         "mode": DEFAULT_MODE,
         "save_depth": False,
+        "frame_chunk": 0,
+        "token_chunk": 0,
     })
     args.device = section(cfg, "runtime", {"device": "cuda"}).device
     args.source, args.save_dir, args.config = cli.source, cli.save_dir, cli.config

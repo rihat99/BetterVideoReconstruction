@@ -38,7 +38,9 @@ Source forms accepted by :func:`iter_inputs`:
     top-down pose / body steps; ignored by steps that don't read it),
     ``camera`` (optional path passed through as :attr:`InputItem.camera_path`
     — a per-item camera.npz for the body step; ignored by steps that don't
-    read it)
+    read it), ``sources`` (optional list of every camera view of the item,
+    view 0 first — read by the vggt step, which puts all views in one
+    forward; ignored by steps that don't read it)
 """
 from __future__ import annotations
 
@@ -69,10 +71,16 @@ class InputItem:
     prompts: list[dict] | None = None   # opaque per-item prompt list — only some steps read this
     bboxes_path: Path | None = None     # opaque per-item bboxes.npz — only some steps (pose/body) read this
     camera_path: Path | None = None     # opaque per-item camera.npz — only some steps (body) read this
+    sources: list[Path] | None = None   # every camera view, view 0 first — only the vggt step reads this
 
     @property
     def stem(self) -> str:
         return self.source_path.stem
+
+    @property
+    def views(self) -> list[Path]:
+        """Every camera view of this item — just ``source_path`` unless a manifest listed ``sources``."""
+        return self.sources or [self.source_path]
 
 
 # -----------------------------------------------------------------------------
@@ -160,8 +168,10 @@ def iter_inputs(
             entry_mask = Path(entry["mask"]) if "mask" in entry else _resolve_mask(src, mask, mask_dir)
             entry_bboxes = Path(entry["bboxes"]) if "bboxes" in entry else None
             entry_camera = Path(entry["camera"]) if "camera" in entry else None
+            entry_sources = [Path(s) for s in entry["sources"]] if "sources" in entry else None
             yield InputItem(src, out_dir, entry_mask, prompts=entry.get("prompts"),
-                            bboxes_path=entry_bboxes, camera_path=entry_camera)
+                            bboxes_path=entry_bboxes, camera_path=entry_camera,
+                            sources=entry_sources)
         return
     if suffix == ".txt":
         for src in _read_txt_manifest(src_path):

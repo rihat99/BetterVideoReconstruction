@@ -33,11 +33,23 @@ saved files in place. This stage:
      it with the cloud, so downstream stages (penetration SDF, contacts, viewer)
      load normals instead of recomputing them.
 
+**Several camera views.** When the vggt stage put a synchronized rig's views in
+one forward, ``camera.npz`` holds ``T`` rows tagged by ``view_ids`` and
+``--source`` lists one video per view, in the same order. Every row feeds the
+scene cloud — a second viewpoint sees what the first one cannot. Note the
+hidden-point prune gets *weaker*, not stronger: it keeps a point that is
+front-most in **any** row, so surfaces the first view would have pruned as
+ghost slab survive if the second view saw them. ``transform.npz`` and ``human.npz`` stay
+**view 0 only**, i.e. one row per time step: that is the contract every stage
+after this one reads (the bodies are expressed in view 0's per-frame camera).
+
 Per-clip I/O (``--source`` frames + ``--predictions out/<stem>/``)::
 
-    reads:  --source video / folder of frames          (RGB, for per-point colour)
-            vggt/camera.npz, vggt/depth/frame_*.npz     (needs [vggt] save_depth)
-            sam3/<obj>/frame_*.png
+    reads:  --source video / folder of frames          (RGB, for per-point colour;
+                                                        comma-separated per view)
+            vggt/camera.npz, vggt/depth/[<view>/]frame_*.npz  ([vggt] save_depth)
+            sam3/<obj>/frame_*.png                     (view 0)
+            sam3/<view>/<obj>/frame_*.png              (the other views)
     writes: geometry/transform.npz   extrinsics + original-res K (scale=1, metric=False)
             geometry/scene.npz        merged background points (+ colour + normals)
             geometry/human.npz        per-frame human points (frame_id, obj_id, colour)
@@ -45,6 +57,8 @@ Per-clip I/O (``--source`` frames + ``--predictions out/<stem>/``)::
 Standalone CLI::
 
     python scripts/stages/fuse_geometry.py --source video.mp4 --predictions out/sport_climb/
+    python scripts/stages/fuse_geometry.py --source cam_left.mp4,cam_right.mp4 \\
+        --predictions out/campus_board/
 """
 from __future__ import annotations
 
@@ -53,6 +67,7 @@ import sys
 import tempfile
 from collections import deque
 from concurrent.futures import ThreadPoolExecutor
+from dataclasses import dataclass
 from pathlib import Path
 
 _HERE = Path(__file__).resolve()
@@ -73,9 +88,67 @@ from tools.mask_io import read_binary_mask
 from tools.source import resolve_source
 
 
+@dataclass(frozen=True)
+class _View:
+    """One camera of the clip: where its frames, depth, masks and people are."""
+
+    source: Path
+    depth_dir: Path
+    mask_dir: Path
+    objs: list[int]          # every tracked person — all of them are carved out of the scene
+    climber_ids: list[int]   # the reconstructed climbers — only these enter the human cloud
+
+
 def _discover_objs(sam3_dir: Path, requested: list[int] | None) -> list[int]:
     found = sorted(int(d.name) for d in sam3_dir.iterdir() if d.is_dir() and d.name.isdigit())
     return [o for o in found if o in requested] if requested else found
+
+
+def _climber_ids(pred: Path, objs: list[int]) -> list[int]:
+    """Tracked people that got a reconstructed body (``sam3d/smplx_params.npz``).
+
+    A tracked bystander is excluded from the human cloud but still carved out of
+    the scene. Falls back to every tracked person when the smplx stage has not
+    run (standalone fuse).
+    """
+    smplx_path = pred / "sam3d" / "smplx_params.npz"
+    if not smplx_path.exists():
+        return objs
+    ids = np.load(smplx_path, allow_pickle=True)["object_ids"].ravel()
+    return [int(o) for o in ids if int(o) in objs]
+
+
+def _view_rows(cam) -> tuple[np.ndarray, list[str]]:
+    """``(view_ids (T,), view_names (V,))`` of a ``camera.npz``.
+
+    Camera files written before multi-view have neither: they are one unnamed
+    view, which is exactly ``view_ids`` all-zero and one empty name.
+    """
+    if "view_ids" not in cam.files:
+        return np.zeros(len(cam["frame_indices"]), np.int32), [""]
+    return cam["view_ids"].astype(np.int32), [str(name) for name in cam["view_names"]]
+
+
+def _split_sources(source: str, view_names: list[str]) -> list[Path]:
+    """One source path per camera view, in ``camera.npz``'s view order.
+
+    A single-view clip takes the whole string, commas and all — only a camera
+    file that really holds several views splits on them, so an ordinary path
+    containing a comma still works. With several views the names must match, or
+    a reordered ``--source`` would silently pair one camera's frames and masks
+    with another camera's depth and pose.
+    """
+    if len(view_names) == 1:
+        return [Path(source)]
+    paths = [Path(s.strip()) for s in source.split(",")]
+    if len(paths) != len(view_names):
+        raise SystemExit(f"[fuse] --source lists {len(paths)} view(s) but camera.npz has "
+                         f"{len(view_names)} {view_names} — give one per view, in that order")
+    wrong = [(p.stem, n) for p, n in zip(paths, view_names) if p.stem != n]
+    if wrong:
+        raise SystemExit(f"[fuse] --source order does not match camera.npz's views "
+                         f"{view_names}: got {[p.stem for p in paths]}")
+    return paths
 
 
 def _dilate(mask: np.ndarray, radius: int) -> np.ndarray:
@@ -175,9 +248,9 @@ def _visible_mask(points: torch.Tensor, extr: np.ndarray, K_px: np.ndarray,
     return keep
 
 
-def _prep_frame(pred, frame_path, idx, objs, climber_ids, args, hv, wv):
+def _prep_frame(view, frame_path, idx, args, hv, wv):
     """Per-frame CPU prep (loads, cleaning, masks) — runs on a worker thread."""
-    vd = np.load(pred / "vggt" / "depth" / f"frame_{idx:06d}.npz")
+    vd = np.load(view.depth_dir / f"frame_{idx:06d}.npz")
     depth, conf = vd["depth"].astype(np.float32), vd["depth_conf"].astype(np.float32)
     # One shared edge-filter pass (the expensive half of the cleaning). The human
     # keeps every in-mask point that survives it; the scene additionally drops
@@ -190,25 +263,36 @@ def _prep_frame(pred, frame_path, idx, objs, climber_ids, args, hv, wv):
     rgb = cv2.cvtColor(cv2.imread(str(frame_path)), cv2.COLOR_BGR2RGB)
     rgb = cv2.resize(rgb, (wv, hv), interpolation=cv2.INTER_AREA)
 
-    is_human, obj_id = _human_masks(pred / "sam3", idx, objs, hv, wv)
+    is_human, obj_id = _human_masks(view.mask_dir, idx, view.objs, hv, wv)
     # Imperfect masks leak human-edge pixels into the background, so subtract
     # a *dilated* band of every tracked person from the scene; collect the
     # human from the tight mask, restricted to the reconstructed climbers.
+    # Views other than 0 have no climbers, so they contribute scene points only.
     scene_mask = valid_scene & ~_dilate(is_human, args.human_dilate)
-    human_mask = valid_human & is_human & np.isin(obj_id, climber_ids)
+    human_mask = valid_human & is_human & np.isin(obj_id, view.climber_ids)
     med = float(np.median(depth[scene_mask])) if scene_mask.any() else None
     return depth, conf, rgb, scene_mask, human_mask, obj_id, med
 
 
-def _build_geometry(args, pred, cam, frame_indices, extr, K_px, objs, climber_ids):
-    """Backproject every frame, split scene/human, merge + cluster-filter the scene."""
+def _build_geometry(args, cam, frame_indices, extr, K_px, views, view_ids):
+    """Backproject every camera row, split scene/human, merge + cluster-filter the scene.
+
+    ``view_ids (T,)`` says which of ``views`` each camera row came from. Every row
+    feeds the scene; only view 0 has climbers, so only its rows feed the human
+    cloud, tagged with their position among the view-0 rows (the time step).
+    """
     hv, wv = int(cam["vggt_height"]), int(cam["vggt_width"])
     dev = args.device
+    time_of_row = np.cumsum(view_ids == 0) - 1     # position among the view-0 rows
     scene_pts, scene_conf, scene_col, scene_depth_med = [], [], [], []
     human_pts, human_conf, human_obj, human_fid, human_col = [], [], [], [], []
 
     with tempfile.TemporaryDirectory(prefix="fuse_frames_") as tmp:
-        frame_paths, src_fps = resolve_source(Path(args.source), Path(tmp))
+        # Each view decodes into its own subdir so the frames cannot collide.
+        resolved = [resolve_source(view.source, Path(tmp) / str(v))
+                    for v, view in enumerate(views)]
+        view_frames = [paths for paths, _ in resolved]
+        src_fps = resolved[0][1]
         # The CPU prep (zlib, edge filter, imread) dominates the loop, so a few
         # worker threads prefetch it in a bounded window ahead of the GPU work.
         with ThreadPoolExecutor(max_workers=4) as pool:
@@ -218,9 +302,10 @@ def _build_geometry(args, pred, cam, frame_indices, extr, K_px, objs, climber_id
             def _submit_next():
                 if todo:
                     k, idx = todo.popleft()
+                    v = int(view_ids[k])
                     pending.append((k, pool.submit(
-                        _prep_frame, pred, frame_paths[int(idx)], int(idx),
-                        objs, climber_ids, args, hv, wv)))
+                        _prep_frame, views[v], view_frames[v][int(idx)], int(idx),
+                        args, hv, wv)))
 
             for _ in range(8):
                 _submit_next()
@@ -245,7 +330,8 @@ def _build_geometry(args, pred, cam, frame_indices, extr, K_px, objs, climber_id
                     human_pts.append(backproject(depth_t, K_t, E_t, mask=sh))
                     human_conf.append(conf_t[sh])
                     human_obj.append(torch.from_numpy(obj_id).to(dev)[sh].to(torch.int32))
-                    human_fid.append(torch.full((int(sh.sum()),), k, dtype=torch.int32, device=dev))
+                    human_fid.append(torch.full((int(sh.sum()),), int(time_of_row[k]),
+                                                dtype=torch.int32, device=dev))
                     human_col.append(col_t[sh])
 
     empty = torch.zeros((0, 3), device=dev)
@@ -314,29 +400,34 @@ def fuse(args: argparse.Namespace) -> None:
     extr, K_px, K_norm = cam["extrinsics"], cam["intrinsics_px"], cam["intrinsics"]
     hv, wv = int(cam["vggt_height"]), int(cam["vggt_width"])
     ho, wo = int(cam["image_height"]), int(cam["image_width"])
+    view_ids, view_names = _view_rows(cam)
+    sources = _split_sources(args.source, view_names)
     requested = [int(x) for x in args.person_obj_ids.split(",")] if args.person_obj_ids else None
-    objs = _discover_objs(pred / "sam3", requested)
-    # Every tracked person is carved out of the scene, but only the reconstructed
-    # climbers (smplx_params object_ids) go into the human cloud — a tracked
-    # bystander is thus excluded from both. Falls back to all objs if smplx params
-    # are absent (standalone fuse without the smplx stage).
-    smplx_path = pred / "sam3d" / "smplx_params.npz"
-    climber_ids = objs
-    if smplx_path.exists():
-        ids = np.load(smplx_path, allow_pickle=True)["object_ids"].ravel()
-        climber_ids = [int(o) for o in ids if int(o) in objs]
-    built = _build_geometry(args, pred, cam, frame_indices, extr, K_px, objs, climber_ids)
+    sam3 = pred / "sam3"
+    views = []
+    for v, (source, name) in enumerate(zip(sources, view_names)):
+        # View 0's masks stay in sam3/ — the layout every other stage reads; an
+        # extra view's tracker pass writes into sam3/<view name>/, which the
+        # digit-only object discovery ignores.
+        mask_dir = sam3 if v == 0 else sam3 / name
+        objs = _discover_objs(mask_dir, requested)
+        views.append(_View(source, pred / "vggt" / "depth" / name, mask_dir, objs,
+                           _climber_ids(pred, objs) if v == 0 else []))
+    built = _build_geometry(args, cam, frame_indices, extr, K_px, views, view_ids)
 
     out_dir.mkdir(parents=True, exist_ok=True)
-    K_orig = np.stack([denormalize_K(K_norm[k], ho, wo) for k in range(len(frame_indices))])
+    # transform.npz is the per-time-step camera track of view 0 — one row per
+    # frame, row-aligned with the bodies. The extra views only fed the cloud.
+    rows0 = np.flatnonzero(view_ids == 0)
+    K_orig = np.stack([denormalize_K(K_norm[k], ho, wo) for k in rows0])
     fps = float(built["src_fps"]) if built["src_fps"] else 30.0
     np.savez(
         out_dir / "transform.npz",
         scale=np.float32(1.0), metric=np.bool_(False),
-        extrinsics=extr.astype(np.float32),
-        intrinsics_px_orig=K_orig.astype(np.float32), intrinsics=K_norm,
-        fov_x_deg=cam["fov_x_deg"], fov_y_deg=cam["fov_y_deg"],
-        frame_indices=frame_indices.astype(np.int32), image_height=np.int32(ho),
+        extrinsics=extr[rows0].astype(np.float32),
+        intrinsics_px_orig=K_orig.astype(np.float32), intrinsics=K_norm[rows0],
+        fov_x_deg=cam["fov_x_deg"][rows0], fov_y_deg=cam["fov_y_deg"][rows0],
+        frame_indices=frame_indices[rows0].astype(np.int32), image_height=np.int32(ho),
         image_width=np.int32(wo), vggt_height=np.int32(hv), vggt_width=np.int32(wv),
         fps=np.float32(fps))
     # world_scale mirrors transform.npz's scale per file, so a partially
@@ -351,18 +442,20 @@ def fuse(args: argparse.Namespace) -> None:
         built["human_points"], colors=built["human_color"],
         confidence=built["human_confidence"], frame_id=built["human_frame_id"],
         obj_id=built["human_obj_id"],
-        frame_indices=frame_indices.astype(np.int32), world_scale=np.float32(1.0),
+        frame_indices=frame_indices[rows0].astype(np.int32), world_scale=np.float32(1.0),
     )
-    print(f"  scene {built['scene_points'].shape[0]} pts (voxel={built['voxel']:.4f}, "
-          f"{built['n_hidden']} hidden pruned, {built['n_dropped']} dropped: small clusters) "
-          f"| human {built['n_human']} pts (climbers {climber_ids}) -> {out_dir}\n"
+    print(f"  scene {built['scene_points'].shape[0]} pts from {len(views)} view(s) "
+          f"(voxel={built['voxel']:.4f}, {built['n_hidden']} hidden pruned, "
+          f"{built['n_dropped']} dropped: small clusters) "
+          f"| human {built['n_human']} pts (climbers {views[0].climber_ids}) -> {out_dir}\n"
           f"  world is UP-TO-SCALE — run estimate_scale next to make it metric")
 
 
 def main(argv: list[str] | None = None) -> int:
     p = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     p.add_argument("--source", required=True,
-                   help="clip video / folder of frames (RGB, for per-point colour)")
+                   help="clip video / folder of frames (RGB, for per-point colour); "
+                        "comma-separated, one per camera view, in camera.npz's view order")
     p.add_argument("--predictions", required=True, type=Path, help="clip dir, e.g. out/<stem>/")
     p.add_argument("--config", type=Path, default=_REPO_ROOT / "configs" / "pipeline.toml",
                    help="pipeline TOML (default: configs/pipeline.toml)")

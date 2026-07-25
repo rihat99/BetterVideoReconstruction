@@ -10,7 +10,7 @@ import pytest
 import torch
 
 from scripts.stages.estimate_scale import _metricize_geometry
-from scripts.stages.fuse_geometry import _build_geometry, _merge_scene, _visible_mask
+from scripts.stages.fuse_geometry import _build_geometry, _merge_scene, _View, _visible_mask
 from tools.geometry.voxel import voxel_downsample
 from tools.human_optim.prefit import cloud_chamfer, finger_freeze_mask, joint_velocity_loss
 
@@ -82,13 +82,14 @@ def _tiny_clip(tmp_path: Path):
 
 def test_build_geometry_splits_scene_and_human_unscaled(tmp_path):
     source, pred = _tiny_clip(tmp_path)
-    args = SimpleNamespace(source=source, device="cpu", conf_drop_q=0.0, edge_rtol=0.0,
+    args = SimpleNamespace(device="cpu", conf_drop_q=0.0, edge_rtol=0.0,
                            human_dilate=0, voxel_px=1e-4, min_scene_voxels=1)
     cam = {"vggt_height": 3, "vggt_width": 3}
     extr = np.eye(4, dtype=np.float32)[None]
     K = np.array([[[2.0, 0.0, 1.0], [0.0, 2.0, 1.0], [0.0, 0.0, 1.0]]], np.float32)
+    views = [_View(source, pred / "vggt" / "depth", pred / "sam3", [0], [0])]
 
-    built = _build_geometry(args, pred, cam, np.array([0]), extr, K, [0], [0])
+    built = _build_geometry(args, cam, np.array([0]), extr, K, views, np.zeros(1, np.int32))
 
     # voxel = voxel_px * median_depth / fx = 1e-4 * 2 / 2 — far below spacing, no merging
     assert built["voxel"] == pytest.approx(1e-4)
@@ -102,6 +103,49 @@ def test_build_geometry_splits_scene_and_human_unscaled(tmp_path):
     assert normals.shape == built["scene_points"].shape
     assert torch.allclose(normals.norm(dim=-1), torch.ones(8), atol=1e-5)
     assert (normals[:, 2] < 0).all()
+
+
+def _second_view(tmp_path: Path, pred: Path) -> _View:
+    """A second camera: its own frames, depth and masks, and no reconstructed climber."""
+    source = tmp_path / "frames_right"
+    source.mkdir()
+    cv2.imwrite(str(source / "0.png"), np.full((3, 3, 3), 64, np.uint8))
+    depth_dir = pred / "vggt" / "depth" / "cam_right"
+    mask_dir = pred / "sam3" / "cam_right"
+    depth_dir.mkdir(parents=True)
+    (mask_dir / "00").mkdir(parents=True)
+    np.savez(depth_dir / "frame_000000.npz", depth=np.full((3, 3), 5.0, np.float32),
+             depth_conf=np.ones((3, 3), np.float32))
+    mask = np.zeros((3, 3), np.uint8)
+    mask[1, 1] = 255
+    cv2.imwrite(str(mask_dir / "00" / "frame_000000.png"), mask)
+    return _View(source, depth_dir, mask_dir, [0], [])
+
+
+def test_build_geometry_second_view_feeds_only_the_scene(tmp_path):
+    # Camera row 0 is the SECOND view and row 1 the first, so a human frame id
+    # taken from the camera row instead of the time step would come out as 1.
+    source, pred = _tiny_clip(tmp_path)
+    args = SimpleNamespace(device="cpu", conf_drop_q=0.0, edge_rtol=0.0,
+                           human_dilate=0, voxel_px=1e-4, min_scene_voxels=1)
+    cam = {"vggt_height": 3, "vggt_width": 3}
+    right = np.eye(4, dtype=np.float32)
+    right[0, 3] = 10.0        # far enough aside that neither view occludes the other
+    extr = np.stack([right, np.eye(4, dtype=np.float32)])
+    K = np.tile(np.array([[2.0, 0.0, 1.0], [0.0, 2.0, 1.0], [0.0, 0.0, 1.0]], np.float32),
+                (2, 1, 1))
+    views = [_View(source, pred / "vggt" / "depth", pred / "sam3", [0], [0]),
+             _second_view(tmp_path, pred)]
+
+    built = _build_geometry(args, cam, np.array([0, 0]), extr, K, views,
+                            np.array([1, 0], np.int32))
+
+    z = built["scene_points"][:, 2]
+    assert built["scene_points"].shape[0] == 16        # 8 background pixels per view
+    assert int((z == 2.0).sum()) == 8                  # view 0's depth
+    assert int((z == 5.0).sum()) == 8                  # the second view's
+    assert built["n_human"] == 1                       # only view 0 has a climber
+    assert built["human_frame_id"].tolist() == [0]     # the time step, not the camera row
 
 
 def test_estimate_point_normals_edge_cases():

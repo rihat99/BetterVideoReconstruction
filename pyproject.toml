@@ -52,7 +52,7 @@ dependencies = [
     "pycocotools",
     "tensorboard",
     "huggingface_hub",
-    # VGGT-Omega (multi-view camera + geometry) — submodule, backs estimate_camera_vggt.
+    # VGGT-Omega (multi-view camera + geometry) — vendored, backs estimate_camera_vggt.
     "vggt-omega",
     # utils3d — depth-map edge filter used by tools/geometry/clean.py (previously
     # pulled transitively via MoGe; pinned directly now that MoGe is gone).
@@ -89,7 +89,8 @@ better-human = { path = "../better_human", editable = true }
 mhr = { path = "third_party/MHR", editable = true }
 sam3 = { path = "third_party/sam3", editable = true }
 sapiens = { path = "third_party/sapiens2", editable = true }
-# VGGT-Omega is not on PyPI — install editable from the submodule.
+# VGGT-Omega is not on PyPI — install editable from the vendored copy (we patch it
+# for chunked low-memory inference, so it is no longer a submodule).
 vggt-omega = { path = "third_party/vggt-omega", editable = true }
 geocalib = { path = "third_party/geocalib", editable = true }
 # pymomentum-gpu wheels are built against PyTorch cu129 — force torch/torchvision
