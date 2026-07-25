@@ -51,11 +51,13 @@ from score_prediction_contacts import (  # noqa: E402
 
 FORCE_THRESHOLD_N = 50.0  # on the pipeline's downward load, matching the plate rule
 CONTACTS_FILE = "human_optim/contacts_1.npz"
+CONTACTS2_FILE = "human_optim/contacts_2.npz"
 KINDYN_FILE = "human_optim/kindyn_1.npz"
-PIPELINE_ROWS = ["pipeline_contacts", "pipeline_force"]
+PIPELINE_ROWS = ["pipeline_contacts", "pipeline_contacts_2", "pipeline_force"]
 ROWS = MODELS + PIPELINE_ROWS
 ROW_LABEL = {**MODEL_LABEL,
              "pipeline_contacts": "Pipeline contacts  (contacts_1 labels)",
+             "pipeline_contacts_2": "Pipeline contacts  (contacts_2 final)",
              "pipeline_force": f"Pipeline force  (kindyn_1 load > {FORCE_THRESHOLD_N:.0f} N)"}
 _FINGER = ("index", "middle", "pinky", "ring", "thumb")
 
@@ -95,6 +97,7 @@ def _pipeline_predictions(clip: str) -> tuple[dict[str, np.ndarray], int, dict[s
     """Both pipeline contact readings for one clip, plus the frame count and provenance."""
     tree = PRED_ROOT / clip
     contacts = np.load(tree / CONTACTS_FILE, allow_pickle=True)
+    contacts_2 = np.load(tree / CONTACTS2_FILE, allow_pickle=True)
     kindyn = np.load(tree / KINDYN_FILE, allow_pickle=True)
     frame_indices = np.load(tree / "geometry" / "transform.npz")["frame_indices"]
     n_frames = len(frame_indices)
@@ -107,9 +110,11 @@ def _pipeline_predictions(clip: str) -> tuple[dict[str, np.ndarray], int, dict[s
         raise ValueError(f"campus_board is one climber, but the tree holds {contact_ids} / {kindyn_ids}")
 
     joint_contact = np.asarray(contacts["joint_contact"][0], bool)  # (N, 52)
+    joint_contact_2 = np.asarray(contacts_2["joint_contact"][0], bool)
     members = _limb_members([str(name) for name in contacts["joint_names"]])
     predicted = {
         "pipeline_contacts": np.stack([joint_contact[:, limb].any(1) for limb in members], 1),
+        "pipeline_contacts_2": np.stack([joint_contact_2[:, limb].any(1) for limb in members], 1),
         "pipeline_force": _limb_load(kindyn, 0) > FORCE_THRESHOLD_N,
     }
     provenance = {
@@ -152,7 +157,8 @@ def collect_pipeline() -> dict:
     for row in PIPELINE_ROWS:
         pooled = {key: sum(counts[row][limb][key] for limb in LIMBS) for key in ("tp", "fp", "fn", "tn")}
         metrics[row] = {
-            "source": CONTACTS_FILE if row == "pipeline_contacts" else KINDYN_FILE,
+            "source": {"pipeline_contacts": CONTACTS_FILE, "pipeline_contacts_2": CONTACTS2_FILE,
+                       "pipeline_force": KINDYN_FILE}[row],
             "rule": ROW_LABEL[row],
             "overall": _rates(pooled),
             "per_limb": {limb: _rates(counts[row][limb]) for limb in LIMBS},
@@ -161,7 +167,7 @@ def collect_pipeline() -> dict:
         "clips": len(clips),
         "clip_names": clips,
         "skipped": skipped,
-        "contacts_tag": "contacts_1",
+        "contacts_tag": "contacts_1 + contacts_2",
         "fusion_method": dict(provenance["fusion_method"]),
         "contact_label_method": dict(provenance["contact_label_method"]),
         "force_threshold_newton": FORCE_THRESHOLD_N,
@@ -197,7 +203,7 @@ def write_tables(metrics: dict) -> list[Path]:
                   [("Limb", 1.9, "l")] + [(name, 0.8, "r") for name in ("P", "R", "F1")] * len(ROWS),
                   limb_rows,
                   groups=(("Contact model", 1, 3), ("Force model", 4, 6),
-                          ("Pipeline contacts", 7, 9), ("Pipeline force", 10, 12)),
+                          ("Pipeline c1", 7, 9), ("Pipeline c2", 10, 12), ("Pipeline force", 13, 15)),
                   rule_before=len(LIMBS))
     return [overall_path, limb_path]
 
