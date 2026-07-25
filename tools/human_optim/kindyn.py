@@ -6,16 +6,18 @@ forces on the FROZEN pose (dynamics). ``kindyn_1`` instead optimizes the pose
 base wrench, the 6-DOF force/torque left on the un-actuated free-flyer root — can
 reshape the motion instead of only being absorbed by forces.
 
-It starts from the converged ``kinematic_2`` body and its manual contact
-annotation (``data/<stem>.npz`` — the same labels ``kinematics_2`` uses). The
+It starts from a converged body (``kinematic_2`` by default, ``kinematic_1`` when
+the chain skips kinematics_2) and that body's contact labels. The
 objective is the ``kinematics_2`` losses (reprojection, chamfer, priors, motion
 smoothness, penetration, the annotation terms) PLUS the ``dynamics`` terms
 (base wrench, force magnitude/smoothness, torque smoothness), with the forces as
-extra optimization variables. The force model is deliberately simple in this
-first version: one free world-frame force vector per contact group per frame,
-masked to the frames the annotation says that group touches — **no friction
-cones** (as ``q`` moves the precomputed scene normals go stale; cones can come
-later).
+extra optimization variables: one world-frame force vector per contact group per
+frame, masked to the frames the labels say that group touches. Feet and ankles
+push through **friction pyramids** built like the ``dynamics`` stage's (a force
+that is a nonnegative combination of the four pyramid edges cannot leave the
+cone), except the cone frames are frozen once at the warm-start pose — ``q`` moves
+during the solve, and re-reading the scene normals every iteration would make the
+cone itself a moving target. Hands keep a free bilateral force (they grasp).
 
 The physics half of the objective is packaged as a :class:`DynamicsSpec`
 (built once per person from the RNEA model, the contact-group force points and
@@ -30,12 +32,14 @@ driven by ``scripts/stages/human_optimization.py --stages kindyn_1``.
 from __future__ import annotations
 
 import dataclasses
+import math
 from dataclasses import dataclass
 from pathlib import Path
 
 import numpy as np
 import torch
 
+from tools.geometry.normals import load_scene_cloud
 from tools.smplx_robot import load_smplx_mid
 from tools.smplx_robot.dynamics import velocity_acceleration_from_trajectory
 
@@ -43,7 +47,9 @@ from . import paths
 from .camera import world_from_cam
 from .config import HumanOptimConfig
 from .dynamics import _GRAVITY_MAG, _build_fext, _contact_catalog, _world_to_local
+from .friction import cone_generators, cone_normals
 from .optimizer import PhaseSpec, optimize_person
+from .qmath import normalize_q
 from .stages import (
     _ALL_DOF, _DEFAULT_SMPLX_MODEL, _body_context, _contact_labels, _load_scene,
     _new_out, _append_classic, _person_visual_inputs, _save_body, load_auto_contacts,
@@ -59,7 +65,8 @@ class DynamicsSpec:
 
     Holds the pieces that stay fixed while ``q`` and the forces move: the RNEA
     ``model`` (gravity baked to the scene's world-down), the contact-group force
-    points, and the per-frame contact ``mask``. Its methods run the RNEA forward
+    points, the per-frame contact ``mask``, and the frozen friction cones. Its methods
+    run the RNEA forward
     (recomputing ``v``/``a``/``oMi`` from the *current* ``q`` so gradient flows
     into the pose), define the five dynamics loss terms, warm-start the forces at
     the initial pose, and package the solved forces for the output npz.
@@ -84,15 +91,56 @@ class DynamicsSpec:
     gravity_world: np.ndarray     #: (3,) scene world-down (for the output npz)
     valid: np.ndarray             #: (T,) bool per-frame validity
     total_mass: float             #: body mass, kg (baked inertia sum)
+    cone_cols: tuple[int, ...] = ()      #: force-point columns carrying a friction cone (non-hand groups)
+    cone_normal: torch.Tensor | None = None  #: (T, Cc, 3) frozen surface normal per cone entry
+    cone_gen: torch.Tensor | None = None     #: (T, Cc, 4, 3) frozen pyramid edge directions
+    cone_mask: torch.Tensor | None = None    #: (T, Cc) float 0/1 — cone active (labelled + usable normal)
+    cone_w: torch.Tensor | None = None       #: (T, C, 1) float 0/1 — the cone force replaces the free one
+    mu: float = 1.0                          #: tan(cone half-angle) — the friction coefficient
 
     @property
     def C(self) -> int:
         return len(self.group_names)
 
     def zero_forces(self) -> torch.Tensor:
-        """Initial force leaf ``(T, C, 3)`` — zeros; the warm-start fills it."""
+        """Initial free-force leaf ``(T, C, 3)`` — zeros; the warm-start fills it."""
         T = self.mask.shape[0]
         return torch.zeros(T, self.C, 3, dtype=self.mask.dtype, device=self.mask.device)
+
+    def zero_generators(self) -> torch.Tensor | None:
+        """Initial pyramid-activation leaf ``(T, Cc, 4)`` — zeros, or ``None`` with no cones."""
+        if self.cone_gen is None:
+            return None
+        T = self.mask.shape[0]
+        return torch.zeros(T, len(self.cone_cols), 4, dtype=self.mask.dtype, device=self.mask.device)
+
+    def compose_forces(self, f_free: torch.Tensor, gen_u: torch.Tensor | None) -> torch.Tensor:
+        """World force ``(T, C, 3)``: pyramid-generator force on cone entries, free elsewhere.
+
+        ``gen_u`` are raw activations; ``softplus`` makes them nonnegative (and unlike
+        relu leaves no dead zero-gradient point), so the cone force is a nonnegative
+        combination of the four frozen pyramid edges and cannot leave the cone. Cone
+        entries are selected by ``cone_w`` — a group with no usable normal, or a hand,
+        keeps its free bilateral vector.
+        """
+        if gen_u is None or self.cone_gen is None:
+            return f_free
+        lam = torch.nn.functional.softplus(gen_u)                          # (T, Cc, 4) ≥ 0
+        f_cone = torch.einsum("tcg,tcgd->tcd", lam, self.cone_gen)         # (T, Cc, 3) inside the pyramid
+        full = torch.zeros_like(f_free)
+        full[:, self.cone_cols] = f_cone
+        return self.cone_w * full + (1.0 - self.cone_w) * f_free
+
+    def cone_violation(self, f_world: torch.Tensor) -> torch.Tensor:
+        """``relu(‖f_t‖ − μ·f_n)`` per (frame, cone entry) against the TRUE cone — a readout.
+
+        ``f_n = f·n̂`` is the signed normal component and ``f_t`` the tangential rest.
+        Generator forces live in the pyramid inscribed in the cone, so this must read ~0;
+        it is printed as an invariant check, never optimized."""
+        fc = f_world[:, self.cone_cols]                                    # (T, Cc, 3)
+        f_n = (fc * self.cone_normal).sum(-1)                              # (T, Cc)
+        f_t = fc - f_n[..., None] * self.cone_normal
+        return torch.relu(f_t.pow(2).sum(-1).add(1e-12).sqrt() - self.mu * f_n)
 
     def forward(self, qn: torch.Tensor, f_world: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
         """RNEA base + joint torques from the current pose and forces.
@@ -126,12 +174,17 @@ class DynamicsSpec:
         df_par = (df * u).sum(-1, keepdim=True) * u
         return df_par, df - df_par
 
-    def populate(self, st, f_world: torch.Tensor) -> None:
-        """Add the per-iteration lazy RNEA products to the shared :class:`State`."""
-        st.put_lazy("dyn", lambda: self.forward(st["qn"], f_world))
-        st.put_lazy("dyn_split", lambda: self.force_split(f_world))
+    def populate(self, st, f_free: torch.Tensor, gen_u: torch.Tensor | None) -> None:
+        """Add the per-iteration lazy RNEA products to the shared :class:`State`.
 
-    def register(self, problem, f_world: torch.Tensor) -> None:
+        The state's ``"f_world"`` is the COMPOSED force (newtons) — the cone parametrization
+        is applied once, here, so every dynamics term (smoothness included) sees forces and
+        never raw pyramid activations."""
+        st.put_lazy("f_world", lambda: self.compose_forces(f_free, gen_u))
+        st.put_lazy("dyn", lambda: self.forward(st["qn"], st["f_world"]))
+        st.put_lazy("dyn_split", lambda: self.force_split(st["f_world"]))
+
+    def register(self, problem) -> None:
         """Register the five dynamics terms (active only where their weight is)."""
         half = 0.5
 
@@ -162,14 +215,16 @@ class DynamicsSpec:
         problem.add_term("force_smooth_dir", _fs_dir)
         problem.add_term("torque_smooth", _tsmooth)
 
-    def warmstart(self, qn_init: torch.Tensor) -> torch.Tensor:
+    def warmstart(self, qn_init: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor | None]:
         """Solve the forces at the fixed initial pose (the sequential dynamics solve).
 
         Forces start at zero, so the base-wrench gradient on ``q`` is meaningless
         (an unsupported body is in freefall). A short L-BFGS on the forces alone —
         pose detached — seeds them near their sequential optimum, so the joint
         phases start from a physically-reasonable point for both ``q`` and ``f``.
-        Returns the warm forces ``(T, C, 3)`` (detached).
+        Both leaves are solved (free force AND pyramid activations) so the returned
+        values seed the joint phases coherently. Returns ``(f_free (T, C, 3),
+        gen_u (T, Cc, 4) or None)``, detached.
         """
         from better_robot.dynamics import rnea
         from better_robot.kinematics import forward_kinematics
@@ -183,20 +238,25 @@ class DynamicsSpec:
             base0 = float(rnea(self.model, qn, v, a)[..., :6].pow(2).sum().sqrt())
 
         f = self.zero_forces().requires_grad_(True)
+        gen_u = self.zero_generators()
+        if gen_u is not None:
+            gen_u.requires_grad_(True)
         opt = torch.optim.LBFGS(
-            [f], lr=float(self.dyn_opt["lr"]), max_iter=int(self.dyn_opt["max_iter"]),
+            [f] if gen_u is None else [f, gen_u],
+            lr=float(self.dyn_opt["lr"]), max_iter=int(self.dyn_opt["max_iter"]),
             history_size=int(self.dyn_opt["history_size"]),
             tolerance_grad=float(self.dyn_opt["tolerance_grad"]),
             tolerance_change=float(self.dyn_opt["tolerance_change"]), line_search_fn="strong_wolfe")
 
         def closure():
             opt.zero_grad()
-            fext, f_eff = _build_fext(f, self.mask, R_w2l, self.contact_ids, self.model.njoints)
+            f_world = self.compose_forces(f, gen_u)
+            fext, f_eff = _build_fext(f_world, self.mask, R_w2l, self.contact_ids, self.model.njoints)
             tau = rnea(self.model, qn, v, a, fext=fext)
             loss = (w["base_wrench"] * 0.5 * tau[:, :6].pow(2).sum()
                     + w["force_magnitude"] * 0.5 * f_eff.pow(2).sum())
             if f.shape[0] > 1:
-                df_par, df_perp = self.force_split(f)
+                df_par, df_perp = self.force_split(f_world)
                 loss = loss + w["force_smooth_mag"] * 0.5 * (self.fpair[..., None] * df_par.pow(2)).sum()
                 loss = loss + w["force_smooth_dir"] * 0.5 * (self.fpair[..., None] * df_perp.pow(2)).sum()
                 dtau = tau[1:, 6:] - tau[:-1, 6:]
@@ -207,11 +267,13 @@ class DynamicsSpec:
         if bool(self.mask.any()):
             opt.step(closure)
         with torch.no_grad():
-            base1 = float(self.forward(qn, f)[0][..., :6].pow(2).sum().sqrt())
+            f_world = self.compose_forces(f, gen_u)
+            base1 = float(self.forward(qn, f_world)[0][..., :6].pow(2).sum().sqrt())
         print(f"    [kindyn warm-start] base wrench {base0:.1f}→{base1:.2f} N (forces only, q frozen)")
-        return f.detach()
+        return f.detach(), None if gen_u is None else gen_u.detach()
 
-    def extract(self, qn: torch.Tensor, f_world: torch.Tensor, mid) -> dict:
+    def extract(self, qn: torch.Tensor, f_free: torch.Tensor, gen_u: torch.Tensor | None,
+                mid) -> dict:
         """Package the solved forces + diagnostics for the output npz.
 
         Mirrors the fields the ``dynamics`` stage saves so the forces are
@@ -222,6 +284,7 @@ class DynamicsSpec:
 
         J = mid.num_joints
         with torch.no_grad():
+            f_world = self.compose_forces(f_free, gen_u)                    # (T, C, 3) newtons
             f_final = (f_world * self.mask[..., None])                      # (T, C, 3)
             tau, _ = self.forward(qn, f_world)                              # (T, nv)
             oMi = forward_kinematics(self.model, qn).joint_pose_world       # (T, njoints, 7)
@@ -264,10 +327,17 @@ class DynamicsSpec:
                 dtq = (tau[1:, 6:] - tau[:-1, 6:]).norm(dim=-1)
                 vp = self.valid_pair.bool()
                 tjit = float(dtq[vp].mean()) if bool(vp.any()) else 0.0
+            # Cone violation of the solved forces vs the TRUE cone (N). Generator forces live in
+            # the inscribed pyramid, so this must read ~0; nonzero means a broken invariant.
+            cone_str = ""
+            if self.cone_mask is not None:
+                viol = self.cone_violation(f_final)[self.cone_mask.bool()]
+                cone_str = (f"  cone[{int(viol.numel())}] viol μ={float(viol.mean()):.1f} "
+                            f"max={float(viol.max()):.1f} N" if viol.numel() else "  cone[0]")
 
         print(f"    [kindyn dynamics] base wrench {base1:.2f} N  mean|f|={mean_f:.0f} N "
               f"(weight≈{self.total_mass * _GRAVITY_MAG:.0f} N)  jitter |Δ|f||={fjit_mag:.1f} "
-              f"|Δf⊥|={fjit_dir:.1f} N |Δτ|={tjit:.2f}")
+              f"|Δf⊥|={fjit_dir:.1f} N |Δτ|={tjit:.2f}{cone_str}")
         return dict(
             joints_world=joints_world, torque_mag=torque_mag, force_world=force_world,
             joint_torques=tau.cpu().numpy().astype(np.float32),
@@ -283,7 +353,10 @@ class DynamicsSpec:
 
 def build_dynamics_spec(mid, betas: torch.Tensor, contact_labels: torch.Tensor,
                         valid: np.ndarray, gravity_world: np.ndarray, *, groups: list[str],
-                        weights: dict, dyn_opt: dict, fps: float, device: str) -> DynamicsSpec:
+                        weights: dict, dyn_opt: dict, fps: float, device: str,
+                        q_world: torch.Tensor, scene_pts: torch.Tensor | None = None,
+                        scene_normals: torch.Tensor | None = None,
+                        friction: dict | None = None) -> DynamicsSpec:
     """Assemble one person's :class:`DynamicsSpec` from the frozen-at-init pieces.
 
     The RNEA model comes baked from BetterHuman at ``betas`` (real per-part
@@ -291,6 +364,17 @@ def build_dynamics_spec(mid, betas: torch.Tensor, contact_labels: torch.Tensor,
     world-down. The contact mask marks, per contact group and frame, whether the
     annotation labels any member joint of that group in contact on a valid frame —
     exactly the frames that group may carry a force.
+
+    The friction cones for the non-hand groups (feet + ankles) are frozen here, once,
+    at the warm-start pose ``q_world``: forward kinematics gives each foot/ankle its
+    world position, :func:`~tools.human_optim.friction.cone_normals` reads the wall
+    normal there off the scene cloud, and
+    :func:`~tools.human_optim.friction.cone_generators` turns it into the four pyramid
+    edges. They stay fixed while ``q`` moves — a cone recomputed every iteration would
+    be a moving target, and the pose shifts here are small (this stage starts from a
+    converged body). A cone entry with no usable normal (surface too far, neighbouring
+    normals disagreeing) keeps a free bilateral force, like a hand; without
+    ``friction`` or a scene cloud there are no cones at all.
     """
     dev = torch.device(device)
     dtype = torch.float32
@@ -321,13 +405,34 @@ def build_dynamics_spec(mid, betas: torch.Tensor, contact_labels: torch.Tensor,
             else torch.zeros((valid_t.shape[0], 0), dtype=dtype, device=dev))
     valid_pair = (valid_t[1:] & valid_t[:-1]).to(dtype)                     # (T-1,)
     fpair = (mask[1:] * mask[:-1] * valid_pair[:, None]) if C else mask[1:]
+    contact_ids = torch.tensor(rep_model, dtype=torch.long, device=dev)
+
+    # Friction pyramids on the non-hand groups, frozen at the warm-start pose.
+    cone_cols = tuple(c for c, gn in enumerate(group_names) if "hand" not in gn)
+    cone_n = cone_gen = cone_mask = cone_w = None
+    mu = math.tan(math.radians(float(friction["half_angle_deg"]))) if friction else 1.0
+    if cone_cols and friction is not None and scene_pts is not None and scene_pts.shape[0]:
+        from better_robot.kinematics import forward_kinematics
+        with torch.no_grad():
+            oMi = forward_kinematics(model, normalize_q(q_world.to(dev), J)).joint_pose_world
+            joint_xyz = oMi[:, contact_ids[list(cone_cols)], :3]            # (T, Cc, 3)
+        cone_n, cone_valid = cone_normals(joint_xyz, scene_pts, scene_normals,
+                                          int(friction["normal_k"]), float(friction["max_dist_m"]))
+        cone_mask = (mask[:, cone_cols].bool() & cone_valid).to(dtype)      # (T, Cc)
+        if bool(cone_mask.any()):
+            cone_gen = cone_generators(cone_n, mu).detach()                 # (T, Cc, 4, 3)
+            cone_w = torch.zeros((mask.shape[0], C, 1), dtype=dtype, device=dev)
+            cone_w[:, cone_cols, 0] = cone_mask
+        else:
+            cone_n = cone_mask = None
 
     return DynamicsSpec(
-        model=model, contact_ids=torch.tensor(rep_model, dtype=torch.long, device=dev),
+        model=model, contact_ids=contact_ids,
         rep_bh=rep_bh, group_names=group_names, mask=mask, fpair=fpair, valid_pair=valid_pair,
         dt=1.0 / float(fps), weights=weights, dyn_opt=dyn_opt,
         gravity_world=np.asarray(gravity_world, np.float32), valid=np.asarray(valid, bool),
-        total_mass=total_mass)
+        total_mass=total_mass, cone_cols=cone_cols, cone_normal=cone_n, cone_gen=cone_gen,
+        cone_mask=cone_mask, cone_w=cone_w, mu=mu)
 
 
 # ───────────────────────────── the stage runner ───────────────────────────
@@ -348,24 +453,32 @@ def _kindyn_phases(cfg: HumanOptimConfig) -> list[PhaseSpec]:
 
 
 def run_kindyn(source, pred: Path, cfg: HumanOptimConfig, device: str, *,
-               annotations=None, overlay: bool = False, labels_mode: str = "manual") -> Path:
-    """Joint kinematics + dynamics refinement of ``kinematic_2.npz`` → ``human_optim/kindyn_1.npz``.
+               annotations=None, overlay: bool = False, labels_mode: str = "manual",
+               bodies: str = "kinematic_2") -> Path:
+    """Joint kinematics + dynamics refinement of a refined body → ``human_optim/kindyn_1.npz``.
 
-    Starts from the converged ``kinematic_2`` body and its contact labels, and
+    Starts from a converged body and its contact labels, and
     optimizes the pose and per-contact-group forces together. The output carries
     the refined-body fields (same schema as ``kinematic_2.npz``) plus the solved
     force fields, so it works both as a body source and as an inspectable force
-    artifact. ``labels_mode='manual'`` (default) reads the human annotation
-    ``data/<stem>.npz``; ``'auto'`` reads our own ``contacts_2.npz`` — the
-    contact readout measured on the very body this stage starts from.
+    artifact. ``bodies`` picks the starting body — ``'kinematic_2'`` (default) or
+    ``'kinematic_1'`` when the chain skips kinematics_2 — and with it the matching
+    contact readout (``contacts_2`` / ``contacts_1``). ``labels_mode='manual'``
+    (default) reads the human annotation ``data/<stem>.npz`` instead; ``'auto'``
+    reads that readout — measured on the very body this stage starts from.
     """
     knobs = cfg.knobs
     pred = Path(pred)
     tag = "human_optim/kindyn_1"
 
-    kin_path = paths.body_path(pred, "kinematic_2")
+    if bodies not in ("kinematic_1", "kinematic_2"):
+        raise SystemExit(f"[{tag}] [stages.kindyn_1].bodies must be 'kinematic_1' or "
+                         f"'kinematic_2', got {bodies!r}")
+    contacts_tag = bodies.removeprefix("kinematic_")
+    kin_path = paths.body_path(pred, bodies)
     if not kin_path.exists():
-        raise SystemExit(f"missing {kin_path} — run human_optimization --stages kinematics_2 first")
+        raise SystemExit(f"missing {kin_path} — run human_optimization --stages "
+                         f"{bodies.replace('kinematic', 'kinematics')} first")
     kin = dict(np.load(kin_path, allow_pickle=True))
     pose = dict(np.load(pred / "sapiens" / "pose.npz", allow_pickle=True))
     human = dict(np.load(pred / "geometry" / "human.npz", allow_pickle=True))
@@ -393,11 +506,27 @@ def run_kindyn(source, pred: Path, cfg: HumanOptimConfig, device: str, *,
         gravity_world = np.array([0.0, 1.0, 0.0], np.float32)
         gsrc = "fallback_down(no geocalib)"
 
-    print(f"[{tag}] {pred.name}: P={P} N={N} fps={fps:.1f}  gravity={gravity_world.round(2)} ({gsrc})")
+    # Friction-cone scene cloud: UNGATED (conf_drop_q = 0) so a low-confidence voxel under a
+    # foot still carries a normal — the cone only needs a direction, and dropping voxels there
+    # would silently turn cones off. Separate from the gated cloud the kinematic scene terms use.
+    friction = knobs.get("friction")
+    cone_pts = cone_nrm = None
+    if friction is not None and (pred / "geometry" / "scene.npz").exists():
+        sc = dict(np.load(pred / "geometry" / "scene.npz", allow_pickle=True))
+        cone_pts, cone_nrm, _ = load_scene_cloud(
+            sc, cam_centers, conf_drop_q=0.0, k=int(friction["normal_k"]), device=device)
+        print(f"[{tag}] friction cones ON ({cone_pts.shape[0]} scene pts, "
+              f"half-angle {float(friction['half_angle_deg']):.0f}°)")
+    else:
+        print(f"[{tag}] no scene/[friction] — friction cones OFF")
+
+    print(f"[{tag}] {pred.name}: P={P} N={N} fps={fps:.1f}  bodies={bodies}  "
+          f"gravity={gravity_world.round(2)} ({gsrc})")
     ann_contacts = ann_names = ann_oids = cnt_oids = cnt_contact = None
     if labels_mode == "auto":
         kin_names = [str(x) for x in np.asarray(kin["joint_names"]).tolist()]
-        cnt_oids, cnt_contact, _ = load_auto_contacts(pred, "2", kin_path, N, kin_names, tag)
+        cnt_oids, cnt_contact, _ = load_auto_contacts(
+            pred, contacts_tag, kin_path, N, kin_names, tag)
     else:
         ann_path = resolve_annotation_path(source, annotations)
         ann = dict(np.load(ann_path, allow_pickle=True))
@@ -419,7 +548,7 @@ def run_kindyn(source, pred: Path, cfg: HumanOptimConfig, device: str, *,
     betas_out = []
     force_world_p, torque_p, base_wrench_p = [], [], []
     joints_world_p, joint_torque_p, raw_forces_p, rep_names_p = [], [], [], []
-    total_mass_p = []
+    total_mass_p, joint_contact_p = [], []
     for p in range(P):
         oid = int(object_ids[p])
         vmask = np.asarray(kin["valid_mask"][p], dtype=bool)
@@ -449,10 +578,12 @@ def run_kindyn(source, pred: Path, cfg: HumanOptimConfig, device: str, *,
             contact_labels = torch.full((N, mid.num_joints), -1, dtype=torch.int8, device=device)
             contact_labels[~vmask] = -1
             print(f"[{tag}] person obj_id={oid}: NO contact labels (kinematic re-fit, no forces)")
+        joint_contact_p.append((contact_labels == 1).cpu().numpy())
 
         spec = build_dynamics_spec(
             mid, betas_mean, contact_labels, vmask, gravity_world,
-            groups=groups, weights=weights, dyn_opt=dyn_opt, fps=fps, device=device)
+            groups=groups, weights=weights, dyn_opt=dyn_opt, fps=fps, device=device,
+            q_world=q_world, scene_pts=cone_pts, scene_normals=cone_nrm, friction=friction)
 
         print(f"[{tag}] person obj_id={oid} ({int(vmask.sum())}/{N} valid) …")
         q_opt, before, after, aux = optimize_person(
@@ -488,6 +619,8 @@ def run_kindyn(source, pred: Path, cfg: HumanOptimConfig, device: str, *,
         contact_force_joints=np.array(rep_names_p, dtype="<U16"),
         total_mass=np.stack(total_mass_p, 0),
         gravity_world=gravity_world.astype(np.float32),
+        joint_contact=np.stack(joint_contact_p, 0),          # (P, N, 52) the labels the solve used
+        source_bodies=np.array(bodies, dtype="U16"),
     )
     save = _save_body(out_path, mid, out, betas_out, object_ids, kin["valid_mask"],
                       N, P, H, W, fps, extra=extra)

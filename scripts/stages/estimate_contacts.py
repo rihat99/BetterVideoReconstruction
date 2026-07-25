@@ -25,6 +25,13 @@ out-of-frame joints are zero-confidence; approaching no-contact joints retain st
 motion evidence even near the wall, while stationary no-contact joints are untrusted
 regardless of their reconstructed wall distance.
 
+Finally, when the clip carries an external image model's per-limb contact
+probabilities (``predictions/contacts.npz``), the two witnesses are fused by adding
+their log-odds (:mod:`tools.human_optim.fusion`): the model can turn a limb on where
+the geometry knows nothing, or off where the geometry is barely sure, and clipping its
+probability bounds how far it may ever move a label. Without that file the stage is
+unchanged (bit-for-bit).
+
 Renders ``contacts_1_overlay.mp4``: the projected SMPL-X skeleton, joints **red**
 in contact (dot size ∝ confidence) / **green** otherwise.
 
@@ -35,10 +42,12 @@ Run from CLI::
 
 Reads:  human_optim/kinematic_1.npz, geometry/scene.npz, geometry/transform.npz,
         geometry/human.npz (optional for old artifacts; supplies depth-fit diagnostics)
+        predictions/contacts.npz (optional; the image model's per-limb probabilities)
 Writes: human_optim/contacts_1.npz          (joint_contact (P,N,J) bool + signed/Euclidean
                                              scene-distance diagnostics + merged + auditable
                                              visibility/evidence terms + label_confidence +
-                                             per-joint depth gap/count/trust)
+                                             per-joint depth gap/count/trust + the fused
+                                             prediction probabilities and what they changed)
         human_optim/contacts_1_overlay.mp4  ([contacts].overlay; default on)
 """
 
@@ -74,6 +83,8 @@ from tools.human_optim.confidence import (  # noqa: E402
     CONTACT_CONFIDENCE_DEFAULTS, CONTACT_CONFIDENCE_METHOD,
     CONTACT_CONFIDENCE_SCHEMA, confidence_config, joint_label_confidence,
     occlusion_group_ids)
+from tools.human_optim.fusion import (  # noqa: E402
+    FUSION_METHOD, PRED_LIMBS, fuse_person, load_pred_prob_limb)
 from tools.human_optim.qmath import normalize_q  # noqa: E402
 from tools.smplx_robot import load_smplx_mid  # noqa: E402
 
@@ -102,6 +113,8 @@ def _load_config(path: Path) -> dict:
     comp = c.setdefault("completion", {})   # detector-completion knobs (defaults in completion.py)
     for key, val in COMPLETION_DEFAULTS.items():
         comp.setdefault(key, val)
+    # Predicted-contact fusion: how far the image model may move a label (see fusion.py).
+    c.setdefault("fusion", {}).setdefault("pred_clamp", 0.10)
     d = cfg.setdefault("depth_fit", {})
     for key, val in DEPTH_FIT_DEFAULTS.items():
         d.setdefault(key, val)
@@ -189,6 +202,22 @@ def run(source: str | Path, predictions_dir: str | Path, config_path: str | Path
     parents = np.asarray(kin["parents"], dtype=np.int32)
     valid_mask = np.asarray(kin["valid_mask"], dtype=bool)
     fps = float(tr.get("fps", kin.get("fps", 30.0)))   # drift window needs the true clip fps
+
+    # The image model's per-limb contact probability, aligned to this body's people and
+    # frames. Absent file ⇒ fusion is a no-op and every value below is unchanged. A
+    # prediction on an invalid body frame is unusable (there is no label to fuse it with).
+    pred_clamp = float(cc["fusion"]["pred_clamp"])
+    pred_prob_limb = load_pred_prob_limb(pred, object_ids, np.asarray(tr["frame_indices"]))
+    do_fusion = pred_prob_limb is not None
+    if do_fusion:
+        pred_prob_limb[~valid_mask] = np.nan
+        n_pred = int(np.isfinite(pred_prob_limb).any(-1).sum())
+        print(f"[estimate_contacts] predicted contacts: {n_pred}/{P * N} person-frames, "
+              f"clamp {pred_clamp:.2f}")
+    else:
+        pred_prob_limb = np.full((P, N, len(PRED_LIMBS)), np.nan, np.float32)
+        print("[estimate_contacts] fusion: OFF (no predictions/contacts.npz)")
+    fusion_changed = np.zeros((P, N, len(PRED_LIMBS)), dtype=np.int8)
 
     extr = torch.as_tensor(tr["extrinsics"], dtype=torch.float32, device=device)       # (N,4,4)
     K = torch.as_tensor(tr["intrinsics_px_orig"], dtype=torch.float32, device=device)  # (N,3,3)
@@ -411,6 +440,22 @@ def run(source: str | Path, predictions_dir: str | Path, config_path: str | Path
         for name, val in terms.items():
             val[~valid_mask[p]] = 0.0
             confidence_all[name][p] = val
+        # Predicted-contact fusion runs LAST, on the finished labels and confidence: the
+        # geometric witnesses stay exactly as they were, and only the limb-frames where
+        # the model disagrees strongly enough move (with their own fused confidence).
+        if do_fusion:
+            jc_np, fused_conf, fused_src, changed = fuse_person(
+                jc_np, confidence_all["label_confidence"][p], contact_source[p],
+                pred_prob_limb[p], min_frames=int(cc["min_frames"]), pred_clamp=pred_clamp)
+            joint_contact[p] = jc_np
+            contact_source[p] = fused_src
+            confidence_all["label_confidence"][p] = fused_conf
+            fusion_changed[p] = changed
+            flips = ", ".join(f"{name} +{int((changed[:, c] > 0).sum())}/"
+                              f"-{int((changed[:, c] < 0).sum())}"
+                              for c, name in enumerate(PRED_LIMBS))
+            print(f"[estimate_contacts] obj_id={int(object_ids[p])}: fusion rescued/vetoed "
+                  f"limb-frames — {flips}")
         n_cf = int(jc_np.any(1).sum())
         print(f"[estimate_contacts] obj_id={int(object_ids[p])}: {n_cf}/{N} frames with "
               f"≥1 joint in contact ({int(jc_np.sum())} joint-frame contact instances)")
@@ -460,7 +505,13 @@ def run(source: str | Path, predictions_dir: str | Path, config_path: str | Path
             "static-support-v1" if do_completion else "skipped(post-enforcement body)"),
         contact_label_schema=np.int32(1),
         contact_label_method=np.str_(
-            "completed-static-support-v1" if do_completion else "detector-v1"),
+            ("completed-static-support-v1" if do_completion else "detector-v1")
+            + (f"+{FUSION_METHOD}" if do_fusion else "")),
+        pred_prob_limb=pred_prob_limb.astype(np.float32),
+        pred_limbs=np.array(PRED_LIMBS),
+        fusion_method=np.str_(FUSION_METHOD if do_fusion else "none"),
+        fusion_pred_clamp=np.float32(pred_clamp),
+        fusion_changed=fusion_changed,
         joint_depth_gap_cm=joint_depth_gap_cm,
         joint_depth_points=joint_depth_points,
         joint_depth_trust=joint_depth_trust,

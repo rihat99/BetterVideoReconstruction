@@ -57,7 +57,7 @@ skip_existing = true       # skip items whose task output already exists
 dtype = "fp16"             # model dtype hint
 
 [scale]                     # human-anchored metric scale (runs AFTER fuse; rescales geometry/ in place)
-conf_drop_q = 0.3           # drop this lowest-confidence fraction of cloud points per frame (ruler + pre-fit)
+conf_drop_q = 0.0           # PETER: static-camera VGGT confidence is uniformly low at the limbs — the 0.3 cut hid the hands from the prefit, freezing the arms at the wrong depth (01_hanging wrist std 6.6 → 0.3 cm once un-gated)
 min_inlier_verts = 50       # skip a frame with fewer inlier vertices than this
 mad_k = 3.0                 # reject frames beyond this many MADs from the median log-scale
 skip_existing = false       # skip when scale.npz exists and the world is already metric
@@ -79,9 +79,9 @@ vertex_subsample = 3000     # body vertices used for chamfer
 
 [fuse]                      # backproject VGGT → up-to-scale point clouds → geometry/ (runs BEFORE scale)
 voxel_px = 5.5              # scene merge voxel size, in pixel footprints at the median scene depth
-conf_drop_q = 0.3           # drop this lowest-confidence fraction of VGGT depth (scene only; human keeps all)
+conf_drop_q = 0.0           # PETER: the 0.3 cut deleted the campus board outright (VGGT rebuilds it at the right depth, 5.8 m vs wall 6.4 m, but low-confidence — static camera); un-gated the board survives
 edge_rtol = 0.04            # depth-edge (flying-pixel) filter tolerance; 0 disables
-human_dilate = 8            # grow the human mask N px before subtracting from the scene (cleaner scene); 0 disables
+human_dilate = 2            # PETER: 8 px erased the gripped-rung band around the hands; 2 keeps it while still cutting the person
 min_scene_voxels = 25       # drop scene clusters smaller than this many connected voxels (floating blobs); 1 disables
 person_obj_ids = ""         # restrict SAM3 ids treated as people, e.g. "0,1"; empty → all
 skip_existing = false      # skip when geometry/transform.npz exists

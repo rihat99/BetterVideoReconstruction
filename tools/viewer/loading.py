@@ -52,8 +52,8 @@ def _load_force_data(pred: Path, filename: str) -> dict | None:
     Shared by every source that solves contact forces: ``dynamics.npz`` (force-only)
     and the kinematics+dynamics bodies ``kindyn_1.npz`` / ``kindyn_manual.npz`` (the
     manual-annotation reference chain). All store the same force fields, so the viewer
-    draws them the same way. ``joint_contact`` is optional — the kindyn npz omit it,
-    and the caller then reads which joints are in contact from where the solved
+    draws them the same way. ``joint_contact`` is optional — older kindyn npz omit
+    it, and the caller then reads which joints are in contact from where the solved
     contact force is non-zero.
     """
     f = pred / "human_optim" / filename
@@ -167,7 +167,7 @@ def _load_skeleton(pred: Path, body_fn: str = "kinematic_1.npz",
             valid_confidence = (
                 (schema, method) in (
                     (5, "depth-trust-motion-v1"), (6, "ray-occlusion-motion-v1"),
-                    (7, "source-conditional-v1"))
+                    (7, "source-conditional-v1"), (8, "source-conditional-v1"))
                 and candidate.shape == expected and np.isfinite(candidate).all()
                 and not bool(((candidate < 0.0) | (candidate > 1.0)).any())
                 and saved_body_hash == current_body_hash

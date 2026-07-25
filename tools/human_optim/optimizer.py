@@ -335,6 +335,7 @@ def optimize_person(
     frame_valid: torch.Tensor | None = None,
     cam_centers: torch.Tensor | None = None,
     auto_contact: dict | None = None,
+    preset_labels: torch.Tensor | None = None,
     dynamics: DynamicsSpec | None = None,
 ) -> tuple[torch.Tensor, Metrics, Metrics, dict]:
     """Optimize one person over ``phases``. Returns ``(q_world_opt, before, after, aux)``.
@@ -383,6 +384,13 @@ def optimize_person(
     (``(T, 3)`` world camera centers) drives the radial-velocity damper + its
     diagnostic; both default off.
 
+    ``preset_labels`` (optional ``(T, num_joints)`` int8, auto mode only) supplies those
+    labels from OUTSIDE instead — an external model's per-limb contact prediction. The
+    geometric gates are skipped; everything else about auto mode is kept, including the
+    phase boundary the labels bind at and the pre-enforcement ``drift_pre`` measurement,
+    so the downstream contact readout still gates on a drift measured before any
+    attraction acted.
+
     ``frame_valid`` (optional ``(T,)`` bool) excludes untracked frames — whose
     converter pose was held from the nearest valid frame and so is glued to the
     moving camera — from the init-projection anchor and the scene terms (just as
@@ -394,7 +402,8 @@ def optimize_person(
 
     ``dynamics`` (optional :class:`~tools.human_optim.kindyn.DynamicsSpec`) turns
     on the **kindyn_1** joint kinematics + dynamics mode: a world-force leaf per
-    contact group per frame is added, the RNEA base wrench / torques are threaded
+    contact group per frame is added (plus a friction-pyramid activation leaf where
+    the spec froze a cone), the RNEA base wrench / torques are threaded
     through the shared forward (recomputed from the *current* ``q`` so the physics
     residual pulls on the pose), the five dynamics terms are registered, and the
     forces are warm-started at the initial pose before the phases run. The solved
@@ -422,11 +431,14 @@ def optimize_person(
     init_gm_px = float(knobs["reproj_init"]["gm_scale_px"]) if use_init else 0.0
     use_pen = scene_pts is not None
     use_ann = contact_labels is not None          # manual labels present from the start (kinematics_2)
-    # kinematics_1 auto-contact mode: detect labels once at the first scene phase (below) then
-    # freeze. Guarded on the ann_attraction weight-max, so a 0-weight column never detects
-    # (keeps parity with HEAD). Auto attraction reads its band from [auto_contact]; the manual
-    # (kinematics_2) path keeps [ann_attraction].
-    use_auto = auto_contact is not None and not use_ann and _wmax("ann_attraction") > 0.0
+    # kinematics_1 auto-contact mode: bind labels once at the first scene phase (below) then
+    # freeze. DETECTION is guarded on the ann_attraction weight-max, so a 0-weight column never
+    # runs the detector (keeps parity with HEAD); preset labels need no such guard — they cost
+    # nothing to bind and can drive the velocity damper alone, with the attraction off. Auto
+    # attraction reads its band from [auto_contact]; the manual (kinematics_2) path keeps
+    # [ann_attraction].
+    use_auto = auto_contact is not None and not use_ann and (
+        preset_labels is not None or _wmax("ann_attraction") > 0.0)
     ann_at_cfg = auto_contact if use_auto else (knobs["ann_attraction"] if use_ann else None)
     ann_rep_cfg = knobs["ann_repulsion"] if use_ann else None   # clearance repulsion is manual-only
     ann_vel_ang_w = float(knobs.get("ann_velocity", {}).get("angular_weight", 0.0))  # angular/linear ratio
@@ -582,18 +594,23 @@ def optimize_person(
         st.put_lazy("jerk", lambda: st["accel"][1:] - st["accel"][:-1])
         st.put_lazy("snap", lambda: st["jerk"][1:] - st["jerk"][:-1])
         if dynamics is not None:
-            dynamics.populate(st, f_world)
+            dynamics.populate(st, f_free, gen_u)
         return st
 
     problem = Problem(_forward)
     q = problem.add_leaf("q", q_world_init)
     nq = q.shape[1]
-    # kindyn_1: a world-force leaf per contact group per frame + the five dynamics
-    # terms (registered here, active only where their kindyn column weight is > 0).
-    f_world = None
+    # kindyn_1: a free world-force leaf per contact group per frame — plus, where a
+    # friction cone is frozen (feet/ankles), a second leaf of four pyramid-generator
+    # activations that replaces it — and the five dynamics terms (registered here,
+    # active only where their kindyn column weight is > 0).
+    f_free = gen_u = None
     if dynamics is not None:
-        f_world = problem.add_leaf("f_world", dynamics.zero_forces())
-        dynamics.register(problem, f_world)
+        f_free = problem.add_leaf("f_free", dynamics.zero_forces())
+        gen_init = dynamics.zero_generators()
+        if gen_init is not None:
+            gen_u = problem.add_leaf("gen_u", gen_init)
+        dynamics.register(problem)
 
     def _build_scene_cand():
         """Per-frame padded scene candidates from the *current* pose, or None.
@@ -643,6 +660,26 @@ def optimize_person(
         if frame_valid is not None:
             keep = keep & frame_valid[:, None]
         lab = torch.full((jc.shape[0], mid.num_joints), -1, dtype=torch.int8, device=q.device)
+        lab[keep] = 1
+        return lab, drift
+
+    def _preset_auto_labels() -> tuple[torch.Tensor, torch.Tensor]:
+        """The ``preset_labels`` variant of :func:`_detect_auto_labels`: gates out, drift in.
+
+        Somebody outside already decided which joints touch (an external model's
+        per-limb prediction), so the scene-SDF / stillness gates are skipped. Everything
+        else is identical — the same group + validity restriction, the same positives-only
+        ``1`` / ``-1`` encoding, and the same ``joint_drift`` of this very pose, so the
+        persisted ``drift_pre`` stays the honest pre-enforcement stillness measurement the
+        contact readout gates on."""
+        ac = auto_contact
+        with torch.no_grad():
+            jw_full = mid.forward(betas, normalize_q(q, mid.num_joints)).joints_world.tensor()[..., :3]
+        drift = joint_drift(jw_full, fps=fps, window_s=float(ac["window_s"]), valid_mask=frame_valid)
+        keep = (preset_labels.to(q.device) == 1) & auto_group_mask[None, :]
+        if frame_valid is not None:
+            keep = keep & frame_valid[:, None]
+        lab = torch.full_like(keep, -1, dtype=torch.int8)
         lab[keep] = 1
         return lab, drift
 
@@ -781,12 +818,18 @@ def optimize_person(
     def _phase_start(ph: PhaseSpec):
         def on_start() -> None:
             scene_cell["cand"] = _build_scene_cand() if ph.scene else None
-            if use_auto and contact_labels is None and scene_cell["cand"] is not None:
-                lab, auto_drift_pre[0] = _detect_auto_labels()   # once at the first scene phase, then frozen
+            # Bind the frozen kinematics_1 labels once, at the first scene phase (the body has
+            # seated by then). Preset labels need no scene candidates — only the geometric
+            # detector reads the scene — so they bind at the first scene phase regardless.
+            if use_auto and contact_labels is None and ph.scene and (
+                    preset_labels is not None or scene_cell["cand"] is not None):
+                lab, auto_drift_pre[0] = (_preset_auto_labels() if preset_labels is not None
+                                          else _detect_auto_labels())
                 _bind_labels(lab)
+                src = "predicted" if preset_labels is not None else "detected"
                 per_g = " ".join(f"{g}={int((lab[:, m] == 1).any(1).sum())}"
                                  for g, m in auto_contact["group_members"].items() if m)
-                print(f"    [auto-contact] frozen labels @ {ph.name}: "
+                print(f"    [auto-contact] frozen {src} labels @ {ph.name}: "
                       f"{int((lab == 1).any(1).sum())}/{lab.shape[0]} frames w/ contact  ({per_g})")
             if use_contact_patch and use_pen and ph.scene:
                 with torch.no_grad():
@@ -812,8 +855,11 @@ def optimize_person(
     # kindyn_1: seed the forces at the (frozen) initial pose so the base-wrench
     # gradient on q is meaningful from the first phase (zero forces ⇒ freefall).
     if dynamics is not None:
+        warm_f, warm_gen = dynamics.warmstart(normalize_q(q_world_init, mid.num_joints))
         with torch.no_grad():
-            f_world.copy_(dynamics.warmstart(normalize_q(q_world_init, mid.num_joints)))
+            f_free.copy_(warm_f)
+            if gen_u is not None:
+                gen_u.copy_(warm_gen)
     run_phases(problem, engine_phases, lr=float(oc["lr"]), lr_decay=float(oc["lr_decay"]),
                lr_lbfgs=float(oc["lr_lbfgs"]), lbfgs_history=int(oc["lbfgs_history"]))
 
@@ -822,5 +868,6 @@ def optimize_person(
     aux = {"drift_pre": auto_drift_pre[0],                         # (T, J) refine-start drift, or None
            "auto_labels": contact_labels if use_auto else None}   # (T, J) int8 frozen labels, or None
     if dynamics is not None:
-        aux["dynamics"] = dynamics.extract(q_opt, f_world.detach(), mid)
+        aux["dynamics"] = dynamics.extract(q_opt, f_free.detach(),
+                                           None if gen_u is None else gen_u.detach(), mid)
     return q_opt, before, mk(q_opt), aux

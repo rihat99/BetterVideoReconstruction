@@ -36,7 +36,7 @@ _DEFAULT_CONFIG = _REPO_ROOT / "configs" / "corpus.toml"
 _CONTACTS_CLI = _STAGES_DIR / "estimate_contacts.py"
 # Pinned copy of tools/human_optim/confidence.py's schema/method (kept literal
 # so the driver stays torch-free); update together with that module.
-_CONFIDENCE_SCHEMA = 7
+_CONFIDENCE_SCHEMA = 8
 _CONFIDENCE_METHOD = "source-conditional-v1"
 _IMPLEMENTATION_INPUTS = (
     _CONTACTS_CLI,
@@ -44,6 +44,7 @@ _IMPLEMENTATION_INPUTS = (
     _REPO_ROOT / "tools" / "human_optim" / "contacts.py",
     _REPO_ROOT / "tools" / "human_optim" / "depth_fit.py",
     _REPO_ROOT / "tools" / "human_optim" / "completion.py",
+    _REPO_ROOT / "tools" / "human_optim" / "fusion.py",
     _REPO_ROOT / "tools" / "human_optim" / "dynamics.py",
     _REPO_ROOT / "tools" / "human_optim" / "friction.py",
 )

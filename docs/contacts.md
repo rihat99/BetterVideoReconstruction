@@ -55,7 +55,12 @@ Each component is filtered to spans of at least 3 valid frames before the
 union. Additions are written to the group's own joint (wrist / ankle / foot)
 only. The solved force magnitudes are saved (`limb_force_n`), and
 `contact_source` is a bitmask per joint-frame: 1 = detector, 2 = gate,
-4 = force.
+4 = force, 8 = prediction fusion.
+
+After completion and confidence, a final **fusion** step folds in the external
+image model's per-limb contact predictions where a `predictions/` file exists —
+one clamped log-odds sum per limb-frame, no gates. It has its own doc:
+[contact_fusion.md](contact_fusion.md).
 
 ### The static support solve
 

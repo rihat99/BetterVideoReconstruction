@@ -64,7 +64,9 @@ import torch
 # Artifact version of the confidence written to contacts_<tag>.npz. Bump both
 # together. Light-weight consumers keep literal copies pinned to these values:
 # scripts/corpus.py, scripts/export_contact_dataset.py, tools/viewer/loading.py.
-CONTACT_CONFIDENCE_SCHEMA = 7
+# 8: labels the predicted-contact fusion changed carry ITS confidence (the fused
+#    two-witness agreement, tools/human_optim/fusion.py), not the terms below.
+CONTACT_CONFIDENCE_SCHEMA = 8
 CONTACT_CONFIDENCE_METHOD = "source-conditional-v1"
 
 CONTACT_CONFIDENCE_DEFAULTS: dict[str, float] = {

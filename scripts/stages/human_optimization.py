@@ -50,8 +50,8 @@ _DEFAULT_CONFIG = _REPO_ROOT / "configs" / "human_optimization.toml"
 def run(source, predictions_dir, config_path, *, stages=None, annotations=None) -> None:
     """Run the requested human-optimization stages in dependency order.
 
-    Per-stage options (overlay, kinematics_2 label source, dynamics body/device)
-    come from the config's ``[stages.<name>]`` tables.
+    Per-stage options (overlay, label source, starting body, device) come from the
+    config's ``[stages.<name>]`` tables.
     """
     cfg = load_config(config_path)
     requested = stages if stages else list(cfg.run)
@@ -63,8 +63,10 @@ def run(source, predictions_dir, config_path, *, stages=None, annotations=None) 
 
     kin_stages = [s for s in ("root", "kinematics_1") if s in requested]
     if kin_stages:
+        k1 = opts.get("kinematics_1", {})
         run_kinematic(source, pred, cfg, kin_stages, cfg.device,
-                      overlay=bool(opts.get("kinematics_1", {}).get("overlay", False)))
+                      overlay=bool(k1.get("overlay", False)),
+                      labels_mode=str(k1.get("labels", "auto")))
     if "kinematics_2" in requested:
         k2 = opts.get("kinematics_2", {})
         run_kinematics_2(source, pred, cfg, cfg.device, annotations=annotations,
@@ -78,7 +80,8 @@ def run(source, predictions_dir, config_path, *, stages=None, annotations=None) 
         kd = opts.get("kindyn_1", {})
         run_kindyn(source, pred, cfg, cfg.device, annotations=annotations,
                    overlay=bool(kd.get("overlay", False)),
-                   labels_mode=str(kd.get("labels", "manual")))
+                   labels_mode=str(kd.get("labels", "manual")),
+                   bodies=str(kd.get("bodies", "kinematic_2")))
 
 
 def main(argv=None) -> int:

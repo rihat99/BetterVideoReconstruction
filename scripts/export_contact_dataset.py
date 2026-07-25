@@ -65,7 +65,7 @@ N_JOINTS_52 = 52
 DATASET_SCHEMA_VERSION = 3
 # Pinned copy of tools/human_optim/confidence.py's schema/method (kept literal
 # so the exporter stays torch-free); update together with that module.
-CONTACT_CONFIDENCE_SCHEMA = 7
+CONTACT_CONFIDENCE_SCHEMA = 8
 CONTACT_CONFIDENCE_METHOD = "source-conditional-v1"
 
 

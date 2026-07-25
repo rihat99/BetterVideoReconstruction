@@ -140,6 +140,17 @@ contact. The stillness measured *before* the attraction acted (`drift_pre`) is s
 into the output, because the readout later must not be gamed by the very damping this
 stage applied — that circularity was observed and is the reason for the rule.
 
+There is a second label source: `[stages.kinematics_1] labels = "predicted"` swaps the
+geometric detector for the external image model's per-limb contact predictions
+(`predictions/contacts.npz`, see [contact_fusion.md](contact_fusion.md)). Everything
+else is identical — same binding point, same freeze, same `drift_pre` honesty. This is
+the peter force-plate configuration (`configs/human_optimization_peter.toml`): static
+cameras give VGGT no parallax, so its confidence is uniformly low at the limbs and the
+geometric detector has nothing to detect against — but the un-gated clouds (the peter
+configs set `conf_drop_q = 0` at fuse/scale/chamfer) do contain the board and the
+hands, so chamfer stays on to anchor depth, the predicted labels drive the velocity
+damper, and kinematics_2 seats the labeled limbs on the recovered geometry.
+
 ## The phase plan
 
 | phase | optimizer | DOFs | scene | purpose |
@@ -279,19 +290,25 @@ contact forces **together**, so the physics residual can push back on the motion
 
 It starts from the converged `kinematics_2` body and its contact labels — by
 default `contacts_2.npz`, the readout measured on that very body
-(`[stages.kindyn_1] labels = "manual"` switches back to the annotation). The
+(`[stages.kindyn_1] labels = "manual"` switches back to the annotation, and
+`bodies = "kinematic_1"` starts from `kinematic_1` + `contacts_1` for chains that
+skip `kinematics_2`). The
 objective is the full `kinematics_2` objective (reprojection, priors, motion
 smoothness, scene penetration, the annotation terms — chamfer is off here too:
 kindyn starts from the repaired body, and chamfer would pull it back toward the
 spaghetti-prone depth the repair just left) **plus** the `dynamics` terms
 (`base_wrench`, `force_magnitude`, `force_smooth_mag`/`_dir`, `torque_smooth`), with
-one free world-force vector per contact group per frame added as extra optimization
-variables. This first version keeps the force model simple: **no friction cones**
-(as the pose moves, the precomputed scene normals the cones need go stale; cones can
-come back later).
+one world-force vector per contact group per frame added as extra optimization
+variables. Feet and ankles push through the same **friction pyramids** the
+`dynamics` stage uses (§ above) — a force built as a nonnegative mix of the four
+pyramid edges cannot leave the cone, so the constraint costs no weight — with one
+difference: the cone frames are read off the scene **once, at the warm-start pose**,
+and then frozen. The pose moves during this solve, so re-reading the normals every
+iteration would make the cone itself a moving target; the pose shifts here are small
+because the body starts converged. Hands stay free (they grasp).
 
 **How it runs.** Forces are established first by a quick frozen-pose solve (like the
-`dynamics` stage's, but with free forces — no cones — and this stage's weights) so
+`dynamics` stage's, but with this stage's weights) so
 they start physically reasonable — with zero forces the body is in freefall and the
 base wrench says nothing useful about the pose. Then a single joint **L-BFGS** polish
 moves the pose and forces together. L-BFGS is the right tool here: the pose and the

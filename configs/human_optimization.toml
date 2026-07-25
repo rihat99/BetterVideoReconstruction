@@ -19,6 +19,9 @@ iters = { root = 150 }
 # frozen, then drive the attraction (ann_attraction). ann_attraction[kin1]=0 gives a pure visual fit.
 iters = { full = 300, refine = 200, lbfgs = 30 }
 overlay = false          # reprojected-keypoint debug overlay → human_optim/kinematic_1_overlay.mp4
+labels = "auto"          # where the frozen labels come from: "auto" (the geometric detector above) |
+                         # "predicted" (predictions/contacts.npz — an external image model's per-limb
+                         # contact probability; same frozen positives-only convention, gates skipped)
 
 [stages.kinematics_2]
 # Contact-patch repair. Both knobs matter: the acquisition WEIGHT sets the pull's force balance
@@ -35,15 +38,18 @@ device = "cuda"          # GPU: the new BetterRobot batched-adjoint torch RNEA i
 bodies = "kinematic_1"   # which refined body the force solve reads (kinematic_1 | kinematic_2)
 
 [stages.kindyn_1]
-# Joint kinematics + dynamics. Starts from the converged kinematic_2 body + its contact labels
-# (contacts_2 by default) and optimizes pose AND per-contact-group forces together, so the
-# RNEA base wrench can reshape the motion instead of only being absorbed by forces. Forces are
+# Joint kinematics + dynamics. Starts from a converged body + its contact labels and optimizes
+# pose AND per-contact-group forces together, so the RNEA base wrench can reshape the motion
+# instead of only being absorbed by forces. Forces are
 # warm-started (a frozen-q solve, [dynamics_optimizer] knobs), then ONE joint L-BFGS phase
 # fine-tunes pose + forces together — Adam was tried and is destructive here (it cannot
-# co-adapt N-scale forces to a moving pose; the wrench spikes and the motion wrecks). No
-# friction cones in this first version (as q moves the precomputed scene normals go stale).
+# co-adapt N-scale forces to a moving pose; the wrench spikes and the motion wrecks). Feet and
+# ankles push through the [friction] cones, frozen once at the warm-start pose (the pose moves
+# during the solve, so re-reading the scene normals every iteration would make the cone a
+# moving target; the shifts here are small because the body starts converged).
 iters = { lbfgs = 150 }  # one joint L-BFGS polish (pose + forces); Adam can't co-adapt N-scale forces
-labels = "auto"          # contact labels: "auto" (contacts_2 — the pipeline default; manual annotations are metrics-only) | "manual" (data/<stem>.npz)
+bodies = "kinematic_2"   # which refined body to start from (kinematic_2 | kinematic_1 — for chains that skip kinematics_2); picks the matching contacts_<n> too
+labels = "auto"          # contact labels: "auto" (the contacts_<n> of `bodies` — the pipeline default; manual annotations are metrics-only) | "manual" (data/<stem>.npz)
 overlay = false          # reprojected-keypoint debug overlay → human_optim/kindyn_1_overlay.mp4
 
 #                       root  kin1  kin2   dyn  kindyn1
@@ -215,6 +221,11 @@ force_drift_m = 0.15   # force: group drift below this (m); looser than the gate
 min_span = 3           # drop completion runs shorter than this many frames
 work_vstar_mps = 0.2   # work penalty soft velocity: force on a faster limb is expensive
 gap_dstar_m = 0.05     # gap penalty soft distance: force further from the wall is expensive
+
+# Fuse an image model's per-limb contact probabilities (predictions/contacts.npz, when the
+# clip has them) into the finished labels by adding log-odds. See tools/human_optim/fusion.py.
+[contacts.fusion]
+pred_clamp = 0.10      # clip the model probability into [clamp, 1-clamp]: bounds its say at ±logit(1-clamp)
 
 [depth_fit]
 cell_px = 8          # coarse z-buffer cell at original video resolution
