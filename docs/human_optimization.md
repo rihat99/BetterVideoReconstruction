@@ -210,7 +210,11 @@ closest vertex:
   and 0.93 → 0.26 mm while the true contacts still ended up at the same wall distance
   as the manual-annotation chain. Acquisition's fading pull plus the ordinary
   penetration term seat the limb on their own. The term stays wired; raise its weight
-  to re-enable.
+  to re-enable. Propagated over all 13 `out/` scenes (2026-07-26), the change plus the
+  cones-off default moved the mean kindyn_1 body from 14.2 → 12.5 mm jitter and
+  2.1 → 1.0 mm mean penetration, improving every scene's penetration and 12/13
+  scenes' jitter, with the contacts_2 labels unchanged (pooled F1 .833 before and
+  after).
 
 An earlier version that simply strengthened `ann_attraction` (which pulls *all* of a
 group's vertices) buried the body many centimetres into the wall on every test scene:
