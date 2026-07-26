@@ -106,9 +106,9 @@ def _load_sensor_forces(pred: Path) -> dict | None:
     rig's four load-cell channels rotated into the world frame, in the reaction
     sense (force on the climber, directly comparable to the predicted contact
     forces). The cells support ONE shared structure, so a single channel is that
-    corner's reaction — limb-dominated but mixed across limbs; the channel sum
-    (``tw``) is the only clean physical force. Drawn by the ``sensor forces``
-    toggle in the dynamics folder.
+    corner's reaction — limb-dominated but mixed across limbs (only the channel
+    sum is a clean physical force; the npz stores it as ``total_world``). Drawn
+    by the ``sensor forces`` toggle in the dynamics folder.
     """
     f = pred / "human_optim" / "sensor_forces.npz"
     if not f.exists():
@@ -116,7 +116,6 @@ def _load_sensor_forces(pred: Path) -> dict | None:
     dd = np.load(f, allow_pickle=True)
     return {
         "rw": dd["reaction_world"].astype(np.float32),   # (N, 4, 3) per channel
-        "tw": dd["total_world"].astype(np.float32),      # (N, 3) channel sum
         "limbs": [str(x) for x in dd["limbs"]],          # channel -> limb name
     }
 
