@@ -32,6 +32,10 @@ _DYN_TSCALE = 4.8e-3
 # contact-force arrow colour — a saturated blue that reads against the grey scene
 # cloud and the red skeleton
 _DYN_FORCE_RGB = (50, 120, 255)
+# measured wall-sensor arrows (climb_wall GT): orange per channel, darker orange for
+# the channel-sum total at the root; below the floor a channel is not drawn (the
+# sensors never read exactly zero, and the fixed arrow head would clutter the wall)
+_SENSOR_RGB, _SENSOR_TOTAL_RGB, _SENSOR_FLOOR_N = (255, 150, 30), (205, 95, 0), 10.0
 # body-skeleton overlay: fixed joint-sphere radius / bone radius (m) and the
 # default kinematic mesh opacity while the skeleton shows over it (slider-tunable).
 _SKEL_R, _SKEL_RB, _SKEL_ALPHA = 0.028, 0.012, 0.7
@@ -281,7 +285,8 @@ class ClipScene:
                                             unit_cyl, visible=False)
                     bones.append((h, j, par))
                 node_list.append({"oid": oid, "spheres": spheres, "bones": bones,
-                                  "forces": None, "root_force": None, "root_torque": None})
+                                  "forces": None, "root_force": None, "root_torque": None,
+                                  "sensor": None, "sensor_total": None})
             self.force_nodes[source] = node_list
             # Per-joint finger/palm mask (for the fingers toggle).
             jnames = dyn.get("joint_names")
@@ -305,6 +310,9 @@ class ClipScene:
         #   overlay sources   → the ``confidence`` / ``depth_trust`` skeleton colouring
         #   translucency ones → the body-opacity slider (a mesh a skeleton can overlay)
         self.force_sources = set(self.forces)
+        # Measured wall-sensor forces (climb_wall clips only) — drawn on top of any
+        # active force source by the ``sensor forces`` toggle.
+        self.sensors = data.sensors
         self.overlay_sources = set(self.skel_nodes)
         self._skeleton_sources = self.force_sources | self.overlay_sources
         self.translucency_sources = {s for s in self.skinned
@@ -717,6 +725,39 @@ class ClipScene:
             self._root_arrow(source, nd, "root_torque",
                              valid and bw is not None and ly.get("dyn_root_torque", True),
                              root, None if bw is None else bw[p, f, 3:] * _DYN_TSCALE, (220, 60, 220))
+            # Measured wall-sensor forces (climb_wall GT), same scale as the solved
+            # arrows so lengths compare directly: orange per-channel reactions at the
+            # four limb joints + the channel-sum total at the root. A channel is its
+            # support cell's reaction — limb-dominated but mixed across limbs — so
+            # the total is the arrow to trust; drawn once, on the first person.
+            sens = self.sensors
+            sensor_on = (sens is not None and p == 0 and valid
+                         and ly.get("dyn_sensor", False))
+            if nd["sensor"] is not None:
+                nd["sensor"].remove()
+                nd["sensor"] = None
+            names = dyn.get("joint_names")
+            if sensor_on and names is not None and f < len(sens["rw"]):
+                joint_of = {"left_hand": "left_wrist", "right_hand": "right_wrist",
+                            "left_foot": "left_foot", "right_foot": "right_foot"}
+                pts, vecs = [], []
+                for c, limb in enumerate(sens["limbs"]):
+                    v = sens["rw"][f, c]
+                    jn = joint_of.get(limb)
+                    if jn in names and float(np.linalg.norm(v)) > _SENSOR_FLOOR_N:
+                        pts.append(jw[names.index(jn)])
+                        vecs.append(v * _DYN_FSCALE)
+                if pts:
+                    seg = np.stack([np.asarray(pts), np.asarray(pts) + np.asarray(vecs)],
+                                   axis=1)
+                    nd["sensor"] = self.server.scene.add_arrows(
+                        f"/clip/{source}/p{nd['oid']:02d}/sensor",
+                        points=seg.astype(np.float32), colors=_SENSOR_RGB,
+                        shaft_radius=0.012, head_radius=0.028, head_length=0.05)
+            self._root_arrow(source, nd, "sensor_total",
+                             sensor_on and f < len(sens["tw"]),
+                             root, None if not sensor_on or f >= len(sens["tw"])
+                             else sens["tw"][f] * _DYN_FSCALE, _SENSOR_TOTAL_RGB)
 
     def _root_arrow(self, source, nd, slot, active, root, vec, color) -> None:
         """Redraw one root arrow (force or torque) — remove-then-add each frame."""
@@ -736,4 +777,6 @@ class ClipScene:
                 nd["forces"] = None  # lives under /clip → cascade-removed with the root
                 nd["root_force"] = None
                 nd["root_torque"] = None
+                nd["sensor"] = None
+                nd["sensor_total"] = None
         self.root.remove()

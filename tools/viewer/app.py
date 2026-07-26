@@ -32,7 +32,8 @@ _DYN_LAYER_LABELS = (("dyn_torque", "joint torques (sphere size)"),
                      ("dyn_fingers", "fingers / palm"),
                      ("dyn_forces", "contact forces"),
                      ("dyn_root_force", "root force"),
-                     ("dyn_root_torque", "root torque"))
+                     ("dyn_root_torque", "root torque"),
+                     ("dyn_sensor", "sensor forces (measured)"))
 
 # Layer checkboxes that only colour the kinematic skeleton overlay — hidden unless the
 # active body source is one the overlay draws (see ``ClipScene.overlay_sources``).
@@ -65,7 +66,10 @@ class Viewer:
                        "cameras": True, "gravity": False,
                        # force/torque section (torque scaling + fingers off by default)
                        "dyn_torque": False, "dyn_fingers": False, "dyn_forces": True,
-                       "dyn_root_force": True, "dyn_root_torque": True}
+                       "dyn_root_force": True, "dyn_root_torque": True,
+                       # measured wall-sensor arrows (climb_wall clips only) — off until
+                       # asked for; the checkbox is hidden when the clip has no sensor npz
+                       "dyn_sensor": False}
         self._surface = "points"    # surface-mesh rendering is off (code kept in ClipScene)
         self.cache: dict[Path, ClipData] = {}
         self.scene: ClipScene | None = None
@@ -202,6 +206,7 @@ class Viewer:
         for key in _OVERLAY_LAYER_KEYS:
             self.checkboxes[key].visible = src in sc.overlay_sources
         self.dyn_folder.visible = src in sc.force_sources        # the whole dyn_* section
+        self.checkboxes["dyn_sensor"].visible = sc.sensors is not None
         self.body_opacity.visible = src in sc.translucency_sources
 
     def _on_scene_ps(self) -> None:
