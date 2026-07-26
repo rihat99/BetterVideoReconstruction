@@ -57,8 +57,12 @@ bodies = "kinematic_1"   # which refined body the force solve reads (kinematic_1
 # during the solve, so re-reading the scene normals every iteration would make the cone a
 # moving target; the shifts here are small because the body starts converged).
 iters = { lbfgs = 150 }  # one joint L-BFGS polish (pose + forces); Adam can't co-adapt N-scale forces
-bodies = "kinematic_2"   # PETER: kinematics_2 is back in the chain — its pixel-footprint acquisition+seating is what actually sits the hands on the board
+bodies = "kinematic_2"   # PETER: kinematics_2 is back in the chain — its pixel-footprint acquisition is what actually sits the hands on the board
                          # (kinematic_2 | kinematic_1); picks the matching contacts_<n> too
+cones = false            # [friction] pyramid cones on feet/ankles — OFF, matching the main config
+                         # (they stack with label errors; see the boulder A/B there). The campus board
+                         # is push-only for feet, so this is the first knob to revisit if kindyn feet
+                         # visibly pull on the wall.
 labels = "auto"          # contact labels: "auto" (the contacts_<n> of `bodies` — the pipeline default; manual annotations are metrics-only) | "manual" (data/<stem>.npz)
 overlay = false          # reprojected-keypoint debug overlay → human_optim/kindyn_1_overlay.mp4
 
@@ -266,10 +270,11 @@ nodata_cap = 1.00        # no-contact label with an absent local depth witness
 nodata_force_cap = 1.00  # no-contact, absent depth, but the static solve allocates ~no force here
 
 # Force application points for the dynamics stage: two hands (wrist + fingers folded
-# onto the wrist), two feet, two ankles — six joints. A joint carries a force only on
-# frames it is labelled in contact. Body mass + inertia come baked from BetterHuman.
+# onto the wrist) and two feet — four joints. PETER: no ankle force points (user,
+# 2026-07-26); the main config keeps six. A joint carries a force only on frames it
+# is labelled in contact. Body mass + inertia come baked from BetterHuman.
 [contact]
-groups = ["left_hand", "right_hand", "left_foot", "right_foot", "left_ankle", "right_ankle"]
+groups = ["left_hand", "right_hand", "left_foot", "right_foot"]
 
 # Friction cone for the non-hand contact groups (feet + ankles). A foot/ankle contact can
 # only PUSH along the surface normal and its sideways (tangential) force is capped at μ·(normal

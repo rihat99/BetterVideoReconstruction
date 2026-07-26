@@ -30,7 +30,8 @@ from tools.smplx_robot.vertex_weights import geodesic_endeffector_weights
 from . import paths
 from .camera import fold_root_to_world, project, transform_points, world_from_cam
 from .completion import _min_span
-from .confidence import CONTACT_CONFIDENCE_METHOD, CONTACT_CONFIDENCE_SCHEMA
+from .confidence import (
+    CONTACT_CONFIDENCE_METHOD, CONTACT_CONFIDENCE_SCHEMA, SCENE_FREE_CONFIDENCE_METHOD)
 from .config import HumanOptimConfig
 from .keypoints import build_correspondence
 from .optimizer import PhaseSpec, optimize_person
@@ -700,10 +701,11 @@ def load_auto_contacts(pred: Path, tag: str, body_path: Path, N: int,
         raise SystemExit(
             f"{cnt_path} is not a complete per-joint confidence artifact; "
             "regenerate it with estimate_contacts") from exc
-    if schema != CONTACT_CONFIDENCE_SCHEMA or method != CONTACT_CONFIDENCE_METHOD:
+    known_methods = (CONTACT_CONFIDENCE_METHOD, SCENE_FREE_CONFIDENCE_METHOD)
+    if schema != CONTACT_CONFIDENCE_SCHEMA or method not in known_methods:
         raise SystemExit(
             f"{cnt_path} has confidence schema/method {schema}/{method!r}; expected "
-            f"{CONTACT_CONFIDENCE_SCHEMA}/{CONTACT_CONFIDENCE_METHOD!r}, regenerate it")
+            f"{CONTACT_CONFIDENCE_SCHEMA}/one of {known_methods}, regenerate it")
     expected = (len(cnt_oids), N, len(body_joint_names))
     if cnt_contact.shape != expected or cnt_confidence.shape != expected:
         raise SystemExit(
@@ -721,6 +723,8 @@ def load_auto_contacts(pred: Path, tag: str, body_path: Path, N: int,
         (pred / "geometry" / "transform.npz", "source_transform_sha256"),
     )
     for source_path, hash_key in provenance:
+        if hash_key in cnt and str(np.asarray(cnt[hash_key]).item()) == "":
+            continue  # the stage did not read this input (scene-free contacts record no scene hash)
         with source_path.open("rb") as source_file:
             expected_hash = hashlib.file_digest(source_file, "sha256").hexdigest()
         if hash_key not in cnt or str(np.asarray(cnt[hash_key]).item()) != expected_hash:

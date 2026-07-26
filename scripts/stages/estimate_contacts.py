@@ -75,16 +75,16 @@ from tools.human_optim import (  # noqa: E402
     complete_person, contact_from_sdf, drift_gated_contact, joint_depth_fit, joint_drift,
     joint_guarded_min_sdf,
     joint_occlusion_gap, lift_joint_contact, lift_joint_min_distance, load_dynamics_context,
-    merge_contact_spans, project, scene_sdf,
+    merge_contact_spans, project, scene_sdf, stillness_weight,
     transform_points, vertex_to_joint, world_from_cam,
 )
 from tools.human_optim import paths  # noqa: E402
 from tools.human_optim.confidence import (  # noqa: E402
     CONTACT_CONFIDENCE_DEFAULTS, CONTACT_CONFIDENCE_METHOD,
-    CONTACT_CONFIDENCE_SCHEMA, confidence_config, joint_label_confidence,
-    occlusion_group_ids)
+    CONTACT_CONFIDENCE_SCHEMA, SCENE_FREE_CONFIDENCE_METHOD,
+    confidence_config, joint_label_confidence, occlusion_group_ids)
 from tools.human_optim.fusion import (  # noqa: E402
-    FUSION_METHOD, PRED_LIMBS, fuse_person, load_pred_prob_limb)
+    _LIMB_REPS, FUSION_METHOD, PRED_LIMBS, fuse_person, load_pred_prob_limb)
 from tools.human_optim.qmath import normalize_q  # noqa: E402
 from tools.smplx_robot import load_smplx_mid  # noqa: E402
 
@@ -109,6 +109,9 @@ def _load_config(path: Path) -> dict:
     c.setdefault("merge_dist_m", 0.03)     # span-merge: bridge a flicker gap the joint barely moved across
     c.setdefault("merge_max_gap_s", 2.0)   # …only gaps shorter than this
     c.setdefault("merge_sdf_m", 0.08)      # …re-grip guard: it stayed within this of the wall the whole gap
+    c.setdefault("use_scene", True)        # false: the scene cloud is untrustworthy — labels come from
+                                           # predictions/contacts.npz gated on stillness alone (no SDF
+                                           # detector, no completion, no fusion, no depth-fit)
     c.setdefault("overlay", True)           # render the contact skeleton overlay
     comp = c.setdefault("completion", {})   # detector-completion knobs (defaults in completion.py)
     for key, val in COMPLETION_DEFAULTS.items():
@@ -170,25 +173,28 @@ def run(source: str | Path, predictions_dir: str | Path, config_path: str | Path
     # annotation-guided kinematics_2. Output tag mirrors it: contacts_1 / contacts_2.
     kin_path = paths.body_path(pred, bodies)
     tag = bodies.removeprefix("kinematic_")
+    use_scene = bool(cc["use_scene"])
     scene_path = pred / "geometry" / "scene.npz"
     if not kin_path.exists():
         raise SystemExit(f"missing {kin_path} — run human_optimization {bodies} first")
-    if not scene_path.exists():
+    if use_scene and not scene_path.exists():
         raise SystemExit(f"missing {scene_path} — run fuse_geometry.py first (needs vggt --save-depth)")
 
     transform_path = pred / "geometry" / "transform.npz"
     kin = dict(np.load(kin_path, allow_pickle=True))
     source_body_sha256 = _sha256(kin_path)
-    source_scene_sha256 = _sha256(scene_path)
+    source_scene_sha256 = _sha256(scene_path) if use_scene else ""
     source_transform_sha256 = _sha256(transform_path)
     tr = dict(np.load(transform_path, allow_pickle=True))
     if not bool(tr.get("metric", True)):  # absent flag = old already-metric artifact
         raise SystemExit(f"geometry under {pred} is up-to-scale — run estimate_scale after fuse")
-    sc = dict(np.load(scene_path, allow_pickle=True))
+    sc = dict(np.load(scene_path, allow_pickle=True)) if use_scene else None
     human_path = pred / "geometry" / "human.npz"
     human_cloud = None
     source_human_sha256 = ""
-    if human_path.exists():
+    if not use_scene:
+        pass  # scene-free mode also skips the human cloud (depth-fit fields stay no-data)
+    elif human_path.exists():
         source_human_sha256 = _sha256(human_path)
         with np.load(human_path) as human:
             human_cloud = tuple(torch.as_tensor(
@@ -208,6 +214,9 @@ def run(source: str | Path, predictions_dir: str | Path, config_path: str | Path
     # prediction on an invalid body frame is unusable (there is no label to fuse it with).
     pred_clamp = float(cc["fusion"]["pred_clamp"])
     pred_prob_limb = load_pred_prob_limb(pred, object_ids, np.asarray(tr["frame_indices"]))
+    if not use_scene and pred_prob_limb is None:
+        raise SystemExit("[estimate_contacts] use_scene=false needs predictions/contacts.npz — "
+                         "without the scene the model's contacts are the only label source")
     do_fusion = pred_prob_limb is not None
     if do_fusion:
         pred_prob_limb[~valid_mask] = np.nan
@@ -217,18 +226,24 @@ def run(source: str | Path, predictions_dir: str | Path, config_path: str | Path
     else:
         pred_prob_limb = np.full((P, N, len(PRED_LIMBS)), np.nan, np.float32)
         print("[estimate_contacts] fusion: OFF (no predictions/contacts.npz)")
+    if not use_scene:
+        do_fusion = False  # scene-free: the predictions ARE the labels, there is nothing to fuse
     fusion_changed = np.zeros((P, N, len(PRED_LIMBS)), dtype=np.int8)
 
     extr = torch.as_tensor(tr["extrinsics"], dtype=torch.float32, device=device)       # (N,4,4)
     K = torch.as_tensor(tr["intrinsics_px_orig"], dtype=torch.float32, device=device)  # (N,3,3)
     cam_centers = world_from_cam(extr)[:, :3, 3]
 
-    scene_pts, scene_normals, scene_conf = load_scene_cloud(
-        sc, cam_centers, conf_drop_q=float(cc.get("conf_drop_q", 0.0)),
-        k=int(cc["normal_k"]), device=device)
-    print(f"[estimate_contacts] scene cloud {scene_pts.shape[0]} pts, normals: "
-          f"{'fuse' if 'normals' in sc else 'PCA fallback'}; "
-          f"close<{float(cc['close_thresh_m']) * 100:.0f}cm")
+    scene_pts = scene_normals = scene_conf = None
+    if use_scene:
+        scene_pts, scene_normals, scene_conf = load_scene_cloud(
+            sc, cam_centers, conf_drop_q=float(cc.get("conf_drop_q", 0.0)),
+            k=int(cc["normal_k"]), device=device)
+        print(f"[estimate_contacts] scene cloud {scene_pts.shape[0]} pts, normals: "
+              f"{'fuse' if 'normals' in sc else 'PCA fallback'}; "
+              f"close<{float(cc['close_thresh_m']) * 100:.0f}cm")
+    else:
+        print("[estimate_contacts] scene: OFF (use_scene=false) — labels = predicted AND still")
 
     mid = load_smplx_mid(_DEFAULT_SMPLX_MODEL, device)
     J = mid.num_joints
@@ -246,7 +261,7 @@ def run(source: str | Path, predictions_dir: str | Path, config_path: str | Path
     # acted on the kin2 POSE, but the stillness evidence still predates any enforcement.
     # An old body npz without drift_pre stays detector-only (re-measured stillness there
     # would be manufactured evidence).
-    do_completion = "drift_pre" in kin
+    do_completion = "drift_pre" in kin and use_scene
     comp_ctx = load_dynamics_context(config_path)
     comp_knobs = cc["completion"]
     grav_path = pred / "geocalib" / "gravity.npz"
@@ -273,7 +288,8 @@ def run(source: str | Path, predictions_dir: str | Path, config_path: str | Path
               f"gravity={gravity_world.round(2)} ({gsrc}), "
               f"friction cones {'ON' if cone_pts is not None else 'OFF'}")
     else:
-        print(f"[estimate_contacts] completion: OFF for {bodies} (post-enforcement body)")
+        reason = "use_scene=false" if not use_scene else "post-enforcement body"
+        print(f"[estimate_contacts] completion: OFF for {bodies} ({reason})")
 
     joint_contact = np.zeros((P, N, J), dtype=bool)
     contact_source = np.zeros((P, N, J), dtype=np.int8)   # per joint-frame: 1=detector, 2=gate, 4=force
@@ -324,19 +340,31 @@ def run(source: str | Path, predictions_dir: str | Path, config_path: str | Path
             joint_depth_gap_cm[p] = gap_np
             joint_depth_points[p] = points_np
             joint_depth_trust[p] = trust_np
-        sdf, dmin, conf = scene_sdf(vw, scene_pts, scene_normals, scene_conf,
-                                    prune_margin_m=float(cc["prune_margin_m"]))
-        # Raw (unguarded) per-joint min-sdf diagnostic — kept as the continuous channel.
-        vcon = contact_from_sdf(sdf, dmin, conf, close_thresh_m=float(cc["close_thresh_m"]),
-                                max_dist_m=float(cc["max_dist_m"]), conf_thresh=float(cc["conf_thresh"]))
-        _, jsdf = lift_joint_contact(vcon, sdf, v2j, J)
-        jdmin = lift_joint_min_distance(dmin, v2j, J)
-        # Final contact: a joint-frame must be BOTH near the wall and still. Drift-gate
-        # the guarded per-joint min-sdf (frames whose net window drift ≥ 2·still_m are a
-        # pass, not a grip → forced non-contact), then temporal hysteresis (enter<close,
-        # stay<exit) + min-duration, so labels stop flickering at the boundary.
-        gsdf = joint_guarded_min_sdf(sdf, dmin, conf, v2j, J,
-                                     max_dist_m=float(cc["max_dist_m"]), conf_thresh=float(cc["conf_thresh"]))
+        prob_t = torch.as_tensor(pred_prob_limb[p], dtype=torch.float32, device=device)  # (N, 4)
+        if use_scene:
+            sdf, dmin, conf = scene_sdf(vw, scene_pts, scene_normals, scene_conf,
+                                        prune_margin_m=float(cc["prune_margin_m"]))
+            # Raw (unguarded) per-joint min-sdf diagnostic — kept as the continuous channel.
+            vcon = contact_from_sdf(sdf, dmin, conf, close_thresh_m=float(cc["close_thresh_m"]),
+                                    max_dist_m=float(cc["max_dist_m"]), conf_thresh=float(cc["conf_thresh"]))
+            _, jsdf = lift_joint_contact(vcon, sdf, v2j, J)
+            jdmin = lift_joint_min_distance(dmin, v2j, J)
+            # Final contact: a joint-frame must be BOTH near the wall and still. Drift-gate
+            # the guarded per-joint min-sdf (frames whose net window drift ≥ 2·still_m are a
+            # pass, not a grip → forced non-contact), then temporal hysteresis (enter<close,
+            # stay<exit) + min-duration, so labels stop flickering at the boundary.
+            gsdf = joint_guarded_min_sdf(sdf, dmin, conf, v2j, J,
+                                         max_dist_m=float(cc["max_dist_m"]), conf_thresh=float(cc["conf_thresh"]))
+        else:
+            # Scene-free: the model's per-limb probability plays the proximity witness.
+            # A limb the model calls in contact (p >= 0.5) gets pseudo-distance 0 at its
+            # rep joints, +inf elsewhere — the unchanged drift gate, hysteresis and
+            # min-duration below then read exactly "predicted AND still".
+            gsdf = torch.full((N, J), torch.finfo(torch.float32).max, device=device)
+            for c, reps in enumerate(_LIMB_REPS):
+                on = prob_t[:, c] >= 0.5
+                for j in reps:
+                    gsdf[on, j] = 0.0
         # The persisted pre-enforcement drift is the honest motion measurement:
         # later attraction/damping must not manufacture apparent stillness. Both
         # the binary gate and no-contact confidence use it, with final-body drift
@@ -368,8 +396,9 @@ def run(source: str | Path, predictions_dir: str | Path, config_path: str | Path
 
         jc_np = jc.cpu().numpy()
         jc_np[~valid_mask[p]] = False
-        joint_sdf_cm[p] = jsdf.cpu().numpy()
-        joint_distance_cm[p] = (jdmin * 100.0).cpu().numpy()
+        if use_scene:
+            joint_sdf_cm[p] = jsdf.cpu().numpy()
+            joint_distance_cm[p] = (jdmin * 100.0).cpu().numpy()
         joints_2d[p] = px.cpu().numpy()
         merged_np = merged_bool.cpu().numpy(); merged_np[~valid_mask[p]] = False
         merged_all[p] = merged_np
@@ -379,7 +408,9 @@ def run(source: str | Path, predictions_dir: str | Path, config_path: str | Path
         # bitmask records where each label came from. Confidence below then runs on the
         # COMPLETED labels.
         detector_np = jc_np.copy()
-        src = np.where(detector_np, np.int8(1), np.int8(0))
+        # Provenance: 1 = geometric detector; 8 = model prediction (the schema-8 bit
+        # the fusion rescue uses) — scene-free labels are the model's.
+        src = np.where(detector_np, np.int8(1) if use_scene else np.int8(8), np.int8(0))
         if do_completion:
             comp = complete_person(
                 mid, torch.as_tensor(kin["betas"][p], dtype=torch.float32, device=device),
@@ -407,6 +438,32 @@ def run(source: str | Path, predictions_dir: str | Path, config_path: str | Path
         # Per-joint confidence in the FINAL label.  The binary label is unchanged;
         # the readout only assigns its continuous training weight.
         jc_final = torch.as_tensor(jc_np, dtype=torch.bool, device=device)
+        if not use_scene:
+            # Scene-free confidence: belief(contact) = model probability × stillness.
+            # A label's confidence is that belief (contact) or its complement (no
+            # contact); joints outside the model's four limbs carry belief 0. The
+            # surface channel stays 0 (there is no wall witness); visibility is not
+            # assessed and stays 1 so nothing is spuriously down-weighted.
+            still = stillness_weight(gate_drift, still_m=float(cg["still_m"]))    # (N, J)
+            p_eff = torch.zeros((N, J), device=device)
+            for c, reps in enumerate(_LIMB_REPS):
+                pr = prob_t[:, c].clamp(pred_clamp, 1.0 - pred_clamp)
+                pr = torch.where(torch.isfinite(pr), pr, torch.full_like(pr, 0.5))
+                for j in reps:
+                    p_eff[:, j] = pr
+            belief = p_eff * still
+            lc = torch.where(jc_final, belief, 1.0 - belief).cpu().numpy()
+            mo = still.clamp(0.0, 1.0).cpu().numpy()
+            vis = np.ones((N, J), np.float32)
+            for name, val in (("label_confidence", lc), ("motion", mo),
+                              ("image_visibility", vis), ("occlusion_visibility", vis.copy()),
+                              ("visibility", vis.copy())):
+                val[~valid_mask[p]] = 0.0
+                confidence_all[name][p] = val
+            n_cf = int(jc_np.any(1).sum())
+            print(f"[estimate_contacts] obj_id={int(object_ids[p])}: {n_cf}/{N} frames with "
+                  f"≥1 joint in contact ({int(jc_np.sum())} joint-frame contact instances)")
+            continue
         cf = cfg["contact_confidence"]
         other_vw = None
         if P > 1:
@@ -502,10 +559,12 @@ def run(source: str | Path, predictions_dir: str | Path, config_path: str | Path
         force_share=force_share, body_weight_n=body_weight_n,
         completion_groups=np.array(list(comp_ctx.groups)),
         completion_method=np.str_(
-            "static-support-v1" if do_completion else "skipped(post-enforcement body)"),
+            "static-support-v1" if do_completion
+            else f"skipped({'use_scene=false' if not use_scene else 'post-enforcement body'})"),
         contact_label_schema=np.int32(1),
         contact_label_method=np.str_(
-            ("completed-static-support-v1" if do_completion else "detector-v1")
+            "predicted-drift-gate-v1" if not use_scene
+            else ("completed-static-support-v1" if do_completion else "detector-v1")
             + (f"+{FUSION_METHOD}" if do_fusion else "")),
         pred_prob_limb=pred_prob_limb.astype(np.float32),
         pred_limbs=np.array(PRED_LIMBS),
@@ -523,10 +582,12 @@ def run(source: str | Path, predictions_dir: str | Path, config_path: str | Path
         motion_evidence=confidence_all["motion"],
         label_confidence=confidence_all["label_confidence"],
         confidence_schema=np.int32(CONTACT_CONFIDENCE_SCHEMA),
-        confidence_method=np.str_(CONTACT_CONFIDENCE_METHOD),
+        confidence_method=np.str_(
+            CONTACT_CONFIDENCE_METHOD if use_scene else SCENE_FREE_CONFIDENCE_METHOD),
         confidence_motion_source=np.str_("drift_pre_with_final_fallback"),
         source_body=np.str_(kin_path.name), source_body_sha256=np.str_(source_body_sha256),
-        source_scene=np.str_(scene_path.name), source_scene_sha256=np.str_(source_scene_sha256),
+        source_scene=np.str_(scene_path.name if use_scene else ""),
+        source_scene_sha256=np.str_(source_scene_sha256),
         source_transform=np.str_(transform_path.name),
         source_transform_sha256=np.str_(source_transform_sha256),
         source_human=np.str_(human_path.name if human_cloud is not None else ""),

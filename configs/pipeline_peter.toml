@@ -57,12 +57,17 @@ skip_existing = true       # skip items whose task output already exists
 dtype = "fp16"             # model dtype hint
 
 [scale]                     # human-anchored metric scale (runs AFTER fuse; rescales geometry/ in place)
-conf_drop_q = 0.0           # PETER: static-camera VGGT confidence is uniformly low at the limbs — the 0.3 cut hid the hands from the prefit, freezing the arms at the wrong depth (01_hanging wrist std 6.6 → 0.3 cm once un-gated)
+conf_drop_q = 0.0           # PETER: static-camera VGGT confidence is uniformly low at the limbs — the 0.3 cut would hide the hands/arms from the ruler median; un-gated keeps every body pixel voting
 min_inlier_verts = 50       # skip a frame with fewer inlier vertices than this
 mad_k = 3.0                 # reject frames beyond this many MADs from the median log-scale
 skip_existing = false       # skip when scale.npz exists and the world is already metric
 # pre-fit: dual scale + body refinement → geometry/prefit.npz (see docs/scale.md)
-prefit = true               # false → ruler-only scale, no body alignment
+prefit = false              # PETER: OFF (user, 2026-07-26 — do not rely on the static-camera human depth at
+                            # all). The pre-fit is a chamfer fit against the human cloud, so it drags the
+                            # body/init to the same wrong depth the kinematic chamfer was banned for. Ruler-only
+                            # scale keeps depth's influence to one robust median scalar (the body is the only
+                            # metric anchor there is); the kinematics then init from the converter bodies.
+                            # NOTE: delete any stale geometry/prefit.npz — kinematics inits from it when present.
 rounds = 4                  # body-round ↔ scale-re-measure alternations (early-stops at 0.1%)
 iters = 150                # Adam iterations per body round (per person)
 lr = 0.01                # Adam learning rate

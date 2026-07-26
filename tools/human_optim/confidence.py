@@ -68,6 +68,10 @@ import torch
 #    two-witness agreement, tools/human_optim/fusion.py), not the terms below.
 CONTACT_CONFIDENCE_SCHEMA = 8
 CONTACT_CONFIDENCE_METHOD = "source-conditional-v1"
+# The contact stage's scene-free mode (use_scene = false): confidence is the model's
+# contact probability × stillness (no scene witnesses). A legitimate current method,
+# not a stale artifact — consumers accept either.
+SCENE_FREE_CONFIDENCE_METHOD = "scene_free_pred_still_v1"
 
 CONTACT_CONFIDENCE_DEFAULTS: dict[str, float] = {
     # Plausible signed-distance band for a contact.  Soft sigmoids avoid hard

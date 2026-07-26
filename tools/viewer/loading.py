@@ -167,7 +167,8 @@ def _load_skeleton(pred: Path, body_fn: str = "kinematic_1.npz",
             valid_confidence = (
                 (schema, method) in (
                     (5, "depth-trust-motion-v1"), (6, "ray-occlusion-motion-v1"),
-                    (7, "source-conditional-v1"), (8, "source-conditional-v1"))
+                    (7, "source-conditional-v1"), (8, "source-conditional-v1"),
+                    (8, "scene_free_pred_still_v1"))
                 and candidate.shape == expected and np.isfinite(candidate).all()
                 and not bool(((candidate < 0.0) | (candidate > 1.0)).any())
                 and saved_body_hash == current_body_hash

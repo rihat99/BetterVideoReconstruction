@@ -200,6 +200,25 @@ corpus scenes are under the cap).
   (detection), `[contacts.completion]` (the union recipe and solve scales), and
   `[contact_confidence]` (weighting).
 
+## Scene-free mode (`use_scene = false`)
+
+For clips whose scene reconstruction is unusable (a static camera gives VGGT no
+parallax — the peter campus board), `[contacts] use_scene = false` drops every
+scene witness. Labels become **the external model's predicted contacts gated on
+stillness**: a limb the model calls in contact (probability ≥ 0.5) gets
+pseudo-distance 0 at its representative joints and +∞ elsewhere, and that feeds
+the *unchanged* drift gate, hysteresis and minimum-duration span filter. The SDF
+detector, completion, fusion and the depth-fit witness are all skipped (the file
+records `contact_label_method = predicted-drift-gate-v1` and no scene hash, so
+the downstream freshness checks know the scene was never read). Confidence is
+the model's probability × the stillness weight for contact labels, its
+complement for no-contact (`scene_free_pred_still_v1`); visibility is not
+assessed and stays 1. The stillness knob must match the body's own noise:
+without a depth anchor the peter kin1 body sways 5–10 cm during real holds, so
+the campus config raises `[contact_gate] still_m` to 0.12 (the 0.03 default
+deleted a third of the model's true contacts there; a limb genuinely in flight
+still exceeds the 24 cm-per-window kill threshold).
+
 ## Output
 
 `human_optim/contacts_<tag>.npz` — see the field table in
