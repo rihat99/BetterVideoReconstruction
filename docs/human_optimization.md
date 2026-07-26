@@ -180,7 +180,11 @@ contact labels. The pipeline default is **auto**: our own `contacts_1.npz`
 Auto positives are deliberately **not** confidence-gated: on a floating body every
 witness correctly reports ~0 confidence, and gating would veto exactly the repair
 this stage exists for — the pull tests the label, reprojection and the priors
-referee it. Its job is to move the body — sometimes tens of centimetres — until
+referee it. (Scaling each instance's pull by its label confidence was tried on
+2026-07-26 and confirmed this the hard way: the floating-body scene stayed ~30 cm
+off the wall because its true contacts carry confidence .07–.34, while boulder_1's
+*false* positives carry .92 and kept pulling. Arming the clearance repulsion with
+the labels' negatives was tried the same day — it only added jitter.) Its job is to move the body — sometimes tens of centimetres — until
 every labeled contact actually touches the wall. Chamfer is **off** here (the human depth cloud is
 exactly the spaghetti-prone evidence being repaired); reprojection and the pose priors
 are what keep the repair from diverging.
@@ -198,10 +202,15 @@ closest vertex:
   roughly constant force from far away that fades out at contact. Only the group's
   closest vertex is pulled — a contact label means *some* surface point touches, not
   the whole hand.
-- **`ann_seating`** — near the surface, drives that vertex's signed distance to a few
-  millimetres *inside* the wall (contacts should touch or slightly penetrate). It is
-  symmetric: after an overshoot it pushes back out, which is what prevents the body
-  from being buried.
+- **`ann_seating`** — **off by default since 2026-07-26.** It drove that vertex a few
+  millimetres *inside* the wall, on the theory that its symmetric push-back was the
+  anti-burial guard. Measured on boulder_1/3, the opposite was true: the −5 mm target
+  was itself the main source of penetration (it applies to every instance, including
+  the labels that are wrong), and removing it cut mean vertex penetration 2.03 → 0.51
+  and 0.93 → 0.26 mm while the true contacts still ended up at the same wall distance
+  as the manual-annotation chain. Acquisition's fading pull plus the ordinary
+  penetration term seat the limb on their own. The term stays wired; raise its weight
+  to re-enable.
 
 An earlier version that simply strengthened `ann_attraction` (which pulls *all* of a
 group's vertices) buried the body many centimetres into the wall on every test scene:
@@ -299,13 +308,15 @@ kindyn starts from the repaired body, and chamfer would pull it back toward the
 spaghetti-prone depth the repair just left) **plus** the `dynamics` terms
 (`base_wrench`, `force_magnitude`, `force_smooth_mag`/`_dir`, `torque_smooth`), with
 one world-force vector per contact group per frame added as extra optimization
-variables. Feet and ankles push through the same **friction pyramids** the
-`dynamics` stage uses (§ above) — a force built as a nonnegative mix of the four
-pyramid edges cannot leave the cone, so the constraint costs no weight — with one
-difference: the cone frames are read off the scene **once, at the warm-start pose**,
-and then frozen. The pose moves during this solve, so re-reading the normals every
-iteration would make the cone itself a moving target; the pose shifts here are small
-because the body starts converged. Hands stay free (they grasp).
+variables. The `dynamics` stage's **friction pyramids** (§ above) are available here
+too (`[stages.kindyn_1] cones = true`; the cone frames are then read off the scene
+once, at the warm-start pose, and frozen — the pose moves during the solve, so
+re-reading the normals every iteration would make the cone a moving target). They are
+**off by default**: measured on boulder_1/3 they stack with contact-label errors
+(jitter 6.7 → 8.3 mm) and hurt boulder_1 even with hand-annotated labels
+(penetration 1.5 → 4.2 mm) — a hooking heel or toe genuinely pulls on the wall, which
+a push-only cone forbids. Turn them on for scenes where every foot contact really
+pushes, like the campus-board force-plate clips.
 
 **How it runs.** Forces are established first by a quick frozen-pose solve (like the
 `dynamics` stage's, but with this stage's weights) so

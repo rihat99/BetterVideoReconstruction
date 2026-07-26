@@ -66,7 +66,7 @@ overlay = false          # reprojected-keypoint debug overlay → human_optim/ki
 [loss_weights.kinematic]
 reproj_sapiens      = [   8,    8,    8,    0,    8 ]
 reproj_init         = [  30,   30,   30,    0,   30 ]
-chamfer             = [  10,   10,    0,    0,    0 ]   # PETER: back ON for root+kin1 — with the un-gated fuse/scale ([scale]/[fuse] conf_drop_q=0) the human cloud DOES see the hands at the board depth, and chamfer is the only term that constrains the arms along the camera ray (wrist std 18 → 6.6 cm; with the un-gated prefit init, 0.3 cm)
+chamfer             = [   0,    0,    0,    0,    0 ]   # PETER: OFF everywhere (user, 2026-07-26) — the static-camera depth is bad enough to corrupt even the scale, and chamfer sits the human at the wrong depth (unrealistic motion). The 2026-07-25 chamfer-on recipe is refuted; peter rework pending.
 pose_prior          = [ 300,  300,  300,    0,  300 ]
 orient_prior        = [  50,   50,   50,    0,   50 ]
 
@@ -86,7 +86,7 @@ penetration         = [   0, 4000, 4000,    0, 4000 ]   # push posed verts out o
 # Label-driven; labels are AUTO-detected in kinematics_1 (frozen), MANUAL in kinematics_2 + kindyn_1.
 ann_attraction      = [   0,    0,    0,    0,   20 ]   # OFF in kin1 for peter: attraction pulls predicted-labeled hands onto the same untrustworthy static-camera geometry chamfer was disabled for (measured on 01_hanging: attraction 10 → R-wrist std 29.6 cm vs 16.4 with 0; velocity damping alone halves the drift). The predicted labels drive ann_velocity only.
 ann_acquisition     = [   0,    0, 1000,    0,    0 ]   # kinematics_2: per positive (frame, annotation-group) instance, long-range bounded pull of the group's ONE closest vertex toward a target patch of wall points. 1000 chosen by sweep: seats floaters (gtIGgs euclid med 40.8→5.4 cm) at reproj_sap 9.3→28.8 px; 300 under-seats, 3000 buys little for +6 px.
-ann_seating         = [   0,    0, 3000,    0,    0 ]   # kinematics_2: seat that same vertex at slight penetration; SYMMETRIC (pushes back out after overshoot) — the anti-burial term, keep it strong. insensitive in the 300–3000 acquisition sweep (pen_med −1.3…−2.0 cm throughout).
+ann_seating         = [   0,    0,    0,    0,    0 ]   # OFF (2026-07-26, matching the main config): the −5 mm target was itself the burial mechanism on the boulder A/B; acquisition + the penetration term seat on their own.
 ann_repulsion       = [   0,    0, 4000,    0, 4000 ]   # push no-contact verts off — MANUAL only (auto labels carry no negatives)
 ann_velocity        = [   0,  500, 4000,    0, 4000 ]   # damp in-contact joints' linear + angular velocity (readout reads pre-enforcement drift_pre)
 ann_acceleration    = [   0,    0,    0,    0,    0 ]   # OFF — near-redundant with a strong ann_velocity (a still joint is already low-accel); wired + ready, raise to damp in-contact joints' Cartesian (LOCAL_WORLD_ALIGNED) acceleration if ann_velocity is lowered to allow slow sliding contacts

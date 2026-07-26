@@ -81,7 +81,8 @@ def run(source, predictions_dir, config_path, *, stages=None, annotations=None) 
         run_kindyn(source, pred, cfg, cfg.device, annotations=annotations,
                    overlay=bool(kd.get("overlay", False)),
                    labels_mode=str(kd.get("labels", "manual")),
-                   bodies=str(kd.get("bodies", "kinematic_2")))
+                   bodies=str(kd.get("bodies", "kinematic_2")),
+                   cones=bool(kd.get("cones", False)))
 
 
 def main(argv=None) -> int:

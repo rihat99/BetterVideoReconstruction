@@ -454,7 +454,7 @@ def _kindyn_phases(cfg: HumanOptimConfig) -> list[PhaseSpec]:
 
 def run_kindyn(source, pred: Path, cfg: HumanOptimConfig, device: str, *,
                annotations=None, overlay: bool = False, labels_mode: str = "manual",
-               bodies: str = "kinematic_2") -> Path:
+               bodies: str = "kinematic_2", cones: bool = False) -> Path:
     """Joint kinematics + dynamics refinement of a refined body → ``human_optim/kindyn_1.npz``.
 
     Starts from a converged body and its contact labels, and
@@ -466,6 +466,9 @@ def run_kindyn(source, pred: Path, cfg: HumanOptimConfig, device: str, *,
     contact readout (``contacts_2`` / ``contacts_1``). ``labels_mode='manual'``
     (default) reads the human annotation ``data/<stem>.npz`` instead; ``'auto'``
     reads that readout — measured on the very body this stage starts from.
+    ``cones`` opts in to the ``[friction]`` pyramid cones on feet/ankles (off by
+    default: measured on the boulder scenes they stack with label errors, and a
+    hooking foot genuinely pulls — see docs/human_optimization.md).
     """
     knobs = cfg.knobs
     pred = Path(pred)
@@ -509,7 +512,7 @@ def run_kindyn(source, pred: Path, cfg: HumanOptimConfig, device: str, *,
     # Friction-cone scene cloud: UNGATED (conf_drop_q = 0) so a low-confidence voxel under a
     # foot still carries a normal — the cone only needs a direction, and dropping voxels there
     # would silently turn cones off. Separate from the gated cloud the kinematic scene terms use.
-    friction = knobs.get("friction")
+    friction = knobs.get("friction") if cones else None
     cone_pts = cone_nrm = None
     if friction is not None and (pred / "geometry" / "scene.npz").exists():
         sc = dict(np.load(pred / "geometry" / "scene.npz", allow_pickle=True))
@@ -563,7 +566,11 @@ def run_kindyn(source, pred: Path, cfg: HumanOptimConfig, device: str, *,
 
         if labels_mode == "auto" and oid in cnt_oids:
             jc = cnt_contact[cnt_oids.index(oid)]                          # (N, 52)
-            lab = np.where(jc, np.int8(1), np.int8(-1)).astype(np.int8)    # +1 / -1, NEVER 0
+            # Positives-only ON PURPOSE (+1 / -1, never 0): arming the repulsion with
+            # negatives + confidence weighting was tried (2026-07-26) and measured on
+            # boulder_1/3 to ADD jitter — the ann terms fight the force terms in the
+            # joint L-BFGS.
+            lab = np.where(jc, np.int8(1), np.int8(-1)).astype(np.int8)
             lab[~vmask] = -1
             contact_labels = torch.as_tensor(lab, dtype=torch.int8, device=device)
             nc = int((lab == 1).any(1).sum())

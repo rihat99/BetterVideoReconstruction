@@ -43,13 +43,14 @@ bodies = "kinematic_1"   # which refined body the force solve reads (kinematic_1
 # instead of only being absorbed by forces. Forces are
 # warm-started (a frozen-q solve, [dynamics_optimizer] knobs), then ONE joint L-BFGS phase
 # fine-tunes pose + forces together — Adam was tried and is destructive here (it cannot
-# co-adapt N-scale forces to a moving pose; the wrench spikes and the motion wrecks). Feet and
-# ankles push through the [friction] cones, frozen once at the warm-start pose (the pose moves
-# during the solve, so re-reading the scene normals every iteration would make the cone a
-# moving target; the shifts here are small because the body starts converged).
+# co-adapt N-scale forces to a moving pose; the wrench spikes and the motion wrecks).
 iters = { lbfgs = 150 }  # one joint L-BFGS polish (pose + forces); Adam can't co-adapt N-scale forces
 bodies = "kinematic_2"   # which refined body to start from (kinematic_2 | kinematic_1 — for chains that skip kinematics_2); picks the matching contacts_<n> too
 labels = "auto"          # contact labels: "auto" (the contacts_<n> of `bodies` — the pipeline default; manual annotations are metrics-only) | "manual" (data/<stem>.npz)
+cones = false            # [friction] pyramid cones on feet/ankles, frozen at the warm-start pose. OFF:
+                         # measured on boulder_1/3 they stack with label errors (jitter 6.7→8.3 mm) and
+                         # hurt boulder_1 even with manual labels (pen 1.5→4.2 mm) — a hooking foot
+                         # genuinely pulls. Turn on for push-only scenes (e.g. the peter campus board).
 overlay = false          # reprojected-keypoint debug overlay → human_optim/kindyn_1_overlay.mp4
 
 #                       root  kin1  kin2   dyn  kindyn1
@@ -76,8 +77,8 @@ penetration         = [   0, 4000, 4000,    0, 4000 ]   # push posed verts out o
 # Label-driven; labels are AUTO-detected in kinematics_1 (frozen), MANUAL in kinematics_2 + kindyn_1.
 ann_attraction      = [   0,   10,    0,    0,   20 ]   # pull in-contact-joint verts onto the wall (kin1-auto + kindyn_1). OFF in kinematics_2 — its mean-over-active-verts pull BURIED the body (front verts cross the wall, the rest keep pulling); replaced by ann_acquisition + ann_seating.
 ann_acquisition     = [   0,    0, 1000,    0,    0 ]   # kinematics_2: per positive (frame, annotation-group) instance, long-range bounded pull of the group's ONE closest vertex toward a target patch of wall points. 1000 chosen by sweep: seats floaters (gtIGgs euclid med 40.8→5.4 cm) at reproj_sap 9.3→28.8 px; 300 under-seats, 3000 buys little for +6 px.
-ann_seating         = [   0,    0, 3000,    0,    0 ]   # kinematics_2: seat that same vertex at slight penetration; SYMMETRIC (pushes back out after overshoot) — the anti-burial term, keep it strong. insensitive in the 300–3000 acquisition sweep (pen_med −1.3…−2.0 cm throughout).
-ann_repulsion       = [   0,    0, 4000,    0, 4000 ]   # push no-contact verts off — MANUAL only (auto labels carry no negatives)
+ann_seating         = [   0,    0,    0,    0,    0 ]   # OFF (2026-07-26): its −5 mm target was itself the burial mechanism — on boulder_1/3 removing it cut mean penetration 2.03→0.51 / 0.93→0.26 mm with TP wall distances matching the manual chain; acquisition's fading pull + the penetration term already seat. Wired, raise to re-enable.
+ann_repulsion       = [   0,    0, 4000,    0, 4000 ]   # push no-contact verts off — MANUAL only (auto labels carry no negatives; arming them via contacts_1 negatives was tried 2026-07-26 and only added jitter)
 ann_velocity        = [   0,  500, 4000,    0, 4000 ]   # damp in-contact joints' linear + angular velocity (readout reads pre-enforcement drift_pre)
 ann_acceleration    = [   0,    0,    0,    0,    0 ]   # OFF — near-redundant with a strong ann_velocity (a still joint is already low-accel); wired + ready, raise to damp in-contact joints' Cartesian (LOCAL_WORLD_ALIGNED) acceleration if ann_velocity is lowered to allow slow sliding contacts
 
@@ -148,6 +149,10 @@ radius_px = 60         # target-patch pixel footprint around the group's member 
 patch_k = 64           # target points kept per instance (nearest in 3D to the member centroid)
 delta_m = 0.10         # pseudo-Huber knee: bounded ~constant pull beyond it, quadratic fade to 0 within
 conf_thresh = 0.1      # scene-point confidence floor for a patch point
+# NOTE: confidence-weighting the pull per instance was tried (2026-07-26) and REFUTED: on a
+# floating body the witnesses report ~0 confidence for TRUE contacts (gtIGgs medians .07–.34),
+# so weighting kills exactly the repair this stage exists for (body stays 30 cm off the wall) —
+# while boulder_1's FALSE positives sit at confidence .92 and keep pulling anyway.
 
 # Near-field seat: drive the acquisition vertex's patch-plane signed distance to target_m
 # (slight penetration), symmetric so it pushes back out after overshoot; active within ±band_m.
@@ -270,7 +275,8 @@ groups = ["left_hand", "right_hand", "left_foot", "right_foot", "left_ankle", "r
 # of the wall toward the climber). A joint whose nearest scene point is beyond max_dist_m — or
 # whose neighboring normals disagree (they average to ~nothing on thin holds / concave
 # corners) — gets a free bilateral force instead, like a hand. Ankle centers sit a few cm
-# inside the leg, so keep max_dist_m generous. Comment out this section to run without cones.
+# inside the leg, so keep max_dist_m generous. Comment out this section to run the dynamics
+# stage (and the completion force solve) without cones; kindyn_1 opts in via [stages.kindyn_1].cones.
 [friction]
 half_angle_deg = 45.0   # μ = tan(45°) = 1
 normal_k = 16
