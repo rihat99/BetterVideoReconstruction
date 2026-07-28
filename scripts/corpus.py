@@ -134,6 +134,22 @@ STAGES: dict[str, StageSpec] = {
         farm_inputs=("sam3d", "sapiens", "geometry"),
         config_sections=("human_optimization",),
     ),
+    "kinematics_2": StageSpec(
+        mode="farm_inprocess",
+        cli=None,
+        out_stage="human_optim",
+        out_check="kinematic_2.npz",
+        farm_inputs=("sapiens", "geometry"),  # kinematic_1 + contacts_1 come via the human_optim out link
+        config_sections=("human_optimization",),
+    ),
+    "kindyn": StageSpec(
+        mode="farm_inprocess",
+        cli=None,
+        out_stage="human_optim",
+        out_check="kindyn_1.npz",
+        farm_inputs=("sapiens", "geometry"),  # kinematic_2 + contacts_2 come via the human_optim out link
+        config_sections=("human_optimization",),
+    ),
     "contacts": StageSpec(
         mode="farm_subprocess_per_scene",
         cli=_CONTACTS_CLI,
@@ -143,6 +159,13 @@ STAGES: dict[str, StageSpec] = {
         config_sections=("contacts",),
         capture_and_move=True,
     ),
+}
+
+# farm_inprocess human-optimization stages → the --stages argument they dispatch.
+_HUMAN_STAGE_ARGS = {
+    "human_optim": "root,kinematics_1",
+    "kinematics_2": "kinematics_2",
+    "kindyn": "kindyn_1",
 }
 
 
@@ -486,6 +509,7 @@ def _contacts_entry(
         "body": str(body),
         "geometry": str(geom),
         "geocalib": str(paths.feature_dir("geocalib", sid)),  # optional gravity input
+        "predictions": str(paths.feature_dir("predictions", sid)),  # optional external contact model
         "output": str(_out_path(paths, out_paths, STAGES["contacts"], sid, tag)),
     }
 
@@ -543,7 +567,8 @@ def _stage_config_data(stage: str, config: CorpusConfig) -> dict[str, Any]:
     """Copy authoritative stage knobs and apply only corpus execution overrides."""
     spec = STAGES[stage]
     base_path = (
-        config.human_optim_config if stage in {"human_optim", "contacts"}
+        config.human_optim_config
+        if stage in {"human_optim", "kinematics_2", "kindyn", "contacts"}
         else config.pipeline_config
     )
     with base_path.open("rb") as config_file:
@@ -551,12 +576,13 @@ def _stage_config_data(stage: str, config: CorpusConfig) -> dict[str, Any]:
     resolved: dict[str, Any] = {"runtime": dict(base.get("runtime", {}))}
     resolved["runtime"]["device"] = "cuda"
 
-    if stage == "human_optim":
+    if stage in {"human_optim", "kinematics_2", "kindyn"}:
         resolved = base
         resolved.setdefault("runtime", {})["device"] = "cuda"
-        resolved.setdefault("stages", {}).setdefault("kinematics_1", {})["overlay"] = bool(
-            config.overlay.get(stage, False)
-        )
+        if stage == "human_optim":
+            resolved.setdefault("stages", {}).setdefault("kinematics_1", {})["overlay"] = bool(
+                config.overlay.get(stage, False)
+            )
         return resolved
     if stage == "contacts":
         resolved = base
@@ -704,7 +730,7 @@ def _run_farm_worker(
                         "--predictions",
                         str(farm),
                         "--stages",
-                        "root,kinematics_1",
+                        _HUMAN_STAGE_ARGS[stage],
                         "--config",
                         str(config_path),
                     ]
@@ -764,6 +790,9 @@ def _run_contacts_worker(
                 geocalib = Path(entry["geocalib"]) if "geocalib" in entry else None
                 if geocalib is not None and geocalib.is_dir():  # optional gravity input
                     (farm / "geocalib").symlink_to(geocalib.resolve())
+                preds = Path(entry["predictions"]) if "predictions" in entry else None
+                if preds is not None and (preds / "contacts.npz").is_file():
+                    (farm / "predictions").symlink_to(preds.resolve())  # enables fusion
                 cmd = [
                     sys.executable,
                     str(_CONTACTS_CLI),
