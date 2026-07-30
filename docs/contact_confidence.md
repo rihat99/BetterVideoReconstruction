@@ -1,4 +1,4 @@
-# Per-joint contact-label confidence (schema 7)
+# Per-joint contact-label confidence (schema 8)
 
 Every contact label the stage writes — contact *and* no-contact — gets a
 weight `label_confidence` between 0 and 1. It answers one question: **how much
@@ -13,16 +13,21 @@ that is out of frame or hidden behind a body cannot be trusted either way, so
 visibility multiplies everything. Second, **how strong is the evidence for
 this label's class?** For a contact label, evidence means the body surface
 really sits on the wall. For a no-contact label, evidence means the joint
-clearly moved — a still joint proves nothing. Third — and this is what
-schema 7 added — **where did the label come from?** The completion pass
-creates some labels from "near and still" (gates) and some from the support
-solve (force). A label must not be certified by the same signal that created
-it, so each source gets a **ceiling** on its evidence, and only a different,
-semi-independent signal can raise that ceiling.
+clearly moved — a still joint proves nothing. Third, **where did the label
+come from?** The completion pass creates some labels from "near and still"
+(gates) and some from the support solve (force). A label must not be
+certified by the same signal that created it, so each source gets a
+**ceiling** on its evidence, and only a different, semi-independent signal
+can raise that ceiling.
 
 ```text
 label_confidence = visibility × evidence-capped-by-source
 ```
+
+One exception sits on top of this algebra: a label that prediction **fusion**
+changed — a rescue or a veto (see [contact_fusion.md](contact_fusion.md)) —
+carries the fused log-odds confidence instead. Labels fusion left alone keep
+the witness confidence described here.
 
 ## How to read the numbers
 
@@ -86,8 +91,8 @@ surface  = near × (0.40 + 0.60 × not_deep)   ≈ 0.92 right on the wall
 ```
 
 Then the source cap. The label's `contact_source` bitmask says who created
-it (1 = detector, 2 = gate, 4 = force), and `share` is the solved contact
-force at the joint as a fraction of body weight, with
+it (1 = detector, 2 = gate, 4 = force, 8 = fusion), and `share` is the solved
+contact force at the joint as a fraction of body weight, with
 `force_ramp = 1 − exp(−share / 0.25)`:
 
 | source | evidence | ceiling |
@@ -104,7 +109,8 @@ of that geometry, so it, and only it, lifts the gate ceiling. A force-only
 label is the opposite case: an honest rescue on a misregistered body, real
 but positionally uncertain, so it tops out at 0.70. Only the six group
 joints (wrists, ankles, feet) ever carry gate or force bits; every other
-joint is detector-only and unaffected.
+joint is detector-only and unaffected. A fusion-created label (bit 8) skips
+this table entirely — it carries the fused log-odds confidence.
 
 ## Evidence for a no-contact label
 
@@ -148,14 +154,18 @@ lowering the knobs below 1.0 re-enables it.
 
 ## Saved fields
 
-`estimate_contacts` writes these to `human_optim/contacts_1.npz`
-(`contacts_2.npz` from a kinematics_2 body is detector-only — no completion,
-no force witness).
+`estimate_contacts` writes these to `human_optim/contacts_<tag>.npz`
+(`contacts_1` from a `kinematic_1` body, `contacts_2` from `kinematic_2` —
+both run the full detector + completion + fusion pipeline, since
+`kinematic_2` forwards the honest `drift_pre`; note the `contacts_2`
+confidence caveat in [contacts.md](contacts.md): its caps were calibrated on
+the `kinematic_1` body).
 
 | Field | Shape | Meaning |
 |---|---|---|
 | `joint_contact` | `(P, N, J)` bool | Final binary contact label |
-| `contact_source` | `(P, N, J)` int8 | Provenance bitmask 1=detector, 2=gate, 4=force |
+| `contact_source` | `(P, N, J)` int8 | Provenance bitmask 1=detector, 2=gate, 4=force, 8=fusion |
+| `limb_force_n` | `(P, N, 6)` float | Solved support force per contact group, Newtons (order in `completion_groups`) |
 | `force_share` | `(P, N, J)` float | Solved force / body weight at the six limb joints; NaN elsewhere |
 | `body_weight_n` | `(P,)` float | Total baked mass × g per person |
 | `label_confidence` | `(P, N, J)` float | Final per-joint training weight |
@@ -171,8 +181,12 @@ no force witness).
 | `joint_sdf_cm` | `(P, N, J)` float | Unguarded signed-distance diagnostic |
 | `joint_distance_cm` | `(P, N, J)` float | Euclidean scene-distance diagnostic; not a confidence input |
 | `merged` | `(P, N, J)` bool | Label was filled by span merging |
-| `confidence_schema` | scalar | `7` |
-| `confidence_method` | scalar string | `source-conditional-v1` |
+| `pred_prob_limb` | `(P, N, 4)` float | Model contact probability per limb (order `pred_limbs`); NaN where absent |
+| `fusion_changed` | `(P, N, 4)` int8 | +1 = fusion rescue, −1 = veto, 0 = untouched, per limb-frame |
+| `fusion_method` | scalar string | `predfuse-logodds-v1`, or `none` when no predictions existed |
+| `fusion_pred_clamp` | scalar | The clamp applied to the model probability |
+| `confidence_schema` | scalar | `8` |
+| `confidence_method` | scalar string | `source-conditional-v1` (`scene_free_pred_still_v1` in scene-free mode) |
 | `confidence_motion_source` | scalar string | `drift_pre_with_final_fallback` |
 
 The artifact also stores source hashes and every effective knob. Invalid

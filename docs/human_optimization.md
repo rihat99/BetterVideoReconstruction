@@ -1,14 +1,25 @@
 # Human optimization: the body refinement stages
 
-`scripts/stages/human_optimization.py` — one dispatcher over the body-refinement
-stages: `root`, `kinematics_1`, `kinematics_2`, `dynamics`, and the experimental
+`scripts/stages/human_optimization.py` — one dispatcher over the
+body-refinement stages: `root`, `kinematics_1`, `kinematics_2`, `dynamics`, and
 `kindyn_1` (joint kinematics + dynamics). One config,
-`configs/human_optimization.toml`. The default chain runs `root` + `kinematics_1`;
-the rest are opt-in (`kinematics_2` needs contact annotations, `dynamics` and
-`kindyn_1` need them too).
+`configs/human_optimization.toml`.
 
-This doc explains the optimization problem each stage solves, every loss term, and the
-decisions behind them.
+The default pipeline chain runs `root` + `kinematics_1`. The remaining stages
+are standalone follow-ups; run in order, with the contact readout
+([contacts.md](contacts.md)) between them, they form the full-auto chain:
+
+```
+kinematics_1 → contacts_1 → kinematics_2 → contacts_2 → kindyn_1
+```
+
+Each contact readout measures the body it is given; each later stage consumes
+the labels of the readout before it. No manual annotation is needed anywhere in
+that chain — manual labels stay available for evaluation and via the
+`labels = "manual"` switches.
+
+This doc explains the optimization problem each stage solves, every loss term,
+and the decisions behind them.
 
 ## The engine
 
@@ -172,65 +183,77 @@ iterations — the cloud is static and the body barely moves within a phase.
 
 ## kinematics_2 — contact-patch repair
 
-A repair stage, restarted from the `kinematics_1` result, driven by per-joint
-contact labels. The pipeline default is **auto**: our own `contacts_1.npz`
-(detector + completion labels, positives-only). Manual annotations
-(`data/<stem>.npz`; 10- or 14-joint schema) remain available via
-`[stages.kinematics_2] labels = "manual"` but are metrics-only in the pipeline.
-Auto positives are deliberately **not** confidence-gated: on a floating body every
-witness correctly reports ~0 confidence, and gating would veto exactly the repair
-this stage exists for — the pull tests the label, reprojection and the priors
-referee it. (Scaling each instance's pull by its label confidence was tried on
-2026-07-26 and confirmed this the hard way: the floating-body scene stayed ~30 cm
-off the wall because its true contacts carry confidence .07–.34, while boulder_1's
-*false* positives carry .92 and kept pulling. Arming the clearance repulsion with
-the labels' negatives was tried the same day — it only added jitter.) Its job is to move the body — sometimes tens of centimetres — until
-every labeled contact actually touches the wall. Chamfer is **off** here (the human depth cloud is
-exactly the spaghetti-prone evidence being repaired); reprojection and the pose priors
-are what keep the repair from diverging.
+A repair stage. It restarts from the `kinematics_1` result and moves the body —
+sometimes tens of centimetres — until every labeled contact actually touches the
+wall.
 
-The pull is per **contact instance** — one annotated group (a hand, a foot, an ankle…)
-on one frame. For each instance a small **target patch** is built once per phase: the
-scene points that are visible where that limb appears in the image (projecting within
-`radius_px` of the limb, confidence-gated, the `patch_k` nearest kept). Pulling toward
-the wall *seen at the limb's pixel* keeps the pull nearly reprojection-neutral. An
-instance with no such wall points is reported unresolved and simply not pulled — a
-missing hold cannot be repaired honestly. Two terms act on each instance's single
+**Where the labels come from.** The pipeline default is auto: our own
+`contacts_1.npz` (detector + completion labels, positives only). Manual
+annotations (`data/<stem>.npz`, 10- or 14-joint schema) remain available via
+`[stages.kinematics_2] labels = "manual"` but are metrics-only in the pipeline.
+
+**Why the labels are not confidence-gated.** On a floating body every witness
+honestly reports near-zero confidence, so gating on confidence would veto
+exactly the repair this stage exists for. Instead the pull itself tests the
+label, and reprojection plus the pose priors referee it — a wrong label simply
+fails to win against them. This was confirmed the hard way (2026-07-26):
+scaling each pull by its label confidence left the floating-body scene ~30 cm
+off the wall, because its true contacts carry confidence .07–.34 while
+boulder_1's *false* positives carry .92 and kept pulling. Arming the clearance
+repulsion with the labels' negatives was tried the same day — it only added
+jitter.
+
+**Why chamfer is off.** The human depth cloud is exactly the spaghetti-prone
+evidence being repaired, so the term that matches the body to it is disabled.
+Reprojection and the pose priors are what keep the repair from diverging.
+
+**How the pull works.** The unit of repair is a **contact instance** — one
+labeled group (a hand, a foot, an ankle…) on one frame. For each instance a
+small **target patch** is built once per phase: the scene points visible where
+that limb appears in the image (projecting within `radius_px` of the limb,
+confidence-gated, the `patch_k` nearest kept). Pulling toward the wall *seen at
+the limb's pixel* keeps the pull nearly reprojection-neutral. An instance with
+no such wall points is reported unresolved and simply not pulled — a missing
+hold cannot be repaired honestly. Two terms act on each instance's single
 closest vertex:
 
-- **`ann_acquisition`** — a pseudo-Huber pull on the distance to the patch: a bounded,
-  roughly constant force from far away that fades out at contact. Only the group's
-  closest vertex is pulled — a contact label means *some* surface point touches, not
-  the whole hand.
-- **`ann_seating`** — **off by default since 2026-07-26.** It drove that vertex a few
-  millimetres *inside* the wall, on the theory that its symmetric push-back was the
-  anti-burial guard. Measured on boulder_1/3, the opposite was true: the −5 mm target
-  was itself the main source of penetration (it applies to every instance, including
-  the labels that are wrong), and removing it cut mean vertex penetration 2.03 → 0.51
-  and 0.93 → 0.26 mm while the true contacts still ended up at the same wall distance
-  as the manual-annotation chain. Acquisition's fading pull plus the ordinary
-  penetration term seat the limb on their own. The term stays wired; raise its weight
-  to re-enable. Propagated over all 13 `out/` scenes (2026-07-26), the change plus the
-  cones-off default moved the mean kindyn_1 body from 14.2 → 12.5 mm jitter and
-  2.1 → 1.0 mm mean penetration, improving every scene's penetration and 12/13
-  scenes' jitter, with the contacts_2 labels unchanged (pooled F1 .833 before and
-  after).
+- **`ann_acquisition`** — a pseudo-Huber pull on the distance to the patch: a
+  bounded, roughly constant force from far away that fades out at contact. Only
+  the group's closest vertex is pulled — a contact label means *some* surface
+  point touches, not the whole hand.
+- **`ann_seating`** — **off by default since 2026-07-26.** It used to drive
+  that vertex a few millimetres *inside* the wall, on the theory that its
+  symmetric push-back was the anti-burial guard. Measured on boulder_1/3, the
+  opposite was true: the −5 mm target was itself the main source of penetration
+  (it applies to every instance, including the labels that are wrong), and
+  removing it cut mean vertex penetration 2.03 → 0.51 and 0.93 → 0.26 mm while
+  the true contacts still ended up at the same wall distance as the
+  manual-annotation chain. Acquisition's fading pull plus the ordinary
+  penetration term seat the limb on their own. The term stays wired; raise its
+  weight to re-enable. Propagated over all 13 `out/` scenes (2026-07-26), the
+  change plus the cones-off default moved the mean kindyn_1 body from
+  14.2 → 12.5 mm jitter and 2.1 → 1.0 mm mean penetration, improving every
+  scene's penetration and 12/13 scenes' jitter, with the contacts_2 labels
+  unchanged (pooled F1 .833 before and after).
 
-An earlier version that simply strengthened `ann_attraction` (which pulls *all* of a
-group's vertices) buried the body many centimetres into the wall on every test scene:
-once the front vertices cross the surface and drop out of the loss, the back vertices
-keep pulling. The per-instance closest-vertex form makes that failure impossible
-rather than tuned away.
+**Why closest-vertex, not the whole limb.** An earlier version simply
+strengthened `ann_attraction`, which pulls *all* of a group's vertices. It
+buried the body many centimetres into the wall on every test scene: once the
+front vertices cross the surface and drop out of the loss, the back vertices
+keep pulling. The per-instance closest-vertex form makes that failure
+impossible rather than tuned away.
 
-Scene terms (and the patches) are on from the **root phase** — the rigid root phase
-does the bulk push toward the wall, then `full` and `refine` re-settle the pose
-(no L-BFGS here: the per-phase patches form an active set whose churn breaks its line
-search). Clearance repulsion on no-contact joints and the in-contact velocity damper
-run as before. People whose annotation is absent or marked `ignored` are copied
-through from `kinematic_1` untouched, and the honest `drift_pre` from kinematics_1 is
-passed through unchanged, so the contact readout on this body still gates on
-pre-enforcement stillness. The acquisition weight is the floater knob: it sets the
-force balance against reprojection, and was chosen by sweep (see the config comments).
+**Phases.** Scene terms (and the patches) are on from the **root phase**: the
+rigid root phase does the bulk push toward the wall, then `full` and `refine`
+re-settle the pose. There is no L-BFGS phase here — the per-phase patches form
+an active set whose churn breaks its line search. Clearance repulsion on
+no-contact joints and the in-contact velocity damper run as before. People
+whose annotation is absent or marked `ignored` are copied through from
+`kinematic_1` untouched, and the honest `drift_pre` from kinematics_1 is passed
+through unchanged, so the contact readout on this body still gates on
+pre-enforcement stillness. The acquisition weight is the floater knob: it sets
+the force balance against reprojection, and was chosen by sweep (see the config
+comments).
 
 ## dynamics — force-only RNEA
 
@@ -252,21 +275,24 @@ hands (resolved at the wrist), the two feet, and the two ankles — minimizing:
 
 A joint carries a force only on the frames it is labelled in contact.
 
-**Friction cone.** A hold or foothold can only *push* on the body, never pull, and it can
-only push sideways so much before the foot slips. The forces it is allowed to apply
-therefore form a cone around the surface normal, opening to a half-angle θ (default 45°,
-so the sideways force may be at most `tan θ = 1` times the outward push). The cone is not
-a loss term — it is built into the force itself. At each coned contact the force is a sum
-of the cone's four *edge directions* (the normal tilted by θ toward each side), each
-scaled by a learned non-negative amount. Any such sum lies inside the pyramid those edges
-span, so the force can never leave the cone or pull — by construction, with no weight to
-tune. (The pyramid is inscribed in the round cone, so between its edges it is slightly
-stricter than θ.) The surface normal at each contact comes from the fused scene cloud: we
-take the nearest scene points to the joint and average their stored normals, which already
-point out of the wall toward the climber. A contact whose joint is too far from any
-surface, or whose neighbouring normals disagree (a thin hold or a concave corner averages
-opposing normals to nothing), falls back to a free force with no cone — better none than
-one aimed arbitrarily. Hands are left out on purpose — a climbing hand grips a hold and
+**Friction cone.** A hold or foothold can only *push* on the body, never pull, and it
+can only push sideways so much before the foot slips. The forces it may apply form a
+cone around the surface normal, opening to a half-angle θ (default 45°, so the
+sideways force may be at most `tan θ = 1` times the outward push).
+
+The cone is not a loss term — it is built into the force itself. At each coned contact
+the force is a sum of the cone's four *edge directions* (the normal tilted by θ toward
+each side), each scaled by a learned non-negative amount. Any such sum lies inside the
+pyramid those edges span, so the force can never leave the cone or pull — by
+construction, with no weight to tune. (The pyramid is inscribed in the round cone, so
+between its edges it is slightly stricter than θ.)
+
+The surface normal at each contact comes from the fused scene cloud: take the nearest
+scene points to the joint and average their stored normals, which already point out of
+the wall toward the climber. A contact whose joint is too far from any surface, or
+whose neighbouring normals disagree (a thin hold or a concave corner averages opposing
+normals to nothing), falls back to a free force with no cone — better none than one
+aimed arbitrarily. Hands are left out on purpose: a climbing hand grips a hold and
 pulls down and inward on it, so its force is genuinely bilateral.
 
 Force smoothness is split in two so the **magnitude** of a contact force can be held
@@ -294,66 +320,73 @@ force-plus-gradient solve, so the torch path is used.
 
 ## kindyn_1 — joint kinematics + dynamics
 
-The chain above is **sequential**: `kinematics_1/2` fit the motion using only what
-the camera sees, then `dynamics` solves the contact forces on that finished,
-**frozen** pose. So the physics never gets a say in the motion — if the pose is a
-little off, the force solve just absorbs the error into a large leftover base
-wrench. `kindyn_1` breaks that one-way street: it optimizes the pose **and** the
-contact forces **together**, so the physics residual can push back on the motion.
+**Why it exists.** The chain above is one-way: `kinematics_1/2` fit the motion
+using only what the camera sees, then `dynamics` solves the contact forces on
+that finished, **frozen** pose. The physics never gets a say in the motion — if
+the pose is a little off, the force solve just absorbs the error into a large
+leftover base wrench. `kindyn_1` closes the loop: it optimizes the pose **and**
+the contact forces together, so the physics residual can push back on the
+motion.
 
-It starts from the converged `kinematics_2` body and its contact labels — by
-default `contacts_2.npz`, the readout measured on that very body
-(`[stages.kindyn_1] labels = "manual"` switches back to the annotation, and
-`bodies = "kinematic_1"` starts from `kinematic_1` + `contacts_1` for chains that
-skip `kinematics_2`). The
-objective is the full `kinematics_2` objective (reprojection, priors, motion
-smoothness, scene penetration, the annotation terms — chamfer is off here too:
-kindyn starts from the repaired body, and chamfer would pull it back toward the
-spaghetti-prone depth the repair just left) **plus** the `dynamics` terms
-(`base_wrench`, `force_magnitude`, `force_smooth_mag`/`_dir`, `torque_smooth`), with
-one world-force vector per contact group per frame added as extra optimization
-variables. The `dynamics` stage's **friction pyramids** (§ above) are available here
-too (`[stages.kindyn_1] cones = true`; the cone frames are then read off the scene
-once, at the warm-start pose, and frozen — the pose moves during the solve, so
-re-reading the normals every iteration would make the cone a moving target). They are
-**off by default**: measured on boulder_1/3 they stack with contact-label errors
-(jitter 6.7 → 8.3 mm) and hurt boulder_1 even with hand-annotated labels
-(penetration 1.5 → 4.2 mm) — a hooking heel or toe genuinely pulls on the wall, which
-a push-only cone forbids. Turn them on for scenes where every foot contact really
-pushes, like the campus-board force-plate clips.
+**What it optimizes.** It starts from the converged `kinematics_2` body and its
+contact labels — by default `contacts_2.npz`, the readout measured on that very
+body. (`[stages.kindyn_1] labels = "manual"` switches back to the annotation;
+`bodies = "kinematic_1"` starts from `kinematic_1` + `contacts_1` for chains
+that skip `kinematics_2`.) The objective is the full `kinematics_2` objective —
+reprojection, priors, motion smoothness, scene penetration, the annotation
+terms — **plus** the `dynamics` terms (`base_wrench`, `force_magnitude`,
+`force_smooth_mag`/`_dir`, `torque_smooth`), with one world-force vector per
+contact group per frame added as extra optimization variables. Chamfer stays
+off, for the same reason as in `kinematics_2`: kindyn starts from the repaired
+body, and chamfer would pull it back toward the spaghetti-prone depth the
+repair just left.
 
-**How it runs.** Forces are established first by a quick frozen-pose solve (like the
-`dynamics` stage's, but with this stage's weights) so
-they start physically reasonable — with zero forces the body is in freefall and the
-base wrench says nothing useful about the pose. Then a single joint **L-BFGS** polish
-moves the pose and forces together. L-BFGS is the right tool here: the pose and the
-~1000 N forces live on wildly different scales, and a fixed-step optimizer (Adam)
-cannot co-adapt them — it leaves the forces frozen and lets the pose flail against a
-stale physics residual, which wrecks the motion. L-BFGS's line search keeps every
-step from overshooting, so the pose settles gently onto the physically-solved forces.
-In practice the forces do not move at all during the joint phase — their gradient is
-~10⁸× smaller than the pose's, below the shared line search's step resolution — so
-the stage is effectively *solved forces + pose refinement against them*, and the
-whole win comes from the **pose** shifting to be consistent with the physics. (That
-also means the saved forces are the ones solved at the *starting* pose; re-solving
-them at the final pose gives a slightly different, self-consistent pair — a possible
-future alternation step.)
+**Friction cones are available but off by default**
+(`[stages.kindyn_1] cones = true` re-enables). When on, the cone frames are
+read off the scene once, at the warm-start pose, and frozen — the pose moves
+during the solve, so re-reading the normals every iteration would make the cone
+a moving target. They are off because, measured on boulder_1/3, they stack with
+contact-label errors (jitter 6.7 → 8.3 mm) and hurt boulder_1 even with
+hand-annotated labels (penetration 1.5 → 4.2 mm): a hooking heel or toe
+genuinely pulls on the wall, which a push-only cone forbids. Turn them on for
+scenes where every foot contact really pushes, like the campus-board
+force-plate clips.
+
+**How it runs.** Two steps. First, a quick frozen-pose force solve (like the
+`dynamics` stage's, but with this stage's weights) establishes physically
+reasonable forces — with zero forces the body is in freefall, and the base
+wrench says nothing useful about the pose. Then a single joint **L-BFGS**
+polish moves the pose and forces together.
+
+L-BFGS is the right tool here. The pose and the ~1000 N forces live on wildly
+different scales, and a fixed-step optimizer (Adam) cannot co-adapt them — it
+leaves the forces frozen and lets the pose flail against a stale physics
+residual, which wrecks the motion. L-BFGS's line search keeps every step from
+overshooting, so the pose settles gently onto the physically-solved forces.
+
+In practice the forces do not move at all during the joint phase — their
+gradient is ~10⁸× smaller than the pose's, below the shared line search's step
+resolution. So the stage is effectively *solved forces + pose refinement
+against them*, and the whole win comes from the **pose** shifting to be
+consistent with the physics. (That also means the saved forces are the ones
+solved at the *starting* pose; re-solving them at the final pose would give a
+slightly different, self-consistent pair — a possible future alternation step.)
 
 **The weights.** The kinematic columns of `kindyn_1` are copied straight from
-`kinematics_2`, so the visual fit is asked for exactly as before. The five dynamics
-weights are **linear** (the term is `0.5·Σ residual²` and the weight multiplies it,
-like every other engine term) — unlike the standalone `dynamics` stage, which folds
-the weight inside the square. `base_wrench` is tiny (`1e-5`) on purpose: the base
-wrench is on the order of 1000 N while the visual losses are order 1–100, so at
-weight 1 it would simply overwrite the visual fit. The three smoothness terms keep
-the `dynamics` stage's ratios to `base_wrench` exactly; `force_magnitude` ends up
-~100× heavier relative to `base_wrench` than in the `dynamics` stage (that stage
-folds its 0.01 *inside* the square, making it effectively 1e-4 of base — here the
-linear 0.01 ratio is kept). This only shapes the warm-start (the force terms are
-constant while the forces sit frozen in the joint phase) and the tuned result met
-its targets, so the value stays. Tuned on `boulder_1`: the base wrench drops far
-below the sequential value while the chamfer and reprojection grow only a few
-percent.
+`kinematics_2`, so the visual fit is asked for exactly as before. The five
+dynamics weights are **linear** — the term is `0.5·Σ residual²` and the weight
+multiplies it, like every other engine term — unlike the standalone `dynamics`
+stage, which folds the weight inside the square. `base_wrench` is tiny (`1e-5`)
+on purpose: the base wrench is on the order of 1000 N while the visual losses
+are order 1–100, so at weight 1 it would simply overwrite the visual fit. The
+three smoothness terms keep the `dynamics` stage's ratios to `base_wrench`
+exactly; `force_magnitude` ends up ~100× heavier relative to `base_wrench` than
+in the `dynamics` stage (that stage folds its 0.01 *inside* the square, making
+it effectively 1e-4 of base — here the linear 0.01 ratio is kept). This only
+shapes the warm-start (the force terms are constant while the forces sit frozen
+in the joint phase) and the tuned result met its targets, so the value stays.
+Tuned on `boulder_1`: the base wrench drops far below the sequential value
+while the chamfer and reprojection grow only a few percent.
 
 ## What is deliberately absent
 

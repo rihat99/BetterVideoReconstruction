@@ -14,7 +14,10 @@ The pipeline has two independent opinions about whether a limb touches the wall.
 
 Fusion combines the two at the very end of `estimate_contacts.py`, after the
 detector, the completion pass, and the confidence computation. It changes labels
-only; everything upstream is untouched.
+only; everything upstream is untouched. It runs whenever the clip has a
+`predictions/contacts.npz` — for `contacts_1` and `contacts_2` alike; without
+one, the stage prints "fusion: OFF" and the output is the pure geometric
+labeling.
 
 ## The idea: add the evidence
 
