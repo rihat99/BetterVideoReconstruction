@@ -66,31 +66,36 @@ def _limb_members(joint_names: list[str]) -> list[list[int]]:
     """Joint columns per limb, in ``LIMBS`` order — hand = wrist + fingers, foot = foot + ankle.
 
     Mirrors the contact stage's own fold (``tools.human_optim.dynamics._contact_catalog``)
-    by name rather than by index, and without pulling torch into a CPU script.
+    by name rather than by index, and without pulling torch into a CPU script. A name the
+    list does not hold is simply skipped, so the same rule folds the body's 52 joints and
+    the much shorter list of joints the force solve puts a contact on.
     """
     index = {name: column for column, name in enumerate(joint_names)}
-    hands = [[index[f"{side}_wrist"]]
+    present = lambda *names: [index[name] for name in names if name in index]  # noqa: E731
+    hands = [present(f"{side}_wrist")
              + [column for name, column in index.items()
                 if name.startswith(f"{side}_") and any(finger in name for finger in _FINGER)]
              for side in ("left", "right")]
-    feet = [[index[f"{side}_foot"], index[f"{side}_ankle"]] for side in ("left", "right")]
+    feet = [present(f"{side}_foot", f"{side}_ankle") for side in ("left", "right")]
     return hands + feet
 
 
 def _limb_load(kindyn: np.lib.npyio.NpzFile, person: int) -> np.ndarray:
     """``(N, 4)`` downward load in newtons per limb — the plate-comparable scalar.
 
-    ``kindyn_1`` solves a force at six points: the two wrists, the two feet and the
-    two ankles. A hand limb is its wrist; a foot limb is the foot plus the ankle,
-    because a planted foot can push through both.
+    A limb's load is the sum over whichever contact points the solve gave it. Which
+    points those are is read from the file rather than assumed, because it has changed:
+    the solve used to push through six joints (the wrists, the feet and the ankles) and
+    now uses four (the wrists and the feet).
     """
     gravity = np.asarray(kindyn["gravity_world"], float)
     down = gravity / np.linalg.norm(gravity)
     groups = [str(name) for name in np.asarray(kindyn["contact_force_joints"]).reshape(-1)]
-    load = -(np.asarray(kindyn["contact_forces"][person], float) @ down)  # (N, 6)
-    columns = [["left_wrist"], ["right_wrist"], ["left_foot", "left_ankle"],
-               ["right_foot", "right_ankle"]]
-    return np.stack([load[:, [groups.index(name) for name in limb]].sum(1) for limb in columns], 1)
+    load = -(np.asarray(kindyn["contact_forces"][person], float) @ down)  # (N, groups)
+    members = _limb_members(groups)
+    if not all(members):  # a limb with no contact point would silently read as zero load
+        raise ValueError(f"no solved contact point for {LIMBS[members.index([])]} among {groups}")
+    return np.stack([load[:, limb].sum(1) for limb in members], 1)
 
 
 def _pipeline_predictions(clip: str) -> tuple[dict[str, np.ndarray], int, dict[str, str]]:
