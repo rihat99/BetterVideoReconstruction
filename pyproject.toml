@@ -4,8 +4,13 @@ version = "0.1.0"
 description = "Monocular-video human reconstruction (SAM3 track → VGGT camera → SAM-3D-Body → MHR→SMPL-X → visually-guided kinematic refinement)"
 requires-python = ">=3.12"
 dependencies = [
-    "better-robot",
-    "better-human",
+    # "better-robot",  # TEMP: hand-installed --no-deps (cu126/cu129 index conflict)
+    # "better-human",  # TEMP: hand-installed --no-deps (cu126/cu129 index conflict)
+    # view_3d's UI library — also better-robot's viewer extra, but declared here
+    # because better-robot is hand-installed with --no-deps (see INSTALL.md).
+    "viser>=1.0",
+    # better-robot's own runtime dep, same --no-deps reason.
+    "yourdfpy>=0.0.14",
     # MHR (Momentum Human Rig) — submodule
     "mhr",
     "pymomentum-gpu",
@@ -68,9 +73,9 @@ dependencies = [
     "accelerate>=0.30",
     "bitsandbytes>=0.46",
     "trimesh>=4.0",
-    # SMPL-X body model (pip package) — backs convert_mhr_to_smplx.py. better_human's
+    # SMPL-X body model (pip package) — backs convert_mhr_to_smplx.py. BetterHuman's
     # native SMPLX has no jaw/eye/face deformation yet, so the MHR→SMPL-X fitter uses
-    # the standard smplx package (loads better_human/models/smplx/SMPLX_*.npz).
+    # the standard smplx package (loads ../BetterHuman/models/smplx/SMPLX_*.npz).
     "smplx>=0.1.28",
     # sam3 still uses pkg_resources, which setuptools 80+ no longer ships by
     # default; pin below that cutoff so ``import pkg_resources`` keeps working.
@@ -84,8 +89,8 @@ url = "https://download.pytorch.org/whl/cu129"
 explicit = true
 
 [tool.uv.sources]
-better-robot = { path = "../BetterRobot", editable = true }
-better-human = { path = "../better_human", editable = true }
+# better-robot = { path = "../BetterRobot", editable = true }  # TEMP: see above
+# better-human = { path = "../BetterHuman", editable = true }  # TEMP: see above
 mhr = { path = "third_party/MHR", editable = true }
 sam3 = { path = "third_party/sam3", editable = true }
 sapiens = { path = "third_party/sapiens2", editable = true }
