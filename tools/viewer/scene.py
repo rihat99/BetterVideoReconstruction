@@ -3,8 +3,8 @@
 Builds every scene node for a single clip from its :class:`~tools.viewer.loading.ClipData`
 — the scene cloud, the per-point normal arrows (debug), the camera frustums +
 centre path, the gravity arrow, the per-frame human
-points, the skinned SMPL-X bodies, and the force/torque skeletons (dynamics /
-kindyn_1) — and
+points, the skinned SMPL-X bodies, their joint skeletons and contact frames, and
+the force/torque skeletons (dynamics / kindyn_1) — and
 moves them together with the frame slider. One ``/clip`` root frame owns them all, so :meth:`ClipScene.dispose`
 tears the whole clip down in a single removal.
 """
@@ -39,18 +39,18 @@ _SENSOR_RGB, _SENSOR_FLOOR_N = (255, 150, 30), 10.0
 # body-skeleton overlay: fixed joint-sphere radius / bone radius (m) and the
 # default kinematic mesh opacity while the skeleton shows over it (slider-tunable).
 _SKEL_R, _SKEL_RB, _SKEL_ALPHA = 0.028, 0.012, 0.7
-# joint-sphere colours — red in scene contact / green free (matches estimate_contacts);
-# the flat fallback when the "contact confidence" layer is off (or no confidence was written).
+# Finger joints (``_FINGER_TOKENS``, imported from ``loading``) draw at 30 % of that
+# size, so a hand reads as a hand instead of a clump of body-sized spheres.
+_SKEL_FINGER_SCALE = 0.30
+# Joint-sphere colour: joints carry no contact state any more (contact lives on the
+# contact frames), so every joint is the same neutral slate grey.
+_SKEL_RGB = (120, 128, 140)
+# contact/free colours — red touching the scene / green free (matches estimate_contacts).
 _CONTACT_RGB, _FREE_RGB = (235, 45, 45), (60, 200, 90)
-# With the confidence layer on, the sphere is ramped by the per-joint label confidence
-# (contacts_1.npz ``label_confidence`` ∈ [0, 1], both classes): a neutral grey at ~0 →
-# these darker, saturated endpoints at ~1, so a more-certain label reads darker + bolder.
-_CONTACT_HI, _FREE_HI, _CONF_GREY = (150, 12, 12), (14, 120, 42), (150, 150, 150)
-# Depth trust override: calm green at trust=1 → bright magenta at trust=0;
-# missing depth gaps are a distinct neutral slate grey.
-_DEPTH_GOOD, _DEPTH_BAD, _DEPTH_NODATA = (90, 170, 120), (255, 0, 110), (105, 110, 125)
-# (``_FINGER_TOKENS`` — the hand joints excluded from the body skeleton — is imported
-# from ``loading`` so the skeleton build and the finger→wrist contact fold agree.)
+# contact frames: sphere radius (m, readable next to the 0.028 joints), the
+# frame→parent-joint connector radius as a fraction of it, the pale connector colour,
+# and the length of the outward-normal arrow drawn at each frame.
+_FRAME_R, _FRAME_CONN_SCALE, _FRAME_CONN_RGB, _FRAME_NORMAL_LEN = 0.012, 0.3, (150, 190, 160), 0.06
 # cap on drawn camera frustums, so a long clip isn't a dense wire mess
 _CAM_MAX_FRUSTUMS = 24
 # draw the ground grid this many times the fitted floor's data extent, so it reads
@@ -58,31 +58,14 @@ _CAM_MAX_FRUSTUMS = 24
 _GROUND_GRID_MULT = 10.0
 
 
-def _unit_cylinder():
-    """A unit +z cylinder (radius 1, height 1) with a light-grey vertex colour,
-    scaled per-frame into skeleton / dynamics bones."""
+def _unit_cylinder(color: tuple[int, int, int] = (235, 235, 235)):
+    """A unit +z cylinder (radius 1, height 1) in ``color``, scaled per-frame into
+    skeleton / dynamics bones and contact-frame connectors."""
     import trimesh
 
     cyl = trimesh.creation.cylinder(radius=1.0, height=1.0, sections=10)
-    cyl.visual.vertex_colors = np.array([235, 235, 235, 255], np.uint8)
+    cyl.visual.vertex_colors = np.array([*color, 255], np.uint8)
     return cyl
-
-
-def _conf_color(hot: bool, conf: float) -> tuple[int, int, int]:
-    """Joint-sphere RGB ramped by label confidence: neutral grey at 0 → a dark, saturated
-    red (contact) / green (free) at 1. ``conf`` clamped to [0, 1] (non-finite → grey)."""
-    hi = _CONTACT_HI if hot else _FREE_HI
-    c = float(conf)
-    t = min(max(c, 0.0), 1.0) if c == c else 0.0     # c == c is False for NaN
-    return tuple(int(round(g + (h - g) * t)) for g, h in zip(_CONF_GREY, hi))
-
-
-def _depth_color(gap_cm: float, trust: float) -> tuple[int, int, int]:
-    """Joint-sphere RGB from depth trust; missing depth data is neutral slate grey."""
-    if not np.isfinite(gap_cm) or not np.isfinite(trust):
-        return _DEPTH_NODATA
-    t = 1.0 - float(np.clip(trust, 0.0, 1.0))
-    return tuple(int(round(g + (b - g) * t)) for g, b in zip(_DEPTH_GOOD, _DEPTH_BAD))
 
 
 class ClipScene:
@@ -204,16 +187,12 @@ class ClipScene:
             self.skinned[name] = hs
 
         # -- body-skeleton overlays (spheres + bones), hidden — one per refined body
-        # source that carries a skeleton dict ("kinematics" from contacts_1,
-        # "kinematics_2" from contacts_2). Joints come from that body's per-frame world
-        # joints; a sphere is red in scene contact / green free, and the mesh goes
-        # translucent while the skeleton overlays it. Fingers are excluded.
+        # source that carries a skeleton dict ("kinematics" from kinematic_1,
+        # "kinematics_2" from kinematic_2). Joints come from that body's per-frame world
+        # joints; all 52 are drawn (fingers small, because contact frames hang off the
+        # finger joints), and the mesh goes translucent while an overlay covers it.
         self.skels = data.skeletons
         self.skel_nodes: dict[str, dict[int, dict]] = {}     # source -> oid -> nodes
-        self._contact: dict[str, dict[int, np.ndarray]] = {}
-        self._conf: dict[str, dict[int, np.ndarray]] = {}    # (N, J) label confidence, folded
-        self._depth_gap: dict[str, dict[int, np.ndarray]] = {}
-        self._depth_trust: dict[str, dict[int, np.ndarray]] = {}
         self._skel_src: str | None = None      # source whose skeleton nodes are visible
         self._translucent: str | None = None   # active source whose mesh is currently translucent
         for source, skel in self.skels.items():
@@ -222,22 +201,7 @@ class ClipScene:
                 continue
             _f, body_oids, people = body
             names, parents = skel["joint_names"], skel["parents"]
-            joints = [j for j, nm in enumerate(names)
-                      if not any(t in nm for t in _FINGER_TOKENS)]
-            jointset = set(joints)
-            if skel["contact"] is not None:
-                c_oids = (skel["contact_oids"] if skel["contact_oids"] is not None
-                          else np.arange(skel["contact"].shape[0]))
-                self._contact[source] = {int(o): skel["contact"][i] for i, o in enumerate(c_oids)}
-                if skel.get("confidence") is not None:
-                    self._conf[source] = {int(o): skel["confidence"][i]
-                                          for i, o in enumerate(c_oids)}
-                if skel.get("joint_depth_gap_cm") is not None:
-                    self._depth_gap[source] = {int(o): skel["joint_depth_gap_cm"][i]
-                                               for i, o in enumerate(c_oids)}
-                if skel.get("joint_depth_trust") is not None:
-                    self._depth_trust[source] = {int(o): skel["joint_depth_trust"][i]
-                                                 for i, o in enumerate(c_oids)}
+            small = [any(t in nm for t in _FINGER_TOKENS) for nm in names]
             cyl = _unit_cylinder()
             nodes: dict[int, dict] = {}
             for p, person in enumerate(people):
@@ -245,19 +209,53 @@ class ClipScene:
                     continue
                 oid = int(body_oids[p])
                 spheres = {j: ss.add_icosphere(
-                    f"/clip/skeleton/{source}/p{oid:02d}/joint_{j:02d}", radius=_SKEL_R,
-                    color=_FREE_RGB, position=(0.0, 0.0, 0.0), visible=False) for j in joints}
+                    f"/clip/skeleton/{source}/p{oid:02d}/joint_{j:02d}",
+                    radius=_SKEL_R * (_SKEL_FINGER_SCALE if small[j] else 1.0),
+                    color=_SKEL_RGB, position=(0.0, 0.0, 0.0), visible=False)
+                    for j in range(len(names))}
                 bones = []
-                for j in joints:
+                for j in range(len(names)):
                     par = int(parents[j])
-                    if par < 0 or par not in jointset:
+                    if par < 0:
                         continue
                     h = ss.add_mesh_trimesh(f"/clip/skeleton/{source}/p{oid:02d}/bone_{j:02d}",
                                             cyl, visible=False)
-                    bones.append((h, j, par))
+                    bones.append((h, j, par, _SKEL_RB * (_SKEL_FINGER_SCALE if small[j] else 1.0)))
                 nodes[oid] = {"spheres": spheres, "bones": bones}
             if nodes:
                 self.skel_nodes[source] = nodes
+
+        # -- contact frames (spheres + parent links + normal arrows), hidden — the 12
+        # named skin points contact is detected on, for every source whose contact
+        # artifact carries per-frame labels. Positions come from the SAME body forward
+        # pass that poses the mesh, so a frame sits exactly on the drawn skin. --
+        self.frame_nodes: dict[str, dict[int, dict]] = {}    # source -> oid -> nodes
+        self._frame_contact: dict[str, dict[int, np.ndarray]] = {}
+        self._frames_src: str | None = None
+        for source, skel in self.skels.items():
+            body = data.skinned.get(source)
+            if body is None or skel["frame_contact"] is None:
+                continue
+            _f, body_oids, people = body
+            self._frame_contact[source] = {int(o): skel["frame_contact"][i]
+                                           for i, o in enumerate(skel["contact_oids"])}
+            parent = np.asarray(skel["frame_parent"], np.int32)     # (F,) joint per frame
+            link = _unit_cylinder(_FRAME_CONN_RGB)
+            nodes = {}
+            for p, person in enumerate(people):
+                if person is None:
+                    continue
+                oid = int(body_oids[p])
+                spheres = [ss.add_icosphere(
+                    f"/clip/frames/{source}/p{oid:02d}/frame_{i:02d}", radius=_FRAME_R,
+                    color=_FREE_RGB, position=(0.0, 0.0, 0.0), visible=False)
+                    for i in range(len(parent))]
+                links = [ss.add_mesh_trimesh(f"/clip/frames/{source}/p{oid:02d}/link_{i:02d}",
+                                             link, visible=False) for i in range(len(parent))]
+                nodes[oid] = {"oid": oid, "spheres": spheres, "links": links,
+                              "parent": parent, "arrows": None}
+            if nodes:
+                self.frame_nodes[source] = nodes
 
         # -- force/torque skeletons (spheres + bones), one per force source
         #    ("dynamics" and/or "kindyn_1"), hidden; forces added per frame. Node paths
@@ -307,16 +305,16 @@ class ClipScene:
         # Which sources own a drawable skeleton, and which contextual GUI controls
         # apply to which source (read by the viewer to hide inapplicable controls):
         #   force sources     → the ``dyn_*`` overlays + the torque skeleton
-        #   overlay sources   → the ``confidence`` / ``depth_trust`` skeleton colouring
-        #   translucency ones → the body-opacity slider (a mesh a skeleton can overlay)
+        #   frame sources     → the ``contact frames`` layer (labels exist for them)
+        #   translucency ones → the body-opacity slider (a mesh an overlay covers)
         self.force_sources = set(self.forces)
+        self.frame_sources = set(self.frame_nodes)
         # Measured wall-sensor forces (climb_wall clips only) — drawn on top of any
         # active force source by the ``sensor forces`` toggle.
         self.sensors = data.sensors
-        self.overlay_sources = set(self.skel_nodes)
-        self._skeleton_sources = self.force_sources | self.overlay_sources
+        self._skeleton_sources = self.force_sources | set(self.skel_nodes)
         self.translucency_sources = {s for s in self.skinned
-                                     if s in self._skeleton_sources}
+                                     if s in self._skeleton_sources | self.frame_sources}
 
         self._apply_static_layers()
         self.info_md = self._build_info()
@@ -555,6 +553,7 @@ class ClipScene:
                     for j, bone in enumerate(handle.bones):
                         bone.wxyz, bone.position = bw[j], bp[j]
         self._apply_skeleton(f)
+        self._apply_frames(f)
         for source in self.forces:
             self._apply_dynamics(source, f, src == source, skel_on and src == source)
         self._apply_translucency()
@@ -564,23 +563,23 @@ class ClipScene:
         for nd in self.skel_nodes.get(source, {}).values():
             for sp in nd["spheres"].values():
                 sp.visible = False
-            for h, _j, _par in nd["bones"]:
+            for h, *_rest in nd["bones"]:
                 h.visible = False
 
     def _apply_skeleton(self, f: int) -> None:
-        """Pose + contact-colour the active body source's 22-joint skeleton — gated on
-        the ``skeleton`` layer + a source with skeleton nodes ("kinematics" coloured by
-        contacts_1, "kinematics_2" by contacts_2). (The mesh translucency it needs is
-        applied centrally in :meth:`_apply_translucency`.)
+        """Pose the active body source's 52-joint skeleton — gated on the ``skeleton``
+        layer + a source with skeleton nodes ("kinematics" / "kinematics_2").
+
+        Spheres are one neutral colour: contact is a property of the contact frames
+        (see :meth:`_apply_frames`), not of joints. Finger joints and their bones draw
+        small. (The mesh translucency the overlay needs is applied centrally in
+        :meth:`_apply_translucency`.)
 
         The per-joint pose/visibility loop is skipped entirely while the skeleton is
         hidden and already torn down, so idle playback stays cheap.
         """
         src = self.active if (self.layers.get("skeleton", False)
                               and self.active in self.skel_nodes) else None
-        # Confidence shading (on by default): grey→saturated red/green by label confidence.
-        use_conf = self.layers.get("confidence", True)
-        use_depth = self.layers.get("depth_trust", False)
         if src is None and self._skel_src is None:
             return
         if self._skel_src is not None and self._skel_src != src:
@@ -588,36 +587,19 @@ class ClipScene:
         if src is not None:
             _f, body_oids, people = self.data.skinned[src]
             nodes = self.skel_nodes[src]
-            contact = self._contact.get(src, {})
-            conf_d = self._conf.get(src, {})
-            gap_d = self._depth_gap.get(src, {})
-            trust_d = self._depth_trust.get(src, {})
             for p, person in enumerate(people):
                 nd = None if person is None else nodes.get(int(body_oids[p]))
                 if nd is None:
                     continue
                 live = f < len(person["valid"]) and bool(person["valid"][f])
                 bp = person["bone_pos"][f]                    # (J, 3) world joints
-                con = contact.get(int(body_oids[p]))          # (N, J) bool or None
-                cf = conf_d.get(int(body_oids[p]))            # (N, J) confidence or None
-                gap = gap_d.get(int(body_oids[p]))            # (N, J) gap cm or None
-                trust = trust_d.get(int(body_oids[p]))        # (N, J) trust or None
                 for j, sp in nd["spheres"].items():
                     if live:
                         sp.position = (float(bp[j, 0]), float(bp[j, 1]), float(bp[j, 2]))
-                        hot = con is not None and f < len(con) and bool(con[f, j])
-                        if use_depth:
-                            dg = gap[f, j] if gap is not None and f < len(gap) else np.nan
-                            dt = trust[f, j] if trust is not None and f < len(trust) else np.nan
-                            sp.color = _depth_color(dg, dt)
-                        elif use_conf and cf is not None and f < len(cf):
-                            sp.color = _conf_color(hot, cf[f, j])
-                        else:
-                            sp.color = _CONTACT_RGB if hot else _FREE_RGB
                         sp.visible = True
                     else:
                         sp.visible = False
-                for h, j, par in nd["bones"]:
+                for h, j, par, radius in nd["bones"]:
                     a, b = bp[par], bp[j]
                     d = b - a
                     length = float(np.linalg.norm(d))
@@ -625,25 +607,104 @@ class ClipScene:
                         h.position = (float((a[0] + b[0]) * 0.5), float((a[1] + b[1]) * 0.5),
                                       float((a[2] + b[2]) * 0.5))
                         h.wxyz = _wxyz_shortest_arc_z(d)
-                        h.scale = (_SKEL_RB, _SKEL_RB, length)
+                        h.scale = (radius, radius, length)
                         h.visible = True
                     else:
                         h.visible = False
         self._skel_src = src
 
+    # -- contact-frame overlay --
+    def _hide_frame_nodes(self, source: str) -> None:
+        for nd in self.frame_nodes.get(source, {}).values():
+            self._hide_person_frames(nd)
+
+    @staticmethod
+    def _hide_person_frames(nd: dict) -> None:
+        for sp in nd["spheres"]:
+            sp.visible = False
+        for h in nd["links"]:
+            h.visible = False
+        if nd["arrows"] is not None:
+            nd["arrows"].remove()
+            nd["arrows"] = None
+
+    def _apply_frames(self, f: int) -> None:
+        """Draw the active body source's 12 contact frames at frame ``f``.
+
+        Per frame: a sphere on the skin point (red where the contact artifact says it
+        touches the scene, green where it is free), a thin link back to the joint the
+        frame rides on, and a short arrow along its outward normal — the direction the
+        detector compares against the scene surface. Gated on the ``contact frames``
+        layer; skipped entirely while hidden and already torn down.
+        """
+        src = self.active if (self.layers.get("contact_frames", True)
+                              and self.active in self.frame_nodes) else None
+        if src is None and self._frames_src is None:
+            return
+        if self._frames_src is not None and self._frames_src != src:
+            self._hide_frame_nodes(self._frames_src)      # switching source / turning off
+        if src is not None:
+            _f, body_oids, people = self.data.skinned[src]
+            nodes, contact = self.frame_nodes[src], self._frame_contact[src]
+            for p, person in enumerate(people):
+                nd = None if person is None else nodes.get(int(body_oids[p]))
+                if nd is None:
+                    continue
+                if f < len(person["valid"]) and bool(person["valid"][f]):
+                    self._draw_frames(src, nd, person, contact[int(body_oids[p])], f)
+                else:
+                    self._hide_person_frames(nd)
+        self._frames_src = src
+
+    def _draw_frames(self, source: str, nd: dict, person: dict,
+                     contact: np.ndarray, f: int) -> None:
+        """Place one person's contact-frame spheres, parent links and normal arrows."""
+        fp, fn = person["frame_pos"][f], person["frame_normal"][f]     # (F, 3) each
+        bp = person["bone_pos"][f]                                     # (J, 3) world joints
+        hot = contact[f]                                               # (F,) in scene contact
+        for i, sp in enumerate(nd["spheres"]):
+            sp.position = (float(fp[i, 0]), float(fp[i, 1]), float(fp[i, 2]))
+            sp.color = _CONTACT_RGB if hot[i] else _FREE_RGB
+            sp.visible = True
+        radius = _FRAME_R * _FRAME_CONN_SCALE
+        for i, h in enumerate(nd["links"]):
+            a, b = bp[int(nd["parent"][i])], fp[i]
+            d = b - a
+            length = float(np.linalg.norm(d))
+            if length > 1e-6:
+                h.position = (float((a[0] + b[0]) * 0.5), float((a[1] + b[1]) * 0.5),
+                              float((a[2] + b[2]) * 0.5))
+                h.wxyz = _wxyz_shortest_arc_z(d)
+                h.scale = (radius, radius, length)
+                h.visible = True
+            else:
+                h.visible = False
+        # Outward-normal arrows: one node per person, remove-then-add each frame
+        # (reusing the handle would leak a node), coloured like their spheres.
+        if nd["arrows"] is not None:
+            nd["arrows"].remove()
+        seg = np.stack([fp, fp + fn * _FRAME_NORMAL_LEN], axis=1).astype(np.float32)
+        colors = np.where(hot[:, None], np.array(_CONTACT_RGB, np.uint8),
+                          np.array(_FREE_RGB, np.uint8)).astype(np.uint8)
+        nd["arrows"] = self.server.scene.add_arrows(
+            f"/clip/frames/{source}/p{nd['oid']:02d}/normals", points=seg, colors=colors,
+            shaft_radius=0.05 * _FRAME_NORMAL_LEN, head_radius=0.12 * _FRAME_NORMAL_LEN,
+            head_length=0.3 * _FRAME_NORMAL_LEN)
+
     # -- force / torque layers (dynamics, kindyn_1) --
     def _apply_translucency(self) -> None:
-        """Make the active source's mesh translucent when its skeleton also shows over
-        it, so the skeleton reads through; restore any previously translucent mesh.
+        """Make the active source's mesh translucent when an overlay also shows over it,
+        so the overlay reads through; restore any previously translucent mesh.
 
-        One rule for both skeletons — the kinematic 22-joint overlay and a force
-        source's torque skeleton. The force-only ``dynamics`` source has no mesh, so it
-        never triggers this. Pushed only on a state change, so idle playback stays cheap.
+        One rule for all three overlays — the kinematic 52-joint skeleton, the contact
+        frames, and a force source's torque skeleton. The force-only ``dynamics`` source
+        has no mesh, so it never triggers this. Pushed only on a state change, so idle
+        playback stays cheap.
         """
         src = self.active
-        want = (src if (src in self.skinned and self.layers["body"]
-                        and self.layers.get("skeleton", False)
-                        and src in self._skeleton_sources) else None)
+        covered = ((self.layers.get("skeleton", False) and src in self._skeleton_sources)
+                   or (self.layers.get("contact_frames", True) and src in self.frame_sources))
+        want = src if (src in self.skinned and self.layers["body"] and covered) else None
         if want == self._translucent:
             return
         for target, opacity in ((self._translucent, None), (want, self.mesh_opacity)):
@@ -767,6 +828,9 @@ class ClipScene:
 
     def dispose(self) -> None:
         """Remove every node this clip added — one root removal cascades to all."""
+        for nodes in self.frame_nodes.values():
+            for nd in nodes.values():
+                nd["arrows"] = None      # lives under /clip → cascade-removed with the root
         for node_list in self.force_nodes.values():
             for nd in node_list:
                 nd["forces"] = None  # lives under /clip → cascade-removed with the root
