@@ -29,7 +29,6 @@ from tools.smplx_robot.vertex_weights import geodesic_endeffector_weights
 
 from . import paths
 from .camera import fold_root_to_world, project, transform_points, world_from_cam
-from .completion import _min_span
 from .confidence import (
     CONTACT_CONFIDENCE_METHOD, CONTACT_CONFIDENCE_SCHEMA, SCENE_FREE_CONFIDENCE_METHOD)
 from .config import HumanOptimConfig
@@ -403,66 +402,6 @@ def _kinematics_2_phases(cfg: HumanOptimConfig) -> list[PhaseSpec]:
 
 # ─────────────────────── kinematic stages (root / kin1) ───────────────────
 
-def _predicted_labels(pred: Path, tr: dict, object_ids: np.ndarray, valid_mask: np.ndarray,
-                      joint_names: list[str], min_frames: int, tag: str) -> np.ndarray:
-    """``(P, N, J)`` int8 tri-state contact labels read from an external model's predictions.
-
-    ``predictions/contacts.npz`` carries a per-frame contact probability for four
-    limbs (``left_hand``, ``right_hand``, ``left_foot``, ``right_foot``) indexed by
-    **video** frame; the pipeline indexes the VGGT-selected frames, so rows are matched
-    through ``geometry/transform.npz``'s ``frame_indices``. A limb is positive on a
-    pipeline frame when its probability clears the file's own ``threshold``, the
-    prediction is valid there, and the body is tracked; positive runs shorter than
-    ``min_frames`` are dropped (the flicker guard the geometric detector also uses).
-    Each positive limb-frame labels ALL the limb's member joints — a hand is the wrist
-    plus its 15 finger joints, a foot is the ankle plus the toe joint. Labels are
-    positive-only (``1`` in contact, ``-1`` everywhere else, never ``0``), so the
-    clearance repulsion stays inert exactly as it does for auto-detected labels.
-    """
-    cnt_path = pred / "predictions" / "contacts.npz"
-    if not cnt_path.exists():
-        raise SystemExit(f"[{tag}] labels='predicted' but {cnt_path} is missing")
-    pc = dict(np.load(cnt_path, allow_pickle=True))
-    limbs = [str(x) for x in pc["limbs"]]
-    unknown = [ln for ln in limbs if ln not in _ANN_TO_SMPLX]
-    if unknown:
-        raise SystemExit(f"[{tag}] {cnt_path} predicts unknown limb(s) {unknown}")
-    probs = np.asarray(pc["probs"], np.float32)                       # (Pp, Np, L)
-    pred_valid = np.asarray(pc["valid_mask"], bool)                   # (Pp, Np)
-    thresh = float(np.asarray(pc["threshold"]).item())
-    pred_oids = [int(x) for x in pc["object_ids"]]
-    # prediction row that holds each pipeline frame's video frame (-1 = not predicted)
-    pred_row = {int(f): i for i, f in enumerate(np.asarray(pc["frame_indices"], np.int64))}
-    rows = np.array([pred_row.get(int(f), -1) for f in np.asarray(tr["frame_indices"], np.int64)],
-                    np.int64)
-    have = rows >= 0
-    N, J = len(rows), len(joint_names)
-    jidx = {n: i for i, n in enumerate(joint_names)}
-    members = [[jidx[j] for j in _ANN_TO_SMPLX[ln] if j in jidx] for ln in limbs]
-    print(f"[{tag}] PREDICTED labels from {cnt_path} (threshold {thresh:.2f}, "
-          f"{int(have.sum())}/{N} frames predicted)")
-
-    labels = np.full((len(object_ids), N, J), -1, np.int8)
-    for p in range(len(object_ids)):
-        oid = int(object_ids[p])
-        if oid not in pred_oids:
-            print(f"[{tag}] obj_id={oid}: absent from {cnt_path.name} — no predicted labels")
-            continue
-        pp = pred_oids.index(oid)
-        vmask = np.asarray(valid_mask[p], bool)
-        pos = np.zeros((N, len(limbs)), bool)
-        pos[have] = (probs[pp, rows[have]] > thresh) & pred_valid[pp, rows[have], None]
-        pos = _min_span(pos & vmask[:, None], min_frames)
-        for li, member_idx in enumerate(members):
-            if member_idx:
-                labels[p][np.ix_(pos[:, li], member_idx)] = 1
-        labels[p][~vmask] = -1
-        per_limb = " ".join(f"{limbs[li]}={int(pos[:, li].sum())}" for li in range(len(limbs)))
-        print(f"[{tag}] obj_id={oid}: predicted contacts on {int(pos.any(1).sum())}/{N} "
-              f"frames  ({per_limb})")
-    return labels
-
-
 def run_kinematic(source, pred: Path, cfg: HumanOptimConfig, stages_to_run,
                   device: str, *, overlay: bool = False, labels_mode: str = "auto") -> Path:
     """Run ``root`` and/or ``kinematics_1`` for every tracked person → ``human_optim/``.
@@ -473,11 +412,10 @@ def run_kinematic(source, pred: Path, cfg: HumanOptimConfig, stages_to_run,
     when ``kinematics_1`` is in ``stages_to_run``, else the intermediate ``root.npz``
     (root-only placement).
 
-    ``labels_mode='auto'`` (default) detects the frozen contact labels geometrically
-    inside the optimization (the ``[auto_contact]`` operating point);
-    ``'predicted'`` takes them from an external model's ``predictions/contacts.npz``
-    instead (:func:`_predicted_labels`) — same frozen, positives-only convention, same
-    ``ann_attraction`` / ``ann_velocity`` terms, only the *source* of the labels differs.
+    ``labels_mode`` must be ``'auto'``: the frozen contact labels are detected
+    geometrically on the 12 contact frames inside the optimization (the
+    ``[auto_contact]`` operating point). The finger joints are frozen throughout —
+    they carry the two fingertip contact frames but have no evidence to be fitted with.
     """
     knobs = cfg.knobs
     pred = Path(pred)
@@ -507,8 +445,7 @@ def run_kinematic(source, pred: Path, cfg: HumanOptimConfig, stages_to_run,
     torch.manual_seed(0)
     phases = _kinematic_phases(cfg, stages_to_run)
 
-    # kinematics_1 auto-contact: resolve the [auto_contact] groups → SMPLXMid joint indices and
-    # fold in the shared [contact_gate] stillness. optimize_person detects labels once at the
+    # kinematics_1 auto-contact operating point. optimize_person detects labels once at the
     # refine phase, guarded on ann_attraction[kinematics_1] > 0, so this is inert at weight 0.
     auto_cfg = None
     if "auto_contact" in knobs and "kinematics_1" in stages_to_run:
@@ -518,24 +455,14 @@ def run_kinematic(source, pred: Path, cfg: HumanOptimConfig, stages_to_run,
         # labels / bodies; omit to inherit [contact_gate] (one shared notion of "still").
         ac.setdefault("window_s", float(knobs["contact_gate"]["window_s"]))
         ac.setdefault("still_m", float(knobs["contact_gate"]["still_m"]))
-        idx = {n: i for i, n in enumerate(mid.joint_names)}
-        members = {g: [idx[j] for j in _ANN_TO_SMPLX.get(g, []) if j in idx]
-                   for g in ac.get("groups", [])}
-        ac["group_members"] = members
-        ac["group_joints"] = sorted({i for v in members.values() for i in v})
+        # Same for the normal window: omit to inherit the readout's [contacts] value.
+        ac.setdefault("normal_max_angle_deg", float(knobs["contacts"]["normal_max_angle_deg"]))
         auto_cfg = ac
 
-    # labels = "predicted": the external model decides WHICH limbs touch; the geometric
-    # detector's gates are skipped, everything else about auto mode stays (bound once at the
-    # first scene phase, frozen, positives-only, same drift_pre measurement).
-    if labels_mode not in ("auto", "predicted"):
-        raise SystemExit(f"[{tag}] [stages.kinematics_1].labels must be 'auto' or 'predicted', "
-                         f"got {labels_mode!r}")
-    pred_labels = None
-    if labels_mode == "predicted" and "kinematics_1" in stages_to_run:
-        pred_labels = _predicted_labels(pred, tr, object_ids, sp["valid_mask"],
-                                        list(mid.joint_names),
-                                        int(knobs["auto_contact"]["min_frames"]), tag)
+    if labels_mode != "auto":
+        raise SystemExit(
+            f"[{tag}] [stages.kinematics_1].labels must be 'auto', got {labels_mode!r} — "
+            "contact lives on the 12 contact frames and no external model predicts those")
 
     out = _new_out()
     betas_out = []
@@ -565,9 +492,7 @@ def run_kinematic(source, pred: Path, cfg: HumanOptimConfig, stages_to_run,
             sub=sub, knobs=knobs, phases=phases,
             scene_pts=scene_pts, scene_normals=scene_normals, scene_conf=scene_conf, fps=fps,
             chamfer_weights=chamfer_w, frame_valid=frame_valid,
-            cam_centers=cam_centers, auto_contact=auto_cfg,
-            preset_labels=(torch.as_tensor(pred_labels[p], dtype=torch.int8, device=device)
-                           if pred_labels is not None else None))
+            cam_centers=cam_centers, auto_contact=auto_cfg, freeze_fingers=True)
         print(f"    before: {before}\n    after:  {after}")
         # Persist drift_pre + auto_labels: drift_pre is the honest pre-attraction gate source
         # for the readout; auto_labels track the body produced by this optimization.
@@ -577,14 +502,16 @@ def run_kinematic(source, pred: Path, cfg: HumanOptimConfig, stages_to_run,
         betas_out.append(betas_mean.cpu().numpy().astype(np.float32))
         # None ⇒ detection did not run for this person (no scene / weight 0): write NaN drift +
         # -1 labels; consumers then fall back to computing drift from the body.
+        num_cf = len(mid.contact_frame_names)
         drift_pre_p.append(dp.cpu().numpy().astype(np.float32) if dp is not None
-                           else np.full((N, mid.num_joints), np.nan, np.float32))
+                           else np.full((N, num_cf), np.nan, np.float32))
         auto_labels_p.append(al.cpu().numpy().astype(np.int8) if al is not None
-                             else np.full((N, mid.num_joints), -1, np.int8))
+                             else np.full((N, num_cf), -1, np.int8))
 
     body = "kinematic_1" if "kinematics_1" in stages_to_run else "root"
     out_path = paths.body_path(pred, body)
-    extra = dict(drift_pre=np.stack(drift_pre_p, 0), auto_labels=np.stack(auto_labels_p, 0))
+    extra = dict(drift_pre=np.stack(drift_pre_p, 0), auto_labels=np.stack(auto_labels_p, 0),
+                 contact_frame_names=np.array(list(mid.contact_frame_names)))
     save = _save_body(out_path, mid, out, betas_out, object_ids, sp["valid_mask"], N, P, H, W, fps, extra=extra)
     print(f"[{tag}] wrote {out_path}")
 

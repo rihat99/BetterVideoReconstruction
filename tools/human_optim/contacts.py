@@ -1,5 +1,17 @@
 """Scene-contact estimation for the optimized SMPL-X bodies.
 
+**Contact lives on the 12 contact frames** — named mesh points (toes, heels,
+knees, palms, fingertips) baked onto the body, each carrying its own outward
+surface normal (:mod:`tools.body`). :func:`detect_frame_contacts` is the one
+detector both the kinematic stage's frozen auto-labels and the standalone
+``estimate_contacts`` readout call, so the two can never drift apart. The rest of
+this module is the generic span/drift machinery it is built from
+(:func:`joint_drift`, :func:`stillness_weight`, :func:`hysteresis_spans`,
+:func:`drift_gated_contact`, :func:`merge_contact_spans` — all agnostic to what
+the ``K`` axis means) plus the older per-joint pieces the out-of-scope stages
+still import.
+
+The older per-joint model, kept for those stages:
 Given a posed (world-frame, scaled) SMPL-X mesh and the static scene point cloud,
 mark which body vertices touch the scene with a point-cloud SDF, then lift the
 per-vertex contacts to **per-joint** contacts by nearest-joint assignment (each
@@ -20,6 +32,9 @@ chunked-batched machinery the per-iteration losses need.
 """
 
 from __future__ import annotations
+
+import math
+from typing import NamedTuple
 
 import numpy as np
 import torch
@@ -516,3 +531,165 @@ def merge_contact_spans(
                 continue                   # re-grip guard: it left the wall in between
             out[t1 + 1:t2, j] = True
     return out
+
+
+# ── contact frames: the shared detector ───────────────────────────────────────
+# A contact frame is one mesh point that carries its own outward surface normal
+# (tools/body.py). Three things must agree before it counts as touching:
+#   surface  — a confident scene point is close, and the frame sits at/just
+#              inside it (signed distance below the hysteresis thresholds);
+#   normal   — the frame's skin FACES that scene point (the window below);
+#   stillness — the frame barely drifted over a short window.
+# The normal window is what separates a toe hooked UNDER a hold from a toe
+# standing ON it: both points are millimetres from the same hold, but their skin
+# faces opposite ways, so only one of them can be the contact.
+
+
+@torch.no_grad()
+def frame_scene_signals(
+    frame_points: torch.Tensor,    # (T, F, 3) world contact-frame positions
+    frame_normals: torch.Tensor,   # (T, F, 3) world outward unit normals
+    scene_pts: torch.Tensor,       # (M, 3) world scene points
+    scene_normals: torch.Tensor,   # (M, 3) outward unit normals
+    scene_conf: torch.Tensor,      # (M,) per-point confidence
+    *,
+    prune_margin_m: float = 0.10,
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+    """Per-(frame index, contact frame) scene signals ``(sdf, dmin, conf, normal_dot)``.
+
+    Each output is ``(T, F)``:
+
+      * ``sdf`` — **perpendicular** signed distance ``(p_f − p_nn)·n_scene`` to the
+        nearest scene point (metres); negative = behind the surface. Same
+        convention as :func:`scene_sdf`, so contact and the penetration loss agree.
+      * ``dmin`` — Euclidean distance to that nearest point (the far guard).
+      * ``conf`` — that point's confidence (the cloud-hole guard).
+      * ``normal_dot`` — ``dot(n_frame, −n_scene)`` ∈ [−1, 1]: ``+1`` when the
+        skin looks straight into the wall, ``−1`` when it faces away.
+
+    Only 12 points per time step, so the nearest neighbour is a plain per-frame
+    ``cdist`` after pruning the scene to the points' AABB + ``prune_margin_m``
+    (the margin must be at least the caller's ``max_dist_m``, or a true neighbour
+    just outside the box is lost). A time step with no scene point in its box
+    returns ``+inf`` distance, zero confidence and ``normal_dot = −1`` — no contact.
+    """
+    num_steps, num_frames = frame_points.shape[0], frame_points.shape[1]
+    device, dtype = frame_points.device, frame_points.dtype
+    infinity = torch.finfo(dtype).max
+    sdf = torch.full((num_steps, num_frames), infinity, device=device, dtype=dtype)
+    dmin = torch.full((num_steps, num_frames), infinity, device=device, dtype=dtype)
+    conf = torch.zeros((num_steps, num_frames), device=device, dtype=scene_conf.dtype)
+    normal_dot = torch.full((num_steps, num_frames), -1.0, device=device, dtype=dtype)
+    for t in range(num_steps):
+        points = frame_points[t]                                          # (F, 3)
+        if not bool(torch.isfinite(points).all()):
+            continue
+        low = points.amin(0) - prune_margin_m
+        high = points.amax(0) + prune_margin_m
+        near_box = ((scene_pts >= low) & (scene_pts <= high)).all(dim=-1)  # (M,) bool
+        if not bool(near_box.any()):
+            continue
+        candidate_pts = scene_pts[near_box]
+        candidate_normals = scene_normals[near_box]
+        distance = torch.cdist(points[None], candidate_pts[None])[0]       # (F, Mc)
+        nearest_distance, nearest = distance.min(dim=1)                    # (F,)
+        point, normal = candidate_pts[nearest], candidate_normals[nearest]
+        sdf[t] = ((points - point) * normal).sum(dim=-1)
+        dmin[t] = nearest_distance
+        conf[t] = scene_conf[near_box][nearest]
+        normal_dot[t] = -(frame_normals[t] * normal).sum(dim=-1)
+    return sdf, dmin, conf, normal_dot
+
+
+def frame_guarded_sdf(
+    sdf: torch.Tensor,          # (T, F) perpendicular signed distance (m)
+    dmin: torch.Tensor,         # (T, F) Euclidean NN distance (m)
+    conf: torch.Tensor,         # (T, F) NN-point confidence
+    normal_dot: torch.Tensor,   # (T, F) dot(frame normal, −scene normal)
+    *,
+    max_dist_m: float,
+    conf_thresh: float,
+    normal_max_angle_deg: float,
+) -> torch.Tensor:
+    """The continuous contact signal ``(T, F)``: ``sdf`` where every guard passes, ``+inf`` else.
+
+    Three guards, all cheap and all "no evidence ⇒ no contact":
+
+      * ``dmin < max_dist_m`` — the nearest scene point must genuinely be near
+        (a match behind an occluder is not a surface);
+      * ``conf > conf_thresh`` — a hole in the cloud must read as *unknown*, not
+        as *no wall*;
+      * ``normal_dot ≥ cos(normal_max_angle_deg)`` — the **normal window**: the
+        frame's skin has to face the scene point. At the default 90° a frame may
+        touch anything in its own hemisphere and nothing behind it.
+
+    Forcing the failures to ``+inf`` (rather than masking) is what lets the plain
+    hysteresis / minimum-duration / span-merge machinery run unchanged — a guarded
+    step simply looks infinitely far from the wall, so it can never start or hold
+    a contact span.
+    """
+    guard = ((dmin < max_dist_m) & (conf > conf_thresh)
+             & (normal_dot >= math.cos(math.radians(float(normal_max_angle_deg)))))
+    infinity = torch.finfo(sdf.dtype).max
+    return torch.where(guard, sdf, torch.full_like(sdf, infinity))
+
+
+class FrameContacts(NamedTuple):
+    """One clip's contact-frame readout — the boolean plus every signal behind it."""
+
+    #: ``(T, F)`` bool — the label.
+    contact: torch.Tensor
+    #: ``(T, F)`` the guarded signed distance the spans were cut from (``+inf`` = guarded out).
+    guarded_sdf: torch.Tensor
+    #: ``(T, F)`` raw perpendicular signed distance (m).
+    sdf: torch.Tensor
+    #: ``(T, F)`` Euclidean distance to the nearest scene point (m).
+    dmin: torch.Tensor
+    #: ``(T, F)`` confidence of that nearest scene point.
+    conf: torch.Tensor
+    #: ``(T, F)`` ``dot(frame normal, −scene normal)``.
+    normal_dot: torch.Tensor
+
+
+def detect_frame_contacts(
+    frame_points: torch.Tensor,    # (T, F, 3) world contact-frame positions
+    frame_normals: torch.Tensor,   # (T, F, 3) world outward unit normals
+    drift: torch.Tensor,           # (T, F) net window drift (m) — the caller's measurement
+    scene_pts: torch.Tensor,       # (M, 3) world scene points
+    scene_normals: torch.Tensor,   # (M, 3) outward unit normals
+    scene_conf: torch.Tensor,      # (M,) per-point confidence
+    *,
+    close_thresh_m: float,
+    exit_thresh_m: float,
+    min_frames: int,
+    still_m: float,
+    max_dist_m: float,
+    conf_thresh: float,
+    normal_max_angle_deg: float,
+    prune_margin_m: float,
+) -> FrameContacts:
+    """Detect contact on the 12 contact frames — the single detector for the whole pipeline.
+
+    Surface (:func:`frame_scene_signals`), normal window and guards
+    (:func:`frame_guarded_sdf`), then stillness + temporal hysteresis
+    (:func:`drift_gated_contact`): a frame enters a contact span below
+    ``close_thresh_m``, holds it below the looser ``exit_thresh_m``, and spans
+    shorter than ``min_frames`` are dropped.
+
+    ``drift`` is supplied by the CALLER, never measured here, because *which*
+    motion measurement is honest depends on the stage: the kinematic fit passes
+    the drift of its starting pose (before any contact attraction acted), and the
+    readout stage passes that same persisted ``drift_pre``. Re-measuring drift on
+    an enforced body would be manufactured evidence. A ``NaN`` drift (an untracked
+    step) fails the stillness gate, so it can never hold a span.
+    """
+    sdf, dmin, conf, normal_dot = frame_scene_signals(
+        frame_points, frame_normals, scene_pts, scene_normals, scene_conf,
+        prune_margin_m=prune_margin_m)
+    guarded_sdf = frame_guarded_sdf(
+        sdf, dmin, conf, normal_dot, max_dist_m=max_dist_m, conf_thresh=conf_thresh,
+        normal_max_angle_deg=normal_max_angle_deg)
+    contact = drift_gated_contact(
+        guarded_sdf, drift, close_thresh_m=close_thresh_m, exit_thresh_m=exit_thresh_m,
+        min_frames=min_frames, still_m=still_m)
+    return FrameContacts(contact, guarded_sdf, sdf, dmin, conf, normal_dot)

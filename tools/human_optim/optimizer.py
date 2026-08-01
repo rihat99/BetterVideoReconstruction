@@ -35,10 +35,10 @@ import torch
 if TYPE_CHECKING:
     from .kindyn import DynamicsSpec
 
+from tools.body import frame_normals
+
 from .camera import project, transform_points
-from .contacts import (
-    drift_gated_contact, joint_drift, joint_guarded_min_sdf, scene_sdf, vertex_to_joint,
-)
+from .contacts import detect_frame_contacts, joint_drift, vertex_to_joint
 from .keypoints import smooth_tracks
 from tools.optim import Phase, Problem, State, run_phases
 
@@ -49,6 +49,7 @@ from .losses import (
     sapiens_reprojection_gm, scene_penetration, scene_signed_distance, seating_penalty,
 )
 from .motion import tangent_difference
+from .prefit import finger_freeze_mask
 from .qmath import normalize_q
 from .visibility import front_facing_mask, vertex_normals
 
@@ -95,12 +96,15 @@ class PhaseSpec:
     optimizer: str = "adam"
 
 
-def _dof_mask(active: tuple[str, ...], nq: int, device) -> torch.Tensor:
+def _dof_mask(active: tuple[str, ...], nq: int, device, *,
+              freeze_fingers: bool = False) -> torch.Tensor:
     """``(nq,)`` 0/1 mask selecting the ``q`` DOFs trainable this phase.
 
     ``q`` packs the root translation (``[:3]``), the root quaternion (``[3:7]``),
     then the parent-local joint quaternions (``[7:]``). Freezing a DOF group is
     done by zeroing its gradient after backward, so only the named groups move.
+    ``freeze_fingers`` additionally pins the 30 finger quaternions (the ``q``
+    tail, :func:`~tools.human_optim.prefit.finger_freeze_mask`).
     """
     m = torch.zeros(nq, device=device)
     if "transl" in active:
@@ -109,6 +113,8 @@ def _dof_mask(active: tuple[str, ...], nq: int, device) -> torch.Tensor:
         m[3:7] = 1.0
     if "joints" in active:
         m[7:] = 1.0
+    if freeze_fingers:
+        m = m * finger_freeze_mask(nq, device)
     return m
 
 
@@ -335,15 +341,15 @@ def optimize_person(
     frame_valid: torch.Tensor | None = None,
     cam_centers: torch.Tensor | None = None,
     auto_contact: dict | None = None,
-    preset_labels: torch.Tensor | None = None,
+    freeze_fingers: bool = False,
     dynamics: DynamicsSpec | None = None,
 ) -> tuple[torch.Tensor, Metrics, Metrics, dict]:
     """Optimize one person over ``phases``. Returns ``(q_world_opt, before, after, aux)``.
 
     ``aux`` carries the detection-time signals the caller persists into the body
-    npz: ``drift_pre (T, num_joints)`` — ``joint_drift`` of the
+    npz: ``drift_pre (T, 12)`` — the net window drift of the 12 **contact frames** on the
     refine-start (pre-attraction) body, the honest pre-enforcement stillness measurement —
-    and ``auto_labels (T, num_joints)`` int8 — the frozen labels the attraction used. Both
+    and ``auto_labels (T, 12)`` int8 — the frozen labels the attraction used. Both
     are ``None`` when auto detection did not run (manual ``kinematics_2``, no scene, or a
     zero ``ann_attraction`` weight); the caller then writes NaN / ``-1`` for that person.
 
@@ -377,19 +383,19 @@ def optimize_person(
 
     ``auto_contact`` (optional dict) enables **kinematics_1** auto-contact mode: when
     ``contact_labels`` is not supplied and the ``ann_attraction`` weight is > 0, labels
-    are detected **once** from the detached pose at the first scene phase (the contact
-    readout at the ``[auto_contact]`` operating point) and **frozen** — positive-only
-    (``1`` on detected group joints, ``-1`` elsewhere, never ``0``), so only the
-    attraction + velocity terms fire, never the clearance repulsion. ``cam_centers``
+    are detected **once** from the detached pose at the first scene phase
+    (:func:`~tools.human_optim.contacts.detect_frame_contacts` at the ``[auto_contact]``
+    operating point) and **frozen** — on the 12 **contact frames**, positive-only
+    (``1`` on a detected frame, ``-1`` elsewhere, never ``0``), so only the
+    attraction + velocity terms fire, never the clearance repulsion. In this mode those
+    terms act on the contact-frame POINTS, not on vertices or joints. ``cam_centers``
     (``(T, 3)`` world camera centers) drives the radial-velocity damper + its
     diagnostic; both default off.
 
-    ``preset_labels`` (optional ``(T, num_joints)`` int8, auto mode only) supplies those
-    labels from OUTSIDE instead — an external model's per-limb contact prediction. The
-    geometric gates are skipped; everything else about auto mode is kept, including the
-    phase boundary the labels bind at and the pre-enforcement ``drift_pre`` measurement,
-    so the downstream contact readout still gates on a drift measured before any
-    attraction acted.
+    ``freeze_fingers`` pins the 30 finger quaternions in every phase (Adam mask and the
+    L-BFGS polish alike). The finger joints still exist and still carry the two fingertip
+    contact frames — they simply follow the wrist instead of being fitted, because at
+    cloud/keypoint resolution there is no evidence to fit them with.
 
     ``frame_valid`` (optional ``(T,)`` bool) excludes untracked frames — whose
     converter pose was held from the nearest valid frame and so is glued to the
@@ -433,12 +439,9 @@ def optimize_person(
     use_ann = contact_labels is not None          # manual labels present from the start (kinematics_2)
     # kinematics_1 auto-contact mode: bind labels once at the first scene phase (below) then
     # freeze. DETECTION is guarded on the ann_attraction weight-max, so a 0-weight column never
-    # runs the detector (keeps parity with HEAD); preset labels need no such guard — they cost
-    # nothing to bind and can drive the velocity damper alone, with the attraction off. Auto
-    # attraction reads its band from [auto_contact]; the manual (kinematics_2) path keeps
-    # [ann_attraction].
-    use_auto = auto_contact is not None and not use_ann and (
-        preset_labels is not None or _wmax("ann_attraction") > 0.0)
+    # runs the detector. Auto attraction reads its band from [auto_contact]; the manual
+    # (kinematics_2) path keeps [ann_attraction].
+    use_auto = auto_contact is not None and not use_ann and _wmax("ann_attraction") > 0.0
     ann_at_cfg = auto_contact if use_auto else (knobs["ann_attraction"] if use_ann else None)
     ann_rep_cfg = knobs["ann_repulsion"] if use_ann else None   # clearance repulsion is manual-only
     ann_vel_ang_w = float(knobs.get("ann_velocity", {}).get("angular_weight", 0.0))  # angular/linear ratio
@@ -452,20 +455,15 @@ def optimize_person(
     depth_pad, depth_valid = pad_frames(depth_points, channels=3,
                                         device=q_world_init.device, dtype=q_world_init.dtype)
 
-    # `v2j_full` / `v2j_sub` map each (subsampled) vertex to its nearest rest-pose joint. The
-    # subsampled map inherits joint contact labels onto vertices (attraction / repulsion masks);
-    # the full map lifts the auto-detection per-vertex SDF to per-joint. Built once from the
-    # shaped rest mesh (label-independent).
-    v2j_full = v2j_sub = None
-    if use_ann or use_auto:
+    # `v2j_sub` maps each subsampled vertex to its nearest rest-pose joint, so the
+    # kinematics_2 manual joint labels can reach vertices (attraction / repulsion masks).
+    # Auto (kinematics_1) mode needs no such map: its labels already live on the 12 contact
+    # frames, which ARE points.
+    v2j_sub = None
+    if use_ann:
         with torch.no_grad():
             v_rest, j_rest = mid.forward_shape(betas_mean[None])
-        v2j_full = vertex_to_joint(v_rest[0], j_rest[0])      # (V,) nearest joint per vertex
-        v2j_sub = v2j_full[sub]                               # (Ns,) subsampled
-    auto_group_mask = None
-    if use_auto:
-        auto_group_mask = torch.zeros(mid.num_joints, dtype=torch.bool, device=q_world_init.device)
-        auto_group_mask[auto_contact["group_joints"]] = True   # only these joints may be labeled 1
+        v2j_sub = vertex_to_joint(v_rest[0], j_rest[0])[sub]   # (Ns,) nearest joint per vertex
 
     # kinematics_2 contact-patch groups: per annotation group, the subsampled-vertex ids it owns
     # (via v2j_sub) + a per-frame in-contact flag (any member joint labeled 1). A group with no
@@ -490,11 +488,19 @@ def optimize_person(
     if contact_conf is not None and v2j_sub is not None:
         conf_v = contact_conf[:, v2j_sub].clamp(0.0, 1.0)      # (T, Ns)
 
-    incontact_v = nocontact_v = None
+    incontact_v = nocontact_v = incontact_f = None
     def _bind_labels(labels: torch.Tensor) -> None:
-        """Set ``contact_labels`` + the per-subsampled-vertex in/no-contact masks (from v2j_sub)."""
-        nonlocal contact_labels, incontact_v, nocontact_v
+        """Set ``contact_labels`` + the mask of the points the annotation terms act on.
+
+        Auto (kinematics_1) labels live on the contact frames, so the mask is the labels
+        themselves; manual (kinematics_2) labels live on joints and are spread onto the
+        subsampled vertices through ``v2j_sub``.
+        """
+        nonlocal contact_labels, incontact_v, nocontact_v, incontact_f
         contact_labels = labels
+        if use_auto:
+            incontact_f = labels == 1                         # (T, F) per contact frame
+            return
         vlabel = labels[:, v2j_sub]                           # (T, Ns) tri-state per vertex
         incontact_v, nocontact_v = (vlabel == 1), (vlabel == 0)
     if use_ann:
@@ -565,6 +571,8 @@ def optimize_person(
         st.put("jw", jw7[..., :3])
         st.put("jwq", jw7[..., 3:7])
         st.put("vw", out.vertices)
+        st.put("fw", out.frames_world[..., :3])       # (T, F, 3) contact-frame points
+        st.put("fwq", out.frames_world[..., 3:7])     # (T, F, 4) contact-frame orientations
 
         def _vis():
             with torch.no_grad():
@@ -579,6 +587,14 @@ def optimize_person(
                 return None
             return scene_signed_distance(st["vw"][:, sub], *cand, chunk=chunk)
 
+        def _sig_frames():
+            # The same signed-distance pass over the 12 contact-frame points (the
+            # kinematics_1 attraction acts on those, not on vertices).
+            cand = scene_cell["cand"]
+            if cand is None:
+                return None
+            return scene_signed_distance(st["fw"], *cand, chunk=chunk)
+
         def _inst_nn():
             # Per-instance closest (member vertex, patch point), shared by acquisition + seating.
             patches = patch_cell["patches"]
@@ -588,6 +604,7 @@ def optimize_person(
 
         st.put_lazy("vismask", _vis)
         st.put_lazy("sig", _sig)
+        st.put_lazy("sig_f", _sig_frames)
         st.put_lazy("inst_nn", _inst_nn)
         st.put_lazy("d1", lambda: tangent_difference(st["qn"], mid.num_joints))
         st.put_lazy("accel", lambda: st["d1"][1:] - st["d1"][:-1])
@@ -632,51 +649,28 @@ def optimize_person(
     def _detect_auto_labels() -> tuple[torch.Tensor, torch.Tensor]:
         """Detect frozen kinematics_1 contact labels once from the current detached pose.
 
-        Runs the contact readout at the ``[auto_contact]`` operating point (scene SDF →
-        guarded per-joint min → drift/stillness gate → hysteresis), keeps only joints in the
-        configured groups on valid frames. Returns ``(labels, drift)``: ``labels (T, num_joints)``
-        int8 with ``1`` on detected group joints / ``-1`` everywhere else — never ``0``, so
-        ``nocontact_v`` stays empty and the clearance repulsion can never fire in auto mode; and
-        ``drift (T, num_joints)`` — the refine-start net window drift the detection gated on, kept
-        so the caller can persist it as the honest pre-enforcement stillness measurement. No
-        gradient path (``no_grad`` forward from the detached leaf), run once per stage — so
-        contact detection cannot feed back into the fit."""
+        Runs :func:`~tools.human_optim.contacts.detect_frame_contacts` on the 12 contact
+        frames at the ``[auto_contact]`` operating point. Returns ``(labels, drift)``:
+        ``labels (T, F)`` int8 with ``1`` on a detected contact frame / ``-1`` everywhere
+        else — never ``0``, so the clearance repulsion (which needs a ``0``) can never fire
+        in auto mode; and ``drift (T, F)`` — the refine-start net window drift the detection
+        gated on, kept so the caller can persist it as the honest pre-enforcement stillness
+        measurement. No gradient path (``no_grad`` forward from the detached leaf), run once
+        per stage — so contact detection cannot feed back into the fit."""
         ac = auto_contact
         with torch.no_grad():
-            o = mid.forward(betas, normalize_q(q, mid.num_joints))
-            jw_full = o.joints_world.tensor()[..., :3]
-            vw_full = o.vertices
-        sdf, dmin, conf = scene_sdf(vw_full, scene_pts, scene_normals, scene_conf,
-                                    prune_margin_m=float(ac["prune_margin_m"]))
-        gsdf = joint_guarded_min_sdf(sdf, dmin, conf, v2j_full, mid.num_joints,
-                                     max_dist_m=float(ac["max_dist_m"]), conf_thresh=float(ac["conf_thresh"]))
-        drift = joint_drift(
-            jw_full, fps=fps, window_s=float(ac["window_s"]),
-            valid_mask=frame_valid)
-        jc = drift_gated_contact(gsdf, drift, close_thresh_m=float(ac["detect_thresh_m"]),
-                                 exit_thresh_m=float(ac["detect_exit_m"]), min_frames=int(ac["min_frames"]),
-                                 still_m=float(ac["still_m"]))          # (T, J) bool
-        keep = jc & auto_group_mask[None, :]                           # only configured group joints
-        if frame_valid is not None:
-            keep = keep & frame_valid[:, None]
-        lab = torch.full((jc.shape[0], mid.num_joints), -1, dtype=torch.int8, device=q.device)
-        lab[keep] = 1
-        return lab, drift
-
-    def _preset_auto_labels() -> tuple[torch.Tensor, torch.Tensor]:
-        """The ``preset_labels`` variant of :func:`_detect_auto_labels`: gates out, drift in.
-
-        Somebody outside already decided which joints touch (an external model's
-        per-limb prediction), so the scene-SDF / stillness gates are skipped. Everything
-        else is identical — the same group + validity restriction, the same positives-only
-        ``1`` / ``-1`` encoding, and the same ``joint_drift`` of this very pose, so the
-        persisted ``drift_pre`` stays the honest pre-enforcement stillness measurement the
-        contact readout gates on."""
-        ac = auto_contact
-        with torch.no_grad():
-            jw_full = mid.forward(betas, normalize_q(q, mid.num_joints)).joints_world.tensor()[..., :3]
-        drift = joint_drift(jw_full, fps=fps, window_s=float(ac["window_s"]), valid_mask=frame_valid)
-        keep = (preset_labels.to(q.device) == 1) & auto_group_mask[None, :]
+            frames7 = mid.forward(betas, normalize_q(q, mid.num_joints)).frames_world
+        points = frames7[..., :3]
+        drift = joint_drift(points, fps=fps, window_s=float(ac["window_s"]),
+                            valid_mask=frame_valid)
+        detected = detect_frame_contacts(
+            points, frame_normals(frames7), drift, scene_pts, scene_normals, scene_conf,
+            close_thresh_m=float(ac["detect_thresh_m"]), exit_thresh_m=float(ac["detect_exit_m"]),
+            min_frames=int(ac["min_frames"]), still_m=float(ac["still_m"]),
+            max_dist_m=float(ac["max_dist_m"]), conf_thresh=float(ac["conf_thresh"]),
+            normal_max_angle_deg=float(ac["normal_max_angle_deg"]),
+            prune_margin_m=float(ac["prune_margin_m"]))
+        keep = detected.contact
         if frame_valid is not None:
             keep = keep & frame_valid[:, None]
         lab = torch.full_like(keep, -1, dtype=torch.int8)
@@ -727,19 +721,21 @@ def optimize_person(
         problem.add_term("radial_velocity", lambda st: radial_velocity_loss(
             st["jw"], cam_centers, frame_valid=frame_valid))
 
-    # Contact attraction pulls in-contact-joint verts ONTO the wall (kinematics_1
-    # auto labels read their band from [auto_contact]; kinematics_2 from
-    # [ann_attraction]). Clearance repulsion pushes no-contact-joint verts off —
-    # kinematics_2 only, since auto labels carry no 0s (nocontact_v is empty).
+    # Contact attraction pulls labeled points ONTO the wall: the 12 contact-frame POINTS
+    # for kinematics_1's auto labels (band from [auto_contact]), the in-contact joints'
+    # vertices for kinematics_2's manual labels (band from [ann_attraction]). Clearance
+    # repulsion pushes no-contact-joint verts off — kinematics_2 only, since auto labels
+    # carry no 0s (nocontact_v is empty).
     if (use_ann or use_auto) and use_pen:
         def _attraction(st):
-            sig = st["sig"]
-            if sig is None or incontact_v is None:
+            sig = st["sig_f" if use_auto else "sig"]
+            active = incontact_f if use_auto else incontact_v
+            if sig is None or active is None:
                 return q.new_zeros(())
             loss, gap_cm, n_attr = attraction_penalty(
                 *sig, conf_thresh=float(ann_at_cfg["conf_thresh"]),
                 band_m=float(ann_at_cfg["band_m"]), max_dist_m=float(ann_at_cfg["max_dist_m"]),
-                active_mask=incontact_v, active_weight=conf_v)
+                active_mask=active, active_weight=None if use_auto else conf_v)
             return loss, {"cm": gap_cm, "n": n_attr}
         problem.add_term("ann_attraction", _attraction)
     if use_ann and use_pen:
@@ -784,25 +780,28 @@ def optimize_person(
             return loss, {"cm": seat_cm, "n": n}
         problem.add_term("ann_seating", _seating)
     if use_ann or use_auto:
-        # Velocity damper (slow in-contact joints) needs only the world joints, so it
+        # Velocity damper (hold the labeled points still) needs only world placements, so it
         # runs in every phase the labels are present (refine + lbfgs for auto, all
-        # phases for manual).
+        # phases for manual). Auto labels damp the contact FRAMES, manual ones the joints —
+        # the loss is the same, only the (T, K) point set differs.
+        pos_key, quat_key = ("fw", "fwq") if use_auto else ("jw", "jwq")
+
         def _velocity(st):
             if contact_labels is None:
                 return q.new_zeros(())
             loss, speed_cms, ang_deg_s, n_steps = joint_velocity_loss(
-                st["jw"], contact_labels, fps=fps, joint_weight=contact_conf,
-                world_quats=st["jwq"], angular_weight=ann_vel_ang_w)
+                st[pos_key], contact_labels, fps=fps, joint_weight=contact_conf,
+                world_quats=st[quat_key], angular_weight=ann_vel_ang_w)
             return loss, {"cm_s": speed_cms, "deg_s": ang_deg_s, "n": n_steps}
         problem.add_term("ann_velocity", _velocity)
 
         # Contact acceleration damper (steady, jerk-free holds) — the Cartesian 2nd
-        # difference of the same in-contact joints; needs only the world joints.
+        # difference of the same labeled points.
         def _acceleration(st):
             if contact_labels is None:
                 return q.new_zeros(())
             loss, accel_cms2, n_stencils = joint_acceleration_loss(
-                st["jw"], contact_labels, fps=fps, joint_weight=contact_conf)
+                st[pos_key], contact_labels, fps=fps, joint_weight=contact_conf)
             return loss, {"cm_s2": accel_cms2, "n": n_stencils}
         problem.add_term("ann_acceleration", _acceleration)
 
@@ -819,18 +818,14 @@ def optimize_person(
         def on_start() -> None:
             scene_cell["cand"] = _build_scene_cand() if ph.scene else None
             # Bind the frozen kinematics_1 labels once, at the first scene phase (the body has
-            # seated by then). Preset labels need no scene candidates — only the geometric
-            # detector reads the scene — so they bind at the first scene phase regardless.
-            if use_auto and contact_labels is None and ph.scene and (
-                    preset_labels is not None or scene_cell["cand"] is not None):
-                lab, auto_drift_pre[0] = (_preset_auto_labels() if preset_labels is not None
-                                          else _detect_auto_labels())
+            # seated by then).
+            if use_auto and contact_labels is None and ph.scene and scene_cell["cand"] is not None:
+                lab, auto_drift_pre[0] = _detect_auto_labels()
                 _bind_labels(lab)
-                src = "predicted" if preset_labels is not None else "detected"
-                per_g = " ".join(f"{g}={int((lab[:, m] == 1).any(1).sum())}"
-                                 for g, m in auto_contact["group_members"].items() if m)
-                print(f"    [auto-contact] frozen {src} labels @ {ph.name}: "
-                      f"{int((lab == 1).any(1).sum())}/{lab.shape[0]} frames w/ contact  ({per_g})")
+                per_frame = " ".join(f"{name}={int((lab[:, i] == 1).sum())}"
+                                     for i, name in enumerate(mid.contact_frame_names))
+                print(f"    [auto-contact] frozen detected labels @ {ph.name}: "
+                      f"{int((lab == 1).any(1).sum())}/{lab.shape[0]} frames w/ contact  ({per_frame})")
             if use_contact_patch and use_pen and ph.scene:
                 with torch.no_grad():
                     vw_sub0 = mid.forward(betas, normalize_q(q, mid.num_joints)).vertices[:, sub]
@@ -846,9 +841,13 @@ def optimize_person(
                 patch_cell["patches"] = None
         return on_start
 
+    # L-BFGS frees every DOF group (the polish), but a frozen group must STAY frozen there
+    # too — so the finger freeze is the one mask that survives into the L-BFGS phase.
+    lbfgs_mask = {"q": finger_freeze_mask(nq, q.device)} if freeze_fingers else None
     engine_phases = [
         Phase(ph.name, int(ph.iters), ph.weights, optimizer=ph.optimizer,
-              grad_mask=None if ph.optimizer == "lbfgs" else {"q": _dof_mask(ph.dofs, nq, q.device)},
+              grad_mask=(lbfgs_mask if ph.optimizer == "lbfgs" else
+                         {"q": _dof_mask(ph.dofs, nq, q.device, freeze_fingers=freeze_fingers)}),
               on_start=_phase_start(ph))
         for ph in phases
     ]

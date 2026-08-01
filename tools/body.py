@@ -5,7 +5,8 @@ Wraps BetterHuman's parametric :class:`better_human.SMPLX` (52 native joints,
 call, so a future body swap (MHR) only touches this file. The wrapper reproduces
 the exact surface the stages used from the previous ``SMPLXMid`` body:
 
-* :meth:`Body.forward` — pose ``q`` → world joints + vertices (differentiable);
+* :meth:`Body.forward` — pose ``q`` → world joints + vertices + the 12 contact
+  frames (differentiable);
 * :meth:`Body.forward_shape` — the neutral-pose shaped mesh + rest joints;
 * :meth:`Body.from_classic` / :meth:`Body.to_classic` — classic SMPL-X ↔ ``q``;
 * the static topology attributes (``faces``, dense ``lbs_weights``,
@@ -22,6 +23,7 @@ from __future__ import annotations
 from pathlib import Path
 
 import torch
+from better_robot.kinematics import update_frame_placements
 from better_robot.lie import so3
 
 import better_human as bh
@@ -33,6 +35,28 @@ from better_human.bodies.smpl_family.smplx import SMPLXClassic
 _DEFAULT_MODEL_PATH = Path(
     "/data3/rikhat.akizhanov/better/BetterHuman/models/smplx/SMPLX_NEUTRAL.npz"
 )
+
+#: The 12 authored **contact frames** — named mesh points (toes, heels, knees,
+#: palms, fingertips) baked onto the body as BetterRobot frames. Each frame's
+#: origin is a template vertex and its local z axis is that vertex's outward
+#: rest-pose surface normal, so forward kinematics reports both a contact point
+#: and the direction the skin faces there. Contact detection lives entirely on
+#: these frames (see ``docs/contacts.md``).
+_DEFAULT_CONTACT_FRAMES = Path(
+    "/data3/rikhat.akizhanov/better/BetterHuman/studio_data/frames/smplx_neutral/contacts.json"
+)
+
+
+def frame_normals(frames7: torch.Tensor) -> torch.Tensor:
+    """Outward world normal ``(..., F, 3)`` of contact-frame poses ``(..., F, 7)``.
+
+    A contact frame's local z axis is baked as the outward mesh normal at its
+    vertex, so the posed world normal is the third column of the frame's rotation
+    matrix — no mesh work per frame.
+
+    :param frames7: contact-frame world poses, ``[translation, quaternion xyzw]``.
+    """
+    return so3.to_matrix(frames7[..., 3:7])[..., :, 2]
 
 
 class _JointsWorld:
@@ -61,25 +85,34 @@ class _JointsWorld:
 
 
 class _Posed:
-    """One posed body: world joints + vertices, matching the old ``forward`` output."""
+    """One posed body: world joints + vertices + contact frames."""
 
-    def __init__(self, vertices: torch.Tensor, joint_placements: torch.Tensor) -> None:
+    def __init__(self, vertices: torch.Tensor, joint_placements: torch.Tensor,
+                 frame_placements: torch.Tensor) -> None:
         #: Posed world vertices with shape ``(..., V, 3)``.
         self.vertices = vertices
         #: World joint placements as a :class:`_JointsWorld` (``(..., 52, 7)``).
         self.joints_world = _JointsWorld(joint_placements)
         #: World joint positions with shape ``(..., 52, 3)``.
         self.joints = joint_placements[..., :3]
+        #: Contact-frame world poses ``(..., 12, 7)`` (position + scalar-last
+        #: quaternion), in :attr:`Body.contact_frame_names` order. Unscaled, like
+        #: the joints — a stage that re-applies a per-person scale about the
+        #: pelvis scales the frame POSITIONS only (a uniform scale leaves the
+        #: rotations, and therefore :func:`frame_normals`, untouched).
+        self.frames_world = frame_placements
 
 
 class Body:
     """Thin SMPL-X body wrapper over BetterHuman's :class:`better_human.ParametricBody`.
 
     :param base: an unshaped :class:`better_human.SMPLX` (``use_face=False``,
-        ``use_hands=True``, ``num_betas=10``).
+        ``use_hands=True``, ``num_betas=10``) built with contact frames.
     """
 
     def __init__(self, base: bh.SMPLX) -> None:
+        if getattr(base, "contact_frames", None) is None:
+            raise ValueError("body was built without contact frames; pass contact_frames= to SMPLX")
         self._base = base
         self._dtype = base.values.v_template.dtype
         self._device = base.values.v_template.device
@@ -105,6 +138,20 @@ class Body:
         #: Parent index per joint as ``(1, 52)`` (``[0, i]`` = parent of joint ``i``).
         self.parent_tree = torch.tensor(
             [base.structure.parents], dtype=torch.long, device=self._device
+        )
+
+        #: The resolved :class:`better_human.ContactFrames` spec of the 12 contact frames.
+        self.contact_frames = base.contact_frames
+        #: Contact-frame names in authored order, e.g. ``"toe_under_left"`` (length 12).
+        self.contact_frame_names = tuple(self.contact_frames.names)
+        #: Parent joint of each contact frame, as a native 52-joint index (length 12).
+        self.contact_frame_parents = tuple(self.contact_frames.parent_joints)
+        #: Template mesh vertex carrying each contact frame (length 12).
+        self.contact_frame_vertices = tuple(self.contact_frames.vertex_ids)
+        # Rows of BetterRobot's frame table these 12 frames occupy (53… after the
+        # auto-generated per-body frames).
+        self._contact_frame_ids = torch.tensor(
+            self.contact_frames.frame_ids, dtype=torch.long, device=self._device
         )
 
         self._shaped_cache: tuple[torch.Tensor, bh.ParametricBody] | None = None
@@ -142,13 +189,18 @@ class Body:
             in the optimizer; per-frame is allowed).
         :param q: configuration ``(..., 211)`` with unit quaternions.
         :returns: a :class:`_Posed` with ``.vertices (..., V, 3)``,
-            ``.joints_world`` (``(..., 52, 7)``), and ``.joints (..., 52, 3)``.
+            ``.joints_world`` (``(..., 52, 7)``), ``.joints (..., 52, 3)`` and
+            ``.frames_world (..., 12, 7)``.
         """
         shaped = self.shaped(betas)
         data = shaped.fk(q.to(dtype=self._dtype, device=self._device))
         vertices = shaped.vertices_from_data(data)
         placements = data.joint_pose_world[..., 1:, :]         # drop the universe joint (row 0)
-        return _Posed(vertices, placements)
+        # Contact frames ride the joint poses already computed above, so placing
+        # them is a handful of rigid composes — differentiable through ``q``.
+        update_frame_placements(shaped.robot, data)
+        frames = data.frame_pose_world[..., self._contact_frame_ids, :]
+        return _Posed(vertices, placements, frames)
 
     def forward_shape(self, betas: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
         """Return the neutral-pose ``(v_shaped (..., V, 3), rest_joints (..., 52, 3))``.
@@ -209,7 +261,7 @@ class Body:
 
 
 def load_body(model_path: str | Path | None = None, device: str | torch.device = "cpu") -> Body:
-    """Load the SMPL-X body used throughout the pipeline.
+    """Load the SMPL-X body used throughout the pipeline, contact frames baked on.
 
     :param model_path: path to a ``SMPLX_*.npz`` weight file; defaults to the
         BetterHuman-bundled neutral model.
@@ -221,5 +273,6 @@ def load_body(model_path: str | Path | None = None, device: str | torch.device =
         use_hands=True,
         num_betas=10,
         device=device,
+        contact_frames=_DEFAULT_CONTACT_FRAMES,
     )
     return Body(base)
