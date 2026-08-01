@@ -87,19 +87,20 @@ Default chain in order (rows 1–8; `human_optimization` runs its `root` +
 | 5 | `convert_mhr_to_smplx.py` | `sam3d/params.npz` | `sam3d/smplx_params.npz` (`(P,N,…)` classic SMPL-X), overlay |
 | 6 | `fuse_geometry.py` | `vggt/`, `sam3/`, `sam3d/smplx_params.npz`, frames | `geometry/transform.npz` (cameras, `metric=False`), `geometry/scene.npz` (two-pass voxel merge + hidden-point prune + per-point normals), `geometry/human.npz` (per-frame human points) |
 | 7 | `estimate_scale.py` | `sam3d/smplx_params.npz`, `vggt/camera.npz`, `sapiens/pose.npz`, `geometry/` | `geometry/scale.npz` + rescales `transform/scene/human.npz` in place (`metric=True`); `geometry/prefit.npz` (dual scale+body pre-fit bodies, unless `prefit=false`) |
-| 8 | `human_optimization.py` (`root`+`kinematics_1`) | `sam3d/smplx_params.npz`, `sapiens/pose.npz`, `geometry/` (init pose = `prefit.npz` when present) | `human_optim/kinematic_1.npz` (world-frame `q (P,N,211)` + `drift_pre` + `auto_labels`), optional overlay |
-| – | `human_optimization.py --stages kinematics_2` | `kinematic_1.npz`, labels (`data/<stem>.npz` manual, or `contacts_1.npz` auto — `[stages.kinematics_2].labels`) | `human_optim/kinematic_2.npz` |
-| – | `estimate_contacts.py` | a refined body (`--bodies`), `geometry/` | `human_optim/contacts_<tag>.npz` (per-joint labels + confidence + depth-fit gap/trust) |
+| 8 | `human_optimization.py` (`root`+`kinematics_1`) | `sam3d/smplx_params.npz`, `sapiens/pose.npz`, `geometry/` (init pose = `prefit.npz` when present) | `human_optim/kinematic_1.npz` (world-frame `q (P,N,211)` + per-contact-frame `drift_pre`/`auto_labels (P,N,12)`), optional overlay |
+| – | `human_optimization.py --stages kinematics_2` | `kinematic_1.npz`, labels — **frozen this era** (needs the per-joint schema-1 labels the frame stage no longer writes) | `human_optim/kinematic_2.npz` |
+| – | `estimate_contacts.py` | a refined body (`--bodies`), `geometry/` | `human_optim/contacts_<tag>.npz` — **per-contact-frame** labels (schema 2 `frames-v1`: 12 frames, distance + stillness + normal-window gates; see `docs/contacts.md`) |
 | – | `estimate_gravity_geocalib.py` | frames, `geometry/transform.npz` | `geocalib/gravity.npz` (world-frame down + `reliable` flag) |
 | – | `human_optimization.py --stages dynamics` | a refined body + its contacts (default `kinematic_1.npz` + `contacts_1.npz`; `[stages.dynamics].bodies`), gravity | `human_optim/dynamics.npz` (world contact forces at 6 joints — hands/feet/ankles — + joint torques + per-frame root `base_wrench`) |
 
 Viewer: `scripts/view_3d.py out/<stem>/` (viser: fused scene + cameras + human
 points + bodies; the **`body source`** dropdown switches `original` / `prefit` /
-`kinematics` / `kinematics_2` / `kindyn_1` / `kindyn_manual` / `dynamics`; the
-skeleton + contact/confidence/depth-trust layers draw for both `kinematics`
-(from `contacts_1`) and `kinematics_2` (from `contacts_2`); a **`scene normals`** debug layer
-draws the per-point normal arrows; a **`depth trust (spaghetti)`** layer colors
-joints by the per-joint depth-fit metric). `--scenes` browses the DB.
+`kinematics` (+ the frozen-era sources when their files exist); the skeleton
+draws all 52 joints — fingers as small 0.30× spheres; the **`contact frames`**
+layer draws the 12 contact frames red/green from `contacts_1` with a thin
+connector to each parent joint and a 6 cm outward-normal arrow; a
+**`scene normals`** debug layer draws the per-point normal arrows). `--scenes`
+browses the DB.
 
 ## Run
 
