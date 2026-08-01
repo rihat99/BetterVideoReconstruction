@@ -20,8 +20,10 @@ iters = { root = 150 }
 iters = { full = 300, refine = 200, lbfgs = 30 }
 overlay = false          # reprojected-keypoint debug overlay → human_optim/kinematic_1_overlay.mp4
 labels = "auto"          # the only supported source: the geometric contact-frame detector above.
-                         # Finger joints stay FROZEN here (they carry the two fingertip contact
-                         # frames but have no evidence to be fitted with).
+freeze_fingers = true    # pin the 30 finger quaternions at their converter values — the finger
+                         # joints carry the two fingertip contact frames but are not fitted.
+                         # Set false to FIT the hand pose; only meaningful together with
+                         # [keypoints].include_hands = true, which gives the fingertips a 2D witness.
 
 [stages.kinematics_2]
 # Contact-patch repair. Both knobs matter: the acquisition WEIGHT sets the pull's force balance
@@ -121,7 +123,9 @@ limb_quota = 200       # sampling="limb_quota": max points each hand/foot group 
 
 [keypoints]
 score_thresh = 0.3
-include_hands = false
+include_hands = true    # 10 fingertip landmarks (Sapiens ~0.3–0.7 conf on climbers). Measured on 4
+                        # scenes: fingertip 2D −23…−42%, wrist up to −13%, hand-frame contacts +4%,
+                        # ≤0.25 px cost on head/feet. false = the hands have no image witness at all.
 gm_scale_px = 40.0
 smooth_window_s = 0.35  # SG-smooth the Sapiens TARGET tracks (s) before opt; loss sees smoothed, gate measured vs RAW. 0 = off
 

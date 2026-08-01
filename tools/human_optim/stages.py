@@ -403,7 +403,8 @@ def _kinematics_2_phases(cfg: HumanOptimConfig) -> list[PhaseSpec]:
 # ─────────────────────── kinematic stages (root / kin1) ───────────────────
 
 def run_kinematic(source, pred: Path, cfg: HumanOptimConfig, stages_to_run,
-                  device: str, *, overlay: bool = False, labels_mode: str = "auto") -> Path:
+                  device: str, *, overlay: bool = False, labels_mode: str = "auto",
+                  freeze_fingers: bool = True) -> Path:
     """Run ``root`` and/or ``kinematics_1`` for every tracked person → ``human_optim/``.
 
     ``q`` starts from the scale stage's pre-fit bodies when ``geometry/prefit.npz``
@@ -414,8 +415,12 @@ def run_kinematic(source, pred: Path, cfg: HumanOptimConfig, stages_to_run,
 
     ``labels_mode`` must be ``'auto'``: the frozen contact labels are detected
     geometrically on the 12 contact frames inside the optimization (the
-    ``[auto_contact]`` operating point). The finger joints are frozen throughout —
-    they carry the two fingertip contact frames but have no evidence to be fitted with.
+    ``[auto_contact]`` operating point).
+
+    ``freeze_fingers`` (default on) pins the 30 finger quaternions at their
+    converter values: the finger joints carry the two fingertip contact frames but
+    are not fitted. Turning it off lets the hand pose be *observed* — pair it with
+    ``[keypoints].include_hands`` so the fingertips have a 2D witness.
     """
     knobs = cfg.knobs
     pred = Path(pred)
@@ -492,7 +497,7 @@ def run_kinematic(source, pred: Path, cfg: HumanOptimConfig, stages_to_run,
             sub=sub, knobs=knobs, phases=phases,
             scene_pts=scene_pts, scene_normals=scene_normals, scene_conf=scene_conf, fps=fps,
             chamfer_weights=chamfer_w, frame_valid=frame_valid,
-            cam_centers=cam_centers, auto_contact=auto_cfg, freeze_fingers=True)
+            cam_centers=cam_centers, auto_contact=auto_cfg, freeze_fingers=freeze_fingers)
         print(f"    before: {before}\n    after:  {after}")
         # Persist drift_pre + auto_labels: drift_pre is the honest pre-attraction gate source
         # for the readout; auto_labels track the body produced by this optimization.

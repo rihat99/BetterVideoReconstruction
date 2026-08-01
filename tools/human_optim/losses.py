@@ -574,18 +574,29 @@ def pose_prior_loss(
     q: torch.Tensor,        # (T, nq) normalized, bh order
     q_init: torch.Tensor,   # (T, nq) normalized, bh order
     num_joints: int,
+    *,
+    num_prior_joints: int | None = None,
 ) -> torch.Tensor:
     """Smooth quaternion distance ``1 − (q·q_init)²`` over joints (not root).
 
     Excludes the root SE3 (``q[:7]``): the body / hand pose stays near the
     converter's per-frame estimate while root translation + orientation move
     freely.
+
+    ``num_prior_joints`` covers only the first N parent-local quaternions — the
+    body block, dropping the fingers. Used when the finger pose is being *fitted*
+    (``freeze_fingers`` off): the converter's hand pose is then the thing we
+    stopped trusting, so pulling the fingers back to it is incoherent. The
+    denominator stays the full joint count, so dropping the fingers does not
+    silently stiffen the prior on the joints it still covers.
     """
     shape = q.shape[:-1]
     qj = q[..., 7:].reshape(*shape, num_joints - 1, 4)
     qij = q_init[..., 7:].reshape(*shape, num_joints - 1, 4)
     vals = 1.0 - (qj * qij).sum(dim=-1).square()
-    return vals.mean()
+    if num_prior_joints is None:
+        return vals.mean()
+    return vals[..., :num_prior_joints].sum() / vals.numel()
 
 
 def root_orient_prior_loss(

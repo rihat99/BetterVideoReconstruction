@@ -703,7 +703,12 @@ def optimize_person(
     problem.add_term("chamfer", lambda st: chamfer_loss(
         st["vw"][:, sub], st["vismask"], depth_pad, depth_valid, chunk=chunk,
         vertex_weights=chamfer_weights))
-    problem.add_term("pose_prior", lambda st: pose_prior_loss(st["qn"], q_init, mid.num_joints))
+    # Fitted fingers drop out of the pose prior: their starting values are the converter's
+    # hand pose, which is exactly what unfreezing them says we no longer trust.
+    prior_joints = (None if freeze_fingers
+                    else int(finger_freeze_mask(nq, q.device)[7:].sum()) // 4)
+    problem.add_term("pose_prior", lambda st: pose_prior_loss(
+        st["qn"], q_init, mid.num_joints, num_prior_joints=prior_joints))
     problem.add_term("orient_prior", lambda st: root_orient_prior_loss(st["qn"], q_init))
 
     def _msq(x: torch.Tensor) -> torch.Tensor:

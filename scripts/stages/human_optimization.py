@@ -66,7 +66,8 @@ def run(source, predictions_dir, config_path, *, stages=None, annotations=None) 
         k1 = opts.get("kinematics_1", {})
         run_kinematic(source, pred, cfg, kin_stages, cfg.device,
                       overlay=bool(k1.get("overlay", False)),
-                      labels_mode=str(k1.get("labels", "auto")))
+                      labels_mode=str(k1.get("labels", "auto")),
+                      freeze_fingers=bool(k1.get("freeze_fingers", True)))
     if "kinematics_2" in requested:
         k2 = opts.get("kinematics_2", {})
         run_kinematics_2(source, pred, cfg, cfg.device, annotations=annotations,
