@@ -117,15 +117,25 @@ below are the config names.
 
 ### Scene terms (refine phase onward)
 
-The static scene cloud from fusion enters only after the body has settled. All three
-terms share one nearest-neighbour pass per iteration: each body vertex finds its
-nearest scene point and gets a signed distance (negative = behind the surface).
+The static scene cloud from fusion enters only after the body has settled. A point
+finds its nearest scene point and gets a signed distance (negative = behind the
+surface). In `kinematics_1` that point set is the **12 contact frames**, and one
+nearest-neighbour pass per iteration serves both scene terms; the manual
+`kinematics_2` terms run the same pass over 1000 subsampled mesh vertices instead.
 
-- **`penetration`** — pushes vertices out of the wall. A 1 cm dead zone tolerates soft
-  tissue and noise; a Huber ramp keeps one deeply-buried vertex from dominating;
-  matches to far or low-confidence scene points are ignored.
-- **`ann_attraction`** — the inverse: pulls vertices *onto* the wall, but only for
-  joints labeled as in contact. Attraction owns the region just outside the surface,
+- **`penetration`** — pushes the 12 contact frames out of the wall. A 1 cm dead zone
+  tolerates soft tissue and noise; a Huber ramp keeps one deeply-buried point from
+  dominating; matches to far or low-confidence scene points are ignored. It acts on
+  the contact frames rather than on mesh vertices because those points are where
+  contact is *modelled*: a frame buried 8 cm inside a hold gives the detector a
+  meaningless signed distance, and this term keeps the signals honest. Note what it
+  does *not* do: the dead zone (1 cm) sits inside the contact band (3 cm), so
+  penetration never decides *which* frames read as touching — that is the normal
+  window's job. With ~12 points instead of ~1000 the penalty (a mean over active
+  points) is much more concentrated, so its weight is correspondingly larger.
+- **`ann_attraction`** — the inverse: pulls the labelled points *onto* the wall
+  (contact frames under the auto labels; near-contact vertices under manual
+  `kinematics_2` labels). Attraction owns the region just outside the surface,
   penetration the region behind it — they partition the signed-distance axis and never
   fight. This term exists because nothing else pulls the body toward the *scene*
   (chamfer targets the person's own depth, penetration only pushes).

@@ -62,15 +62,15 @@ class Metrics:
     accel: float
     jerk: float
     snap: float           # ‖snap‖ (4th tangent difference) — the highest-frequency jitter
-    pen_cm: float = float("nan")  # mean penetration depth into the scene cloud (nan = no scene)
-    pen_n: int = 0                # number of penetrating vertex-instances (summed over frames)
+    pen_cm: float = float("nan")  # mean contact-frame penetration depth into the scene (nan = no scene)
+    pen_n: int = 0                # number of penetrating contact-frame instances (summed over frames)
     depth_m: float = float("nan")  # mean pelvis camera-frame depth (diagnostic)
     radial_cms: float = float("nan")  # mean per-joint radial (viewing-ray) speed, cm/s
 
     def __str__(self) -> str:
         ini = "n/a" if self.reproj_init_px != self.reproj_init_px else f"{self.reproj_init_px:.2f}px"
         dep = "" if self.depth_m != self.depth_m else f"  depth={self.depth_m:.2f}m"
-        pen = "" if self.pen_cm != self.pen_cm else f"  pen={self.pen_cm:.2f}cm/{self.pen_n}v"
+        pen = "" if self.pen_cm != self.pen_cm else f"  pen={self.pen_cm:.2f}cm/{self.pen_n}f"
         rad = "" if self.radial_cms != self.radial_cms else f"  radial={self.radial_cms:.1f}cm/s"
         return (f"reproj_sap={self.reproj_sap_px:.2f}px  reproj_init={ini}  "
                 f"chamfer={self.chamfer_m * 100:.2f}cm  "
@@ -126,25 +126,27 @@ def _visibility(vertices_sub_det: torch.Tensor, normals_sub: torch.Tensor,
     return front_facing_mask(vcam, ncam)
 
 
-def _padded_scene_candidates(vertices_sub_det: torch.Tensor, scene_pts: torch.Tensor,
+def _padded_scene_candidates(box_points_det: torch.Tensor, scene_pts: torch.Tensor,
                              scene_normals: torch.Tensor, scene_conf: torch.Tensor,
                              margin: float, max_candidates: int):
     """Per-frame scene candidates near the body, padded to ``(T, Mc, …)`` for the
     chunked-batched :func:`~tools.human_optim.losses.scene_penetration`.
 
     The scene cloud is static but large (~10⁵ points over the whole route); only
-    points near the body can ever be penetrated. Each frame keeps the scene
-    points inside its posed-vertex AABB + ``margin`` (a margin covering the body's
-    motion over the stage), then — if that still exceeds ``max_candidates`` — the
-    ``max_candidates`` nearest to the box centre (the farther ones can't be any
-    vertex's nearest neighbour, so this is near-lossless but bounds the padded
+    points near the body can ever be penetrated. ``box_points_det`` ``(T, K, 3)`` is
+    the detached body point set the box is drawn around — the 52 joints plus the 12
+    contact frames, which needs no mesh. Each frame keeps the scene points inside
+    that AABB + ``margin`` (a margin covering both the joints-to-skin gap and the
+    body's motion over the stage), then — if that still exceeds ``max_candidates`` —
+    the ``max_candidates`` nearest to the box centre (the farther ones can't be any
+    body point's nearest neighbour, so this is near-lossless but bounds the padded
     width, hence the per-iter ``cdist`` cost). Built once from the post-placement
     body and reused across a scene phase's iterations. Returns the four padded
     tensors ``(points, normals, confidence, valid)``."""
     pts, nrm, cnf = [], [], []
-    for t in range(vertices_sub_det.shape[0]):
-        lo = vertices_sub_det[t].amin(0) - margin
-        hi = vertices_sub_det[t].amax(0) + margin
+    for t in range(box_points_det.shape[0]):
+        lo = box_points_det[t].amin(0) - margin
+        hi = box_points_det[t].amax(0) + margin
         m = ((scene_pts >= lo) & (scene_pts <= hi)).all(dim=-1)
         cp, cn, cc = scene_pts[m], scene_normals[m], scene_conf[m]
         if cp.shape[0] > max_candidates:
@@ -154,7 +156,7 @@ def _padded_scene_candidates(vertices_sub_det: torch.Tensor, scene_pts: torch.Te
         pts.append(cp)
         nrm.append(cn)
         cnf.append(cc)
-    dev, dt = vertices_sub_det.device, vertices_sub_det.dtype
+    dev, dt = box_points_det.device, box_points_det.dtype
     pad_p, valid = pad_frames(pts, channels=3, device=dev, dtype=dt)
     pad_n, _ = pad_frames(nrm, channels=3, device=dev, dtype=dt)
     pad_c, _ = pad_frames(cnf, channels=None, device=dev, dtype=scene_conf.dtype)
@@ -268,6 +270,7 @@ def _metrics(mid, betas, q_world, *, extrinsics, K, depth_pad, depth_valid, targ
     qn = normalize_q(q_world, mid.num_joints)
     out = mid.forward(betas, qn)
     jw = out.joints_world.tensor()[..., :3]
+    fw = out.frames_world[..., :3]                    # (T, F, 3) contact-frame points
     vw = out.vertices
     # Sapiens reprojection in raw pixels (un-normalized) over scored keypoints
     body = jw[:, corr.joint_model, :]
@@ -289,14 +292,14 @@ def _metrics(mid, betas, q_world, *, extrinsics, K, depth_pad, depth_valid, targ
     n = vertex_normals(vw, mid.faces)
     vismask = _visibility(vw[:, sub], n[:, sub], extrinsics)
     cham = float(chamfer_loss(vw[:, sub], vismask, depth_pad, depth_valid, chunk=chunk))
-    # penetration into the scene cloud (diagnostic — same SDF the loss uses, on
-    # all subsampled verts; candidates pruned to each frame's body box)
+    # penetration into the scene cloud (diagnostic — the same SDF and the same 12
+    # contact-frame points the loss uses; candidates pruned to each frame's body box)
     pen_cm, pen_n = float("nan"), 0
     if scene_pts is not None:
-        cand = _padded_scene_candidates(vw[:, sub], scene_pts, scene_normals, scene_conf,
+        cand = _padded_scene_candidates(torch.cat([jw, fw], 1), scene_pts, scene_normals, scene_conf,
                                         float(pen["prune_margin_m"]), int(pen["max_candidates"]))
         _, dcm, npen = scene_penetration(
-            vw[:, sub], *cand, conf_thresh=float(pen["conf_thresh"]),
+            fw, *cand, conf_thresh=float(pen["conf_thresh"]),
             margin_m=float(pen["margin_m"]), max_dist_m=float(pen["max_dist_m"]),
             max_pen_m=float(pen["max_pen_m"]), huber_m=float(pen["huber_m"]), chunk=chunk)
         pen_cm, pen_n = float(dcm), int(npen)
@@ -581,15 +584,17 @@ def optimize_person(
                 return _visibility(vw.detach()[:, sub], normals[:, sub], extrinsics)
 
         def _sig():
-            # One detached nearest-neighbour pass shared by the scene terms.
+            # One detached nearest-neighbour pass over the subsampled vertices, shared
+            # by the kinematics_2 annotation terms (repulsion / manual attraction).
             cand = scene_cell["cand"]
             if cand is None:
                 return None
             return scene_signed_distance(st["vw"][:, sub], *cand, chunk=chunk)
 
         def _sig_frames():
-            # The same signed-distance pass over the 12 contact-frame points (the
-            # kinematics_1 attraction acts on those, not on vertices).
+            # The same signed-distance pass over the 12 contact-frame points — shared by
+            # penetration and the kinematics_1 contact attraction. 12 points instead of
+            # 1000 verts, so the nearest-neighbour pass is ~83× cheaper.
             cand = scene_cell["cand"]
             if cand is None:
                 return None
@@ -634,12 +639,16 @@ def optimize_person(
 
         Built once at the start of a scene phase: by then the body is seated (the
         root / full phases placed it), so the candidates pruned to each frame's
-        body box stay valid for the whole phase — reused every iteration."""
+        body box stay valid for the whole phase — reused every iteration. The box is
+        drawn around the joints and the contact frames (no mesh); its 0.30 m margin
+        covers the joints-to-skin gap, so the kinematics_2 vertex terms still see
+        every scene point their vertices could reach."""
         if not use_pen:
             return None
         with torch.no_grad():
-            v0 = mid.forward(betas, normalize_q(q, mid.num_joints)).vertices
-            cand = _padded_scene_candidates(v0[:, sub], scene_pts, scene_normals,
+            o0 = mid.forward(betas, normalize_q(q, mid.num_joints))
+            box = torch.cat([o0.joints_world.tensor()[..., :3], o0.frames_world[..., :3]], 1)
+            cand = _padded_scene_candidates(box, scene_pts, scene_normals,
                                             scene_conf, float(pen_cfg["prune_margin_m"]), max_cand)
         if frame_valid is not None:      # untracked frames: drop their candidates → all scene terms skip them
             pad_p, pad_n, pad_c, valid = cand
@@ -680,8 +689,10 @@ def optimize_person(
     # ── term registration (order fixes the summation order) ─────────────────
     # Each term reads the shared per-iteration State; a term is active in a phase
     # iff its weight there is non-zero (the engine skips the rest). The scene
-    # penalty heads share the one lazy "sig" nearest-neighbour pass, and return
-    # zeros outside scene phases (sig is None there).
+    # penalty heads share a lazy nearest-neighbour pass — "sig_f" over the 12 contact
+    # frames (penetration + auto attraction), "sig" over the subsampled vertices
+    # (the kinematics_2 terms) — and return zeros outside scene phases (both are
+    # None there).
     problem.add_term("reproj_sapiens", lambda st: sapiens_reprojection_gm(
         st["jw"], st["vw"], extrinsics, K, target_kp_loss, scores, corr, frame_vertex_ids,
         score_thresh=score_thresh, gm_scale_px=sap_gm_px))
@@ -707,7 +718,10 @@ def optimize_person(
 
     if use_pen:
         def _penetration(st):
-            sig = st["sig"]
+            # On the 12 contact-frame points, not on mesh vertices: those points ARE
+            # where contact is modelled, and keeping them out of the wall is what stops
+            # a wrong-facing frame (a toe_above buried in a hold) from reading as touching.
+            sig = st["sig_f"]
             if sig is None:
                 return q.new_zeros(())
             loss, depth_cm, n_pen = penetration_penalty(
