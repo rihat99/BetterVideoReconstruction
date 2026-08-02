@@ -24,6 +24,10 @@ freeze_fingers = true    # pin the 30 finger quaternions at their converter valu
                          # joints carry the two fingertip contact frames but are not fitted.
                          # Set false to FIT the hand pose; only meaningful together with
                          # [keypoints].include_hands = true, which gives the fingertips a 2D witness.
+finger_smooth_s = 0.2    # Gaussian sigma (SECONDS) for smoothing that frozen finger trajectory over
+                         # time. The converter estimates the hand per frame, so it jitters (measured
+                         # 1.5-3.7 deg/frame), and freezing keeps the jitter. 0.2 s removes ~90% of it
+                         # and leaves the body fit and the fingertip 2D residual unchanged. 0 = off.
 
 [stages.kinematics_2]
 # Contact-patch repair. Both knobs matter: the acquisition WEIGHT sets the pull's force balance

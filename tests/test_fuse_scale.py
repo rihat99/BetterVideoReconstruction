@@ -12,7 +12,8 @@ import torch
 from scripts.stages.estimate_scale import _metricize_geometry
 from scripts.stages.fuse_geometry import _build_geometry, _merge_scene, _View, _visible_mask
 from tools.geometry.voxel import voxel_downsample
-from tools.human_optim.prefit import cloud_chamfer, finger_freeze_mask, joint_velocity_loss
+from tools.human_optim.prefit import (
+    cloud_chamfer, finger_freeze_mask, joint_velocity_loss, smooth_finger_quats)
 
 
 def test_merge_scene_collapses_boundary_twins():
@@ -165,6 +166,81 @@ def test_finger_freeze_mask_zeros_the_finger_tail():
     assert mask[: 7 + 4 * 21].eq(1).all()   # root SE3 + 21 body joints stay live
     assert mask[7 + 4 * 21:].eq(0).all()    # 30 finger joints frozen
     assert mask.numel() == 211
+
+
+def _x_quats(angles: torch.Tensor) -> torch.Tensor:
+    """``(T, 1, 4)`` scalar-last quaternions rotating ``angles`` (rad) about x."""
+    half = 0.5 * angles
+    zero = torch.zeros_like(half)
+    return torch.stack([half.sin(), zero, zero, half.cos()], dim=-1)[:, None, :]
+
+
+def _q_with_fingers(track: torch.Tensor) -> torch.Tensor:
+    """Pose ``(T, 211)`` at identity, with every finger quaternion set from ``track (T, 30, 4)``."""
+    num_frames = track.shape[0]
+    q = torch.zeros(num_frames, 211)
+    q[:, 6] = 1.0                                             # root quaternion (scalar last)
+    q[:, 7: 7 + 4 * 21].reshape(num_frames, 21, 4)[..., 3] = 1.0
+    q[:, 7 + 4 * 21:] = track.reshape(num_frames, -1)
+    return q
+
+
+def _quat_angle_deg(a: torch.Tensor, b: torch.Tensor) -> torch.Tensor:
+    """Rotation angle (deg) between unit quaternions, insensitive to the ``q ≡ −q`` sign."""
+    return torch.rad2deg(2.0 * torch.arccos((a * b).sum(-1).abs().clamp(max=1.0)))
+
+
+def test_smooth_finger_quats_survives_hemisphere_flips():
+    # A hand held perfectly still, reported as −q on half the frames. Averaging the raw
+    # components would cancel across the flip; hemisphere alignment must prevent that.
+    still = _x_quats(torch.full((12,), 0.7))
+    track = still.expand(12, 30, 4).clone()
+    track[6:] *= -1.0
+    q = _q_with_fingers(track)
+
+    out = smooth_finger_quats(q.clone(), np.ones(12, bool), 2.0)
+    fingers = out[:, 7 + 4 * 21:].reshape(12, 30, 4)
+
+    assert torch.allclose(fingers.norm(dim=-1), torch.ones(12, 30), atol=1e-5)
+    assert float(_quat_angle_deg(fingers, still).max()) == pytest.approx(0.0, abs=1e-3)
+    assert torch.equal(out[:, : 7 + 4 * 21], q[:, : 7 + 4 * 21])          # body block untouched
+    assert torch.equal(smooth_finger_quats(q.clone(), np.ones(12, bool), 0.0), q)
+
+
+def test_smooth_finger_quats_removes_jitter_but_keeps_motion():
+    torch.manual_seed(0)
+    curl = torch.linspace(0.0, 1.0, 40)                        # a real, slow finger curl
+    noisy = _x_quats(curl + 0.05 * torch.randn(40)).expand(40, 30, 4).contiguous()
+    clean = _x_quats(curl)
+
+    out = smooth_finger_quats(_q_with_fingers(noisy), np.ones(40, bool), 3.0)
+    fingers = out[:, 7 + 4 * 21:].reshape(40, 30, 4)
+
+    before = float(_quat_angle_deg(noisy[1:], noisy[:-1]).mean())
+    after = float(_quat_angle_deg(fingers[1:], fingers[:-1]).mean())
+    floor = float(_quat_angle_deg(clean[1:], clean[:-1]).mean())   # the curl's own step size
+    assert after - floor < 0.25 * (before - floor)             # most of the excess step is gone
+    assert float(_quat_angle_deg(fingers, clean).mean()) < \
+        float(_quat_angle_deg(noisy, clean).mean())            # closer to the true curl
+
+
+def test_smooth_finger_quats_does_not_smooth_across_a_tracking_gap():
+    # Two valid spans at very different hand poses with untracked frames between them
+    # (those hold a copy of a neighbouring pose). Each span is already constant, so a
+    # correct filter leaves it exactly where it is instead of dragging the spans together.
+    angles = torch.cat([torch.full((12,), 0.2), torch.full((8,), 1.4)])
+    track = _x_quats(angles).expand(20, 30, 4).contiguous()
+    valid = np.zeros(20, bool)
+    valid[:8] = True
+    valid[12:] = True
+
+    q = _q_with_fingers(track)
+    out = smooth_finger_quats(q.clone(), valid, 4.0)
+    fingers = out[:, 7 + 4 * 21:].reshape(20, 30, 4)
+
+    assert float(_quat_angle_deg(fingers[:8], track[:8]).max()) == pytest.approx(0.0, abs=1e-3)
+    assert float(_quat_angle_deg(fingers[12:], track[12:]).max()) == pytest.approx(0.0, abs=1e-3)
+    assert torch.equal(out[8:12], q[8:12])                     # untracked rows untouched
 
 
 def test_cloud_chamfer_matches_only_visible_vertices():

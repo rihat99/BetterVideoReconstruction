@@ -34,6 +34,7 @@ from .confidence import (
 from .config import HumanOptimConfig
 from .keypoints import build_correspondence
 from .optimizer import PhaseSpec, optimize_person
+from .prefit import smooth_finger_quats
 from .qmath import normalize_q
 from .visibility import subsample_indices
 
@@ -420,7 +421,9 @@ def run_kinematic(source, pred: Path, cfg: HumanOptimConfig, stages_to_run,
     ``freeze_fingers`` (default on) pins the 30 finger quaternions at their
     converter values: the finger joints carry the two fingertip contact frames but
     are not fitted. Turning it off lets the hand pose be *observed* — pair it with
-    ``[keypoints].include_hands`` so the fingertips have a 2D witness.
+    ``[keypoints].include_hands`` so the fingertips have a 2D witness. Because the
+    frozen pose is whatever the converter produced frame by frame, its jitter is
+    smoothed out of the init trajectory first (``[stages.kinematics_1].finger_smooth_s``).
     """
     knobs = cfg.knobs
     pred = Path(pred)
@@ -437,6 +440,9 @@ def run_kinematic(source, pred: Path, cfg: HumanOptimConfig, stages_to_run,
     H, W = int(sp["video_height"]), int(sp["video_width"])
     object_ids = np.asarray(sp["object_ids"], dtype=np.int32)
     fps = float(tr.get("fps", 30.0))
+    # Frozen fingers inherit the converter's per-frame hand pose, jitter included. Smooth
+    # that trajectory once at init (sigma in seconds → frames); 0 leaves it untouched.
+    finger_sigma_frames = float(cfg.stage_opts["kinematics_1"].get("finger_smooth_s", 0.0)) * fps
     params, init_src = _init_params(pred, sp, object_ids, tag)
     print(f"[{tag}] init pose: {init_src}")
 
@@ -484,6 +490,7 @@ def run_kinematic(source, pred: Path, cfg: HumanOptimConfig, stages_to_run,
         q_cam = mid.from_classic(betas_T, t("body_pose"), t("transl"), t("global_orient"),
                                  t("left_hand_pose"), t("right_hand_pose"))
         q_world = fold_root_to_world(q_cam, wfc)
+        smooth_finger_quats(q_world, vmask, finger_sigma_frames)
         q_world[:, 3:] += 1e-6 * torch.randn_like(q_world[:, 3:])   # break bit-exact static-frame ties
 
         target_kp, scores, depth, frame_valid = _person_visual_inputs(

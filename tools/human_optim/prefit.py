@@ -125,6 +125,54 @@ def finger_freeze_mask(nq: int, device) -> torch.Tensor:
     return mask
 
 
+def _valid_spans(valid: np.ndarray) -> list[tuple[int, int]]:
+    """The contiguous ``[start, end)`` runs of True in a ``(T,)`` bool mask."""
+    edges = np.flatnonzero(np.diff(np.concatenate(([0], valid.astype(np.int8), [0]))))
+    return list(zip(edges[::2], edges[1::2]))
+
+
+def smooth_finger_quats(q: torch.Tensor, valid: np.ndarray, sigma_frames: float) -> torch.Tensor:
+    """Gaussian-smooth the finger quaternions of ``q (T, 211)`` along time, in place.
+
+    The converter's per-frame hand pose is reasonable but jittery, and the fingers are
+    frozen during the fit, so that jitter survives into the result unless it is removed
+    here. Quaternions are hemisphere-aligned first (``q`` and ``−q`` are the same
+    rotation, so a raw sign flip would average to nonsense), then each component is
+    Gaussian-filtered over time and renormalized — the standard cheap approximation,
+    accurate at the per-frame angles a hand actually moves through.
+
+    Each contiguous run of ``valid`` frames is filtered on its own: untracked frames
+    hold a copy of their nearest valid pose (:func:`~tools.human_optim.stages._fill_invalid_frames`),
+    and averaging that plateau into real frames would drag them. The span edges use a
+    replicated border, so the first and last frames keep their value instead of decaying.
+
+    :param q: pose ``(T, 211)``; the finger block ``q[:, 91:]`` is overwritten.
+    :param valid: ``(T,)`` bool — the frames the tracker actually saw.
+    :param sigma_frames: Gaussian sigma in frames; ``<= 0`` is a no-op.
+    """
+    if sigma_frames <= 0:
+        return q
+    for start, end in _valid_spans(valid):
+        num = end - start
+        if num < 3:
+            continue
+        radius = min(int(round(3.0 * sigma_frames)), num - 1)
+        offsets = torch.arange(-radius, radius + 1, device=q.device, dtype=q.dtype)
+        kernel = torch.exp(-0.5 * (offsets / sigma_frames).square())
+        track = q[start:end, _FINGER_Q_START:].reshape(num, -1, 4)
+        dots = (track[1:] * track[:-1]).sum(-1)                            # (num-1, J)
+        signs = torch.where(dots < 0, -1.0, 1.0).cumprod(0)                # sequential flip
+        aligned = torch.cat([track[:1], track[1:] * signs[..., None]], 0)
+        channels = aligned.reshape(num, -1).T[None]                        # (1, 4J, num)
+        padded = torch.nn.functional.pad(channels, (radius, radius), mode="replicate")
+        weights = (kernel / kernel.sum()).view(1, 1, -1).expand(channels.shape[1], 1, -1)
+        smoothed = torch.nn.functional.conv1d(padded, weights, groups=channels.shape[1])
+        out = smoothed[0].T.reshape(num, -1, 4)
+        out = out / out.norm(dim=-1, keepdim=True).clamp_min(1e-8)
+        q[start:end, _FINGER_Q_START:] = out.reshape(num, -1)
+    return q
+
+
 def _front_facing_sub(
     vertices: torch.Tensor, faces: torch.Tensor, sub: torch.Tensor, chunk: int,
 ) -> torch.Tensor:
