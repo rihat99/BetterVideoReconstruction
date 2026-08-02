@@ -461,13 +461,11 @@ def run_kinematic(source, pred: Path, cfg: HumanOptimConfig, stages_to_run,
     auto_cfg = None
     if "auto_contact" in knobs and "kinematics_1" in stages_to_run:
         ac = dict(knobs["auto_contact"])
-        # Detector stillness: [auto_contact] may pin its OWN window_s / still_m — decoupled from the
-        # readout's [contact_gate] so the readout recall knob can move WITHOUT changing the frozen
-        # labels / bodies; omit to inherit [contact_gate] (one shared notion of "still").
+        # Stillness is ONE notion shared with the readout: both inherit [contact_gate]. A
+        # [auto_contact] override is still honoured, but the shipped config does not use one —
+        # a detector that is stricter than the readout only hides labels from the attraction.
         ac.setdefault("window_s", float(knobs["contact_gate"]["window_s"]))
         ac.setdefault("still_m", float(knobs["contact_gate"]["still_m"]))
-        # Same for the normal window: omit to inherit the readout's [contacts] value.
-        ac.setdefault("normal_max_angle_deg", float(knobs["contacts"]["normal_max_angle_deg"]))
         auto_cfg = ac
 
     if labels_mode != "auto":

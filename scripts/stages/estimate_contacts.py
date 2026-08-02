@@ -61,7 +61,7 @@ from tools.body import frame_normals, load_body  # noqa: E402
 from tools.config import load_toml  # noqa: E402
 from tools.geometry.normals import load_scene_cloud  # noqa: E402
 from tools.human_optim import (  # noqa: E402
-    detect_frame_contacts, frame_guarded_sdf, joint_drift, merge_contact_spans,
+    detect_frame_contacts, joint_drift, merge_contact_spans,
     project, transform_points, world_from_cam,
 )
 from tools.human_optim import paths  # noqa: E402
@@ -84,7 +84,6 @@ def _load_config(path: Path) -> dict:
     c.setdefault("max_dist_m", 0.10)       # far guard (a match behind an occluder is not a surface)
     c.setdefault("conf_thresh", 0.1)       # residual absolute floor (VGGT conf ≥~1 ⇒ non-binding)
     c.setdefault("conf_drop_q", 0.1)       # quantile confidence gate: drop the lowest scene voxels
-    c.setdefault("normal_max_angle_deg", 90.0)  # normal window: how far the skin may look away
     c.setdefault("normal_k", 16)           # kNN for PCA scene-normal estimation
     c.setdefault("prune_margin_m", 0.10)   # per-frame scene-AABB margin for the nearest-neighbour
     c.setdefault("merge_dist_m", 0.03)     # span-merge: bridge a gap the point barely moved across
@@ -182,7 +181,7 @@ def run(source: str | Path, predictions_dir: str | Path, config_path: str | Path
     print(f"[estimate_contacts] scene cloud {scene_pts.shape[0]} pts, normals: "
           f"{'fuse' if 'normals' in scene_npz else 'PCA fallback'}; "
           f"close<{float(cc['close_thresh_m']) * 100:.0f}cm, "
-          f"normal window ±{float(cc['normal_max_angle_deg']):.0f}°")
+          f"still<{float(cg['still_m']) * 100:.1f}cm")
 
     body = load_body(device=device)
     frame_names = list(body.contact_frame_names)
@@ -219,19 +218,22 @@ def run(source: str | Path, predictions_dir: str | Path, config_path: str | Path
 
         detected = detect_frame_contacts(
             points, normals, drift, scene_pts, scene_normals, scene_conf,
+            frame_names=frame_names,
             close_thresh_m=float(cc["close_thresh_m"]), exit_thresh_m=float(cc["exit_thresh_m"]),
             min_frames=int(cc["min_frames"]), still_m=float(cg["still_m"]),
             max_dist_m=float(cc["max_dist_m"]), conf_thresh=float(cc["conf_thresh"]),
-            normal_max_angle_deg=float(cc["normal_max_angle_deg"]),
             prune_margin_m=float(cc["prune_margin_m"]))
 
         # Bridge short same-frame gaps the point barely moved across AND stayed near the
         # wall throughout (flicker / brief re-settle); the re-grip guard blocks a genuine
-        # leave-and-return.
+        # leave-and-return. The merge works one frame at a time, so on its own it can
+        # bridge a toe over a step where the pair tiebreak had already ruled that toe out —
+        # putting both toes of a foot back in contact at once. The tiebreak's verdict is
+        # final, so bridged steps never land on a suppressed one.
         contact = merge_contact_spans(
             detected.contact, points, detected.guarded_sdf,
             merge_dist_m=float(cc["merge_dist_m"]), max_gap_s=float(cc["merge_max_gap_s"]),
-            gap_sdf_m=float(cc["merge_sdf_m"]), fps=fps)
+            gap_sdf_m=float(cc["merge_sdf_m"]), fps=fps) & ~detected.toe_suppressed
         merged = contact & ~detected.contact
 
         pixels = project(transform_points(points, extrinsics), intrinsics)     # (N, F, 2)
@@ -251,16 +253,10 @@ def run(source: str | Path, predictions_dir: str | Path, config_path: str | Path
                       frame_normal_dot[p], frame_drift_m[p]):
             array[~valid_mask[p]] = np.nan
 
-        # How often did the surface guards accept a point that the normal window then
-        # rejected? That difference IS the toe-hook discrimination, so it is worth
-        # reporting: the same guarded signal with the window opened to 180°.
-        open_window = frame_guarded_sdf(
-            detected.sdf, detected.dmin, detected.conf, detected.normal_dot,
-            max_dist_m=float(cc["max_dist_m"]), conf_thresh=float(cc["conf_thresh"]),
-            normal_max_angle_deg=180.0)
-        close_thresh = float(cc["close_thresh_m"])
-        window_rejected = ((open_window < close_thresh) & (detected.guarded_sdf >= close_thresh)
-                           & person_valid[:, None]).sum(dim=0).cpu().numpy()
+        # How often did the toe tiebreak have to choose? Both toe frames of a foot were
+        # candidates at that step and the normal picked one; the count is the size of the
+        # both-fire problem the rule removes.
+        toe_tiebreak = (detected.toe_suppressed & person_valid[:, None]).sum(dim=0).cpu().numpy()
 
         n_valid = int(valid_mask[p].sum())
         print(f"[estimate_contacts] obj_id={object_id}: "
@@ -270,7 +266,7 @@ def run(source: str | Path, predictions_dir: str | Path, config_path: str | Path
         for i, name in enumerate(frame_names):
             rate = float(contact_np[valid_mask[p], i].mean()) if n_valid else float("nan")
             print(f"    {name:<17s} rate={rate:5.1%}  spans={_count_spans(contact_np[:, i]):3d}  "
-                  f"normal-gate rejected={int(window_rejected[i]):4d}")
+                  f"toe-tiebreak suppressed={int(toe_tiebreak[i]):4d}")
 
     save = dict(
         contact_label_schema=np.int32(CONTACT_LABEL_SCHEMA),
@@ -297,7 +293,6 @@ def run(source: str | Path, predictions_dir: str | Path, config_path: str | Path
         min_frames=np.int32(cc["min_frames"]),
         max_dist_m=np.float32(cc["max_dist_m"]),
         conf_thresh=np.float32(cc["conf_thresh"]),
-        normal_max_angle_deg=np.float32(cc["normal_max_angle_deg"]),
         prune_margin_m=np.float32(cc["prune_margin_m"]),
         merge_dist_m=np.float32(cc["merge_dist_m"]),
         merge_max_gap_s=np.float32(cc["merge_max_gap_s"]),

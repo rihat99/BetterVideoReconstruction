@@ -28,10 +28,10 @@ joints must exist in the optimized body — but their pose is **frozen**: at dep
 and keypoint resolution there is nothing to fit a finger with, so the fingers
 simply follow the wrist and carry their frame along.
 
-## The three gates
+## The two gates
 
-For every person, every video frame and every contact frame, three things must
-agree before we call it a touch.
+For every person, every video frame and every contact frame, two things must
+agree before we call it a touch: the point is **at the wall**, and it is **still**.
 
 **1. Surface.** Find the nearest point of the fused scene cloud. That point has
 an outward normal (estimated by local PCA at fuse time, oriented toward the
@@ -43,21 +43,8 @@ evidence: the nearest point must be within 10 cm (a match further away is behind
 an occluder, not a surface), and it must be a confident point (a hole in the
 cloud must read as *unknown*, never as *no wall*).
 
-**2. The normal window.** The contact frame's own outward normal must face the
-scene point it matched. Concretely, `dot(frame normal, −scene normal)` has to be
-at least `cos(normal_max_angle_deg)`; at the default 90° a frame may touch
-anything in the hemisphere it looks into, and nothing behind it.
-
-This one gate is why `toe_under` and `toe_above` exist. They sit millimetres
-apart on the same toe, so any distance test alone would fire both on the same
-hold. Their normals point opposite ways, so the window picks exactly one:
-standing on a foothold lights `toe_under`; hooking the toe *under* a hold — the
-foot pulling up rather than pressing down — lights `toe_above`, because that is
-the surface actually pressed against the hold. Same for a heel hook versus
-standing on the heel.
-
-**3. Stillness.** Touching means holding. A contact frame's *net drift* over a
-centred ~0.35 s window must stay small — under 3 cm by default. Net drift, not
+**2. Stillness.** Touching means holding. A contact frame's *net drift* over a
+centred ~0.35 s window must stay small — under `still_m` by default. Net drift, not
 speed: a gripping hand jitters by millimetres that cancel out over the window,
 while a hand sweeping slowly past the wall accumulates several centimetres. The
 drift used is `drift_pre`, saved by the kinematic stage: the motion measured
@@ -65,10 +52,43 @@ drift used is `drift_pre`, saved by the kinematic stage: the motion measured
 because the optimizer's own damping holds labelled contacts still — stillness
 re-measured afterwards would be evidence we manufactured ourselves.
 
-The gates are applied by pushing the signed distance to `+inf` wherever any of
+The gates are applied by pushing the signed distance to `+inf` wherever either of
 them fails. A blocked step then simply looks infinitely far from the wall, so
 everything downstream — hysteresis, minimum duration, span merging — works
 without knowing the gates exist.
+
+## Why the frame's own normal is not a gate
+
+Every contact frame knows which way its skin looks, and we used to require that it
+look at the scene point it matched (a `normal_max_angle_deg` window). That gate is
+gone. Both of its inputs are too noisy to veto on: the scene normals come from a
+reconstructed point cloud, and the frame's normal comes from the fitted pose. It
+was throwing away real contacts — most visibly fingertips, which reach a hold
+while the estimated hand pose points the fingerpad the wrong way. Being near the
+wall and still is the evidence we actually trust.
+
+The normal survives in exactly one place, with no knob attached.
+
+## Telling the two toe frames apart
+
+`toe_under` and `toe_above` sit millimetres apart on the same toe. Every gate
+above accepts or rejects them together, so both fire on the same hold — and then
+the body appears to be standing on a foothold and hooking under it at the same
+time. Only their normals can separate them, because those point opposite ways.
+
+So: assume at most one of a pair is really in contact at any step. (Both at once
+is physically possible and deliberately ignored — it is rare, and pretending
+otherwise costs more than it buys.) At a step where **both** toes of one foot are
+near enough to hold a contact, keep the one whose normal looks more into the wall
+and drop the other. Exact ties keep `toe_under`, so the answer never depends on
+evaluation order. The drop happens before hysteresis, so the loser can neither
+start nor continue a span there — the output can never show both toes of a foot
+touching at the same step. Standing on a foothold lights `toe_under`; hooking the
+toe *under* a hold — the foot pulling up rather than pressing down — lights
+`toe_above`.
+
+The count of steps where the tiebreak had to choose is printed per frame by
+`estimate_contacts` (`toe-tiebreak suppressed=`).
 
 ## From a signal to a label
 
@@ -102,10 +122,10 @@ gates are implemented, and both users call it:
   finished body, runs the same detector, merges spans and writes
   `contacts_<tag>.npz`. `--bodies kinematic_1` → `contacts_1.npz`.
 
-The two use different operating points on purpose — `[auto_contact]` for the
-detector inside the fit, `[contacts]` + `[contact_gate]` for the readout — so the
-readout's recall knob can move without silently changing the bodies that were
-already fitted. The *code* is shared, so the two can never drift apart.
+The two use different *distance* thresholds on purpose — `[auto_contact]` is
+looser, because inside the fit a label is a target to pull toward, not a claim.
+Stillness is **one** notion shared by both. The *code* is shared too, so the two
+can never drift apart.
 
 ## Knobs
 
@@ -113,16 +133,16 @@ All in `configs/human_optimization.toml`.
 
 `[contacts]` — the readout: `close_thresh_m` / `exit_thresh_m` (hysteresis),
 `min_frames`, `max_dist_m` and `conf_thresh` (the surface guards), `conf_drop_q`
-and `normal_k` (scene-cloud loading), `normal_max_angle_deg` (the normal window),
-`prune_margin_m`, and the three `merge_*` knobs.
+and `normal_k` (scene-cloud loading), `prune_margin_m`, and the three `merge_*`
+knobs.
 
 `[contact_gate]` — `window_s` and `still_m`, the stillness gate. `still_m` is the
-recall knob: raise it and more marginal contacts survive.
+recall knob: raise it and more marginal contacts survive. It is the *only* knob
+that moves both the kin1 detector and the readout at once.
 
-`[auto_contact]` — the same operating point for the detector inside
-`kinematics_1`, with its own looser `detect_thresh_m` / `detect_exit_m` and its
-own `still_m`. Omit `still_m`, `window_s` or `normal_max_angle_deg` there and it
-inherits the readout's value.
+`[auto_contact]` — the detector inside `kinematics_1`: its own looser
+`detect_thresh_m` / `detect_exit_m`, plus the attraction `band_m`. It does not set
+`still_m` or `window_s`, so it inherits `[contact_gate]`.
 
 ## Output
 

@@ -1,4 +1,4 @@
-"""Contact-frame detection: the surface / normal-window / stillness gates."""
+"""Contact-frame detection: the surface guards, the stillness gate, the toe-pair tiebreak."""
 
 from __future__ import annotations
 
@@ -10,7 +10,13 @@ from better_robot.lie import so3
 
 from tools.body import frame_normals
 from tools.human_optim.contacts import (
-    detect_frame_contacts, frame_guarded_sdf, frame_scene_signals, joint_drift)
+    detect_frame_contacts, frame_guarded_sdf, frame_scene_signals, joint_drift,
+    merge_contact_spans, toe_pair_slots)
+
+# The 12 contact frames in their stored order — note slots 10/11 are RIGHT then LEFT.
+_FRAME_NAMES = ("toe_under_left", "toe_under_right", "heel_left", "heel_right",
+                "toe_above_left", "toe_above_right", "knee_left", "knee_right",
+                "palm_left", "palm_right", "finger_right", "finger_left")
 
 _UP = torch.tensor([0.0, 0.0, 1.0])
 _DOWN = torch.tensor([0.0, 0.0, -1.0])
@@ -32,12 +38,14 @@ def _hover(num_steps: int, height: float, normal: torch.Tensor):
     return points, normal.expand(num_steps, 1, 3).clone()
 
 
-def _detect(points, normals, drift, scene, **overrides):
+def _detect(points, normals, drift, scene, *, frame_names=None, **overrides):
+    """Run the detector on ``points``; unnamed columns get non-toe names (no tiebreak)."""
     knobs = dict(close_thresh_m=0.03, exit_thresh_m=0.035, min_frames=3, still_m=0.03,
-                 max_dist_m=0.10, conf_thresh=0.1, normal_max_angle_deg=90.0,
-                 prune_margin_m=0.15)
+                 max_dist_m=0.10, conf_thresh=0.1, prune_margin_m=0.15)
     knobs.update(overrides)
-    return detect_frame_contacts(points, normals, drift, *scene, **knobs)
+    names = frame_names if frame_names is not None else [
+        f"palm_{i}" for i in range(points.shape[1])]
+    return detect_frame_contacts(points, normals, drift, *scene, frame_names=names, **knobs)
 
 
 # ── the signals ──────────────────────────────────────────────────────────────
@@ -74,51 +82,136 @@ def test_guards_force_infinity_not_masking():
     points, normals = _hover(2, 0.01, _DOWN)
     sdf, dmin, conf, normal_dot = frame_scene_signals(points, normals, *scene,
                                                       prune_margin_m=0.15)
-    guarded = frame_guarded_sdf(sdf, dmin, conf, normal_dot, max_dist_m=0.10,
-                                conf_thresh=0.1, normal_max_angle_deg=90.0)
+    guarded = frame_guarded_sdf(sdf, dmin, conf, max_dist_m=0.10, conf_thresh=0.1)
     assert torch.allclose(guarded, sdf)
     # each guard on its own must push the signal to +inf-ish
-    for kwargs in (dict(max_dist_m=0.005), dict(conf_thresh=2.0), dict(normal_max_angle_deg=1.0)):
-        knobs = dict(max_dist_m=0.10, conf_thresh=0.1, normal_max_angle_deg=90.0)
+    for kwargs in (dict(max_dist_m=0.005), dict(conf_thresh=2.0)):
+        knobs = dict(max_dist_m=0.10, conf_thresh=0.1)
         knobs.update(kwargs)
-        blocked = frame_guarded_sdf(sdf, dmin, conf, -normal_dot if "normal_max_angle_deg"
-                                    in kwargs else normal_dot, **knobs)
-        assert (blocked > 1e30).all(), kwargs
+        assert (frame_guarded_sdf(sdf, dmin, conf, **knobs) > 1e30).all(), kwargs
 
 
-# ── the normal window: the toe-hook case ─────────────────────────────────────
+# ── the normal is NOT a gate ─────────────────────────────────────────────────
 
-def test_normal_window_accepts_the_frame_facing_the_scene():
+def test_a_still_frame_at_the_surface_fires():
     scene = _plane()
     points, normals = _hover(10, 0.01, _DOWN)
     drift = torch.zeros(10, 1)
     assert _detect(points, normals, drift, scene).contact.all()
 
 
-def test_normal_window_rejects_the_frame_facing_away():
-    """Same point, opposite skin direction — toe_above cannot fire on a hold below it."""
+def test_a_frame_facing_away_from_the_scene_still_fires():
+    """The normal is no longer a gate: same point, flipped skin, same label.
+
+    Reconstructed scene normals and the fitted pose are both too noisy to veto on — the
+    old normal window threw away real contacts (fingertips on holds, mostly).
+    """
     scene = _plane()
     points, normals = _hover(10, 0.01, _UP)
     drift = torch.zeros(10, 1)
-    assert not _detect(points, normals, drift, scene).contact.any()
+    assert _detect(points, normals, drift, scene).contact.all()
 
 
-def test_toe_hook_pair_never_both_fire():
-    """toe_under and toe_above sit at the same place with opposite normals."""
+# ── the toe pair: the one place a normal still decides ───────────────────────
+
+def _toe_pair(num_steps: int, height: float, *, under_normal, above_normal):
+    """A left toe_under / toe_above pair at the same place, ``height`` above the plane."""
+    points = torch.tensor([0.0, 0.0, height]).expand(num_steps, 2, 3).clone()
+    normals = torch.stack((under_normal.expand(num_steps, 3),
+                           above_normal.expand(num_steps, 3)), dim=1)
+    return points, normals, ["toe_under_left", "toe_above_left"]
+
+
+def test_toe_pair_keeps_the_frame_looking_into_the_wall():
+    """Both toes are millimetres from the same hold; only the one facing it may fire."""
     scene = _plane()
-    points = torch.tensor([0.0, 0.0, 0.01]).expand(10, 2, 3).clone()
-    normals = torch.stack((_DOWN.expand(10, 3), _UP.expand(10, 3)), dim=1)
-    contact = _detect(points, normals, torch.zeros(10, 2), scene).contact
-    assert contact[:, 0].all()
+    points, normals, names = _toe_pair(10, 0.01, under_normal=_DOWN, above_normal=_UP)
+    contact = _detect(points, normals, torch.zeros(10, 2), scene, frame_names=names).contact
+    assert contact[:, 0].all(), "toe_under faces the plane, so it wins"
     assert not contact[:, 1].any()
+    # flip which one faces the plane and the winner flips with it
+    points, normals, names = _toe_pair(10, 0.01, under_normal=_UP, above_normal=_DOWN)
+    contact = _detect(points, normals, torch.zeros(10, 2), scene, frame_names=names).contact
+    assert contact[:, 1].all() and not contact[:, 0].any()
 
 
-def test_wide_open_window_lets_the_away_facing_frame_through():
-    """The rejection is the WINDOW, not some other guard: open it and the label returns."""
+def test_toe_pair_tie_is_deterministic_and_keeps_toe_under():
+    """Identical normals ⇒ identical evidence; the rule must still pick exactly one."""
     scene = _plane()
-    points, normals = _hover(10, 0.01, _UP)
-    drift = torch.zeros(10, 1)
-    assert _detect(points, normals, drift, scene, normal_max_angle_deg=180.0).contact.all()
+    points, normals, names = _toe_pair(10, 0.01, under_normal=_DOWN, above_normal=_DOWN)
+    contact = _detect(points, normals, torch.zeros(10, 2), scene, frame_names=names).contact
+    assert contact[:, 0].all() and not contact[:, 1].any()
+
+
+def test_toe_pair_leaves_a_lone_candidate_alone():
+    """Only one toe near the wall ⇒ nothing to disambiguate, whichever way it looks."""
+    scene = _plane()
+    points = torch.zeros(10, 2, 3)
+    points[:, 0, 2] = 0.01                      # toe_under at the surface
+    points[:, 1, 2] = 0.40                      # toe_above far away
+    normals = torch.stack((_UP.expand(10, 3), _DOWN.expand(10, 3)), dim=1)
+    detected = _detect(points, normals, torch.zeros(10, 2), scene,
+                       frame_names=["toe_under_left", "toe_above_left"])
+    assert detected.contact[:, 0].all()
+    assert not detected.toe_suppressed.any()
+
+
+def test_toe_pairs_of_one_foot_are_never_both_in_contact():
+    """The output invariant, on noisy poses: at most ONE toe per foot at every step."""
+    torch.manual_seed(0)
+    scene = _plane()
+    num_steps, num_frames = 60, len(_FRAME_NAMES)
+    points = torch.zeros(num_steps, num_frames, 3)
+    points[..., :2] = torch.empty(num_steps, num_frames, 2).uniform_(-0.2, 0.2)
+    points[..., 2] = torch.empty(num_steps, num_frames).uniform_(-0.01, 0.05)
+    normals = torch.randn(num_steps, num_frames, 3)
+    normals = normals / normals.norm(dim=-1, keepdim=True)
+    detected = _detect(points, normals, torch.zeros(num_steps, num_frames), scene,
+                       frame_names=list(_FRAME_NAMES), min_frames=1)
+    assert detected.toe_suppressed.any(), "the stress case must actually exercise the rule"
+    for under, above in toe_pair_slots(_FRAME_NAMES):
+        assert not (detected.contact[:, under] & detected.contact[:, above]).any()
+
+
+def test_span_merging_cannot_resurrect_a_suppressed_toe():
+    """The readout's span merge works one frame at a time, so it could undo the tiebreak.
+
+    ``estimate_contacts`` bridges short gaps AFTER detection. Left alone it would bridge
+    ``toe_under`` straight across the steps where ``toe_above`` won the pair — putting both
+    toes of one foot back in contact at once. Masking the merge with ``toe_suppressed``
+    keeps the verdict final; this pins that composition.
+    """
+    scene = _plane()
+    num_steps = 15
+    points = torch.tensor([0.0, 0.0, 0.01]).expand(num_steps, 2, 3).clone()
+    # Both toes sit at the surface the whole time; only which one faces it changes, so the
+    # tiebreak hands steps 5-7 to toe_above and every other step to toe_under.
+    normals = torch.zeros(num_steps, 2, 3)
+    normals[:, 0] = _DOWN                       # toe_under looks into the plane …
+    normals[:, 1] = _UP
+    normals[5:8, 0] = _UP                       # … except mid-clip, where they swap
+    normals[5:8, 1] = _DOWN
+    names = ["toe_under_left", "toe_above_left"]
+    detected = _detect(points, normals, torch.zeros(num_steps, 2), scene,
+                       frame_names=names, min_frames=3)
+    under, above = 0, 1
+    assert detected.contact[:5, under].all() and detected.contact[8:, under].all()
+    assert detected.contact[5:8, above].all()
+    assert not (detected.contact[:, under] & detected.contact[:, above]).any()
+
+    bridged = merge_contact_spans(detected.contact, points, detected.guarded_sdf,
+                                  merge_dist_m=0.03, max_gap_s=2.0, gap_sdf_m=0.08, fps=30.0)
+    assert (bridged[5:8, under] & bridged[5:8, above]).all(), "the merge alone re-creates both-fire"
+    kept = bridged & ~detected.toe_suppressed
+    assert not (kept[:, under] & kept[:, above]).any()
+
+
+def test_toe_pair_slots_resolve_by_name_not_position():
+    """Slots 10/11 are finger_RIGHT then finger_LEFT — positional arithmetic would misfire."""
+    assert toe_pair_slots(_FRAME_NAMES) == ((0, 4), (1, 5))
+    shuffled = tuple(reversed(_FRAME_NAMES))
+    assert toe_pair_slots(shuffled) == ((11, 7), (10, 6))
+    assert toe_pair_slots(["palm_left", "knee_left"]) == ()
 
 
 # ── stillness ────────────────────────────────────────────────────────────────

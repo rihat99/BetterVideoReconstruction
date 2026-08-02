@@ -130,8 +130,8 @@ nearest-neighbour pass per iteration serves both scene terms; the manual
   contact is *modelled*: a frame buried 8 cm inside a hold gives the detector a
   meaningless signed distance, and this term keeps the signals honest. Note what it
   does *not* do: the dead zone (1 cm) sits inside the contact band (3 cm), so
-  penetration never decides *which* frames read as touching — that is the normal
-  window's job. With ~12 points instead of ~1000 the penalty (a mean over active
+  penetration never decides *which* frames read as touching — the distance and
+  stillness gates do. With ~12 points instead of ~1000 the penalty (a mean over active
   points) is much more concentrated, so its weight is correspondingly larger.
 - **`ann_attraction`** — the inverse: pulls the labelled points *onto* the wall
   (contact frames under the auto labels; near-contact vertices under manual

@@ -674,10 +674,10 @@ def optimize_person(
                             valid_mask=frame_valid)
         detected = detect_frame_contacts(
             points, frame_normals(frames7), drift, scene_pts, scene_normals, scene_conf,
+            frame_names=mid.contact_frame_names,
             close_thresh_m=float(ac["detect_thresh_m"]), exit_thresh_m=float(ac["detect_exit_m"]),
             min_frames=int(ac["min_frames"]), still_m=float(ac["still_m"]),
             max_dist_m=float(ac["max_dist_m"]), conf_thresh=float(ac["conf_thresh"]),
-            normal_max_angle_deg=float(ac["normal_max_angle_deg"]),
             prune_margin_m=float(ac["prune_margin_m"]))
         keep = detected.contact
         if frame_valid is not None:

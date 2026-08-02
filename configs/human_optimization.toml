@@ -201,14 +201,14 @@ band_m = 0.15            # attraction pull range for a labeled contact frame
 max_dist_m = 0.25        # guard; > band_m and > detect_exit_m
 prune_margin_m = 0.30    # nearest-neighbour AABB prune; >= max_dist_m
 conf_thresh = 0.1
-still_m = 0.025          # DETECTOR stillness, decoupled from [contact_gate].still_m; omit to inherit it
-# normal_max_angle_deg — DETECTOR normal window; omit to inherit [contacts].normal_max_angle_deg
+# window_s / still_m are NOT set here: the kin1 detector inherits [contact_gate], so "still"
+# means one thing everywhere and one knob moves both.
 
-# Readout stillness gate: a contact frame is "still" when its NET drift over a ~1/3 s window is small
-# (separates a gripping hand's mm-jitter from a slow near-wall pass). still_m = drift at stillness 0.5 = recall knob.
+# Stillness gate: a contact frame is "still" when its NET drift over a ~1/3 s window is small
+# (separates a gripping hand's mm-jitter from a slow near-wall pass). still_m = drift at stillness 0.5.
 [contact_gate]
 window_s = 0.35        # drift window (~11 frames at 30 fps)
-still_m  = 0.03        # readout net-drift recall knob (raise → more recall); the kin1 DETECTOR pins its own in [auto_contact]
+still_m  = 0.04        # THE recall knob (raise → more recall), shared by the kin1 detector and the readout
 
 [contacts]
 overlay = true         # render the contact overlay
@@ -218,10 +218,9 @@ min_frames = 3         # drop contact spans shorter than this many frames
 max_dist_m = 0.10
 conf_thresh = 0.1      # residual absolute floor (VGGT conf ≥~1 ⇒ non-binding)
 conf_drop_q = 0.1      # quantile gate at scene load: drop the lowest-confidence scene voxels
-# Normal window: a contact frame may only touch a scene point its own outward skin normal faces,
-# within this angle. This is what separates toe_under (hooking under a hold) from toe_above
-# (standing on it) — same place on the toe, opposite normals. 90° = the whole facing hemisphere.
-normal_max_angle_deg = 90.0
+# A contact frame's own normal is NOT a gate — scene points and pose are too noisy to veto on.
+# It is used in one place only, with no knob: when both toe frames of a foot are candidates,
+# the one looking more into the wall wins and the other is dropped (toe_under vs toe_above).
 normal_k = 16
 prune_margin_m = 0.10
 # span-merge: bridge a short same-frame gap the point barely moved across AND stayed near the wall
