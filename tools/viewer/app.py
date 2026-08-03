@@ -53,12 +53,13 @@ class Viewer:
     def __init__(self, server, clips: list[Path], *, point_size: float,
                  human_point_size: float, camera_scale: float, camera_stride: int,
                  show_smplx: bool, device: str, human_max_points: int = 0,
-                 video_dir: Path | None = None, up: str = "-y") -> None:
+                 video: bool = True, video_dir: Path | None = None,
+                 up: str = "-y") -> None:
         self.server = server
         self.clips = clips
         self.opts = dict(camera_stride=camera_stride, device=device,
                          show_smplx=show_smplx, human_max_points=human_max_points,
-                         video_dir=video_dir)
+                         video=video, video_dir=video_dir)
         self.layers = {"body": show_smplx, "skeleton": False, "contact_frames": True,
                        "human": False, "scene": True, "normals": False,
                        "cameras": True, "gravity": False,
@@ -104,9 +105,14 @@ class Viewer:
                 g.add_button("next ▶").on_click(lambda _: self._on_nav(1))
                 self.pos = g.add_markdown(self._pos_md(0))
         # Video pane: the clip's original footage, synced to the frame slider
-        # (``_update_video``); hidden when the clip has no source video.
-        with g.add_folder("video"):
-            self.video_img = g.add_image(_background_image(), format="jpeg", jpeg_quality=80)
+        # (``_update_video``); hidden when the clip has no source video. With
+        # ``[viewer].video = false`` the pane is never created and the footage is
+        # never decoded — streaming a JPEG per frame lags remote sessions.
+        self.video_img = None
+        if video:
+            with g.add_folder("video"):
+                self.video_img = g.add_image(_background_image(), format="jpeg",
+                                             jpeg_quality=80)
         self.video_frames = None
         self.play_folder = g.add_folder("playback")
         with self.play_folder:
@@ -336,6 +342,7 @@ class Viewer:
                 data = load_clip_data(clip, device=self.opts["device"],
                                       show_smplx=self.opts["show_smplx"],
                                       human_max_points=self.opts["human_max_points"],
+                                      video=self.opts["video"],
                                       video_dir=self.opts["video_dir"])
                 self.cache[clip] = data
             self.scene = ClipScene(
@@ -364,9 +371,10 @@ class Viewer:
             self.frame.on_update(lambda _: self._apply_current())
 
             self.video_frames = data.video_frames
-            self.video_img.visible = self.video_frames is not None
-            if self.video_frames is not None:
-                self.video_img.image = self.video_frames[0]
+            if self.video_img is not None:
+                self.video_img.visible = self.video_frames is not None
+                if self.video_frames is not None:
+                    self.video_img.image = self.video_frames[0]
             # Default playback speed to this scene's own fps (24/25/30/60 differ).
             if data.fps:
                 self.fps.value = int(np.clip(round(data.fps), 1, 60))
@@ -410,7 +418,7 @@ def view_3d(root: Path, *, port: int = 8082, point_size: float = 0.02,
             human_point_size: float = 0.01, camera_scale: float = 0.1,
             camera_stride: int = 1, up: str = "-y", show_smplx: bool = True,
             device: str = "cuda", human_max_points: int = 6000,
-            video_dir: Path | None = None) -> None:
+            video: bool = True, video_dir: Path | None = None) -> None:
     import viser
 
     clips = _discover_clips(root)
@@ -429,5 +437,6 @@ def view_3d(root: Path, *, port: int = 8082, point_size: float = 0.02,
     viewer = Viewer(server, clips, point_size=point_size, human_point_size=human_point_size,
                     camera_scale=camera_scale, camera_stride=camera_stride,
                     show_smplx=show_smplx, device=device,
-                    human_max_points=human_max_points, video_dir=video_dir, up=up)
+                    human_max_points=human_max_points, video=video, video_dir=video_dir,
+                    up=up)
     viewer.run()
