@@ -1,6 +1,6 @@
 """Compare the contact readings we have on the ClimbingVideos **test split**.
 
-Thirty scenes are held out of training and hand-annotated. Four readings of
+Thirty scenes are held out of training and hand-annotated. Five readings of
 contact are put on one ruler — the same scenes, the same four limbs, the same
 manual labels:
 
@@ -17,6 +17,14 @@ manual labels:
 - **Second optim + model** — ``contacts_2.npz``: the body is refined again with
   the fused labels (``kinematics_2``), and the same readout + fusion runs on
   that better body.
+- **Supervised force model** — ``features/predictions/<scene>/forces_sup.npz``,
+  a network trained to predict each limb's contact force (in body weights)
+  straight from the video. A limb counts as in contact once it carries more than
+  50 N; the scale comes from the body weight our own fit estimated
+  (``contacts_1.npz``, ``body_weight_n``). A foot and its ankle are one limb on
+  this ruler, so their force vectors are summed before thresholding — the
+  dynamics targets split one foot's load across the two joints, and the sum
+  undoes that split.
 
 Ground truth is the manual annotation (``features/annotation/<scene>/annotation.npz``),
 a 14-joint tri-state label per frame: 1 contact, 0 free, **-1 never annotated**. The
@@ -68,13 +76,18 @@ LIMB_ANNOTATION = [("left_hand",), ("right_hand",),
                    ("left_foot", "left_ankle"), ("right_foot", "right_ankle")]
 _FINGER = ("index", "middle", "pinky", "ring", "thumb")
 CONTACT_THRESHOLD = 0.5  # the learned model's stored threshold
+FORCE_THRESHOLD_N = 50.0  # on the supervised force model's per-limb load
+# The supervised force model's channel order, asserted against the file.
+SUP_LIMBS = ["left_hand", "right_hand", "left_foot", "right_foot",
+             "left_ankle", "right_ankle"]
 
-ROWS = ["optim", "learned", "fused1", "fused2"]
+ROWS = ["optim", "learned", "fused1", "fused2", "force_sup"]
 ROW_LABEL = {
     "optim": "Optimization",
     "learned": f"Learned model  (p > {CONTACT_THRESHOLD})",
     "fused1": "Optim + model",
     "fused2": "Second optim + model",
+    "force_sup": f"Supervised force  (|F| > {FORCE_THRESHOLD_N:.0f} N)",
 }
 
 
@@ -178,6 +191,32 @@ def learned_contacts(scene: str) -> tuple[np.ndarray, list[int]]:
         [int(o) for o in predictions["object_ids"]]
 
 
+def sup_force_contacts(scene: str) -> tuple[np.ndarray, list[int], str]:
+    """``(P, N, 4)`` bool — a limb the supervised force model loads past 50 N.
+
+    The model predicts a force vector per hand, toe and ankle in body weights,
+    scaled to newtons by the fitted body's weight (``contacts_1.npz``). A foot and
+    its ankle are one limb here, so their vectors are summed before taking the
+    magnitude (magnitude is frame-independent, so the vectors are used as stored).
+
+    :returns: the labels, the person ids, and the model checkpoint string.
+    """
+    forces = np.load(scene_dir("predictions", scene) / "forces_sup.npz", allow_pickle=True)
+    limbs = [str(name) for name in forces["limbs"]]
+    if limbs != SUP_LIMBS:
+        raise SystemExit(f"[score] {scene}: forces_sup limbs {limbs} are not {SUP_LIMBS}")
+    if str(forces["units"]) != "body_weight":
+        raise SystemExit(f"[score] {scene}: forces_sup units {forces['units']!s} "
+                         f"are not body_weight")
+    with np.load(scene_dir("human_optim", scene) / "contacts_1.npz") as contacts:
+        body_weight = np.asarray(contacts["body_weight_n"], np.float64)      # (P,)
+    vec = np.asarray(forces["forces"], np.float64)                           # (P, N, 6, 3)
+    united = np.concatenate([vec[..., :2, :], vec[..., 2:4, :] + vec[..., 4:6, :]], axis=-2)
+    load = np.linalg.norm(united, axis=-1) * body_weight[:, None, None]      # (P, N, 4) N
+    return (load > FORCE_THRESHOLD_N, [int(o) for o in forces["object_ids"]],
+            str(forces["checkpoint"]))
+
+
 # ─────────────────────────────────── scoring ─────────────────────────────────
 
 def collect() -> dict:
@@ -185,25 +224,29 @@ def collect() -> dict:
     counts = {row: {limb: dict(tp=0, fp=0, fn=0, tn=0) for limb in LIMBS} for row in ROWS}
     scenes = test_scenes()
     checkpoint = ""
+    sup_checkpoint = ""
 
     for scene in scenes:
         fused1, changed1, ids1 = folded_contacts(scene, 1)
         fused2, _, ids2 = folded_contacts(scene, 2)
         learned, learned_ids = learned_contacts(scene)
-        if not ids1 == ids2 == learned_ids:
+        sup, sup_ids, sup_ckpt = sup_force_contacts(scene)
+        if not ids1 == ids2 == learned_ids == sup_ids:
             raise SystemExit(f"[score] {scene}: contacts cover {ids1} / {ids2} but the "
-                             f"predictions cover {learned_ids}")
-        if not fused1.shape == fused2.shape == learned.shape:
+                             f"predictions cover {learned_ids} / {sup_ids}")
+        if not fused1.shape == fused2.shape == learned.shape == sup.shape:
             raise SystemExit(f"[score] {scene}: contacts are {fused1.shape} / {fused2.shape}, "
-                             f"the predictions are {learned.shape}")
+                             f"the predictions are {learned.shape} / {sup.shape}")
         checkpoint = checkpoint or str(np.load(
             scene_dir("predictions", scene) / "contacts.npz", allow_pickle=True)["checkpoint"])
+        sup_checkpoint = sup_checkpoint or sup_ckpt
 
         want, known = truth(scene, ids1)
         if want.shape != fused1.shape:
             raise SystemExit(f"[score] {scene}: annotation is {want.shape}, body is {fused1.shape}")
         predicted = {"optim": fused1 ^ (changed1 != 0),   # the exact pre-fusion reading
-                     "learned": learned, "fused1": fused1, "fused2": fused2}
+                     "learned": learned, "fused1": fused1, "fused2": fused2,
+                     "force_sup": sup}
         for row, got in predicted.items():
             for limb_index, limb in enumerate(LIMBS):
                 use = known[..., limb_index]
@@ -222,11 +265,15 @@ def collect() -> dict:
                      "overall": _rates(pooled),
                      "per_limb": {limb: _rates(counts[row][limb]) for limb in LIMBS}}
     rows["learned"]["checkpoint"] = checkpoint
+    rows["force_sup"]["checkpoint"] = sup_checkpoint
     rows["optim"]["source"] = ("features/human_optim/<scene>/contacts_1.npz — limb fold of "
                                "joint_contact, flipped back where fusion_changed != 0 "
                                "(the exact pre-fusion labels)")
     rows["fused1"]["source"] = "features/human_optim/<scene>/contacts_1.npz (joint_contact)"
     rows["fused2"]["source"] = "features/human_optim/<scene>/contacts_2.npz (joint_contact)"
+    rows["force_sup"]["source"] = ("features/predictions/<scene>/forces_sup.npz — |force| per "
+                                   "limb (foot = toe + ankle vector sum), scaled by contacts_1 "
+                                   "body_weight_n")
 
     return {
         "scenes": len(scenes),
@@ -235,6 +282,7 @@ def collect() -> dict:
                         "tri-state labels; unannotated limb-frames are dropped",
         "limb_fold": "hand = wrist (+fingers); foot = foot OR ankle",
         "contact_threshold": CONTACT_THRESHOLD,
+        "force_threshold_newton": FORCE_THRESHOLD_N,
         "rows": rows,
     }
 
