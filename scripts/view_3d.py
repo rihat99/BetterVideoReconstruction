@@ -38,7 +38,9 @@ in the browser, one upload) over a single averaged ``betas`` identity.
 
 A **video** pane in the sidebar plays the clip's original footage in sync with the
 frame slider (loaded from the repo's ``data/`` by default, or ``[viewer].video_dir``;
-hidden when the source video is absent). The playback folder's **onboard camera**
+hidden when the source video is absent). ``[viewer].video = false`` disables the
+pane entirely — no decode, nothing streamed — which keeps playback smooth over a
+remote connection. The playback folder's **onboard camera**
 toggle (off by default) rides the reconstructed camera — matching its pose and
 field of view each frame and locking out manual orbiting — so you watch from the
 filming camera's own viewpoint.
@@ -150,7 +152,7 @@ def _run_scenes(args: argparse.Namespace) -> None:
             human_point_size=args.human_point_size, camera_scale=args.camera_scale,
             camera_stride=args.camera_stride, up=args.up, show_smplx=args.smplx,
             device=args.device, human_max_points=args.human_max_points,
-            video_dir=farm_root)
+            video=args.video, video_dir=farm_root)
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -173,6 +175,7 @@ def main(argv: list[str] | None = None) -> int:
         "up": "-y",
         "smplx": True,
         "human_max_points": 6000,
+        "video": True,
         "video_dir": "",
         "data_root": "",
         "categories": "1,2",
@@ -199,7 +202,7 @@ def main(argv: list[str] | None = None) -> int:
             human_point_size=args.human_point_size, camera_scale=args.camera_scale,
             camera_stride=args.camera_stride, up=args.up, show_smplx=args.smplx,
             device=args.device, human_max_points=args.human_max_points,
-            video_dir=args.video_dir)
+            video=args.video, video_dir=args.video_dir)
     return 0
 
 

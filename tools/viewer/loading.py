@@ -551,7 +551,8 @@ def _subsample_human_mask(fid: np.ndarray, obj: np.ndarray, max_per_frame: int) 
 
 
 def load_clip_data(pred: Path, *, device: str, show_smplx: bool,
-                   human_max_points: int = 0, video_dir: Path | None = None) -> ClipData:
+                   human_max_points: int = 0, video: bool = True,
+                   video_dir: Path | None = None) -> ClipData:
     """Load one clip's geometry + all SMPL-X body sources into numpy."""
     geo = pred / "geometry"
     scene = np.load(geo / "scene.npz")
@@ -607,7 +608,8 @@ def load_clip_data(pred: Path, *, device: str, show_smplx: bool,
         if fd is not None:
             forces[name] = fd
 
-    video_frames, play_fps = _load_video_frames(pred, len(extr), video_dir=video_dir)
+    video_frames, play_fps = (_load_video_frames(pred, len(extr), video_dir=video_dir)
+                              if video else (None, None))
     return ClipData(
         path=pred, name=pred.name,
         scene_points=sp, scene_colors=sco,
