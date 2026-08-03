@@ -1,29 +1,22 @@
 """Compare the contact readings we have on the ClimbingVideos **test split**.
 
-Thirty scenes are held out of training and hand-annotated. Three different things
-predict contact on them, and this puts all three on one ruler — the same scenes,
-the same four limbs, the same manual labels:
+Thirty scenes are held out of training and hand-annotated. Four readings of
+contact are put on one ruler — the same scenes, the same four limbs, the same
+manual labels:
 
-- **our optimization** — ``human_optim/contacts_1.npz`` (key ``joint_contact``), the
-  labels the contacts stage reads off the fitted body and the fused scene. No
-  learning involved; it never saw an annotation.
-- **the learned model** — ``features/predictions/<scene>/contacts.npz``, the
+- **Optimization** — what the geometric pipeline says on its own after
+  ``kinematics_1``: wall distance, stillness and the support-force completion,
+  **before** the image model's say is fused in. This is not a file on disk —
+  ``contacts_1.npz`` is saved after the fusion — but the fusion records every
+  limb-frame it flipped in ``fusion_changed``, so the pre-fusion reading is
+  recovered exactly by flipping those limb-frames back.
+- **Learned model** — ``features/predictions/<scene>/contacts.npz``, the
   image-conditioned network (``climb4_t5mid_v2``), thresholded at its own 0.5.
-- **the force model** — ``features/predictions/<scene>/forces.npz``, a different
-  network (``climb4_force_t7hinge``) that predicts how hard each limb pushes rather
-  than whether it touches. A limb counts as in contact once it carries more than
-  50 N. It predicts in body weights, so the scale comes from the body weight our own
-  fit estimated (``contacts_1.npz``, ``body_weight_n``, 534–680 N over these scenes).
-- **the blind model** — the same network with the image switched off
-  (``climb4_t5mid_blind``, ``blind_to_image: true``), so it sees only body pose. Its
-  predictions are not on disk, so its numbers are **read out of the training log**
-  at the epoch its ``best.pth`` was saved. That is the one row this script does not
-  recompute; everything about it is therefore approximate to 3 decimals and has no
-  per-limb breakdown, because the trainer only wrote the pooled score.
-
-A fourth row, **always contact**, predicts contact on every limb of every frame. It
-is not a model — it is the floor. A climber is usually holding on, so this scores
-far above zero, and any model worth the name has to clear it.
+- **Optim + model** — ``contacts_1.npz`` as saved: the two witnesses above
+  combined by adding their log-odds (see :mod:`tools.human_optim.fusion`).
+- **Second optim + model** — ``contacts_2.npz``: the body is refined again with
+  the fused labels (``kinematics_2``), and the same readout + fusion runs on
+  that better body.
 
 Ground truth is the manual annotation (``features/annotation/<scene>/annotation.npz``),
 a 14-joint tri-state label per frame: 1 contact, 0 free, **-1 never annotated**. The
@@ -34,10 +27,8 @@ the ankle. A limb-frame counts only where the annotation actually says something
 Writes into ``<data_root>/results/``:
 
     contact_metrics.json     every count and rate, per limb and pooled
-    table_overall.png        every row, pooled over the four limbs
-    table_<limb>.png         one table per limb, for the three rows that have a
-                             per-limb score (the floor is not interesting per limb,
-                             and the blind model only ever had a pooled number)
+    table_overall.png        the four rows, pooled over the four limbs
+    table_per_limb.png       the same four rows, one small table per limb
 
 Usage:
     uv run --no-sync python scripts/diagnostics/score_test_contacts.py
@@ -46,7 +37,7 @@ Usage:
 from __future__ import annotations
 
 import json
-import re
+import sqlite3
 import sys
 import tomllib
 from pathlib import Path
@@ -70,28 +61,20 @@ with (_REPO_ROOT / "configs" / "corpus.toml").open("rb") as _fh:
 FEATURES = DATA_ROOT / "features"
 RESULTS = DATA_ROOT / "results"
 
-TRAINING_OUTPUT = _REPO_ROOT.parent / "contact_anything" / "output"
-BLIND_RUN = "climb4_t5mid_blind"
-
 LIMBS = ["left_hand", "right_hand", "left_foot", "right_foot"]
 # Annotation labels each limb is built from. A foot is the toe or the ankle — either
 # one touching the wall is a foot in contact (the learned model's own label fold).
 LIMB_ANNOTATION = [("left_hand",), ("right_hand",),
                    ("left_foot", "left_ankle"), ("right_foot", "right_ankle")]
 _FINGER = ("index", "middle", "pinky", "ring", "thumb")
-CONTACT_THRESHOLD = 0.5  # the learned model's stored threshold, and the one the log evaluates at
-FORCE_THRESHOLD_N = 50.0  # on the force model's downward load
+CONTACT_THRESHOLD = 0.5  # the learned model's stored threshold
 
-ROWS = ["always", "blind", "optim", "learned", "force"]
-# The per-limb tables drop the floor (uninteresting limb by limb) and the blind model
-# (the trainer only ever wrote its pooled score).
-PER_LIMB_ROWS = ["optim", "learned", "force"]
+ROWS = ["optim", "learned", "fused1", "fused2"]
 ROW_LABEL = {
-    "always": "Always contact",
-    "blind": "Blind model",
     "optim": "Optimization",
     "learned": f"Learned model  (p > {CONTACT_THRESHOLD})",
-    "force": f"Force model  (load > {FORCE_THRESHOLD_N:.0f} N)",
+    "fused1": "Optim + model",
+    "fused2": "Second optim + model",
 }
 
 
@@ -101,8 +84,17 @@ def scene_dir(stage: str, scene: str) -> Path:
 
 
 def test_scenes() -> list[str]:
-    """The held-out scenes, taken as the ones the learned model has predictions for."""
-    return sorted(path.parent.name for path in (FEATURES / "predictions").rglob("contacts.npz"))
+    """The held-out scenes, from the scene DB's ``dataset_split`` column.
+
+    Predictions now exist for the whole corpus, so "has a prediction file" no
+    longer identifies the test split — the DB does.
+    """
+    db = sqlite3.connect(f"file:{DATA_ROOT / 'scenes' / 'scenes.db'}?mode=ro", uri=True)
+    try:
+        return sorted(row[0] for row in db.execute(
+            "SELECT scene_id FROM scenes WHERE dataset_split = 'test'"))
+    finally:
+        db.close()
 
 
 # ─────────────────────────────── ground truth ────────────────────────────────
@@ -153,14 +145,27 @@ def _limb_members(joint_names: list[str]) -> list[list[int]]:
     return hands + feet
 
 
-def optim_contacts(scene: str) -> tuple[np.ndarray, list[int], np.ndarray]:
-    """``(P, N, 4)`` bool from ``contacts_1.npz``, its person ids, and ``(P,)`` body weight."""
-    contacts = np.load(scene_dir("human_optim", scene) / "contacts_1.npz", allow_pickle=True)
+def folded_contacts(scene: str, tag: int) -> tuple[np.ndarray, np.ndarray, list[int]]:
+    """One saved ``contacts_<tag>.npz`` read at the limb level.
+
+    :returns: ``(fused, changed, object_ids)`` — the saved (post-fusion) limb state
+        ``(P, N, 4)`` bool, the fusion's flip record ``(P, N, 4)`` int8 (+1 turned
+        the limb on, -1 turned it off, 0 untouched), and the person ids.
+    """
+    contacts = np.load(scene_dir("human_optim", scene) / f"contacts_{tag}.npz",
+                       allow_pickle=True)
+    limbs = [str(name) for name in contacts["pred_limbs"]]
+    if limbs != LIMBS:
+        raise SystemExit(f"[score] {scene}: contacts_{tag} limb order {limbs} is not {LIMBS}")
     joint_contact = np.asarray(contacts["joint_contact"], bool)
     members = _limb_members([str(name) for name in contacts["joint_names"]])
-    folded = np.stack([joint_contact[..., group].any(axis=-1) for group in members], axis=-1)
-    return (folded, [int(o) for o in contacts["object_ids"]],
-            np.asarray(contacts["body_weight_n"], float))
+    fused = np.stack([joint_contact[..., group].any(axis=-1) for group in members], axis=-1)
+    changed = np.asarray(contacts["fusion_changed"], np.int8)
+    # The flip record must agree with the saved labels, or the pre-fusion
+    # reconstruction below would be wrong.
+    if (((changed == 1) & ~fused) | ((changed == -1) & fused)).any():
+        raise SystemExit(f"[score] {scene}: fusion_changed disagrees with contacts_{tag} labels")
+    return fused, changed, [int(o) for o in contacts["object_ids"]]
 
 
 def learned_contacts(scene: str) -> tuple[np.ndarray, list[int]]:
@@ -173,75 +178,32 @@ def learned_contacts(scene: str) -> tuple[np.ndarray, list[int]]:
         [int(o) for o in predictions["object_ids"]]
 
 
-def force_contacts(scene: str, body_weight_n: np.ndarray) -> tuple[np.ndarray, list[int]]:
-    """``(P, N, 4)`` bool — a limb the force model loads past 50 N — plus its person ids.
-
-    The load is the ``+y`` component in the local-world-aligned frame, where ``+y``
-    points up: that is the part of the limb's force that holds the climber against
-    gravity, which is what a hold actually carries. Verified on this corpus — the four
-    limbs sum to a positive load on every frame, median 0.83 body weights.
-    """
-    forces = np.load(scene_dir("predictions", scene) / "forces.npz", allow_pickle=True)
-    limbs = [str(name) for name in forces["limbs"]]
-    if limbs != LIMBS:
-        raise SystemExit(f"[score] {scene}: force limbs {limbs} are not {LIMBS}")
-    load = np.asarray(forces["forces"])[..., 1] * body_weight_n[:, None, None]
-    return load > FORCE_THRESHOLD_N, [int(o) for o in forces["object_ids"]]
-
-
-def blind_from_log() -> dict:
-    """The blind model's pooled test scores, read out of its training log.
-
-    The trainer prints one ``test`` line per epoch and keeps the epoch with the best
-    F1 as ``best.pth``; that is the checkpoint anyone would run, so that is the epoch
-    reported here. Only the pooled score was written — there is no per-limb split.
-    """
-    logs = sorted(TRAINING_OUTPUT.glob(f"{BLIND_RUN}_*.log"))
-    if not logs:
-        raise SystemExit(f"[score] no training log for {BLIND_RUN} in {TRAINING_OUTPUT}")
-    pattern = re.compile(
-        r"^epoch\s+(\d+)\s+train.*?\n\s+test loss \S+\s+joint\[f1=([\d.]+) f2=[\d.]+ "
-        r"p=([\d.]+) r=([\d.]+)\]", re.MULTILINE | re.DOTALL)
-    text = logs[-1].read_text(errors="replace").replace("\r", "\n")
-    epochs = [(float(f1), int(epoch), float(precision), float(recall))
-              for epoch, f1, precision, recall in pattern.findall(text)]
-    if not epochs:
-        raise SystemExit(f"[score] found no test lines in {logs[-1]}")
-    f1, epoch, precision, recall = max(epochs)
-    return {"source": f"{logs[-1].name} (epoch {epoch}, the checkpoint saved as best.pth)",
-            "epochs_logged": len(epochs),
-            "overall": {"precision": precision, "recall": recall, "f1": f1,
-                        "accuracy": None, "frames": None, "positives": None},
-            "per_limb": {limb: {"precision": None, "recall": None, "f1": None} for limb in LIMBS}}
-
-
 # ─────────────────────────────────── scoring ─────────────────────────────────
 
 def collect() -> dict:
     """Score every test scene and return the full metrics tree."""
-    counts = {row: {limb: dict(tp=0, fp=0, fn=0, tn=0) for limb in LIMBS}
-              for row in ROWS if row != "blind"}
+    counts = {row: {limb: dict(tp=0, fp=0, fn=0, tn=0) for limb in LIMBS} for row in ROWS}
     scenes = test_scenes()
     checkpoint = ""
 
     for scene in scenes:
-        optim, optim_ids, body_weight = optim_contacts(scene)
+        fused1, changed1, ids1 = folded_contacts(scene, 1)
+        fused2, _, ids2 = folded_contacts(scene, 2)
         learned, learned_ids = learned_contacts(scene)
-        force, force_ids = force_contacts(scene, body_weight)
-        if not optim_ids == learned_ids == force_ids:
-            raise SystemExit(f"[score] {scene}: contacts_1 covers {optim_ids} but the "
-                             f"predictions cover {learned_ids} / {force_ids}")
-        if not optim.shape == learned.shape == force.shape:
-            raise SystemExit(f"[score] {scene}: contacts_1 is {optim.shape}, the predictions "
-                             f"are {learned.shape} / {force.shape}")
+        if not ids1 == ids2 == learned_ids:
+            raise SystemExit(f"[score] {scene}: contacts cover {ids1} / {ids2} but the "
+                             f"predictions cover {learned_ids}")
+        if not fused1.shape == fused2.shape == learned.shape:
+            raise SystemExit(f"[score] {scene}: contacts are {fused1.shape} / {fused2.shape}, "
+                             f"the predictions are {learned.shape}")
         checkpoint = checkpoint or str(np.load(
             scene_dir("predictions", scene) / "contacts.npz", allow_pickle=True)["checkpoint"])
 
-        want, known = truth(scene, optim_ids)
-        if want.shape != optim.shape:
-            raise SystemExit(f"[score] {scene}: annotation is {want.shape}, body is {optim.shape}")
-        predicted = {"optim": optim, "learned": learned, "force": force,
-                     "always": np.ones_like(optim)}
+        want, known = truth(scene, ids1)
+        if want.shape != fused1.shape:
+            raise SystemExit(f"[score] {scene}: annotation is {want.shape}, body is {fused1.shape}")
+        predicted = {"optim": fused1 ^ (changed1 != 0),   # the exact pre-fusion reading
+                     "learned": learned, "fused1": fused1, "fused2": fused2}
         for row, got in predicted.items():
             for limb_index, limb in enumerate(LIMBS):
                 use = known[..., limb_index]
@@ -254,18 +216,17 @@ def collect() -> dict:
 
     rows = {}
     for row in ROWS:
-        if row == "blind":
-            rows[row] = {"rule": ROW_LABEL[row], **blind_from_log()}
-            continue
         pooled = {key: sum(counts[row][limb][key] for limb in LIMBS)
                   for key in ("tp", "fp", "fn", "tn")}
         rows[row] = {"rule": ROW_LABEL[row],
                      "overall": _rates(pooled),
                      "per_limb": {limb: _rates(counts[row][limb]) for limb in LIMBS}}
     rows["learned"]["checkpoint"] = checkpoint
-    rows["optim"]["source"] = "features/human_optim/<scene>/contacts_1.npz (joint_contact)"
-    rows["force"]["source"] = ("features/predictions/<scene>/forces.npz, +y load in the "
-                               "local-world-aligned frame, scaled by contacts_1 body_weight_n")
+    rows["optim"]["source"] = ("features/human_optim/<scene>/contacts_1.npz — limb fold of "
+                               "joint_contact, flipped back where fusion_changed != 0 "
+                               "(the exact pre-fusion labels)")
+    rows["fused1"]["source"] = "features/human_optim/<scene>/contacts_1.npz (joint_contact)"
+    rows["fused2"]["source"] = "features/human_optim/<scene>/contacts_2.npz (joint_contact)"
 
     return {
         "scenes": len(scenes),
@@ -274,14 +235,6 @@ def collect() -> dict:
                         "tri-state labels; unannotated limb-frames are dropped",
         "limb_fold": "hand = wrist (+fingers); foot = foot OR ankle",
         "contact_threshold": CONTACT_THRESHOLD,
-        "force_threshold_newton": FORCE_THRESHOLD_N,
-        "blind_caveat": "the blind row is quoted from its training log, not recomputed here: "
-                        "3 decimals, pooled only, and scored on the trainer's own sampling "
-                        "(the middle frame of every 5th window, 1669 of the 8281 frames) rather "
-                        "than every frame. Running the learned model both ways puts that "
-                        "difference at 0.001 of F1 (0.933 all frames, 0.935 sampled), and "
-                        "reproduces the log to 0.0002, so the blind row is comparable to "
-                        "about the third decimal",
         "rows": rows,
     }
 
@@ -322,14 +275,13 @@ def _render_limb_figure(path: Path, blocks: list[tuple[str, list[list[str]], fro
 
 def write_tables(metrics: dict) -> list[Path]:
     """Render the two summary tables and return their paths."""
-    compared = [row for row in ROWS if row != "always"]  # a floor is not in the running
     overall_rows = [[ROW_LABEL[row].replace("  ", " "),
                      _fmt(metrics["rows"][row]["overall"]["precision"]),
                      _fmt(metrics["rows"][row]["overall"]["recall"]),
                      _fmt(metrics["rows"][row]["overall"]["f1"])] for row in ROWS]
-    # One winner per metric column, over the model rows.
-    bold = set().union(*(_best({(ROWS.index(row), column): overall_rows[ROWS.index(row)][column]
-                                for row in compared}) for column in (1, 2, 3)))
+    # One winner per metric column.
+    bold = set().union(*(_best({(index, column): overall_rows[index][column]
+                                for index in range(len(ROWS))}) for column in (1, 2, 3)))
     overall_path = RESULTS / "table_overall.png"
     _render_table(overall_path,
                   [("Contact reading", 3.7, "l"), ("P", 0.9, "r"), ("R", 0.9, "r"),
@@ -340,7 +292,7 @@ def write_tables(metrics: dict) -> list[Path]:
     for limb in LIMBS:
         limb_rows = [[ROW_LABEL[row].replace("  ", " "),
                       *(_fmt(metrics["rows"][row]["per_limb"][limb][key])
-                        for key in ("precision", "recall", "f1"))] for row in PER_LIMB_ROWS]
+                        for key in ("precision", "recall", "f1"))] for row in ROWS]
         bold = set().union(*(_best({(index, column): limb_rows[index][column]
                                     for index in range(len(limb_rows))})
                              for column in (1, 2, 3)))
@@ -360,8 +312,8 @@ if __name__ == "__main__":
     print(f"[score] {metrics['scenes']} test scenes")
     for row in ROWS:
         entry = metrics["rows"][row]["overall"]
-        frames = f"{entry['frames']:,} limb-frames" if entry["frames"] else "from the training log"
-        print(f"[score] {ROW_LABEL[row]:42s} P {_fmt(entry['precision'])}  "
-              f"R {_fmt(entry['recall'])}  F1 {_fmt(entry['f1'])}  over {frames}")
+        print(f"[score] {ROW_LABEL[row]:32s} P {_fmt(entry['precision'])}  "
+              f"R {_fmt(entry['recall'])}  F1 {_fmt(entry['f1'])}  "
+              f"over {entry['frames']:,} limb-frames")
     for path in [json_path, *paths]:
         print(f"[score] wrote {path}")
