@@ -65,13 +65,28 @@ from tools.human_optim import (  # noqa: E402
     project, transform_points, world_from_cam,
 )
 from tools.human_optim import paths  # noqa: E402
+from tools.human_optim.forces import (  # noqa: E402
+    ForceKnobs, force_labels, resolve_toe_conflicts, solve_person_forces,
+)
 from tools.human_optim.qmath import normalize_q  # noqa: E402
 
 _DEFAULT_CONFIG = _REPO_ROOT / "configs" / "human_optimization.toml"
 
-#: Bumped from 1 (the per-joint era) — the label axis is now the 12 contact frames.
+#: Bumped from 1 (the per-joint era) — the label axis is now the 12 contact frames. The
+#: force witness (method "frames-v2") only ADDS fields and changes no shape, so readers of
+#: schema 2 keep working; ``contact_label_method`` is what distinguishes the two.
 CONTACT_LABEL_SCHEMA = 2
-CONTACT_LABEL_METHOD = "frames-v1"
+
+#: Fixed internals of the force witness — measured choices, not knobs. Cone axis = the
+#: frame's own outward skin normal negated — the only source that separates the two toe
+#: frames, and it needs no scene cloud at all, so it survives a misregistered body (a
+#: sign-corrected scene normal measured the same to within .002 F1, for more machinery);
+#: relative gap pricing and no distance cap, which are what let a floating body still be
+#: assigned force; and a 0.2 m characteristic lever arm that puts the root torque rows into
+#: force units, so the six root rows are one wrench in one unit.
+_FORCE_INTERNALS = dict(cone_axis="frame", use_motion=True, relative_gap=True,
+                        candidate_max_dist_m=float("inf"), torque_length_m=0.2)
+CONTACT_LABEL_METHOD = "frames-v2"   # v1 = geometry only; v2 adds the force witness
 
 
 def _load_config(path: Path) -> dict:
@@ -93,6 +108,11 @@ def _load_config(path: Path) -> dict:
     if not bool(c.get("use_scene", True)):
         raise SystemExit("[estimate_contacts] use_scene=false is not supported by the contact-frame "
                          "detector — contact is measured against the scene cloud only")
+    f = cfg.setdefault("contact_force", {})
+    f.setdefault("theta_bw", 0.05)          # a frame carrying this fraction of body weight is loaded
+    f.setdefault("lambda_tau", 0.0)         # weight of the per-joint effort residual rows
+    f.setdefault("gap_dstar_m", 0.05)       # gap price: force this far from the scene is expensive
+    f.setdefault("stillness_vstar_mps", 0.2)  # stillness price: force on a limb this fast is expensive
     g = cfg.setdefault("contact_gate", {})
     g.setdefault("window_s", 0.35)         # drift window (s) for the stillness gate
     g.setdefault("still_m", 0.03)          # net drift (m) at which stillness = 0.5
@@ -126,6 +146,26 @@ def _pose(body, betas: torch.Tensor, q: torch.Tensor, scale: float, *, chunk: in
         frames[..., :3] = root + scale * (frames[..., :3] - root)
         posed.append(frames)
     return torch.cat(posed, 0)
+
+
+def _drift_pre(kin: dict, person: int, shape, device: str) -> torch.Tensor:
+    """The persisted pre-enforcement drift ``(N, 12)`` for one person, or a hard error.
+
+    The force solve prices force by how still a frame is. If that stillness were measured
+    on the *enforced* body, the optimizer's own contact damping would be voting for its own
+    labels, so there is deliberately no fallback here: a body without ``drift_pre`` cannot
+    have a force witness computed from it.
+    """
+    if "drift_pre" not in kin:
+        raise SystemExit("[estimate_contacts] kinematic_1.npz has no drift_pre — the force "
+                         "witness needs pre-enforcement stillness and will not re-measure "
+                         "it on the enforced body; re-run human_optimization")
+    drift = torch.as_tensor(np.asarray(kin["drift_pre"])[person],
+                            dtype=torch.float32, device=device)
+    if tuple(drift.shape) != tuple(shape) or not bool(torch.isfinite(drift).all()):
+        raise SystemExit("[estimate_contacts] drift_pre is the wrong shape or has "
+                         "non-finite entries; refusing to guess")
+    return drift
 
 
 def _finite_cm(values: torch.Tensor) -> np.ndarray:
@@ -186,6 +226,19 @@ def run(source: str | Path, predictions_dir: str | Path, config_path: str | Path
     body = load_body(device=device)
     frame_names = list(body.contact_frame_names)
     num_contact_frames = len(frame_names)
+    knee_columns = [i for i, n in enumerate(frame_names) if n.startswith("knee")]
+    cf = cfg["contact_force"]
+    force_knobs = ForceKnobs(
+        lambda_tau=float(cf["lambda_tau"]), gap_dstar_m=float(cf["gap_dstar_m"]),
+        stillness_vstar_mps=float(cf["stillness_vstar_mps"]), **_FORCE_INTERNALS)
+
+    # Gravity for the force solve: GeoCalib's world-down when the stage ran, else VGGT's
+    # world-down convention — the same fallback the dynamics stage uses.
+    gravity_path = pred / "geocalib" / "gravity.npz"
+    if gravity_path.exists():
+        gravity_world = np.asarray(np.load(gravity_path)["gravity_world"], np.float32)
+    else:
+        gravity_world = np.array([0.0, 1.0, 0.0], np.float32)
 
     shape = (num_people, num_frames, num_contact_frames)
     frame_contact = np.zeros(shape, dtype=bool)
@@ -195,6 +248,12 @@ def run(source: str | Path, predictions_dir: str | Path, config_path: str | Path
     frame_drift_m = np.full(shape, np.nan, dtype=np.float32)
     frame_normal_dot = np.full(shape, np.nan, dtype=np.float32)
     frames_2d = np.full((*shape, 2), np.nan, dtype=np.float32)
+    frame_force = np.zeros((*shape, 3), dtype=np.float32)
+    frame_force_bw = np.zeros(shape, dtype=np.float32)
+    frame_force_label = np.zeros(shape, dtype=bool)
+    body_weight_n = np.zeros(num_people, dtype=np.float32)
+    residual_before_n = np.zeros((num_people, num_frames), dtype=np.float32)
+    residual_after_n = np.zeros((num_people, num_frames), dtype=np.float32)
 
     for p in range(num_people):
         object_id = int(object_ids[p])
@@ -238,10 +297,43 @@ def run(source: str | Path, predictions_dir: str | Path, config_path: str | Path
 
         pixels = project(transform_points(points, extrinsics), intrinsics)     # (N, F, 2)
 
+        # ── the force witness ────────────────────────────────────────────────────
+        # The geometric detector above needs the frame to be NEAR the scene. When the
+        # reconstruction puts the body in the wrong place that never happens and a real
+        # contact is simply lost. So ask physics as well: solve the world forces at the 12
+        # frames that explain the body's leftover root wrench, and call a frame in contact
+        # when it has to carry real load. Add-only, with exactly one exception: the toe
+        # pair (see below), where "at most one toe per foot" outranks add-only.
+        force_solution = solve_person_forces(
+            body, betas, q, valid_mask[p], drift_pre=_drift_pre(kin, p, drift.shape, device),
+            drift_window_s=float(cg["window_s"]), gravity_world=gravity_world, fps=fps,
+            scene_pts=scene_pts, scene_normals=scene_normals, scene_conf=scene_conf,
+            knobs=force_knobs)
+        force_label, _ = force_labels(
+            force_solution.magnitude, frame_names=frame_names, valid=valid_mask[p],
+            threshold_n=float(cf["theta_bw"]) * force_solution.body_weight_n,
+            min_frames=int(cc["min_frames"]))
+        force_label[:, knee_columns] = False        # force on a knee is ~all false positives
+        contact = contact | torch.as_tensor(force_label, device=contact.device)
+
         contact_np = contact.cpu().numpy()
         contact_np[~valid_mask[p]] = False
-        merged_np = merged.cpu().numpy()
-        merged_np[~valid_mask[p]] = False
+        # Both readouts keep one toe per foot, but they can keep DIFFERENT ones, and the
+        # union would then hold both at once. Let the force break it — that is precisely
+        # what a solved contact force is good for — and accept that this can drop a
+        # geometric label, because "at most one toe per foot" is physics and add-only is
+        # only bookkeeping.
+        contact_np = resolve_toe_conflicts(contact_np, force_solution.magnitude,
+                                           frame_names=frame_names,
+                                           min_frames=int(cc["min_frames"]))
+        merged_np = merged.cpu().numpy() & contact_np      # a bridged step that lost its
+        merged_np[~valid_mask[p]] = False                  # toe is no longer a contact
+        frame_force[p] = force_solution.forces
+        frame_force_bw[p] = force_solution.magnitude / force_solution.body_weight_n
+        frame_force_label[p] = force_label
+        body_weight_n[p] = force_solution.body_weight_n
+        residual_before_n[p] = force_solution.residual_force_before_n
+        residual_after_n[p] = force_solution.residual_force_after_n
         frame_contact[p] = contact_np
         merged_all[p] = merged_np
         frame_sdf_cm[p] = _finite_cm(detected.sdf)
@@ -272,6 +364,16 @@ def run(source: str | Path, predictions_dir: str | Path, config_path: str | Path
         contact_label_schema=np.int32(CONTACT_LABEL_SCHEMA),
         contact_label_method=np.str_(CONTACT_LABEL_METHOD),
         frame_contact=frame_contact,
+        frame_force=frame_force,                 # (P,N,12,3) world contact force, newtons
+        frame_force_bw=frame_force_bw,           # (P,N,12) the same as a fraction of body weight
+        frame_force_label=frame_force_label,     # (P,N,12) the force decision BEFORE the union
+        body_weight_n=body_weight_n,             # (P,) baked mass x g
+        residual_force_before_n=residual_before_n,   # (P,N) root residual with no contact force
+        residual_force_after_n=residual_after_n,     # (P,N) and after the solve
+        force_theta_bw=np.float32(cf["theta_bw"]),
+        force_lambda_tau=np.float32(cf["lambda_tau"]),
+        force_gap_dstar_m=np.float32(cf["gap_dstar_m"]),
+        force_stillness_vstar_mps=np.float32(cf["stillness_vstar_mps"]),
         frame_sdf_cm=frame_sdf_cm,
         frame_distance_cm=frame_distance_cm,
         frame_drift_m=frame_drift_m,

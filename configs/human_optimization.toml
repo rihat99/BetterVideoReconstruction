@@ -229,6 +229,21 @@ merge_dist_m = 0.03    # max endpoint displacement across the gap (m)
 merge_max_gap_s = 2.0  # only bridge gaps shorter than this (s)
 merge_sdf_m = 0.08     # re-grip guard: it stayed within this signed distance of the wall the whole gap
 
+# The FORCE WITNESS in the contact readout. The detector above needs a contact frame to be
+# near the scene; when the reconstruction puts the body in the wrong place that never
+# happens and the contact is lost. So the stage also asks physics: with the pose frozen,
+# inverse dynamics says what force the body still needs to move the way it does, and the
+# solve finds the world forces at the 12 contact frames that explain it — each one confined
+# to a 45 degree friction cone about that patch of skin, so a frame can only explain what it
+# is oriented to explain. A frame that has to carry theta_bw of the body's weight is called
+# in contact, and that label is UNIONED onto the geometric one (add-only, never removes).
+# Everything else about the solve is a fixed, measured choice in the code, not a knob.
+[contact_force]
+theta_bw = 0.05            # fraction of body weight at which a frame counts as loaded
+lambda_tau = 0.0           # per-joint effort rows: wired, measured neutral (F1 .719 off / .717 on)
+gap_dstar_m = 0.05         # gap price: force this far from the scene is already expensive
+stillness_vstar_mps = 0.2  # stillness price: force on a frame drifting this fast is expensive
+
 # Force application points for the dynamics stage: two hands (wrist + fingers folded
 # onto the wrist), two feet, two ankles — six joints. A joint carries a force only on
 # frames it is labelled in contact. Body mass + inertia come baked from BetterHuman.

@@ -105,6 +105,88 @@ the re-grip guard: a hand that left the wall and came back is two contacts, not
 one. Bridged frames are flagged in the output (`merged`) so a consumer can ignore
 them.
 
+## The force witness: contacts the distance gate cannot see
+
+Everything above needs the contact frame to be **near** the scene. That works when
+the reconstructed depth is good. When it is not — the body floats a hand's width
+off the wall, or a limb came out too short — the frame is never near anything, the
+gate never fires, and a real contact is simply lost.
+
+So the stage asks physics a second question. Freeze the pose and run inverse
+dynamics with nothing touching the body. The answer says what force the body would
+need to move the way it does while falling freely. Six of those numbers belong to
+the **root** (the pelvis), which has no muscle behind it: whatever is left there
+had to come in through a contact. That leftover is the **residual** — with no
+contacts at all it is simply the body's weight, about 600 N, entirely unexplained.
+
+The stage then solves for the world forces at the 12 contact frames that explain
+the residual. Two things keep the answer meaningful.
+
+**A friction cone on every frame.** A cone is the set of pushes a surface can
+actually deliver: straight out along the surface, or up to 45° off it, never a
+pull. Each frame's cone points along the direction that patch of skin faces
+(negated — the wall pushes back the way the skin looks). Without cones a single
+free hand can absorb almost any residual and the answer says nothing about *which*
+limb touched; that is exactly how an earlier attempt failed. With cones, a frame
+can only explain the part of the residual it is physically oriented to explain.
+It also settles the toe pair for free: `toe_under` and `toe_above` face opposite
+ways, so their cones are opposite and the solve picks one.
+
+**Two prices.** Force on a frame that is drifting is expensive (a sliding limb
+carries little load), and force far from the scene is expensive. The gap price is
+measured **relative to the nearest contact frame of that step**, not as an
+absolute distance. That is the whole floater rescue: on a body where every frame
+is far from the wall, absolute pricing would make all force unaffordable and the
+solve would leave the body's weight unexplained — on exactly the bodies this
+exists to rescue. Relative pricing still prefers the nearer frame, but the weight
+has to land somewhere.
+
+**No scene data is not "far away".** When no scene point is anywhere near a step's
+frames, that is missing evidence, and the frame is simply not allowed to carry
+force. Confusing the two once cost a whole ablation its meaning.
+
+A frame that has to carry more than `theta_bw` of body weight (default 5%) for at
+least 3 frames is called in contact. Knee frames are excluded — measured, their
+force labels are almost all false. The result is **unioned** onto the geometric
+label: force only ever adds.
+
+**With one exception, and it is the toe pair.** Each readout keeps at most one toe
+per foot, but they can keep *different* ones, and the union would then hold both —
+which the physics forbids. So after the union, wherever both toes of a foot are
+labelled, the force decides: the toe carrying the larger solved magnitude survives
+(ties keep `toe_under`), even if that drops a geometric label. Exclusivity outranks
+add-only, because "at most one toe per foot" is a statement about the world while
+add-only is only a policy about how two readouts combine. Dropping a step can split
+a surviving span, so the four toe columns get a final minimum-duration pass. Before
+this rule the union held both toes on 838 steps across 12 of the 13 scenes; now it
+is 0 everywhere.
+
+The solve is a convex problem — a quadratic cost over nonnegative cone
+coefficients — so projected gradient descent reaches the one true optimum, and the
+stage reports a KKT number that is near zero when it got there. It takes a few
+seconds per scene.
+
+Honesty rule, same as everywhere else here: the stillness used to price force is
+the **persisted pre-enforcement drift** (`drift_pre`). A body whose `drift_pre` is
+missing is a hard error, never a silent re-measurement — otherwise the optimizer's
+own contact damping would be voting for its own labels.
+
+What it is worth, on the 13 annotated scenes (see the round report for the full
+tables): pooled F1 rises from **.488 to .721** at the default threshold — precision
+.869 → .858, recall .340 → .623, so the gain is almost entirely recall at nearly
+unchanged precision. Every scene improves, and the three known floaters go from
+.02 / .09 / .26 to **.81 / .79 / .80**.
+
+Three caveats travel with those numbers. On eleven never-tuned held-out scenes the
+same frozen recipe gains much less — pooled .789 → .837, per-source macro
+.725 → .775, with 2 of 5 source videos slightly worse — because those scenes have
+good geometry and the distance gate already works there. The force witness pays
+where the reconstruction is bad, and there it pays a lot: the one held-out scene
+with poor geometry went .519 → .801. A geometry-only control that thresholds the
+same *relative* distance recovers much of one floater on its own, so the physics is
+not the whole story. And `sport_climb` has a climber on a rope, a force this model
+does not know about, so its numbers are reported separately.
+
 ## One detector, two callers
 
 `tools/human_optim/contacts.py::detect_frame_contacts` is the only place these
