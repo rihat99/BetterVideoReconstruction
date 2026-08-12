@@ -68,13 +68,33 @@ pose_prior          = [ 300,  300,  300,    0,  300 ]
 orient_prior        = [  50,   50,   50,    0,   50 ]
 
 [loss_weights.motion]
-accel_root          = [  24,   24,   24,    0,   24 ]
-accel_joint         = [  48,   48,   48,    0,   48 ]
-jerk_root           = [ 300,  300,  300,    0,  300 ]
-jerk_joint          = [ 500,  500,  500,    0,  500 ]
+# The tangent differences of q: velocity (1st) → accel (2nd) → jerk (3rd) → snap (4th).
+# A difference row is dropped where its stencil touches an untracked frame — that frame's
+# pose is HELD from its neighbour, so the step across the gap is an artefact, not motion.
+velocity_root       = [   0,    0,    0,    0,    0 ]   # OFF — a direct penalty on q̇ damps real motion,
+velocity_joint      = [   0,    0,    0,    0,    0 ]   # not just jitter. Measured at 24/48: jitter only
+                                                        # -2.3% and contact F1 .578 -> .575. Wired; leave at 0.
+# kin1 accel by sweep on 6 scenes (x1 / x4 / x16.7 / x41.7): joint-angle jitter 2.752 ->
+# 2.688 -> 2.528 -> 2.354 deg/frame, Cartesian joint accel 7.93 -> 6.88 mm/frame², contact
+# F1 flat at .578-.579 and reproj_sapiens +0.05 px. Monotone, no saturation, no cost — the
+# old 24/48 was simply far below where this term starts to bite. kin2/kindyn_1 unchanged.
+# x16.7 is the shipped point: on all 13 annotated scenes it pairs with radial_velocity 400
+# for F1 .488 -> .497 and jitter -8.9% with no scene losing more than .008. Going to
+# 1000/2000 together with radial 1500 roughly doubles the smoothing (jitter -15.3%,
+# Cartesian accel -27.8%) and still beats baseline (F1 .493), but five scenes move down,
+# one by .057 — raise both pairs together if you want that trade.
+accel_root          = [  24,  400,   24,    0,   24 ]
+accel_joint         = [  48,  800,   48,    0,   48 ]
+jerk_root           = [ 300,  300,  300,    0,  300 ]   # NOT raised: jerk/snap x4 costs F1 .578 -> .560
+jerk_joint          = [ 500,  500,  500,    0,  500 ]   # (they were already the dominant smoothness weights)
 snap_root           = [ 300,  300,  300,    0,  300 ]   # 4th-diff snap on top of accel/jerk — highest-freq root jitter
 snap_joint          = [ 500,  500,  500,    0,  500 ]
-radial_velocity     = [   0,  100,  100,    0,  100 ]   # damp joint velocity along the viewing ray (worst-constrained axis); kin1 + kin2 + kindyn_1
+# Damp joint velocity along the viewing ray (worst-constrained axis); kin1 + kin2 + kindyn_1.
+# The best smoothing lever measured — it spends its whole budget on the one axis the images
+# cannot see. 6-scene ladder x1 / x4 / x15: Cartesian joint accel 7.93 -> 7.09 -> 6.41
+# mm/frame², root translation accel 5.70 -> 4.92 -> 4.28, contact F1 .578 -> .584 -> .580,
+# reproj_sapiens +0.02 / +0.12 px. 400 shipped (see accel above); kin1 only.
+radial_velocity     = [   0,  400,  100,    0,  100 ]
 
 [loss_weights.scene]
 # Acts on the 12 CONTACT FRAMES, not on the 1000 subsampled verts (the loss is a mean over
@@ -136,6 +156,18 @@ smooth_window_s = 0.35  # SG-smooth the Sapiens TARGET tracks (s) before opt; lo
 [reproj_init]
 gm_scale_px = 30.0
 smooth_window_s = 0.35  # same SG smoothing for the init-anchor TARGET tracks; the reproj_init gate is still vs RAW. 0 = off
+
+# Occlusion-aware down-weighting of the visual terms in kinematics_1. A joint the body
+# hides jitters because the two things that hold it — the Sapiens 2D keypoint and the
+# converter starting pose — are both guesses there. So weight reproj_sapiens, reproj_init
+# and pose_prior by a per-joint VISIBILITY, leaving the contact terms free to hold that
+# joint still instead. Visibility = the keypoint's Sapiens detection score, smoothed
+# ([keypoints].smooth_window_s) and divided by its own 90th percentile over the clip (so it
+# measures the score's DROP, not the detector's per-joint calibration); joints with no
+# keypoint inherit their parent's. Measured against an exact ray cast on 4 scenes: mean
+# score 0.905 clear vs 0.614 occluded.
+[occlusion]
+strength = 0.0   # weight = 1 - strength*(1 - ratio), clamped to [0,1]. 0 = off.
 
 [penetration]
 conf_thresh = 0.1      # residual absolute floor (VGGT conf ≥~1 ⇒ non-binding); the quantile gate below does the work

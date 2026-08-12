@@ -118,6 +118,24 @@ def _dof_mask(active: tuple[str, ...], nq: int, device, *,
     return m
 
 
+def _valid_diff_rows(frame_valid: torch.Tensor | None, order: int,
+                     num_frames: int) -> torch.Tensor | None:
+    """``(T-order,)`` bool — the ``order``-th tangent difference touches only valid frames.
+
+    An untracked frame's pose is *held* from its nearest valid neighbour, so a difference
+    whose stencil straddles a gap boundary measures that hold's step, not motion — a spike
+    the smoothness terms would otherwise spend their budget chasing. Returns ``None`` (=
+    the plain unmasked mean) when there is nothing to gate: no validity mask, every frame
+    valid, or a clip too short for the difference.
+    """
+    if frame_valid is None or num_frames <= order:
+        return None
+    rows = frame_valid[:num_frames - order]
+    for k in range(1, order + 1):
+        rows = rows & frame_valid[k:num_frames - order + k]
+    return None if bool(rows.all()) else rows
+
+
 def _visibility(vertices_sub_det: torch.Tensor, normals_sub: torch.Tensor,
                 extrinsics: torch.Tensor) -> torch.Tensor:
     """Front-facing mask ``(T, Ns)`` for already-subsampled vertices."""
@@ -345,6 +363,8 @@ def optimize_person(
     cam_centers: torch.Tensor | None = None,
     auto_contact: dict | None = None,
     freeze_fingers: bool = False,
+    keypoint_vis: torch.Tensor | None = None,
+    joint_vis: torch.Tensor | None = None,
     dynamics: DynamicsSpec | None = None,
 ) -> tuple[torch.Tensor, Metrics, Metrics, dict]:
     """Optimize one person over ``phases``. Returns ``(q_world_opt, before, after, aux)``.
@@ -399,6 +419,16 @@ def optimize_person(
     L-BFGS polish alike). The finger joints still exist and still carry the two fingertip
     contact frames — they simply follow the wrist instead of being fitted, because at
     cloud/keypoint resolution there is no evidence to fit them with.
+
+    ``keypoint_vis`` ``(T, 308)`` / ``joint_vis`` ``(T, J)``
+    (:func:`~tools.human_optim.keypoints.visibility_weights`) down-weight the three terms
+    that speak for a joint the camera cannot see: the Sapiens 2D loss, the
+    init-projection anchor and the pose prior. An occluded joint's 2D detection and its
+    converter starting pose are both guesses, and holding a body to two guesses is what
+    makes occluded limbs jitter — so the visual evidence yields there and the contact
+    terms get the freedom. Every one of the three holds its denominator, so the terms
+    weaken on the occluded joints instead of stiffening on the visible ones. ``None``
+    (the default, and what ``[occlusion].floor = 1`` produces) leaves them untouched.
 
     ``frame_valid`` (optional ``(T,)`` bool) excludes untracked frames — whose
     converter pose was held from the nearest valid frame and so is glued to the
@@ -695,11 +725,12 @@ def optimize_person(
     # None there).
     problem.add_term("reproj_sapiens", lambda st: sapiens_reprojection_gm(
         st["jw"], st["vw"], extrinsics, K, target_kp_loss, scores, corr, frame_vertex_ids,
-        score_thresh=score_thresh, gm_scale_px=sap_gm_px))
+        score_thresh=score_thresh, gm_scale_px=sap_gm_px, visibility=keypoint_vis))
     if use_init:
+        init_vis = None if joint_vis is None else joint_vis[:, body_idx]
         problem.add_term("reproj_init", lambda st: init_reprojection_gm(
             st["jw"], body_idx, extrinsics, K, init_target_loss,
-            gm_scale_px=init_gm_px, frame_mask=frame_valid))
+            gm_scale_px=init_gm_px, frame_mask=frame_valid, joint_weight=init_vis))
     problem.add_term("chamfer", lambda st: chamfer_loss(
         st["vw"][:, sub], st["vismask"], depth_pad, depth_valid, chunk=chunk,
         vertex_weights=chamfer_weights))
@@ -707,19 +738,33 @@ def optimize_person(
     # hand pose, which is exactly what unfreezing them says we no longer trust.
     prior_joints = (None if freeze_fingers
                     else int(finger_freeze_mask(nq, q.device)[7:].sum()) // 4)
+    prior_vis = None if joint_vis is None else joint_vis[:, 1:]   # q[7:] holds joints 1..J-1
     problem.add_term("pose_prior", lambda st: pose_prior_loss(
-        st["qn"], q_init, mid.num_joints, num_prior_joints=prior_joints))
+        st["qn"], q_init, mid.num_joints, num_prior_joints=prior_joints,
+        joint_weight=prior_vis))
     problem.add_term("orient_prior", lambda st: root_orient_prior_loss(st["qn"], q_init))
 
-    def _msq(x: torch.Tensor) -> torch.Tensor:
-        return x.square().mean() if x.numel() > 0 else q.new_zeros(())   # short clip → 0, not NaN
+    vel_rows, accel_rows, jerk_rows, snap_rows = (
+        _valid_diff_rows(frame_valid, order, T) for order in (1, 2, 3, 4))
 
-    problem.add_term("accel_root", lambda st: _msq(st["accel"][:, :6]))
-    problem.add_term("accel_joint", lambda st: _msq(st["accel"][:, 6:]))
-    problem.add_term("jerk_root", lambda st: _msq(st["jerk"][:, :6]))
-    problem.add_term("jerk_joint", lambda st: _msq(st["jerk"][:, 6:]))
-    problem.add_term("snap_root", lambda st: _msq(st["snap"][:, :6]))
-    problem.add_term("snap_joint", lambda st: _msq(st["snap"][:, 6:]))
+    def _msq(x: torch.Tensor, rows: torch.Tensor | None) -> torch.Tensor:
+        if x.numel() == 0:
+            return q.new_zeros(())                                       # short clip → 0, not NaN
+        if rows is None:
+            return x.square().mean()
+        gate = rows.to(x.dtype)[:, None]
+        return (x.square() * gate).sum() / gate.expand_as(x).sum().clamp_min(1.0)
+
+    # velocity = the 1st tangent difference. Off by default (weight 0): a direct penalty on
+    # q̇ damps real motion, not just jitter, unlike the higher differences.
+    problem.add_term("velocity_root", lambda st: _msq(st["d1"][:, :6], vel_rows))
+    problem.add_term("velocity_joint", lambda st: _msq(st["d1"][:, 6:], vel_rows))
+    problem.add_term("accel_root", lambda st: _msq(st["accel"][:, :6], accel_rows))
+    problem.add_term("accel_joint", lambda st: _msq(st["accel"][:, 6:], accel_rows))
+    problem.add_term("jerk_root", lambda st: _msq(st["jerk"][:, :6], jerk_rows))
+    problem.add_term("jerk_joint", lambda st: _msq(st["jerk"][:, 6:], jerk_rows))
+    problem.add_term("snap_root", lambda st: _msq(st["snap"][:, :6], snap_rows))
+    problem.add_term("snap_joint", lambda st: _msq(st["snap"][:, 6:], snap_rows))
 
     if use_pen:
         def _penetration(st):

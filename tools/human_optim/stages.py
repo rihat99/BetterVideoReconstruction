@@ -32,7 +32,7 @@ from .camera import fold_root_to_world, project, transform_points, world_from_ca
 from .confidence import (
     CONTACT_CONFIDENCE_METHOD, CONTACT_CONFIDENCE_SCHEMA, SCENE_FREE_CONFIDENCE_METHOD)
 from .config import HumanOptimConfig
-from .keypoints import build_correspondence
+from .keypoints import build_correspondence, visibility_weights
 from .optimizer import PhaseSpec, optimize_person
 from .prefit import smooth_finger_quats
 from .qmath import normalize_q
@@ -456,6 +456,10 @@ def run_kinematic(source, pred: Path, cfg: HumanOptimConfig, stages_to_run,
     torch.manual_seed(0)
     phases = _kinematic_phases(cfg, stages_to_run)
 
+    # Occlusion-aware down-weighting of the visual terms (kinematics_1 only). 0 is off.
+    vis_strength = float(knobs.get("occlusion", {}).get("strength", 0.0))
+    parents = [-1] + [int(mid.parent_tree[0, j]) for j in range(1, mid.num_joints)]
+
     # kinematics_1 auto-contact operating point. optimize_person detects labels once at the
     # refine phase, guarded on ann_attraction[kinematics_1] > 0, so this is inert at weight 0.
     auto_cfg = None
@@ -495,6 +499,16 @@ def run_kinematic(source, pred: Path, cfg: HumanOptimConfig, stages_to_run,
             pose, human, oid, N, vmask, knobs, device,
             mid=mid, betas_T=betas_T, q_world=q_world, extr=extr, K=K)
 
+        keypoint_vis = joint_vis = None
+        if vis_strength > 0.0:
+            keypoint_vis, joint_vis = visibility_weights(
+                scores, corr, parents, strength=vis_strength,
+                window_s=float(knobs["keypoints"].get("smooth_window_s", 0.0)),
+                fps=fps, frame_valid=frame_valid)
+            seen = joint_vis[frame_valid][:, corr.joint_model]
+            print(f"[{tag}] visibility strength={vis_strength:g}: mean={float(seen.mean()):.3f}, "
+                  f"{float((seen < 0.5).float().mean()):.1%} of corresponded joint-frames < 0.5")
+
         print(f"[{tag}] person obj_id={oid} ({int(vmask.sum())}/{N} valid) …")
         q_opt, before, after, aux = optimize_person(
             mid, betas_mean, q_world, extrinsics=extr, K=K, depth_points=depth,
@@ -502,7 +516,8 @@ def run_kinematic(source, pred: Path, cfg: HumanOptimConfig, stages_to_run,
             sub=sub, knobs=knobs, phases=phases,
             scene_pts=scene_pts, scene_normals=scene_normals, scene_conf=scene_conf, fps=fps,
             chamfer_weights=chamfer_w, frame_valid=frame_valid,
-            cam_centers=cam_centers, auto_contact=auto_cfg, freeze_fingers=freeze_fingers)
+            cam_centers=cam_centers, auto_contact=auto_cfg, freeze_fingers=freeze_fingers,
+            keypoint_vis=keypoint_vis, joint_vis=joint_vis)
         print(f"    before: {before}\n    after:  {after}")
         # Persist drift_pre + auto_labels: drift_pre is the honest pre-attraction gate source
         # for the readout; auto_labels track the body produced by this optimization.

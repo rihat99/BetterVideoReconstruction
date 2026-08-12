@@ -53,7 +53,7 @@ def load_config(path: str | Path) -> HumanOptimConfig:
                   for s in STAGE_ORDER}
 
     knob_sections = ("optimizer", "chamfer", "keypoints", "reproj_init", "penetration",
-                     "contact_gate", "auto_contact", "ann_attraction",
+                     "occlusion", "contact_gate", "auto_contact", "ann_attraction",
                      "ann_repulsion", "ann_velocity", "ann_acquisition", "ann_seating",
                      "contacts", "contact", "dynamics_optimizer", "friction")
     knobs = {name: dict(raw[name]) for name in knob_sections if name in raw}

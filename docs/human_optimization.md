@@ -102,6 +102,41 @@ below are the config names.
   root orientation can run away at the boundary and break the image fit. Root
   translation stays free — depth placement is chamfer's job.
 
+### Occlusion weighting (`[occlusion].strength`) — off, and here is why
+
+Wired but **off** (`strength = 0`). The idea was reasonable and the measurement says no.
+
+The idea: the three terms that speak *for a specific joint* — `reproj_sapiens`,
+`reproj_init` and `pose_prior` — should go quiet when the camera cannot see that joint,
+because behind an occluder both of their inputs are guesses (the detector is placing a
+keypoint it cannot see; the converter pose they pin to came from the same hidden pixels).
+Turning them down should hand the joint to the terms that still know something —
+smoothness and the contact damping.
+
+The visibility signal itself works. It is the joint's Sapiens **detection score**,
+smoothed over time and divided by that keypoint's own 90th percentile across the clip;
+the division is what makes it mean *visibility* rather than detector calibration (Sapiens
+scores hips near 0.65 and wrists near 0.95 even in plain view, so only the *drop* is
+informative). Checked against an exact camera-ray occlusion cast on four scenes, the mean
+score is **0.905 when the joint is clear and 0.614 when body surface stands in front of
+it** — a clean separation. Joints with no keypoint (spine, neck, collars, head, feet,
+fingers) inherit their parent's number, so a foot follows its ankle and the fingers follow
+their wrist. `strength` scales the drop: `weight = 1 − strength·(1 − ratio)`.
+
+What the measurement showed (6 scenes, occlusion measured by ray cast on the baseline
+bodies so every variant is scored on the same joint-frames): turning the visual terms down
+makes occluded joints jitter **more**, monotonically — mean Cartesian acceleration on
+occluded joint-frames 12.1 → 14.1 → 15.8 mm/frame² at strength 0 → 2 → 5, while contact F1
+slipped .578 → .575 and reprojection drifted +1.5 px. So on this data those three terms
+are the things *stabilising* an occluded joint, not the things shaking it; removing them
+leaves the joint free to wander. The jitter must be coming from somewhere else — the
+chamfer is the suspect, since behind an occluder the person's depth cloud belongs to the
+occluding limb and the nearest-neighbour match is simply wrong.
+
+Every one of the three terms keeps its *unweighted* denominator, so a down-weighted joint
+**loosens** its term rather than pushing its share onto the joints that stayed visible.
+Only `kinematics_1` reads the knob.
+
 ### Motion terms
 
 - **`accel_*`, `jerk_*`, `snap_*`** — squared 2nd, 3rd and 4th finite differences of
@@ -109,11 +144,31 @@ below are the config names.
   rotations, not as quaternion numbers). Root and joints are weighted separately: the
   root carries the whole trajectory, the joints only the articulation. Higher
   derivatives target higher-frequency jitter.
+  The `kinematics_1` accel weights are ~17× the other stages'. A sweep over ×1/×4/×16.7/
+  ×41.7 moved joint-angle jitter 2.75 → 2.69 → 2.53 → 2.35 °/frame with contact F1 flat
+  and reprojection within 0.05 px: monotone the whole way, so the old value was simply far
+  below where the term starts to bite. Jerk and snap were *not* raised — they were already
+  the dominant smoothness weights, and ×4 on them cost F1 (.578 → .560).
+- **`velocity_*`** — the 1st difference, the same family one step down. **Off** (weight
+  0): unlike the higher differences it penalizes motion itself, not the roughness of
+  motion, so it slows the climber as well as the jitter. Measured at the accel weights it
+  bought only −2.3% jitter and cost F1 (.578 → .575).
+- A difference is **dropped where its stencil touches an untracked frame**. Those frames
+  hold a pose copied from their nearest tracked neighbour, so the step across a gap is
+  an artefact of the hold, not motion — without the gate the smoothness terms spend
+  their budget flattening it. All 13 annotated clips are fully tracked, so this changes
+  nothing there; it matters on corpus clips with tracking gaps.
 - **`radial_velocity`** — damps joint motion *along the viewing ray* only. Depth along
   the ray is the direction monocular evidence constrains worst, so that is where
   jitter concentrates; image-plane motion is left to the reprojection terms. The ray
   direction is held fixed (detached) so the term can only slow motion along it, never
-  rotate the ray to cheat.
+  rotate the ray to cheat. This is the **most effective** smoothing weight measured:
+  ×4 and ×15 give Cartesian joint acceleration −11% / −19% and root translation
+  acceleration −14% / −25%, for +0.02 / +0.12 px of reprojection and no F1 cost. It beats
+  the generic smoothness terms because it spends its whole budget on the one axis the
+  images cannot see. Shipped at ×4 alongside the raised accel; together, on all 13
+  annotated scenes, they cut joint-angle jitter 8.9%, Cartesian joint acceleration 16%
+  and root translation acceleration 19%, while contact F1 goes .488 → .497.
 
 ### Scene terms (refine phase onward)
 

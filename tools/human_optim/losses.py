@@ -48,6 +48,7 @@ def sapiens_reprojection_gm(
     *,
     score_thresh: float,
     gm_scale_px: float,
+    visibility: torch.Tensor | None = None,  # (T, 308) per-keypoint weight in [0,1]
 ) -> torch.Tensor:
     """Robust (Geman-McClure) reprojection to **Sapiens Goliath-308** keypoints.
 
@@ -56,6 +57,11 @@ def sapiens_reprojection_gm(
     and the **score** as the per-point weight (gated below ``score_thresh``).
     Returns the score-weighted mean GM cost ∈ [0, 1) — an independent cross-check
     on the init-projection anchor.
+
+    ``visibility`` (:func:`~tools.human_optim.keypoints.visibility_weights`) scales each
+    keypoint's contribution again, so a keypoint the body occludes pulls less. The
+    denominator stays the *unscaled* score sum, so down-weighting a subset genuinely
+    lowers the term instead of redistributing it onto the keypoints that stayed.
     """
     body = joints_world[:, corr.joint_model, :]                 # (T, Kb, 3)
     lm = vertices_world[:, frame_vertex_ids[corr.lm_frame], :]  # (T, Kl, 3)
@@ -68,7 +74,8 @@ def sapiens_reprojection_gm(
 
     r2 = ((pred_px - tgt) ** 2).sum(dim=-1)                    # (T, K) px²
     gm = geman_mcclure(r2, pred_px.new_tensor(gm_scale_px) ** 2)
-    return (w * gm).sum() / w.sum().clamp_min(1.0)
+    num = w * gm if visibility is None else w * visibility[:, corr.sap] * gm
+    return num.sum() / w.sum().clamp_min(1.0)
 
 
 def init_reprojection_gm(
@@ -80,6 +87,7 @@ def init_reprojection_gm(
     *,
     gm_scale_px: float,
     frame_mask: torch.Tensor | None = None,  # (T,) bool — average over only these (valid) frames
+    joint_weight: torch.Tensor | None = None,  # (T, Jb) per-joint weight in [0,1]
 ) -> torch.Tensor:
     """Robust (Geman-McClure) reprojection of the body joints to their own INITIAL
     (converter-pose) projection — a dense, self-consistent 2D anchor.
@@ -96,10 +104,17 @@ def init_reprojection_gm(
     mean GM cost ∈ [0, 1) (0 at init — the body starts at the pose that defined the
     target). ``frame_mask`` restricts the mean to the given (valid) frames, so
     untracked frames — whose held converter pose follows the camera — do not anchor.
+    ``joint_weight`` (:func:`~tools.human_optim.keypoints.visibility_weights`) scales each
+    joint's contribution, so an occluded joint — whose starting pose came from a converter
+    estimate the camera could not see either — is held less tightly. The denominator is
+    untouched, so the anchor as a whole weakens rather than shifting its pull onto the
+    joints that stayed visible.
     """
     pred_px = project(transform_points(joints_world[:, body_idx, :], extrinsics), K)  # (T, Jb, 2)
     r2 = ((pred_px - target_px) ** 2).sum(dim=-1)                                      # (T, Jb) px²
     gm = geman_mcclure(r2, pred_px.new_tensor(gm_scale_px) ** 2)                       # (T, Jb)
+    if joint_weight is not None:
+        gm = gm * joint_weight
     if frame_mask is None:
         return gm.mean()
     m = frame_mask.to(gm.dtype)                                                        # (T,) 1 = valid
@@ -576,6 +591,7 @@ def pose_prior_loss(
     num_joints: int,
     *,
     num_prior_joints: int | None = None,
+    joint_weight: torch.Tensor | None = None,  # (T, num_joints-1) per-joint weight in [0,1]
 ) -> torch.Tensor:
     """Smooth quaternion distance ``1 − (q·q_init)²`` over joints (not root).
 
@@ -589,11 +605,18 @@ def pose_prior_loss(
     stopped trusting, so pulling the fingers back to it is incoherent. The
     denominator stays the full joint count, so dropping the fingers does not
     silently stiffen the prior on the joints it still covers.
+
+    ``joint_weight`` (:func:`~tools.human_optim.keypoints.visibility_weights`) scales each
+    joint's contribution, so a joint the camera could not see is pulled less toward a
+    starting pose the camera could not see either. Like ``num_prior_joints`` it holds the
+    denominator, so the prior *loosens* on those joints instead of stiffening on the rest.
     """
     shape = q.shape[:-1]
     qj = q[..., 7:].reshape(*shape, num_joints - 1, 4)
     qij = q_init[..., 7:].reshape(*shape, num_joints - 1, 4)
     vals = 1.0 - (qj * qij).sum(dim=-1).square()
+    if joint_weight is not None:
+        vals = vals * joint_weight
     if num_prior_joints is None:
         return vals.mean()
     return vals[..., :num_prior_joints].sum() / vals.numel()
