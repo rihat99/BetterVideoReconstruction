@@ -70,30 +70,33 @@ def test_opposite_skin_normals_give_opposite_cones() -> None:
     assert torch.all(above_up < 0), "every edge of the toe-top's cone pulls the body down"
 
 
-# ── the toe rule: standing vs hooking, decided once per contact ───────────────
+# ── the toe rule: whichever side the solve loaded takes the contact ───────────
 
 def test_toe_rule_gives_a_supported_foot_to_the_sole() -> None:
-    """An upward-loaded foot is standing, so the whole contact is ``toe_under``."""
+    """The sole carried the load, so the whole contact is ``toe_under``."""
     labels = np.zeros((6, 4), bool)
     labels[:, 0] = labels[:, 1] = True                # both toe frames claim the contact
-    support = np.zeros((6, 4), dtype=np.float32)
-    support[:, 0] = 40.0                              # the sole holds the body up
-    support[:, 1] = 5.0                               # the toe top is loaded upward too — nonsense
-    resolved = resolve_toe_conflicts(labels, support, frame_names=_TOE_NAMES, min_frames=3)
+    magnitude = np.zeros((6, 4), dtype=np.float32)
+    magnitude[:, 0] = 40.0                            # the load went through the sole
+    magnitude[:, 1] = 5.0                             # the toe top carried a trace
+    resolved = resolve_toe_conflicts(labels, magnitude, frame_names=_TOE_NAMES, min_frames=3)
     assert resolved[:, 0].all() and not resolved[:, 1].any()
 
 
-def test_toe_rule_gives_a_hanging_foot_to_the_top_of_the_toe() -> None:
-    """A downward-pulled foot is hooking, so the whole contact is ``toe_above``.
+def test_toe_rule_gives_a_loaded_toe_top_the_contact() -> None:
+    """The load went through the toe top, so the whole contact is ``toe_above``.
 
-    This is the only way ``toe_above`` can win, and it is exactly what a toe hook does.
+    The regression behind this test is a bat hang: the climber is inverted and the hooked
+    toe holds the body weight *up*. An earlier rule read the force's vertical sign
+    ("hooks pull down") and renamed every bat hang to a stance — the rule must read which
+    side carried the load, never which way the force pointed.
     """
     labels = np.zeros((6, 4), bool)
     labels[:, 0] = labels[:, 1] = True
-    support = np.zeros((6, 4), dtype=np.float32)
-    support[:, 0] = 5.0                               # a trace of upward load on the sole
-    support[:, 1] = -60.0                             # the toe top is pulled down hard: a hook
-    resolved = resolve_toe_conflicts(labels, support, frame_names=_TOE_NAMES, min_frames=3)
+    magnitude = np.zeros((6, 4), dtype=np.float32)
+    magnitude[:, 0] = 5.0                             # a trace of load on the sole
+    magnitude[:, 1] = 60.0                            # the toe top carried the body
+    resolved = resolve_toe_conflicts(labels, magnitude, frame_names=_TOE_NAMES, min_frames=3)
     assert resolved[:, 1].all() and not resolved[:, 0].any()
 
 
@@ -107,12 +110,12 @@ def test_toe_rule_never_switches_patch_inside_one_contact() -> None:
     steps = 12
     labels = np.zeros((steps, 4), bool)
     labels[:, 0] = labels[:, 1] = True
-    support = np.zeros((steps, 4), dtype=np.float32)
-    support[:, 0] = 30.0
-    support[:, 1] = -25.0
-    support[4:7, 0] = 2.0                             # three steps where the sole looks weak
-    support[4:7, 1] = -80.0                           # and the hook story looks strong
-    resolved = resolve_toe_conflicts(labels, support, frame_names=_TOE_NAMES, min_frames=3)
+    magnitude = np.zeros((steps, 4), dtype=np.float32)
+    magnitude[:, 0] = 30.0
+    magnitude[:, 1] = 25.0
+    magnitude[4:7, 0] = 2.0                           # three steps where the sole looks weak
+    magnitude[4:7, 1] = 80.0                          # and the toe top looks strong
+    resolved = resolve_toe_conflicts(labels, magnitude, frame_names=_TOE_NAMES, min_frames=3)
     for column in (0, 1):
         assert len(set(resolved[:, column].tolist())) == 1, "the patch changed inside a contact"
     assert not (resolved[:, 0] & resolved[:, 1]).any()
@@ -123,10 +126,10 @@ def test_toe_rule_decides_each_contact_separately() -> None:
     labels = np.zeros((14, 4), bool)
     labels[0:5, 0] = labels[0:5, 1] = True            # first contact
     labels[9:14, 0] = labels[9:14, 1] = True          # second contact, after a real release
-    support = np.zeros((14, 4), dtype=np.float32)
-    support[0:5, 0] = 50.0                            # standing
-    support[9:14, 1] = -50.0                          # hooking
-    resolved = resolve_toe_conflicts(labels, support, frame_names=_TOE_NAMES, min_frames=3)
+    magnitude = np.zeros((14, 4), dtype=np.float32)
+    magnitude[0:5, 0] = 50.0                          # standing
+    magnitude[9:14, 1] = 50.0                         # hooking
+    resolved = resolve_toe_conflicts(labels, magnitude, frame_names=_TOE_NAMES, min_frames=3)
     assert resolved[0:5, 0].all() and not resolved[0:5, 1].any()
     assert resolved[9:14, 1].all() and not resolved[9:14, 0].any()
 
@@ -139,8 +142,8 @@ def test_toe_rule_leaves_the_foot_contact_itself_untouched() -> None:
     """
     generator = np.random.default_rng(0)
     labels = generator.random((40, 4)) < 0.4
-    support = generator.normal(size=(40, 4)).astype(np.float32) * 30.0
-    resolved = resolve_toe_conflicts(labels, support, frame_names=_TOE_NAMES, min_frames=1)
+    magnitude = np.abs(generator.normal(size=(40, 4))).astype(np.float32) * 30.0
+    resolved = resolve_toe_conflicts(labels, magnitude, frame_names=_TOE_NAMES, min_frames=1)
     for under, above in ((0, 1), (2, 3)):
         before = labels[:, under] | labels[:, above]
         after = resolved[:, under] | resolved[:, above]
@@ -163,15 +166,14 @@ def test_union_of_the_two_readouts_never_holds_both_toes() -> None:
     steps = 8
     geometric = np.zeros((steps, 4), bool)
     geometric[:, 0] = True                             # detector says toe_under_left
-    support = np.zeros((steps, 4), dtype=np.float32)
-    support[2:7, 1] = -400.0                           # the force says the toe top is hanging
-    magnitude = np.abs(support)
+    magnitude = np.zeros((steps, 4), dtype=np.float32)
+    magnitude[2:7, 1] = 400.0                          # the force loaded the toe top
     force, _ = force_labels(magnitude, frame_names=_TOE_NAMES, valid=np.ones(steps, bool),
-                            threshold_n=30.0, min_frames=3, support=support)
+                            threshold_n=30.0, min_frames=3)
     union = geometric | force
     assert (union[:, 0] & union[:, 1]).sum() > 0, "the union really does hold both toes"
 
-    resolved = resolve_toe_conflicts(union, support, frame_names=_TOE_NAMES, min_frames=3)
+    resolved = resolve_toe_conflicts(union, magnitude, frame_names=_TOE_NAMES, min_frames=3)
     assert not (resolved[:, 0] & resolved[:, 1]).any(), "at most one toe per foot per step"
     assert resolved[:, 1].all(), "the hook explains the whole contact, so it takes all of it"
 

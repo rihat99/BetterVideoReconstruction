@@ -21,9 +21,9 @@ carry real load is in contact whatever its distance says, which is how a contact
 badly reconstructed body is recovered at all. See ``docs/force_contacts.md``.
 
 The union is then debounced once (a contact lasts at least ``min_frames``, and so does a
-release) and each foot is given a single toe patch per contact — the force decides
-whether it was standing on the hold (``toe_under``) or hooked under it (``toe_above``),
-once for the whole contact rather than per step.
+release) and each foot is given a single toe patch per contact — whichever side of the
+toe the force solve loaded (``toe_under`` standing on the hold, ``toe_above`` pressed
+against one), once for the whole contact rather than per step.
 
 Stillness reads the body's persisted pre-enforcement drift (``drift_pre``) — motion
 measured before any contact attraction acted. The force solve requires it and will not
@@ -78,8 +78,10 @@ _DEFAULT_CONFIG = _REPO_ROOT / "configs" / "human_optimization.toml"
 #: schema 2 keep working; ``contact_label_method`` is what distinguishes the two.
 CONTACT_LABEL_SCHEMA = 2
 
-CONTACT_LABEL_METHOD = "frames-v3"   # v1 = geometry only; v2 adds the force witness;
-                                     # v3 the toe support rule, debounce + force hysteresis
+CONTACT_LABEL_METHOD = "frames-v4"   # v1 = geometry only; v2 adds the force witness;
+                                     # v3 debounce + force hysteresis; v4 the toe rule reads
+                                     # the solved load allocation (v3 read its vertical sign,
+                                     # which renamed every bat hang to a stance)
 
 
 def _load_config(path: Path) -> dict:
@@ -306,7 +308,7 @@ def run(source: str | Path, predictions_dir: str | Path, config_path: str | Path
             force_solution.magnitude, frame_names=frame_names, valid=valid_mask[p],
             threshold_n=float(cf["theta_bw"]) * force_solution.body_weight_n,
             hold_n=float(cf["theta_hold_bw"]) * force_solution.body_weight_n,
-            min_frames=int(cc["min_frames"]), support=force_solution.support)
+            min_frames=int(cc["min_frames"]))
         force_label[:, knee_columns] = False        # force on a knee is ~all false positives
         contact_np = contact.cpu().numpy() | force_label
         contact_np[~valid_mask[p]] = False
@@ -322,7 +324,7 @@ def run(source: str | Path, predictions_dir: str | Path, config_path: str | Path
         # union would then hold both at once. The toe rule settles it for the whole contact
         # at once — see resolve_toe_conflicts. It only moves a label between the two frames
         # of one foot, so "this foot is in contact" is untouched.
-        contact_np = resolve_toe_conflicts(contact_np, force_solution.support,
+        contact_np = resolve_toe_conflicts(contact_np, force_solution.magnitude,
                                            frame_names=frame_names,
                                            min_frames=int(cc["min_frames"]))
         merged_np = merged.cpu().numpy() & contact_np      # a bridged step that lost its

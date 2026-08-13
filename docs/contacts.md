@@ -83,7 +83,7 @@ That tiebreak is all the `kinematics_1` auto-labels have to go on, since no forc
 has been solved yet when they are detected. In the standalone readout it is
 **superseded**: the force witness decides the pair for a whole contact at a time,
 and its verdict is the last word — see
-[`force_contacts.md`](force_contacts.md#step-8-the-toe-rule--standing-or-hooking).
+[`force_contacts.md`](force_contacts.md#step-8-the-toe-rule--which-side-did-the-load-go-through).
 Measured on the 13 annotated scenes, the readout's final labels come out
 bit-identical whether this per-step tiebreak runs or not.
 

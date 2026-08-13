@@ -181,54 +181,52 @@ side — measured, their force labels are almost all wrong.
 
 The only place the force can *remove* a geometric label is the toe pair, next.
 
-## Step 8: the toe rule — standing or hooking
+## Step 8: the toe rule — which side did the load go through?
 
 `toe_under` and `toe_above` are the same place on the toe with opposite normals.
-`toe_under` is the sole: the foot **stands** on a hold and the hold pushes the
-body up. `toe_above` is the top of the toe: the foot **hooks** under a hold and
-the hold pulls the body down. At most one of them is touching, so a label naming
-both is wrong — and both readouts do produce that, because each keeps a single
-toe but they can keep different ones.
+`toe_under` is the sole: the foot **stands** on a hold. `toe_above` is the top of
+the toe: the foot presses it **against** a hold — a toe hook, or the whole body
+inverted in a bat hang. At most one of them is touching, so a label naming both
+is wrong — and both readouts do produce that, because each keeps a single toe but
+they can keep different ones.
 
-Two things were measured on the 13 annotated scenes before this rule was written.
+The decision is made **once per contact**. A contact is one unbroken run of
+"this foot is touching" (either frame on). Across that whole run each side is
+scored by how much force the solve put through it:
 
-**The scene cannot tell the pair apart at one frame.** The two signals that ought
-to — the wall's own normal at the nearest point, and which side of the toe that
-nearest point lies on — each agreed with the solved load on about half the
-labelled steps. Both are coin flips. The reconstructed cloud simply is not
-accurate at the scale of a toe. So the old per-step tiebreak had nothing solid to
-stand on, and it showed: the label switched patch *while the foot stayed on the
-hold*, 0.38 times per foot-contact on average and more than once per contact on
-three scenes.
+    standing  =  Σ |force on toe_under|
+    hooking   =  Σ |force on toe_above|
 
-**The solved force does know.** 97% of sole labels carried an upward force, as
-standing must. But 60% of the top-of-toe labels carried an upward force too,
-which a hook cannot do — those were stances wearing the wrong name. That is the
-bug you could see in the viewer.
-
-So the decision is made **once per contact**, from the force. A contact is one
-unbroken run of "this foot is touching" (either frame on). Across that whole run
-the two stories are scored by how much load each actually explains:
-
-    standing  =  Σ  (force on toe_under) · up
-    hooking   =  Σ −(force on toe_above) · up
-
-`up` is the world up direction; the dot product picks out the part of the force
-that fights gravity. The bigger story takes the entire run. A sole loaded
-downward, or a toe-top loaded upward, both score negative — so an incoherent
-assignment loses on either side. Exact ties keep `toe_under`, since standing is
-much the more common contact and the result then never depends on evaluation
+The bigger sum takes the entire run; exact ties keep `toe_under`, since standing
+is much the more common contact and the result then never depends on evaluation
 order.
 
-Two properties make this safe. The patch cannot change while the foot stays on
-the hold, by construction. And the rule only ever *moves* a label between the two
+Why this is the right reading: every solved force lives in a cone about its own
+frame's skin normal, so the solve can only put load through the side whose
+orientation can explain the body's motion. "Which side carried the load" is
+therefore already a normal test — using the body's normals, which are exact,
+instead of the cloud's, which are not. On the eyeballed disputed contacts it
+called all eight correctly, where each of the two earlier readings managed four:
+
+* **The force's vertical sign** ("standing pushes up, hooking pulls down" — the
+  first version of this rule) renames every bat hang to a stance: an inverted
+  climber's hooked toe holds the body weight *up*, which the sign test declared
+  impossible for a hook. boulder_3's whole inverted sequence wore `toe_under`
+  because of this.
+* **The cloud's normal at the nearest scene point** votes "top of toe" for
+  ordinary stances on small holds: the nearest cloud points are the wall plane
+  behind the hold, and a standing toe's upper surface naturally faces the wall.
+  It is trustworthy only on large volumes the cloud actually resolved — exactly
+  where it agrees with the load anyway.
+
+Two properties make the rule safe. The patch cannot change while the foot stays
+on the hold, by construction — the old per-step tiebreak switched patch 0.38
+times per foot-contact. And the rule only ever *moves* a label between the two
 frames of one foot — the union of the pair, which is what "this foot is in
 contact" means and all that the scorer and downstream stages read, comes out
-unchanged.
-
-What it did, on the 13 scenes: patch switches inside a contact went **85 → 0**;
-`toe_above` labels went 879 → 131, and the share of them that carry a downward
-force — i.e. that actually look like a hook — went **39% → 97%**.
+unchanged. (That invariance also means the F1 table below cannot see this rule;
+its evidence is the viewer and the physics stages downstream, which inherit the
+frame's normal for their friction cones.)
 
 ## What it is worth
 

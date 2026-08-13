@@ -87,12 +87,9 @@ class ForceSolution:
 
     #: ``(T, 12, 3)`` world contact forces, newtons; zero off the candidate set.
     forces: np.ndarray
-    #: ``(T, 12)`` force magnitudes, newtons.
+    #: ``(T, 12)`` force magnitudes, newtons. The toe rule reads these: which side the
+    #: solve loaded is its verdict on which side really touched.
     magnitude: np.ndarray
-    #: ``(T, 12)`` the part of each force that holds the body up, newtons: ``f · up``.
-    #: Positive = this frame is carrying weight; negative = it is pulling the body down,
-    #: which is what a hooked contact does. The toe rule reads it.
-    support: np.ndarray
     #: ``(T, 12)`` bool — frames the solve was allowed to load.
     candidate: np.ndarray
     #: ``(T, 12)`` ``dot(cone axis, nearest scene normal)`` ∈ [−1, 1] — ``+1`` when this
@@ -147,7 +144,6 @@ class FrameDynamics:
         self.q_model = normalize_q(q.to(dev), body.num_joints)
         self.frame_names = tuple(body.contact_frame_names)
         #: ``(3,)`` world up — the direction a contact has to push to hold the body.
-        self.up = -gravity / _GRAVITY_MAG
         self.body_weight_n = float(model.values.body_inertias[..., 1:, 0].sum()) * _GRAVITY_MAG
 
         with torch.no_grad():
@@ -296,7 +292,6 @@ def solve_frame_forces(dyn: FrameDynamics, *, valid: np.ndarray, drift_m: torch.
     return ForceSolution(
         forces=to_numpy(force),
         magnitude=to_numpy(force.norm(dim=-1)),
-        support=to_numpy(force @ dyn.up),
         candidate=candidate.cpu().numpy(),
         normal_dot=to_numpy(normal_dot),
         residual_force_before_n=to_numpy(before[:, :3].norm(dim=-1)),
@@ -390,44 +385,40 @@ def hysteresis(series: np.ndarray, *, enter_above: float, hold_above: float) -> 
     return out
 
 
-def resolve_toe_conflicts(labels: np.ndarray, support: np.ndarray, *, frame_names,
+def resolve_toe_conflicts(labels: np.ndarray, magnitude: np.ndarray, *, frame_names,
                           min_frames: int = 3) -> np.ndarray:
-    """Give each foot ONE toe patch per contact — standing or hooking, decided once.
+    """Give each foot ONE toe patch per contact — the side the solved force loaded.
 
     The two toe frames are the same place on the toe with opposite normals. ``toe_under``
-    is the sole: the foot **stands** on a hold and the hold pushes the body *up*.
-    ``toe_above`` is the top of the toe: the foot **hooks** under a hold and the hold pulls
-    the body *down*. At most one of them touches, so a label naming both is wrong — and the
-    readouts do name both, because the geometric detector and :func:`force_labels` each
-    keep a single toe but can keep *different* ones.
+    is the sole — the foot stands on a hold; ``toe_above`` is the top of the toe — the
+    foot presses it against a hold (a toe hook, or the whole body inverted in a bat hang).
+    At most one of them touches, so a label naming both is wrong — and the readouts do
+    name both, because the geometric detector and :func:`force_labels` each keep a single
+    toe but can keep *different* ones.
 
-    Two things were measured on the 13 annotated scenes before this rule was written.
+    The verdict is the force solve's own load allocation, summed over the whole contact.
+    A contact is one unbroken run of "this foot is touching" (either toe frame on); across
+    that run each side is scored by how much force the solve put through it::
 
-    First, **the scene cannot tell the pair apart at one frame.** The two signals that
-    ought to — the wall's own normal, and which side of the toe the nearest wall point
-    lies on — each agreed with the solved load on about half the labelled steps, i.e. they
-    are coin flips. The reconstructed cloud is not accurate at the scale of a toe. So a
-    per-step decision has nothing solid to stand on, and indeed the old per-step rule
-    switched patch *while the foot stayed on the hold*: 0.38 switches per foot-contact on
-    average, more than one per contact on three scenes.
+        standing = Σ |f|[toe_under]        hooking = Σ |f|[toe_above]
 
-    Second, **the solved force does know.** 97% of sole labels carried an upward force, as
-    standing must; but 60% of the top-of-toe labels carried an upward force too, which a
-    hook cannot do — those were stances wearing the wrong name.
+    The bigger sum takes the entire run; ties keep ``toe_under`` (standing is much the
+    more common contact, and the result then never depends on evaluation order). This
+    works because each frame's force lives in a cone about that frame's *own* skin normal:
+    the solve can only load the side whose orientation can explain the body's motion, so
+    "which side carried the load" already contains the normal information — the body's
+    normals, which are exact, not the cloud's. Whole-run evidence instead of one frame,
+    so the patch cannot change while the foot stays on the hold.
 
-    So the rule reads the force, over the whole contact. A contact is one unbroken run of
-    "this foot is touching" (either toe frame on). Across that run the two stories are
-    scored by how much of the load each one actually explains::
+    Two earlier readings of the same data were refuted by eyeballing the disputed spans:
 
-        standing = Σ  support[toe_under]      (weight the sole held up)
-        hooking  = Σ −support[toe_above]      (downward pull the top of the toe took)
-
-    where ``support`` is ``f · up``, the part of the solved force that fights gravity. The
-    bigger story takes the entire run. A sole loaded downward and a toe-top loaded upward
-    both score negative, so an incoherent assignment loses on either side, and ties keep
-    ``toe_under`` — standing is much the more common contact, and the result then never
-    depends on evaluation order. Whole-run evidence instead of one frame, and the patch
-    cannot change while the foot stays on the hold.
+    * **The force's vertical sign** ("standing pushes up, hooking pulls down") renamed
+      every bat hang to a stance: a toe hooked overhead with the climber inverted holds
+      the body weight *up*, which the sign test declared impossible for a hook.
+    * **The cloud normal at the nearest scene point** votes "top of toe" for ordinary
+      stances on small holds: the nearest cloud points are the wall plane behind the
+      hold, and a standing toe-top naturally faces the wall. It is only trustworthy on
+      large volumes the cloud actually resolved — where it agrees with the load anyway.
 
     This only ever *moves* a label between the two frames of one foot. Their union — which
     is what "this foot is in contact" means, and all the scorer and the downstream stages
@@ -441,8 +432,8 @@ def resolve_toe_conflicts(labels: np.ndarray, support: np.ndarray, *, frame_name
     pairs = toe_pair_slots(frame_names)
     for under, above in pairs:
         for start, stop in _runs(out[:, under] | out[:, above]):
-            standing = support[start:stop, under].sum()
-            hooking = -support[start:stop, above].sum()
+            standing = magnitude[start:stop, under].sum()
+            hooking = magnitude[start:stop, above].sum()
             out[start:stop, under] = standing >= hooking
             out[start:stop, above] = standing < hooking
     toe_columns = sorted({column for pair in pairs for column in pair})
@@ -451,16 +442,16 @@ def resolve_toe_conflicts(labels: np.ndarray, support: np.ndarray, *, frame_name
 
 
 def force_labels(magnitude: np.ndarray, *, frame_names, valid: np.ndarray,
-                 threshold_n: float, hold_n: float | None = None, min_frames: int = 3,
-                 support: np.ndarray | None = None) -> tuple[np.ndarray, np.ndarray]:
+                 threshold_n: float, hold_n: float | None = None,
+                 min_frames: int = 3) -> tuple[np.ndarray, np.ndarray]:
     """Contact labels from solved force magnitudes ``(T, 12)`` → ``(labels, toe_split)``.
 
     A frame enters contact when it carries more than ``threshold_n`` newtons and holds it
     while it carries more than ``hold_n`` (default ``None`` = no hysteresis, i.e. one
     threshold). Runs shorter than ``min_frames`` are dropped, then each foot gets one toe
-    patch per contact (:func:`resolve_toe_conflicts` on ``support``, defaulting to
-    ``magnitude``) — the same rule the stage applies to the union, so there is only ever
-    one toe rule in the pipeline.
+    patch per contact (:func:`resolve_toe_conflicts` on the same magnitudes) — the same
+    rule the stage applies to the union, so there is only ever one toe rule in the
+    pipeline.
 
     ``toe_split`` marks the steps where both toes of a foot were labelled and the rule had
     to choose; it is a pure diagnostic.
@@ -477,6 +468,5 @@ def force_labels(magnitude: np.ndarray, *, frame_names, valid: np.ndarray,
         toe_split[:, under] |= both
         toe_split[:, above] |= both
     resolved = resolve_toe_conflicts(
-        fires, magnitude if support is None else support,
-        frame_names=frame_names, min_frames=min_frames)
+        fires, magnitude, frame_names=frame_names, min_frames=min_frames)
     return resolved, toe_split

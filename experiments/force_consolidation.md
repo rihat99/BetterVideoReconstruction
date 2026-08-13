@@ -61,6 +61,10 @@ sentences, evidence and caveats included.
 
 ## 3. The toe pair and the flicker
 
+> **Correction, next day:** the support rule shipped here read the force's
+> vertical sign, and that reading is refuted — see the last section of this
+> file. The per-span aggregation and the flicker work stand.
+
 The requested signal was a negative result, measured before designing: at one
 frame's resolution the scene cannot adjudicate the toe pair. The wall-normal
 tiebreak disagrees with the shipped force tiebreak on 48% of arbitrated steps —
@@ -150,3 +154,46 @@ both readouts (precision .55 — worth an eyeball).
 4. sport_climb still needs a rope force (or exclusion); it is the one scene
    where flicker got worse and F1 stays low (.318).
 5. The `dynamics` stage (per-joint) is frozen; retire or port it.
+
+## Correction (2026-08-13): the toe rule read the force backwards on inverted feet
+
+The user eyeballed boulder_3 and reported the opposite of what we shipped: the
+clip ends in a bat hang — the climber fully inverted, toes hooked over a volume
+— so the ending should be all `toe_above`, and we had renamed all of it
+`toe_under`. Root cause, replayed from the saved arrays: the solve itself was
+right (it put 1.12 BW through `toe_above` and its residual there is small), but
+the support rule scored the span by the force's **vertical sign** — "standing
+pushes up, hooking pulls down" — and an inverted hook holds the body weight
+*up*. The "96.9% of surviving toe_above labels carry downward force" statistic
+from the round record was circular for the same reason: every solved force is
+confined to a cone about its frame's own skin normal, so its direction mostly
+reads back foot orientation, not physics.
+
+Before redesigning, the user's proposed hierarchy — trust the cloud normal at
+the contact when it clearly separates the pair, use the force otherwise — was
+replayed offline on all 156 toe spans of the 13 scenes and eyeballed at the
+disputed spans. The cloud normal is right on large volumes (boulder_3, the
+vcRBT roof) but votes "top of toe" for ordinary stances on small holds — the
+nearest cloud points there are the wall plane behind the hold, and a standing
+toe's upper surface naturally faces the wall. Normal-first would have flipped
+long standing spans of gtIGgs, boulder_1, 33OD and 3DAg to hooks (all four
+eyeballed as stances). Scoreboard on the eight eyeballed disputed spans:
+**load-allocation vote 8/8, cloud-normal vote 4/8, shipped sign-reading 4/8.**
+
+Shipped fix (`frames-v4`): the per-span rule keeps its shape, but each side is
+scored by **how much force the solve put through it** — `Σ|f|` on `toe_under`
+vs `toe_above`, winner takes the run, ties keep `toe_under`. The cones make
+this a normal test with exact normals: the solve can only load the side whose
+orientation can explain the body's motion. The `support` (`f·up`) field and its
+plumbing are deleted; zero new knobs. boulder_3 now labels its whole inverted
+sequence `toe_above` (38–39% of frames per foot, `toe_under` 0), vcRBT's roof
+toe hook flips to `toe_above`, and 2nwG's board stance flips back to
+`toe_under`. The union — and therefore the judge's F1 — is invariant to the
+rule by construction; the evidence is the eyeballs above and the downstream
+physics, which inherits the frame's normal for its friction cones.
+
+Also noted while diagnosing (not acted on): boulder_3's force solve ran with
+the fallback gravity `[0,1,0]` (GeoCalib `reliable=false`; its own per-frame
+estimates disagree with each other by up to ~35°, so the flag is doing its
+job) — a ~25° gravity error rescales the residual the solve explains but did
+not change the allocation verdicts here.
