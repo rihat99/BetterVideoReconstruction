@@ -272,7 +272,8 @@ merge_sdf_m = 0.08     # re-grip guard: it stayed within this signed distance of
 # Everything else about the solve is a fixed, measured choice in the code, not a knob.
 [contact_force]
 theta_bw = 0.05            # fraction of body weight at which a frame counts as loaded
-lambda_tau = 0.0           # per-joint effort rows: wired, measured neutral (F1 .719 off / .717 on)
+theta_hold_bw = 0.03       # …and keeps the label until the load drops below this (hysteresis;
+                           # set equal to theta_bw for a single threshold)
 gap_dstar_m = 0.05         # gap price: force this far from the scene is already expensive
 stillness_vstar_mps = 0.2  # stillness price: force on a frame drifting this fast is expensive
 

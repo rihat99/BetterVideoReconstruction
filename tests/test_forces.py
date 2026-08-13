@@ -9,7 +9,8 @@ import pytest
 import torch
 
 from tools.human_optim.forces import (
-    NO_SCENE_M, ForceKnobs, contact_axes, force_labels, min_span, resolve_toe_conflicts,
+    NO_SCENE_M, ForceKnobs, close_gaps, force_labels, hysteresis, min_span,
+    resolve_toe_conflicts,
 )
 from tools.human_optim.friction import cone_generators
 
@@ -50,31 +51,132 @@ def test_zero_coefficients_give_exactly_zero_force() -> None:
     assert torch.count_nonzero(force) == 0
 
 
-def test_frame_axis_separates_the_two_toe_frames() -> None:
-    """``"frame"`` axes are the negated skin normal, so a toe pair gets opposite cones."""
-    points = torch.zeros(1, 2, 3)
-    normals = torch.tensor([[[0.0, -1.0, 0.0], [0.0, 1.0, 0.0]]])     # under faces down, above up
-    axes, valid = contact_axes(points, normals, torch.zeros(0, 3), torch.zeros(0, 3),
-                               mode="frame", k=4, max_dist_m=1.0)
-    assert bool(valid.all()), "a frame axis never needs the scene, so it is always usable"
+def test_opposite_skin_normals_give_opposite_cones() -> None:
+    """The cone axis is the negated skin normal, so a toe pair can never push the same way.
+
+    ``toe_under`` faces down out of the sole and ``toe_above`` faces up out of the top of
+    the toe, so the surfaces they can be pushed by are on opposite sides of the toe. That
+    separation is what makes "standing" and "hooking" different hypotheses at all.
+    """
+    skin = torch.tensor([[[0.0, -1.0, 0.0], [0.0, 1.0, 0.0]]])       # under faces down, above up
+    axes = -skin
     torch.testing.assert_close(axes[0, 0], torch.tensor([0.0, 1.0, 0.0]))
-    torch.testing.assert_close(axes[0, 1], torch.tensor([0.0, -1.0, 0.0]))
     assert float((axes[0, 0] * axes[0, 1]).sum()) == pytest.approx(-1.0)
 
+    generators = cone_generators(axes, math.tan(math.radians(45.0)))  # (1, 2, 4, 3)
+    under_up = (generators[0, 0] * axes[0, 0]).sum(-1)
+    above_up = (generators[0, 1] * axes[0, 0]).sum(-1)
+    assert torch.all(under_up > 0), "every edge of the sole's cone pushes the body up"
+    assert torch.all(above_up < 0), "every edge of the toe-top's cone pulls the body down"
 
-def test_toe_winner_take_all_keeps_the_stronger_toe() -> None:
-    """At most one toe frame per foot survives; exact ties keep ``toe_under``."""
-    magnitude = np.tile(np.array([[80.0, 100.0, 0.0, 0.0]], dtype=np.float32), (5, 1))
-    labels, split = force_labels(magnitude, frame_names=_TOE_NAMES, valid=np.ones(5, bool),
-                                 threshold_n=30.0, min_frames=3)
-    assert labels[0].tolist() == [False, True, False, False]
-    assert split[0].tolist() == [True, True, False, False], "both fired, so the pair was split"
 
-    tied = np.tile(np.array([[100.0, 100.0, 0.0, 0.0]], dtype=np.float32), (5, 1))
-    tie_labels, _ = force_labels(tied, frame_names=_TOE_NAMES, valid=np.ones(5, bool),
-                                 threshold_n=30.0, min_frames=3)
-    assert tie_labels[0].tolist() == [True, False, False, False]
+# ── the toe rule: standing vs hooking, decided once per contact ───────────────
 
+def test_toe_rule_gives_a_supported_foot_to_the_sole() -> None:
+    """An upward-loaded foot is standing, so the whole contact is ``toe_under``."""
+    labels = np.zeros((6, 4), bool)
+    labels[:, 0] = labels[:, 1] = True                # both toe frames claim the contact
+    support = np.zeros((6, 4), dtype=np.float32)
+    support[:, 0] = 40.0                              # the sole holds the body up
+    support[:, 1] = 5.0                               # the toe top is loaded upward too — nonsense
+    resolved = resolve_toe_conflicts(labels, support, frame_names=_TOE_NAMES, min_frames=3)
+    assert resolved[:, 0].all() and not resolved[:, 1].any()
+
+
+def test_toe_rule_gives_a_hanging_foot_to_the_top_of_the_toe() -> None:
+    """A downward-pulled foot is hooking, so the whole contact is ``toe_above``.
+
+    This is the only way ``toe_above`` can win, and it is exactly what a toe hook does.
+    """
+    labels = np.zeros((6, 4), bool)
+    labels[:, 0] = labels[:, 1] = True
+    support = np.zeros((6, 4), dtype=np.float32)
+    support[:, 0] = 5.0                               # a trace of upward load on the sole
+    support[:, 1] = -60.0                             # the toe top is pulled down hard: a hook
+    resolved = resolve_toe_conflicts(labels, support, frame_names=_TOE_NAMES, min_frames=3)
+    assert resolved[:, 1].all() and not resolved[:, 0].any()
+
+
+def test_toe_rule_never_switches_patch_inside_one_contact() -> None:
+    """The regression this rule exists for: the patch used to flip mid-foothold.
+
+    Per step the load wanders between the two frames; the whole contact still has to come
+    out as one patch, because a foot does not change which side of the toe is touching
+    while it stays on the hold.
+    """
+    steps = 12
+    labels = np.zeros((steps, 4), bool)
+    labels[:, 0] = labels[:, 1] = True
+    support = np.zeros((steps, 4), dtype=np.float32)
+    support[:, 0] = 30.0
+    support[:, 1] = -25.0
+    support[4:7, 0] = 2.0                             # three steps where the sole looks weak
+    support[4:7, 1] = -80.0                           # and the hook story looks strong
+    resolved = resolve_toe_conflicts(labels, support, frame_names=_TOE_NAMES, min_frames=3)
+    for column in (0, 1):
+        assert len(set(resolved[:, column].tolist())) == 1, "the patch changed inside a contact"
+    assert not (resolved[:, 0] & resolved[:, 1]).any()
+
+
+def test_toe_rule_decides_each_contact_separately() -> None:
+    """Two contacts of the same foot are two decisions — the foot may stand, then hook."""
+    labels = np.zeros((14, 4), bool)
+    labels[0:5, 0] = labels[0:5, 1] = True            # first contact
+    labels[9:14, 0] = labels[9:14, 1] = True          # second contact, after a real release
+    support = np.zeros((14, 4), dtype=np.float32)
+    support[0:5, 0] = 50.0                            # standing
+    support[9:14, 1] = -50.0                          # hooking
+    resolved = resolve_toe_conflicts(labels, support, frame_names=_TOE_NAMES, min_frames=3)
+    assert resolved[0:5, 0].all() and not resolved[0:5, 1].any()
+    assert resolved[9:14, 1].all() and not resolved[9:14, 0].any()
+
+
+def test_toe_rule_leaves_the_foot_contact_itself_untouched() -> None:
+    """It only moves the label between the two frames; "this foot is touching" is invariant.
+
+    That invariance is why the rule cannot change what the scorer or any downstream stage
+    sees — only which patch of the toe carries the name.
+    """
+    generator = np.random.default_rng(0)
+    labels = generator.random((40, 4)) < 0.4
+    support = generator.normal(size=(40, 4)).astype(np.float32) * 30.0
+    resolved = resolve_toe_conflicts(labels, support, frame_names=_TOE_NAMES, min_frames=1)
+    for under, above in ((0, 1), (2, 3)):
+        before = labels[:, under] | labels[:, above]
+        after = resolved[:, under] | resolved[:, above]
+        assert (before == after).all(), "the foot's own contact must not move"
+        assert not (resolved[:, under] & resolved[:, above]).any()
+
+
+def test_toe_conflicts_keep_a_label_nothing_contests() -> None:
+    """With no force either way the contact stays on the sole — standing is the default."""
+    labels = np.zeros((6, 4), bool)
+    labels[:, 0] = True
+    resolved = resolve_toe_conflicts(labels, np.zeros((6, 4), dtype=np.float32),
+                                     frame_names=_TOE_NAMES, min_frames=3)
+    assert resolved[:, 0].all()
+    assert not resolved[:, 1].any()
+
+
+def test_union_of_the_two_readouts_never_holds_both_toes() -> None:
+    """Geometry keeps one toe, the force keeps the other; the union must not hold both."""
+    steps = 8
+    geometric = np.zeros((steps, 4), bool)
+    geometric[:, 0] = True                             # detector says toe_under_left
+    support = np.zeros((steps, 4), dtype=np.float32)
+    support[2:7, 1] = -400.0                           # the force says the toe top is hanging
+    magnitude = np.abs(support)
+    force, _ = force_labels(magnitude, frame_names=_TOE_NAMES, valid=np.ones(steps, bool),
+                            threshold_n=30.0, min_frames=3, support=support)
+    union = geometric | force
+    assert (union[:, 0] & union[:, 1]).sum() > 0, "the union really does hold both toes"
+
+    resolved = resolve_toe_conflicts(union, support, frame_names=_TOE_NAMES, min_frames=3)
+    assert not (resolved[:, 0] & resolved[:, 1]).any(), "at most one toe per foot per step"
+    assert resolved[:, 1].all(), "the hook explains the whole contact, so it takes all of it"
+
+
+# ── thresholds, spans and gaps ────────────────────────────────────────────────
 
 def test_threshold_and_min_span_drop_weak_and_brief_load() -> None:
     """Below-threshold load never fires, and a run shorter than ``min_frames`` is dropped."""
@@ -105,49 +207,51 @@ def test_min_span_is_per_column_and_leaves_long_runs_alone() -> None:
     assert kept[:, 1].tolist() == [False, False, True, True, True]
 
 
-def test_union_of_the_two_readouts_never_holds_both_toes() -> None:
-    """The regression this exists for: geometry keeps one toe, force keeps the other.
-
-    Each readout on its own already keeps a single toe per foot, so neither catches this —
-    only the union does, and it must resolve it rather than hold both.
-    """
-    steps = 8
-    geometric = np.zeros((steps, 4), bool)
-    geometric[:, 0] = True                       # detector says toe_under_left, all steps
-    magnitude = np.zeros((steps, 4), dtype=np.float32)
-    magnitude[2:7, 1] = 400.0                    # force says toe_above_left, overlapping
-    force, _ = force_labels(magnitude, frame_names=_TOE_NAMES, valid=np.ones(steps, bool),
-                            threshold_n=30.0, min_frames=3)
-    union = geometric | force
-    assert (union[:, 0] & union[:, 1]).sum() == 5, "the union really does hold both toes"
-
-    resolved = resolve_toe_conflicts(union, magnitude, frame_names=_TOE_NAMES, min_frames=3)
-    assert (resolved[:, 0] & resolved[:, 1]).sum() == 0, "at most one toe per foot per step"
-    # Force carried the load on steps 2..6, so it wins those; the detector keeps steps 0-1
-    # and 7, but neither remnant is 3 frames long, so the minimum-duration pass drops them.
-    assert resolved[:, 1].tolist() == [False, False, True, True, True, True, True, False]
-    assert not resolved[:, 0].any()
+def test_close_gaps_fills_short_holes_but_not_real_releases() -> None:
+    """A one-frame blink is flicker; a long gap is the limb genuinely letting go."""
+    mask = np.zeros((12, 2), bool)
+    mask[0:4, 0] = True
+    mask[5:9, 0] = True              # a one-frame hole at step 4 — flicker
+    mask[0:3, 1] = True
+    mask[8:12, 1] = True             # a five-frame hole — a real release
+    filled = close_gaps(mask, 3)
+    assert filled[:, 0].tolist() == [True] * 9 + [False] * 3
+    assert filled[:, 1].tolist() == mask[:, 1].tolist()
 
 
-def test_toe_conflicts_keep_a_geometric_label_the_force_does_not_contest() -> None:
-    """Exclusivity only fires on a genuine conflict — it is not a blanket force override."""
-    steps = 6
-    labels = np.zeros((steps, 4), bool)
-    labels[:, 0] = True                          # toe_under_left only; nothing contests it
-    resolved = resolve_toe_conflicts(labels, np.zeros((steps, 4), dtype=np.float32),
-                                     frame_names=_TOE_NAMES, min_frames=3)
-    assert resolved[:, 0].all()
-    assert not resolved[:, 1].any()
+def test_close_gaps_leaves_the_ends_of_the_clip_alone() -> None:
+    """There is no contact on the far side of a leading or trailing gap to bridge to."""
+    mask = np.zeros((8, 1), bool)
+    mask[2:6, 0] = True
+    filled = close_gaps(mask, 3)
+    assert filled[:, 0].tolist() == mask[:, 0].tolist()
 
 
-def test_toe_conflict_tie_keeps_toe_under() -> None:
-    """Equal force on both toes is resolved deterministically, never by column order."""
-    labels = np.ones((5, 4), bool)
-    resolved = resolve_toe_conflicts(labels, np.full((5, 4), 100.0, dtype=np.float32),
-                                     frame_names=_TOE_NAMES, min_frames=3)
-    assert resolved[:, 0].all() and not resolved[:, 1].any()
-    assert resolved[:, 2].all() and not resolved[:, 3].any()
+def test_hysteresis_holds_a_span_through_a_dip() -> None:
+    """Entering needs the high threshold; staying only needs the low one."""
+    series = np.array([[0.0], [10.0], [4.0], [4.0], [1.0], [4.0]], dtype=np.float32)
+    held = hysteresis(series, enter_above=8.0, hold_above=3.0)
+    assert held[:, 0].tolist() == [False, True, True, True, False, False]
+    single = hysteresis(series, enter_above=8.0, hold_above=8.0)
+    assert single[:, 0].tolist() == [False, True, False, False, False, False]
 
+
+def test_force_labels_hysteresis_extends_a_contact_it_never_starts_one() -> None:
+    """The hold threshold can only lengthen a span that the enter threshold already opened."""
+    magnitude = np.zeros((10, 4), dtype=np.float32)
+    magnitude[2:5, 2] = 100.0        # clearly loaded: opens the span
+    magnitude[5:8, 2] = 40.0         # fading, but never released
+    magnitude[0:2, 3] = 40.0         # never crosses the enter threshold at all
+    plain, _ = force_labels(magnitude, frame_names=_TOE_NAMES, valid=np.ones(10, bool),
+                            threshold_n=60.0, min_frames=3)
+    held, _ = force_labels(magnitude, frame_names=_TOE_NAMES, valid=np.ones(10, bool),
+                           threshold_n=60.0, hold_n=30.0, min_frames=3)
+    assert plain[:, 2].sum() == 3
+    assert held[:, 2].sum() == 6, "the fading tail stays in contact"
+    assert not held[:, 3].any(), "a frame that never crossed the enter threshold stays off"
+
+
+# ── the no-scene policy and the shipped recipe ────────────────────────────────
 
 def test_no_scene_sentinel_is_not_a_distance() -> None:
     """``frame_scene_signals`` reports ``finfo.max`` for "no scene point near"; the force
@@ -162,10 +266,12 @@ def test_no_scene_sentinel_is_not_a_distance() -> None:
     assert float(datum[0]) == pytest.approx(0.02)
 
 
-def test_default_knobs_are_the_documented_recipe() -> None:
-    """The shipped defaults are the measured recipe, not whatever was last tried."""
+def test_the_solve_has_five_knobs_and_they_are_the_documented_recipe() -> None:
+    """The shipped defaults are the measured recipe, and there is nothing else to tune."""
     knobs = ForceKnobs()
-    assert knobs.cone_axis == "frame"
-    assert knobs.relative_gap is True
-    assert math.isinf(knobs.candidate_max_dist_m)
+    assert set(vars(knobs)) == {"half_angle_deg", "stillness_vstar_mps", "gap_dstar_m",
+                                "mag_weight", "iters"}
     assert knobs.half_angle_deg == pytest.approx(45.0)
+    assert knobs.stillness_vstar_mps == pytest.approx(0.2)
+    assert knobs.gap_dstar_m == pytest.approx(0.05)
+    assert knobs.iters == 2000

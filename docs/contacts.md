@@ -74,21 +74,18 @@ The normal survives in exactly one place, with no knob attached.
 `toe_under` and `toe_above` sit millimetres apart on the same toe. Every gate
 above accepts or rejects them together, so both fire on the same hold — and then
 the body appears to be standing on a foothold and hooking under it at the same
-time. Only their normals can separate them, because those point opposite ways.
+time. Their normals point opposite ways, so inside this detector the one whose
+normal looks more into the wall keeps the step and the other is dropped before
+hysteresis; ties keep `toe_under`. That is the only thing a frame normal decides
+here, and it has no knob.
 
-So: assume at most one of a pair is really in contact at any step. (Both at once
-is physically possible and deliberately ignored — it is rare, and pretending
-otherwise costs more than it buys.) At a step where **both** toes of one foot are
-near enough to hold a contact, keep the one whose normal looks more into the wall
-and drop the other. Exact ties keep `toe_under`, so the answer never depends on
-evaluation order. The drop happens before hysteresis, so the loser can neither
-start nor continue a span there — the output can never show both toes of a foot
-touching at the same step. Standing on a foothold lights `toe_under`; hooking the
-toe *under* a hold — the foot pulling up rather than pressing down — lights
-`toe_above`.
-
-The count of steps where the tiebreak had to choose is printed per frame by
-`estimate_contacts` (`toe-tiebreak suppressed=`).
+That tiebreak is all the `kinematics_1` auto-labels have to go on, since no force
+has been solved yet when they are detected. In the standalone readout it is
+**superseded**: the force witness decides the pair for a whole contact at a time,
+and its verdict is the last word — see
+[`force_contacts.md`](force_contacts.md#step-8-the-toe-rule--standing-or-hooking).
+Measured on the 13 annotated scenes, the readout's final labels come out
+bit-identical whether this per-step tiebreak runs or not.
 
 ## From a signal to a label
 
@@ -105,6 +102,13 @@ the re-grip guard: a hand that left the wall and came back is two contacts, not
 one. Bridged frames are flagged in the output (`merged`) so a consumer can ignore
 them.
 
+**One debounce over the union.** After the geometric and force labels are
+combined, gaps shorter than `min_frames` are filled. Each readout already drops
+its own too-short spans, but the union puts two of them end to end and can leave
+a one- or two-frame hole that neither arm ever saw. The rule is symmetric and
+uses the same number: a contact lasts at least `min_frames`, and so does a
+release.
+
 ## The force witness: contacts the distance gate cannot see
 
 Everything above needs the contact frame to be **near** the scene. That works when
@@ -112,80 +116,19 @@ the reconstructed depth is good. When it is not — the body floats a hand's wid
 off the wall, or a limb came out too short — the frame is never near anything, the
 gate never fires, and a real contact is simply lost.
 
-So the stage asks physics a second question. Freeze the pose and run inverse
-dynamics with nothing touching the body. The answer says what force the body would
-need to move the way it does while falling freely. Six of those numbers belong to
-the **root** (the pelvis), which has no muscle behind it: whatever is left there
-had to come in through a contact. That leftover is the **residual** — with no
-contacts at all it is simply the body's weight, about 600 N, entirely unexplained.
+So the stage asks physics a second question: with the pose frozen, how much force
+is unexplained, and which points on the body could have supplied it? A frame that
+has to carry real load is in contact, whatever the distance says. That label is
+**unioned** onto the geometric one — force only ever adds — with one exception,
+the toe pair, where the force decides which side of the toe is touching.
 
-The stage then solves for the world forces at the 12 contact frames that explain
-the residual. Two things keep the answer meaningful.
+On the 13 annotated scenes it takes pooled F1 from **.488 to .751**, almost
+entirely by recall, and rescues the three known floater clips from .02 / .09 / .26
+to .87 / .85 / .82.
 
-**A friction cone on every frame.** A cone is the set of pushes a surface can
-actually deliver: straight out along the surface, or up to 45° off it, never a
-pull. Each frame's cone points along the direction that patch of skin faces
-(negated — the wall pushes back the way the skin looks). Without cones a single
-free hand can absorb almost any residual and the answer says nothing about *which*
-limb touched; that is exactly how an earlier attempt failed. With cones, a frame
-can only explain the part of the residual it is physically oriented to explain.
-It also settles the toe pair for free: `toe_under` and `toe_above` face opposite
-ways, so their cones are opposite and the solve picks one.
-
-**Two prices.** Force on a frame that is drifting is expensive (a sliding limb
-carries little load), and force far from the scene is expensive. The gap price is
-measured **relative to the nearest contact frame of that step**, not as an
-absolute distance. That is the whole floater rescue: on a body where every frame
-is far from the wall, absolute pricing would make all force unaffordable and the
-solve would leave the body's weight unexplained — on exactly the bodies this
-exists to rescue. Relative pricing still prefers the nearer frame, but the weight
-has to land somewhere.
-
-**No scene data is not "far away".** When no scene point is anywhere near a step's
-frames, that is missing evidence, and the frame is simply not allowed to carry
-force. Confusing the two once cost a whole ablation its meaning.
-
-A frame that has to carry more than `theta_bw` of body weight (default 5%) for at
-least 3 frames is called in contact. Knee frames are excluded — measured, their
-force labels are almost all false. The result is **unioned** onto the geometric
-label: force only ever adds.
-
-**With one exception, and it is the toe pair.** Each readout keeps at most one toe
-per foot, but they can keep *different* ones, and the union would then hold both —
-which the physics forbids. So after the union, wherever both toes of a foot are
-labelled, the force decides: the toe carrying the larger solved magnitude survives
-(ties keep `toe_under`), even if that drops a geometric label. Exclusivity outranks
-add-only, because "at most one toe per foot" is a statement about the world while
-add-only is only a policy about how two readouts combine. Dropping a step can split
-a surviving span, so the four toe columns get a final minimum-duration pass. Before
-this rule the union held both toes on 838 steps across 12 of the 13 scenes; now it
-is 0 everywhere.
-
-The solve is a convex problem — a quadratic cost over nonnegative cone
-coefficients — so projected gradient descent reaches the one true optimum, and the
-stage reports a KKT number that is near zero when it got there. It takes a few
-seconds per scene.
-
-Honesty rule, same as everywhere else here: the stillness used to price force is
-the **persisted pre-enforcement drift** (`drift_pre`). A body whose `drift_pre` is
-missing is a hard error, never a silent re-measurement — otherwise the optimizer's
-own contact damping would be voting for its own labels.
-
-What it is worth, on the 13 annotated scenes (see the round report for the full
-tables): pooled F1 rises from **.488 to .721** at the default threshold — precision
-.869 → .858, recall .340 → .623, so the gain is almost entirely recall at nearly
-unchanged precision. Every scene improves, and the three known floaters go from
-.02 / .09 / .26 to **.81 / .79 / .80**.
-
-Three caveats travel with those numbers. On eleven never-tuned held-out scenes the
-same frozen recipe gains much less — pooled .789 → .837, per-source macro
-.725 → .775, with 2 of 5 source videos slightly worse — because those scenes have
-good geometry and the distance gate already works there. The force witness pays
-where the reconstruction is bad, and there it pays a lot: the one held-out scene
-with poor geometry went .519 → .801. A geometry-only control that thresholds the
-same *relative* distance recovers much of one floater on its own, so the physics is
-not the whole story. And `sport_climb` has a climber on a rope, a force this model
-does not know about, so its numbers are reported separately.
+**[`force_contacts.md`](force_contacts.md) is the full explanation** — the
+residual, the friction cones, the two prices, the no-evidence policy, the label
+rules and the toe rule, with the measured evidence and its caveats.
 
 ## One detector, two callers
 
@@ -216,7 +159,12 @@ All in `configs/human_optimization.toml`.
 `[contacts]` — the readout: `close_thresh_m` / `exit_thresh_m` (hysteresis),
 `min_frames`, `max_dist_m` and `conf_thresh` (the surface guards), `conf_drop_q`
 and `normal_k` (scene-cloud loading), `prune_margin_m`, and the three `merge_*`
-knobs.
+knobs. `min_frames` also sets the union debounce, in both directions.
+
+`[contact_force]` — the force witness: `theta_bw` / `theta_hold_bw` (the load
+thresholds a label enters and holds at), `gap_dstar_m` and `stillness_vstar_mps`
+(the two prices). Four knobs; everything else about the solve is fixed in code.
+See [`force_contacts.md`](force_contacts.md#the-knobs).
 
 `[contact_gate]` — `window_s` and `still_m`, the stillness gate. `still_m` is the
 recall knob: raise it and more marginal contacts survive. It is the *only* knob
@@ -229,7 +177,8 @@ that moves both the kin1 detector and the readout at once.
 ## Output
 
 `human_optim/contacts_<tag>.npz`, `contact_label_schema = 2`,
-`contact_label_method = "frames-v1"`.
+`contact_label_method = "frames-v2"` (`v1` = geometry only; `v2` adds the force
+witness).
 
 | field | shape | meaning |
 |---|---|---|
@@ -239,6 +188,12 @@ that moves both the kin1 detector and the readout at once.
 | `frame_distance_cm` | `(P, N, 12)` f32 | Euclidean distance to the nearest scene point, cm |
 | `frame_normal_dot` | `(P, N, 12)` f32 | how well the two normals face, in [−1, 1] |
 | `frame_drift_m` | `(P, N, 12)` f32 | the net window drift the stillness gate read |
+| `frame_force` | `(P, N, 12, 3)` f32 | the solved world contact force, newtons |
+| `frame_force_bw` | `(P, N, 12)` f32 | its magnitude as a fraction of body weight |
+| `frame_force_label` | `(P, N, 12)` bool | the force decision, before the union |
+| `frame_wall_dot` | `(P, N, 12)` f32 | cone direction vs the wall's normal, at the force search radius |
+| `body_weight_n` | `(P,)` f32 | baked body mass × g |
+| `residual_force_before_n` / `_after_n` | `(P, N)` f32 | unexplained root force, before and after the solve |
 | `contact_frame_names` | `(12,)` | frame names, in label order |
 | `frame_parent_joint` | `(12,)` i64 | parent joint of each frame (52-joint index) |
 | `frame_vertex` | `(12,)` i64 | mesh vertex each frame sits on |

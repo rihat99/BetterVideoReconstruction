@@ -6,27 +6,28 @@ tracked person, every video frame and each of the 12 **contact frames** — the 
 mesh points (toes, heels, knees, palms, fingertips) baked onto the body, each
 carrying its own outward surface normal: *is this point touching the scene?*
 
-Four steps, no more:
+Two readouts answer it, and the stage unions them.
 
-  1. pose each person per frame (re-applying the stored global scale about the
-     pelvis) and read the contact-frame world poses straight out of forward
-     kinematics — position and outward normal, no mesh work;
-  2. for every contact frame find the nearest scene point: signed perpendicular
-     distance, Euclidean distance, that point's confidence, and how well the two
-     normals face each other;
-  3. run the shared detector (:func:`~tools.human_optim.contacts.detect_frame_contacts`)
-     — surface + **normal window** + stillness, then hysteresis and a minimum
-     duration;
-  4. bridge short flicker gaps behind a re-grip guard (bridged frames flagged in
-     ``merged``).
+**Geometry** — pose each person per frame (re-applying the stored global scale about
+the pelvis) and read the contact-frame world poses straight out of forward kinematics;
+for each one find the nearest scene point; then run the shared detector
+(:func:`~tools.human_optim.contacts.detect_frame_contacts`): near the wall AND still,
+with hysteresis, a minimum duration and a span merge behind a re-grip guard (bridged
+frames flagged in ``merged``).
 
-The normal window is what makes toe hooks work: ``toe_under`` and ``toe_above`` sit
-millimetres apart on the same toe, but their skin faces opposite ways, so at most
-one of them can be touching a given hold.
+**Force** — freeze the pose and ask what force is unexplained, then solve which of the
+12 frames could have supplied it (:mod:`tools.human_optim.forces`). A frame that has to
+carry real load is in contact whatever its distance says, which is how a contact on a
+badly reconstructed body is recovered at all. See ``docs/force_contacts.md``.
 
-Stillness reads the body's persisted pre-enforcement drift (``drift_pre``) when
-present — motion measured before any contact attraction acted — and falls back to
-drift re-measured on the final body otherwise.
+The union is then debounced once (a contact lasts at least ``min_frames``, and so does a
+release) and each foot is given a single toe patch per contact — the force decides
+whether it was standing on the hold (``toe_under``) or hooked under it (``toe_above``),
+once for the whole contact rather than per step.
+
+Stillness reads the body's persisted pre-enforcement drift (``drift_pre``) — motion
+measured before any contact attraction acted. The force solve requires it and will not
+re-measure drift on an enforced body.
 
 Renders ``contacts_<tag>_overlay.mp4``: the 12 projected contact points, **red** in
 contact / **green** otherwise.
@@ -66,7 +67,7 @@ from tools.human_optim import (  # noqa: E402
 )
 from tools.human_optim import paths  # noqa: E402
 from tools.human_optim.forces import (  # noqa: E402
-    ForceKnobs, force_labels, resolve_toe_conflicts, solve_person_forces,
+    ForceKnobs, close_gaps, force_labels, resolve_toe_conflicts, solve_person_forces,
 )
 from tools.human_optim.qmath import normalize_q  # noqa: E402
 
@@ -77,16 +78,8 @@ _DEFAULT_CONFIG = _REPO_ROOT / "configs" / "human_optimization.toml"
 #: schema 2 keep working; ``contact_label_method`` is what distinguishes the two.
 CONTACT_LABEL_SCHEMA = 2
 
-#: Fixed internals of the force witness — measured choices, not knobs. Cone axis = the
-#: frame's own outward skin normal negated — the only source that separates the two toe
-#: frames, and it needs no scene cloud at all, so it survives a misregistered body (a
-#: sign-corrected scene normal measured the same to within .002 F1, for more machinery);
-#: relative gap pricing and no distance cap, which are what let a floating body still be
-#: assigned force; and a 0.2 m characteristic lever arm that puts the root torque rows into
-#: force units, so the six root rows are one wrench in one unit.
-_FORCE_INTERNALS = dict(cone_axis="frame", use_motion=True, relative_gap=True,
-                        candidate_max_dist_m=float("inf"), torque_length_m=0.2)
-CONTACT_LABEL_METHOD = "frames-v2"   # v1 = geometry only; v2 adds the force witness
+CONTACT_LABEL_METHOD = "frames-v3"   # v1 = geometry only; v2 adds the force witness;
+                                     # v3 the toe support rule, debounce + force hysteresis
 
 
 def _load_config(path: Path) -> dict:
@@ -110,7 +103,7 @@ def _load_config(path: Path) -> dict:
                          "detector — contact is measured against the scene cloud only")
     f = cfg.setdefault("contact_force", {})
     f.setdefault("theta_bw", 0.05)          # a frame carrying this fraction of body weight is loaded
-    f.setdefault("lambda_tau", 0.0)         # weight of the per-joint effort residual rows
+    f.setdefault("theta_hold_bw", 0.03)     # …and stays loaded until it drops below this (hysteresis)
     f.setdefault("gap_dstar_m", 0.05)       # gap price: force this far from the scene is expensive
     f.setdefault("stillness_vstar_mps", 0.2)  # stillness price: force on a limb this fast is expensive
     g = cfg.setdefault("contact_gate", {})
@@ -228,9 +221,8 @@ def run(source: str | Path, predictions_dir: str | Path, config_path: str | Path
     num_contact_frames = len(frame_names)
     knee_columns = [i for i, n in enumerate(frame_names) if n.startswith("knee")]
     cf = cfg["contact_force"]
-    force_knobs = ForceKnobs(
-        lambda_tau=float(cf["lambda_tau"]), gap_dstar_m=float(cf["gap_dstar_m"]),
-        stillness_vstar_mps=float(cf["stillness_vstar_mps"]), **_FORCE_INTERNALS)
+    force_knobs = ForceKnobs(gap_dstar_m=float(cf["gap_dstar_m"]),
+                             stillness_vstar_mps=float(cf["stillness_vstar_mps"]))
 
     # Gravity for the force solve: GeoCalib's world-down when the stage ran, else VGGT's
     # world-down convention — the same fallback the dynamics stage uses.
@@ -251,6 +243,7 @@ def run(source: str | Path, predictions_dir: str | Path, config_path: str | Path
     frame_force = np.zeros((*shape, 3), dtype=np.float32)
     frame_force_bw = np.zeros(shape, dtype=np.float32)
     frame_force_label = np.zeros(shape, dtype=bool)
+    frame_wall_dot = np.full(shape, -1.0, dtype=np.float32)
     body_weight_n = np.zeros(num_people, dtype=np.float32)
     residual_before_n = np.zeros((num_people, num_frames), dtype=np.float32)
     residual_after_n = np.zeros((num_people, num_frames), dtype=np.float32)
@@ -312,18 +305,24 @@ def run(source: str | Path, predictions_dir: str | Path, config_path: str | Path
         force_label, _ = force_labels(
             force_solution.magnitude, frame_names=frame_names, valid=valid_mask[p],
             threshold_n=float(cf["theta_bw"]) * force_solution.body_weight_n,
-            min_frames=int(cc["min_frames"]))
+            hold_n=float(cf["theta_hold_bw"]) * force_solution.body_weight_n,
+            min_frames=int(cc["min_frames"]), support=force_solution.support)
         force_label[:, knee_columns] = False        # force on a knee is ~all false positives
-        contact = contact | torch.as_tensor(force_label, device=contact.device)
-
-        contact_np = contact.cpu().numpy()
+        contact_np = contact.cpu().numpy() | force_label
         contact_np[~valid_mask[p]] = False
+
+        # One debounce over the union. Each readout already drops its own too-short spans,
+        # but the union puts two of them end to end and can leave a one- or two-frame hole
+        # between them that neither arm ever saw. The same number governs both directions:
+        # a contact lasts at least min_frames, and so does a release.
+        contact_np = close_gaps(contact_np, int(cc["min_frames"]))
+        contact_np[~valid_mask[p]] = False          # never bridge across untracked steps
+
         # Both readouts keep one toe per foot, but they can keep DIFFERENT ones, and the
-        # union would then hold both at once. Let the force break it — that is precisely
-        # what a solved contact force is good for — and accept that this can drop a
-        # geometric label, because "at most one toe per foot" is physics and add-only is
-        # only bookkeeping.
-        contact_np = resolve_toe_conflicts(contact_np, force_solution.magnitude,
+        # union would then hold both at once. The toe rule settles it for the whole contact
+        # at once — see resolve_toe_conflicts. It only moves a label between the two frames
+        # of one foot, so "this foot is in contact" is untouched.
+        contact_np = resolve_toe_conflicts(contact_np, force_solution.support,
                                            frame_names=frame_names,
                                            min_frames=int(cc["min_frames"]))
         merged_np = merged.cpu().numpy() & contact_np      # a bridged step that lost its
@@ -331,6 +330,7 @@ def run(source: str | Path, predictions_dir: str | Path, config_path: str | Path
         frame_force[p] = force_solution.forces
         frame_force_bw[p] = force_solution.magnitude / force_solution.body_weight_n
         frame_force_label[p] = force_label
+        frame_wall_dot[p] = force_solution.normal_dot
         body_weight_n[p] = force_solution.body_weight_n
         residual_before_n[p] = force_solution.residual_force_before_n
         residual_after_n[p] = force_solution.residual_force_after_n
@@ -367,11 +367,12 @@ def run(source: str | Path, predictions_dir: str | Path, config_path: str | Path
         frame_force=frame_force,                 # (P,N,12,3) world contact force, newtons
         frame_force_bw=frame_force_bw,           # (P,N,12) the same as a fraction of body weight
         frame_force_label=frame_force_label,     # (P,N,12) the force decision BEFORE the union
+        frame_wall_dot=frame_wall_dot,           # (P,N,12) dot(cone axis, wall normal), force search radius
         body_weight_n=body_weight_n,             # (P,) baked mass x g
         residual_force_before_n=residual_before_n,   # (P,N) root residual with no contact force
         residual_force_after_n=residual_after_n,     # (P,N) and after the solve
         force_theta_bw=np.float32(cf["theta_bw"]),
-        force_lambda_tau=np.float32(cf["lambda_tau"]),
+        force_theta_hold_bw=np.float32(cf["theta_hold_bw"]),
         force_gap_dstar_m=np.float32(cf["gap_dstar_m"]),
         force_stillness_vstar_mps=np.float32(cf["stillness_vstar_mps"]),
         frame_sdf_cm=frame_sdf_cm,
