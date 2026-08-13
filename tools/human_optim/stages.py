@@ -29,8 +29,6 @@ from tools.smplx_robot.vertex_weights import geodesic_endeffector_weights
 
 from . import paths
 from .camera import fold_root_to_world, project, transform_points, world_from_cam
-from .confidence import (
-    CONTACT_CONFIDENCE_METHOD, CONTACT_CONFIDENCE_SCHEMA, SCENE_FREE_CONFIDENCE_METHOD)
 from .config import HumanOptimConfig
 from .keypoints import build_correspondence, visibility_weights
 from .optimizer import PhaseSpec, optimize_person
@@ -629,14 +627,14 @@ def _contact_labels(contacts_p: np.ndarray, ann_names: list[str],
     return lab
 
 
-def load_auto_contacts(pred: Path, tag: str, body_path: Path, N: int,
-                       body_joint_names: list[str], stage_tag: str):
-    """Load + validate ``contacts_<tag>.npz`` as an auto label source.
+def load_frame_contacts(pred: Path, tag: str, body_path: Path, N: int,
+                        frame_names: list[str], stage_tag: str):
+    """Load + validate ``contacts_<tag>.npz`` as an AUTO label source (the 12 contact frames).
 
-    ``body_path`` is the body the contacts were measured ON (and that the caller
-    is about to refine) — sha256 provenance ties the artifact to it, plus to the
-    scene and transform. Returns ``(cnt_oids, contact, confidence)`` where
-    ``contact`` is ``(Pc, N, 52)`` bool and ``confidence`` ``(Pc, N, 52)`` float32.
+    ``body_path`` is the body the contacts were measured ON (and that the caller is
+    about to refine) — sha256 provenance ties the artifact to it, plus to the scene
+    and transform, so a stale readout can never quietly drive a refinement. Returns
+    ``(cnt_oids, frame_contact)`` with ``frame_contact (Pc, N, 12)`` bool.
     """
     cnt_path = paths.contacts_path(pred, tag)
     if not cnt_path.exists():
@@ -645,45 +643,80 @@ def load_auto_contacts(pred: Path, tag: str, body_path: Path, N: int,
     cnt = dict(np.load(cnt_path, allow_pickle=True))
     cnt_oids = [int(x) for x in cnt["object_ids"]]
     try:
-        schema = int(np.asarray(cnt["confidence_schema"]).item())
-        method = str(np.asarray(cnt["confidence_method"]).item())
-        cnt_contact = np.asarray(cnt["joint_contact"], bool)
-        cnt_confidence = np.asarray(cnt["label_confidence"], np.float32)
+        frame_contact = np.asarray(cnt["frame_contact"], bool)
+        cnt_names = [str(x) for x in np.asarray(cnt["contact_frame_names"]).tolist()]
     except (KeyError, TypeError, ValueError) as exc:
         raise SystemExit(
-            f"{cnt_path} is not a complete per-joint confidence artifact; "
-            "regenerate it with estimate_contacts") from exc
-    known_methods = (CONTACT_CONFIDENCE_METHOD, SCENE_FREE_CONFIDENCE_METHOD)
-    if schema != CONTACT_CONFIDENCE_SCHEMA or method not in known_methods:
-        raise SystemExit(
-            f"{cnt_path} has confidence schema/method {schema}/{method!r}; expected "
-            f"{CONTACT_CONFIDENCE_SCHEMA}/one of {known_methods}, regenerate it")
-    expected = (len(cnt_oids), N, len(body_joint_names))
-    if cnt_contact.shape != expected or cnt_confidence.shape != expected:
-        raise SystemExit(
-            f"{cnt_path} contact/confidence shapes must both be {expected}, got "
-            f"{cnt_contact.shape} and {cnt_confidence.shape}")
-    if (not np.isfinite(cnt_confidence).all()
-            or bool(((cnt_confidence < 0.0) | (cnt_confidence > 1.0)).any())):
-        raise SystemExit(f"{cnt_path} label_confidence must be finite and in [0,1]")
-    cnt_names = [str(x) for x in np.asarray(cnt["joint_names"]).tolist()]
-    if cnt_names != body_joint_names:
-        raise SystemExit(f"{cnt_path} joint order does not match {body_path}")
+            f"{cnt_path} carries no frame_contact / contact_frame_names — it predates the "
+            "contact-frame detector; regenerate it with estimate_contacts") from exc
+    if cnt_names != list(frame_names):
+        raise SystemExit(f"{cnt_path} contact-frame order does not match the body's")
+    expected = (len(cnt_oids), N, len(frame_names))
+    if frame_contact.shape != expected:
+        raise SystemExit(f"{cnt_path} frame_contact must be {expected}, got {frame_contact.shape}")
     provenance = (
         (body_path, "source_body_sha256"),
         (pred / "geometry" / "scene.npz", "source_scene_sha256"),
         (pred / "geometry" / "transform.npz", "source_transform_sha256"),
     )
     for source_path, hash_key in provenance:
-        if hash_key in cnt and str(np.asarray(cnt[hash_key]).item()) == "":
-            continue  # the stage did not read this input (scene-free contacts record no scene hash)
         with source_path.open("rb") as source_file:
             expected_hash = hashlib.file_digest(source_file, "sha256").hexdigest()
         if hash_key not in cnt or str(np.asarray(cnt[hash_key]).item()) != expected_hash:
             raise SystemExit(
                 f"{cnt_path} is stale for {source_path}; regenerate estimate_contacts")
     print(f"[{stage_tag}] AUTO labels from {cnt_path.name}, ids {cnt_oids}")
-    return cnt_oids, cnt_contact, cnt_confidence
+    return cnt_oids, frame_contact
+
+
+#: Which contact frames one coarse annotation joint covers — the inverse of the fold
+#: ``scripts/score_frame_contacts.py`` scores with. Used to put MANUAL per-joint
+#: annotations on the frame axis for the physics stages, whose contact points ARE the
+#: frames. ``hip`` / ``elbow`` / ``shoulder`` carry no contact frame and simply drop out.
+_ANN_TO_FRAMES: dict[str, tuple[str, ...]] = {
+    "left_hand": ("palm_left", "finger_left"),
+    "right_hand": ("palm_right", "finger_right"),
+    "left_knee": ("knee_left",),
+    "right_knee": ("knee_right",),
+    # 14-joint schema: "foot" means the toe, "ankle" the heel. In the 10-joint schema
+    # "foot" is the whole foot, so the heel joins it (see :func:`annotation_frame_labels`).
+    "left_foot": ("toe_under_left", "toe_above_left"),
+    "right_foot": ("toe_under_right", "toe_above_right"),
+    "left_ankle": ("heel_left",),
+    "right_ankle": ("heel_right",),
+}
+
+
+def annotation_frame_labels(contacts_p: np.ndarray, ann_names: list[str],
+                            frame_names: list[str], N: int) -> np.ndarray:
+    """Expand one person's ``(J_ann, N)`` annotation onto the 12 contact frames ``(N, 12)``.
+
+    Tri-state in, tri-state out: an annotated joint's value is copied onto every contact
+    frame it covers (:data:`_ANN_TO_FRAMES`); a frame no annotated joint covers stays
+    ``-1`` (unlabeled). The schema is resolved by :func:`_ann_mapping`, and in the
+    10-joint schema — where ``foot`` means the whole foot — the heel inherits the foot's
+    label too.
+    """
+    mapping = _ann_mapping(ann_names)          # validates the schema (raises on anything else)
+    if contacts_p.shape[1] != N:
+        raise ValueError(f"annotation has {contacts_p.shape[1]} frames but the body has {N}")
+    ten_joint = mapping is _ANN_TO_SMPLX
+    frame_idx = {n: i for i, n in enumerate(frame_names)}
+    ann_idx = {n: i for i, n in enumerate(ann_names)}
+    labels = np.full((N, len(frame_names)), -1, dtype=np.int8)
+    for ann_name, frames in _ANN_TO_FRAMES.items():
+        if ann_name not in ann_idx:
+            continue
+        if ten_joint and ann_name.endswith("_ankle"):
+            continue                                    # no ankle label in the 10-joint schema
+        covered = list(frames)
+        if ten_joint and ann_name.endswith("_foot"):
+            covered.append(f"heel_{ann_name.split('_')[0]}")
+        series = contacts_p[ann_idx[ann_name]]
+        for name in covered:
+            if name in frame_idx:
+                labels[:, frame_idx[name]] = series
+    return labels
 
 
 def resolve_annotation_path(source, annotations) -> Path:
@@ -704,14 +737,17 @@ def run_kinematics_2(source, pred: Path, cfg: HumanOptimConfig, device: str, *,
                      annotations=None, overlay: bool = False, labels_mode: str = "manual") -> Path:
     """Contact-guided refinement of ``kinematic_1.npz`` → ``human_optim/kinematic_2.npz``.
 
-    ``labels_mode='manual'`` (default) uses the human annotation ``data/<stem>.npz``;
-    ``'auto'`` uses our own ``contacts_1.npz`` labels instead —
-    positives-only (in-contact → ``+1``, else ``-1``, **never** ``0``, so the
-    clearance repulsion stays inert by construction). Positives drive the same
-    contact-patch repair (``ann_acquisition``/``ann_seating`` instances over the
-    14 limb groups) as manual labels, ungated — witnesses report ~0 confidence on
-    a floating body, so a confidence gate would veto exactly the repair this stage
-    exists for. Per-joint ``label_confidence`` weights only the velocity damping.
+    ``labels_mode='auto'`` (the pipeline default) reads our own ``contacts_1.npz``: one
+    label per **contact frame** per video frame, positives-only (touching → ``+1``, else
+    ``-1``, **never** ``0``, so the clearance repulsion stays inert by construction).
+    Each of the 12 contact frames is then its own repair instance — the acquisition pulls
+    that exact point toward the patch of wall it appears on, because the contact frames are
+    where contact is detected, forced and measured. No gate: a witness reports ~0 confidence
+    on a floating body, which is exactly the body this stage exists to repair.
+
+    ``labels_mode='manual'`` uses the human annotation ``data/<stem>.npz`` (a metrics-only
+    comparison path) and keeps the older per-joint machinery: labels reach the mesh through
+    each vertex's nearest joint, and the repair instances are the 14 annotation limb groups.
     """
     knobs = cfg.knobs
     pred = Path(pred)
@@ -736,13 +772,16 @@ def run_kinematics_2(source, pred: Path, cfg: HumanOptimConfig, device: str, *,
     cam_centers = wfc[:, :3, 3]                     # (N,3) world camera centers (radial-velocity damper)
     scene_pts, scene_normals, scene_conf = _load_scene(pred, knobs, wfc, device, tag)
 
-    # Label source: our own contacts_1 (auto) or the human annotation (manual).
+    mid, fvids, corr, sub, chamfer_w = _body_context(knobs, device)
+    mid_names = list(mid.joint_names)
+    frame_names = list(mid.contact_frame_names)
+
+    # Label source: our own contacts_1 on the 12 contact frames (auto) or the human
+    # per-joint annotation (manual).
     ann_contacts = ann_names = ann_oids = cnt_oids = ann_ignored = None
-    cnt_contact = cnt_confidence = None
+    cnt_contact = None
     if labels_mode == "auto":
-        kin_names = [str(x) for x in np.asarray(kin["joint_names"]).tolist()]
-        cnt_oids, cnt_contact, cnt_confidence = load_auto_contacts(
-            pred, "1", kin_path, N, kin_names, tag)
+        cnt_oids, cnt_contact = load_frame_contacts(pred, "1", kin_path, N, frame_names, tag)
     else:
         ann_path = resolve_annotation_path(source, annotations)
         ann = dict(np.load(ann_path, allow_pickle=True))
@@ -752,22 +791,18 @@ def run_kinematics_2(source, pred: Path, cfg: HumanOptimConfig, device: str, *,
         ann_ignored = np.asarray(ann["ignored"], bool) if "ignored" in ann else np.zeros(len(ann_oids), bool)
         print(f"[{tag}] annotation {ann_path} — {ann_contacts.shape[0]} people, joints {ann_names}, ids {ann_oids}")
 
-    mid, fvids, corr, sub, chamfer_w = _body_context(knobs, device)
-    mid_names = list(mid.joint_names)
     torch.manual_seed(0)
     phases = _kinematics_2_phases(cfg)
 
-    # Contact-patch repair groups: each annotation group's member SMPLXMid joint indices.
-    # Manual mode uses the annotation's own schema mapping (same one _contact_labels uses);
-    # auto mode uses the 14-joint group structure directly — contacts_1 labels live on the
-    # SMPLXMid joints, so a group is a positive instance whenever any member joint is labeled.
-    # Auto instances are deliberately NOT confidence-gated: on a floating body the witnesses
-    # correctly report ~0 confidence, and gating there would kill exactly the repair we want —
-    # the pull tests the label, reproj + priors referee it. Drives ann_acquisition/seating.
-    group_map = _ann_mapping(ann_names) if ann_names is not None else _ANN_TO_SMPLX_14
-    jidx = {n: i for i, n in enumerate(mid_names)}
-    contact_groups = [g for g in ([jidx[j] for j in members if j in jidx]
-                                  for members in group_map.values()) if g]
+    # Contact-patch repair groups. Auto mode needs none — each contact frame is its own
+    # one-point group. Manual mode maps every annotation group to its member SMPLXMid joint
+    # indices (the annotation's own schema, the same mapping :func:`_contact_labels` uses).
+    contact_axis = "frames" if labels_mode == "auto" else "joints"
+    contact_groups = None
+    if labels_mode != "auto":
+        jidx = {n: i for i, n in enumerate(mid_names)}
+        contact_groups = [g for g in ([jidx[j] for j in members if j in jidx]
+                                      for members in _ann_mapping(ann_names).values()) if g]
 
     out = _new_out()
     betas_out = []
@@ -794,19 +829,17 @@ def run_kinematics_2(source, pred: Path, cfg: HumanOptimConfig, device: str, *,
             pose, human, oid, N, vmask, knobs, device,
             mid=mid, betas_T=betas_T, q_world=q_world, extr=extr, K=K)
 
-        contact_labels = contact_conf = None
+        contact_labels = None
         if labels_mode == "auto":
             if cnt_oids is not None and oid in cnt_oids:
-                cp = cnt_oids.index(oid)
-                jc = cnt_contact[cp]                                           # (N, 52)
-                lab = np.where(jc, np.int8(1), np.int8(-1)).astype(np.int8)    # +1 / -1, NEVER 0 (repulsion inert)
+                fc = cnt_contact[cnt_oids.index(oid)]                          # (N, 12)
+                lab = np.where(fc, np.int8(1), np.int8(-1)).astype(np.int8)    # +1 / -1, NEVER 0 (repulsion inert)
                 lab[~vmask] = -1
                 contact_labels = torch.as_tensor(lab, dtype=torch.int8, device=device)
-                contact_conf = torch.as_tensor(
-                    cnt_confidence[cp], dtype=torch.float32, device=device)
-                nc = int((lab == 1).any(1).sum())
-                print(f"[{tag}] obj_id={oid}: AUTO contacts on {nc} frames"
-                      f"{' (confidence-weighted)' if contact_conf is not None else ''}")
+                per_frame = " ".join(f"{n}={int((lab[:, i] == 1).sum())}"
+                                     for i, n in enumerate(frame_names))
+                print(f"[{tag}] obj_id={oid}: AUTO contacts on "
+                      f"{int((lab == 1).any(1).sum())} frames  ({per_frame})")
             else:
                 print(f"[{tag}] obj_id={oid}: no auto contacts (re-refine only)")
         else:   # manual mode reaches here only for a labelled, non-ignored person
@@ -822,17 +855,19 @@ def run_kinematics_2(source, pred: Path, cfg: HumanOptimConfig, device: str, *,
             target_kp=target_kp, scores=scores, corr=corr, frame_vertex_ids=fvids,
             sub=sub, knobs=knobs, phases=phases,
             scene_pts=scene_pts, scene_normals=scene_normals, scene_conf=scene_conf, fps=fps,
-            contact_labels=contact_labels, contact_conf=contact_conf, contact_groups=contact_groups,
+            contact_labels=contact_labels, contact_axis=contact_axis, contact_groups=contact_groups,
             image_hw=(H, W), chamfer_weights=chamfer_w, frame_valid=frame_valid, cam_centers=cam_centers)
         print(f"    before: {before}\n    after:  {after}")
         _append_classic(out, mid, betas_T, q_opt)
         betas_out.append(betas_mean.cpu().numpy().astype(np.float32))
 
-    # Forward the honest pre-enforcement drift + frozen labels from kinematic_1: kin2's
-    # own velocity damper must not be able to game the contact readout, so estimate_contacts on this
-    # body reads the SAME drift_pre kinematic_1 measured before ANY enforcement. Fixes a latent gap
-    # that until now dropped drift_pre for the manual kinematics_2 too.
-    extra = {k: kin[k] for k in ("drift_pre", "auto_labels") if k in kin}
+    # Forward the honest pre-enforcement drift + frozen labels from kinematic_1. The contact
+    # readout on THIS body (contacts_2) prices stillness by drift, and kin2's own velocity
+    # damper holds exactly the frames contacts_1 called touching still — so re-measuring drift
+    # here would let contacts_1 confirm itself through contacts_2. drift_pre is the motion
+    # measured before ANY contact term acted, in kinematics_1, which is the one measurement no
+    # contact enforcement anywhere in the chain can manufacture. It stays the source.
+    extra = {k: kin[k] for k in ("drift_pre", "auto_labels", "contact_frame_names") if k in kin}
     out_path = paths.body_path(pred, "kinematic_2")
     save = _save_body(out_path, mid, out, betas_out, object_ids, kin["valid_mask"], N, P, H, W, fps,
                       extra=extra or None)

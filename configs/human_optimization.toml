@@ -30,14 +30,17 @@ finger_smooth_s = 0.2    # Gaussian sigma (SECONDS) for smoothing that frozen fi
                          # and leaves the body fit and the fingertip 2D residual unchanged. 0 = off.
 
 [stages.kinematics_2]
-# Contact-patch repair. Both knobs matter: the acquisition WEIGHT sets the pull's force balance
-# against reproj/priors (its far gradient is weight·delta_m), while ITERS set how far the body can
-# travel per phase (Adam step budget). So root ↑ (rigid push toward the wall) then full ↑ before
-# the refine polish. L-BFGS OFF (0 iters, phase dropped) — the per-phase contact patches make an
-# active set that churns and invalidates strong-Wolfe curvature.
+# Contact-patch repair. In "auto" mode the repair instances ARE the 12 contact frames: each
+# labelled frame is pulled toward the patch of wall it appears on — one point per label, the
+# same points contact is detected on and forces are solved at. Both knobs matter: the
+# acquisition WEIGHT sets the pull's force balance against reproj/priors (its far gradient is
+# weight·delta_m), while ITERS set how far the body can travel per phase (Adam step budget).
+# So root ↑ (rigid push toward the wall) then full ↑ before the refine polish. L-BFGS OFF
+# (0 iters, phase dropped) — the per-phase contact patches make an active set that churns and
+# invalidates strong-Wolfe curvature.
 iters = { root = 100, full = 200, refine = 250, lbfgs = 0 }
 overlay = false          # debug overlay → human_optim/kinematic_2_overlay.mp4
-labels = "auto"          # contact labels: "auto" (contacts_1 — the pipeline default; manual annotations are metrics-only) | "manual" (data/<stem>.npz)
+labels = "auto"          # contact labels: "auto" (contacts_1's 12 contact frames — the pipeline default) | "manual" (data/<stem>.npz per-joint annotations; metrics only)
 
 [stages.dynamics]
 device = "cuda"          # GPU: the new BetterRobot batched-adjoint torch RNEA is fast (warp measured slower for this fwd+bwd solve)
@@ -45,18 +48,20 @@ bodies = "kinematic_1"   # which refined body the force solve reads (kinematic_1
 
 [stages.kindyn_1]
 # Joint kinematics + dynamics. Starts from a converged body + its contact labels and optimizes
-# pose AND per-contact-group forces together, so the RNEA base wrench can reshape the motion
-# instead of only being absorbed by forces. Forces are
-# warm-started (a frozen-q solve, [dynamics_optimizer] knobs), then ONE joint L-BFGS phase
-# fine-tunes pose + forces together — Adam was tried and is destructive here (it cannot
+# pose AND the per-CONTACT-FRAME forces together, so the RNEA base wrench can reshape the motion
+# instead of only being absorbed by forces. A frame's force enters RNEA as a wrench on its parent
+# joint (the force plus the moment of its lever arm), so the two toes of a foot stay distinct.
+# Forces are warm-started (a frozen-q solve, [dynamics_optimizer] knobs), then ONE joint L-BFGS
+# phase fine-tunes pose + forces together — Adam was tried and is destructive here (it cannot
 # co-adapt N-scale forces to a moving pose; the wrench spikes and the motion wrecks).
 iters = { lbfgs = 150 }  # one joint L-BFGS polish (pose + forces); Adam can't co-adapt N-scale forces
 bodies = "kinematic_2"   # which refined body to start from (kinematic_2 | kinematic_1 — for chains that skip kinematics_2); picks the matching contacts_<n> too
-labels = "auto"          # contact labels: "auto" (the contacts_<n> of `bodies` — the pipeline default; manual annotations are metrics-only) | "manual" (data/<stem>.npz)
-cones = false            # [friction] pyramid cones on feet/ankles, frozen at the warm-start pose. OFF:
-                         # measured on boulder_1/3 they stack with label errors (jitter 6.7→8.3 mm) and
-                         # hurt boulder_1 even with manual labels (pen 1.5→4.2 mm) — a hooking foot
-                         # genuinely pulls. Turn on for push-only scenes (e.g. the peter campus board).
+labels = "auto"          # contact labels: "auto" (the contacts_<n> of `bodies` — the pipeline default) | "manual" (data/<stem>.npz, spread onto the frames each joint covers; metrics only)
+cones = true             # confine every contact force to a friction pyramid about that frame's own
+                         # CONTACT NORMAL (its negated outward skin normal) at [friction].half_angle_deg,
+                         # frozen at the warm-start pose — the same cone the contact readout's force
+                         # witness uses. A patch of skin can then only push the way it faces. false =
+                         # free bilateral forces everywhere (the pre-2026-08 behaviour).
 overlay = false          # reprojected-keypoint debug overlay → human_optim/kindyn_1_overlay.mp4
 
 #                       root  kin1  kin2   dyn  kindyn1
@@ -104,29 +109,43 @@ radial_velocity     = [   0,  400,  100,    0,  100 ]
 penetration         = [   0, 12000, 12000,    0, 12000 ]   # push the contact frames out of geometry/scene.npz (reported, not a fit gate)
 
 [loss_weights.annotation]
-# Label-driven. kinematics_1: AUTO-detected on the 12 CONTACT FRAMES (frozen at the refine phase);
-# kinematics_2 + kindyn_1: MANUAL per-joint labels. In kin1 the annotation terms act on the contact
-# frame POINTS; in the manual stages on the labelled joints and their vertices.
-ann_attraction      = [   0,   10,    0,    0,   20 ]   # pull labelled points onto the wall: kin1-auto pulls the CONTACT FRAMES, kindyn_1 the in-contact joints' verts. OFF in kinematics_2 — its mean-over-active-verts pull BURIED the body (front verts cross the wall, the rest keep pulling); replaced by ann_acquisition + ann_seating.
-ann_acquisition     = [   0,    0, 1000,    0,    0 ]   # kinematics_2: per positive (frame, annotation-group) instance, long-range bounded pull of the group's ONE closest vertex toward a target patch of wall points. 1000 chosen by sweep: seats floaters (gtIGgs euclid med 40.8→5.4 cm) at reproj_sap 9.3→28.8 px; 300 under-seats, 3000 buys little for +6 px.
+# Label-driven, and in the default chain every label lives on the 12 CONTACT FRAMES:
+# kinematics_1 detects them itself (frozen at the refine phase), kinematics_2 + kindyn_1 read
+# them from contacts_1 / contacts_2. So these terms act on the contact-frame POINTS. Only the
+# metrics-only `labels = "manual"` paths put per-joint labels on the joints and their vertices.
+ann_attraction      = [   0,   10,    0,    0,   20 ]   # pull labelled points onto the wall. OFF in kinematics_2 — its mean-over-active-points pull BURIED the body (the front of a limb crosses the wall while the rest keeps pulling); replaced there by ann_acquisition + ann_seating.
+ann_acquisition     = [   0,    0, 1000,    0,    0 ]   # kinematics_2: per positive (video frame, contact frame) instance, long-range bounded pull of that ONE point toward a target patch of wall points. 1000 chosen by sweep (per-joint era): seats floaters (gtIGgs euclid med 40.8→5.4 cm) at reproj_sap 9.3→28.8 px; 300 under-seats, 3000 buys little for +6 px.
 ann_seating         = [   0,    0,    0,    0,    0 ]   # OFF (2026-07-26): its −5 mm target was itself the burial mechanism — on boulder_1/3 removing it cut mean penetration 2.03→0.51 / 0.93→0.26 mm with TP wall distances matching the manual chain; acquisition's fading pull + the penetration term already seat. Wired, raise to re-enable.
-ann_repulsion       = [   0,    0, 4000,    0, 4000 ]   # push no-contact verts off — MANUAL only (auto labels carry no negatives; arming them via contacts_1 negatives was tried 2026-07-26 and only added jitter)
-ann_velocity        = [   0,  500, 4000,    0, 4000 ]   # damp the labelled points' linear + angular velocity (kin1: contact frames) — the readout reads pre-enforcement drift_pre
+ann_repulsion       = [   0,    0, 4000,    0, 4000 ]   # push no-contact points off — inert unless the labels carry 0s, i.e. `labels = "manual"` only (frame labels are positive-only; arming them via contacts_1 negatives was tried 2026-07-26 and only added jitter)
+ann_velocity        = [   0,  500, 4000,    0, 4000 ]   # damp the labelled points' linear + angular velocity — the contact readout gates on pre-enforcement drift_pre, so this cannot vote for its own labels
 ann_acceleration    = [   0,    0,    0,    0,    0 ]   # OFF — near-redundant with a strong ann_velocity (a still joint is already low-accel); wired + ready, raise to damp in-contact joints' Cartesian (LOCAL_WORLD_ALIGNED) acceleration if ann_velocity is lowered to allow slow sliding contacts
 
 # dynamics column = the standalone frozen-q force stage (base_wrench + force_magnitude INSIDE
-# the square, smoothness linear). kindyn_1 column = all-LINEAR weights for the same terms in
-# the joint engine. Tiny base_wrench because the wrench is O(10³ N) vs kinematic O(1–10²): at
-# weight 1 it would swamp the visual fit. The smoothness ratios to base match the dynamics
-# stage exactly; force_magnitude (0.01 of base, linear) is ~100× heavier relative to base than
-# the dynamics stage's effective 0.01² — it only shapes the force warm-start, and the tuned
-# result met its targets, so it stays.
+# the square, smoothness linear, raw newtons summed over the clip). kindyn_1 column =
+# all-LINEAR weights for the same terms in the joint engine, where every residual is first
+# divided by BODY WEIGHT and averaged over valid frames — so these five numbers are
+# dimensionless and mean the same thing on a 60-frame clip and a 900-frame one. The four
+# ratios to base_wrench are the dynamics stage's (1 : 0.01 : 0.2 : 0.05 : 0.1), kept.
+#
+# base_wrench is THE trade knob: it buys physics with pose. Ladder on boulder_1 + the
+# repaired gtIGgs floater (2026-08-12), root residual as N per frame RMS — the frozen-pose
+# force warm-start already takes boulder_1 632 -> 140 and gtIGgs 1005 -> 243, so these are
+# what the JOINT phase adds on top, and what it costs:
+#          boulder_1 wrench / reproj px / ‖snap‖      gtIGgs wrench / reproj px / ‖snap‖
+#     25      121.8  /  5.60  / 0.88                     100.3  / 26.71 / 2.49
+#    100      114.8  /  5.84  / 1.01                      83.8  / 26.80 / 2.32
+#    400      101.7  /  7.44  / 1.88                      81.6  / 27.04 / 2.61
+#   1600       92.5  / 11.25  / 2.91                      81.2  / 27.23 / 2.94
+# (1600 is what the old un-normalised 1e-5 amounted to on a 445-frame clip — it doubles
+# boulder_1's reprojection error for the last 20 N.) 100 is shipped: gtIGgs keeps ~all of
+# the joint-phase gain and boulder_1 pays 0.35 px. gtIGgs's ‖snap‖ rise is there at every
+# rung, so it is the joint L-BFGS on a heavily repaired body, not this weight.
 [loss_weights.dynamics]
-base_wrench         = [   0,    0,    0,  1.0,  1e-5 ]
-force_magnitude     = [   0,    0,    0, 0.01,  1e-7 ]
-force_smooth_mag    = [   0,    0,    0, 0.20,  2e-6 ]   # smooth the force MAGNITUDE across persisting contacts (harder than direction)
-force_smooth_dir    = [   0,    0,    0, 0.05,  5e-7 ]   # smooth the force DIRECTION (may adapt faster than magnitude)
-torque_smooth       = [   0,    0,    0, 0.10,  1e-6 ]
+base_wrench         = [   0,    0,    0,  1.0,  100 ]
+force_magnitude     = [   0,    0,    0, 0.01,    1 ]
+force_smooth_mag    = [   0,    0,    0, 0.20,   20 ]   # smooth the force MAGNITUDE across persisting contacts (harder than direction)
+force_smooth_dir    = [   0,    0,    0, 0.05,    5 ]   # smooth the force DIRECTION (may adapt faster than magnitude)
+torque_smooth       = [   0,    0,    0, 0.10,   10 ]
 
 [optimizer]
 lr = 0.01
@@ -283,21 +302,19 @@ stillness_vstar_mps = 0.2  # stillness price: force on a frame drifting this fas
 [contact]
 groups = ["left_hand", "right_hand", "left_foot", "right_foot", "left_ankle", "right_ankle"]
 
-# Friction cone for the non-hand contact groups (feet + ankles). A foot/ankle contact can
-# only PUSH along the surface normal and its sideways (tangential) force is capped at μ·(normal
-# force), μ = tan(half_angle_deg). Enforced BY CONSTRUCTION, not by a loss: the force is built
-# as a nonnegative combination of the cone's four pyramid edge directions, so it cannot leave
-# the cone and there is no weight to tune. The normal is read from the fused scene cloud:
-# average the stored normals of the normal_k nearest scene points to the joint (they point out
-# of the wall toward the climber). A joint whose nearest scene point is beyond max_dist_m — or
-# whose neighboring normals disagree (they average to ~nothing on thin holds / concave
-# corners) — gets a free bilateral force instead, like a hand. Ankle centers sit a few cm
-# inside the leg, so keep max_dist_m generous. Comment out this section to run the dynamics
-# stage (and the completion force solve) without cones; kindyn_1 opts in via [stages.kindyn_1].cones.
+# Friction cone half-angle: a contact can only PUSH along its axis and its sideways
+# (tangential) force is capped at μ·(normal force), μ = tan(half_angle_deg). Enforced BY
+# CONSTRUCTION, not by a loss: the force is a nonnegative combination of the cone's four
+# pyramid edge directions, so it cannot leave the cone and there is no weight to tune.
+# kindyn_1 takes the axis from the BODY — each contact frame's own negated outward skin
+# normal, like the contact readout's force witness — so it needs no scene lookup and
+# normal_k / max_dist_m do not apply to it. The old per-joint `dynamics` stage instead reads
+# the axis from the fused scene cloud (average the normal_k nearest scene normals; a joint
+# with no coherent normal within max_dist_m falls back to a free bilateral force).
 [friction]
 half_angle_deg = 45.0   # μ = tan(45°) = 1
-normal_k = 16
-max_dist_m = 0.30
+normal_k = 16           # dynamics stage only: kNN for the scene-normal cone axis
+max_dist_m = 0.30       # dynamics stage only: beyond this the joint gets a free force
 
 [dynamics_optimizer]
 max_iter = 200

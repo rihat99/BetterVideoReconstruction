@@ -183,14 +183,19 @@ def _padded_scene_candidates(box_points_det: torch.Tensor, scene_pts: torch.Tens
 
 @torch.no_grad()
 def _build_contact_patches(
-    vw_sub: torch.Tensor,        # (T, Ns, 3) posed subsampled verts (detached), current pose
-    group_vert_ids: list,        # per group: LongTensor of subsampled-vertex ids owned by the group
+    vw_sub: torch.Tensor,        # (T, K, 3) posed body points (detached), current pose
+    group_vert_ids: list,        # per group: LongTensor of point ids owned by the group
     group_active: torch.Tensor,  # (T, G) bool — group labeled in-contact at this valid frame
     scene_pts: torch.Tensor, scene_normals: torch.Tensor, scene_conf: torch.Tensor,
     extrinsics: torch.Tensor, K: torch.Tensor, image_h: int, image_w: int,
     *, radius_px: float, patch_k: int, conf_thresh: float,
 ) -> dict:
-    """Per positive (frame, annotation-group) instance: a small TARGET PATCH of wall points.
+    """Per positive (frame, contact-group) instance: a small TARGET PATCH of wall points.
+
+    A *group* is whatever set of body points one contact label covers: a single **contact
+    frame** when the labels live on the 12 contact frames (the frames-era default), or an
+    annotation limb group's subsampled vertices in the manual per-joint mode. The two share
+    every line below — only ``vw_sub`` / ``group_vert_ids`` differ.
 
     A contact label means SOME surface point of the group touches the wall, so the target
     is the wall visible where the limb appears — NOT the whole Voronoi patch. For each frame
@@ -355,7 +360,7 @@ def optimize_person(
     scene_pts: torch.Tensor | None = None, scene_normals: torch.Tensor | None = None,
     scene_conf: torch.Tensor | None = None, fps: float = 30.0,
     contact_labels: torch.Tensor | None = None,
-    contact_conf: torch.Tensor | None = None,
+    contact_axis: str = "joints",
     contact_groups: list | None = None,
     image_hw: tuple[int, int] | None = None,
     chamfer_weights: torch.Tensor | None = None,
@@ -383,26 +388,29 @@ def optimize_person(
     supplies its own weight column via :class:`PhaseSpec`; a term whose weight is 0
     in a phase contributes nothing there.
 
-    ``contact_labels`` (optional ``(T, 52)`` int8 tri-state per SMPLXMid joint:
-    ``1`` in-contact, ``0`` no-contact, ``-1`` unlabeled) turns on the
-    **kinematics_2** annotation-driven scene terms in the scene phases — a *real*
-    attraction pulling the vertices of in-contact joints onto the wall, a *strong*
-    repulsion pushing the vertices of no-contact joints off it, and a velocity
-    damper on in-contact joints (weights ``ann_*``). It defaults to the plain
-    kinematics behaviour (no annotation terms). ``contact_conf`` (optional
-    ``(T, 52)`` float in [0,1]) scales the attraction's vertex weights
-    and the velocity damper's per-joint contribution by each joint's label
-    confidence, so an uncertain auto-label pulls proportionally less; ``None`` keeps
-    every labelled joint at weight 1.
+    ``contact_labels`` (optional int8 tri-state ``1`` in-contact / ``0`` no-contact /
+    ``-1`` unlabeled) turns on the label-driven scene terms in the scene phases — an
+    attraction pulling the labelled points onto the wall, a repulsion pushing
+    no-contact points off it, and a velocity damper on the in-contact points (weights
+    ``ann_*``). ``contact_axis`` says what the label columns ARE:
 
-    ``contact_groups`` (optional ``list[list[int]]`` — each annotation group's member
-    SMPLXMid joint indices) turns on the **kinematics_2 contact-patch repair**: per
+      * ``"frames"`` — ``(T, 12)``, one column per **contact frame**. This is the
+        frames-era label axis: the same 12 points contact is detected on, forces are
+        solved at and penetration is measured on, so the terms act on those points
+        directly, with no vertex or joint indirection.
+      * ``"joints"`` (default) — ``(T, 52)`` per SMPLXMid joint, the manual per-joint
+        annotation. Labels reach the mesh through each vertex's nearest rest joint.
+
+    ``contact_groups`` (``list[list[int]]``, ``"joints"`` axis only — each annotation
+    group's member SMPLXMid joint indices) turns on the **contact-patch repair**: per
     positive ``(frame, group)`` instance a target patch of wall points is built once per
     scene phase (:func:`_build_contact_patches`) and the ``ann_acquisition`` /
     ``ann_seating`` terms pull the group's single closest vertex onto it and seat it at
-    slight penetration. Off (``None``) or at zero acquisition/seating weight it is inert.
-    ``image_hw`` (``(H, W)``) is required for it — the patch builder uses it to reject a
-    group whose pixel footprint falls off-image (or behind the camera).
+    slight penetration. On the ``"frames"`` axis every contact frame is its own one-point
+    group, so the repair needs no group list — the pulled point is the contact frame
+    itself. Off (zero acquisition/seating weight) it is inert. ``image_hw`` (``(H, W)``)
+    is required for it — the patch builder uses it to reject a group whose pixel
+    footprint falls off-image (or behind the camera).
 
     ``auto_contact`` (optional dict) enables **kinematics_1** auto-contact mode: when
     ``contact_labels`` is not supplied and the ``ann_attraction`` weight is > 0, labels
@@ -469,41 +477,55 @@ def optimize_person(
     use_init = _wmax("reproj_init") > 0.0
     init_gm_px = float(knobs["reproj_init"]["gm_scale_px"]) if use_init else 0.0
     use_pen = scene_pts is not None
-    use_ann = contact_labels is not None          # manual labels present from the start (kinematics_2)
+    use_ann = contact_labels is not None          # labels supplied by the caller (kinematics_2 / kindyn_1)
+    if contact_axis not in ("joints", "frames"):
+        raise ValueError(f"contact_axis must be 'joints' or 'frames', got {contact_axis!r}")
     # kinematics_1 auto-contact mode: bind labels once at the first scene phase (below) then
     # freeze. DETECTION is guarded on the ann_attraction weight-max, so a 0-weight column never
-    # runs the detector. Auto attraction reads its band from [auto_contact]; the manual
-    # (kinematics_2) path keeps [ann_attraction].
+    # runs the detector. Auto attraction reads its band from [auto_contact]; supplied labels
+    # keep [ann_attraction].
     use_auto = auto_contact is not None and not use_ann and _wmax("ann_attraction") > 0.0
+    # Do the label-driven terms act on the 12 contact-frame POINTS (kinematics_1's own
+    # detection, and any caller passing contact_axis="frames") or on mesh vertices?
+    on_frames = use_auto or (use_ann and contact_axis == "frames")
     ann_at_cfg = auto_contact if use_auto else (knobs["ann_attraction"] if use_ann else None)
-    ann_rep_cfg = knobs["ann_repulsion"] if use_ann else None   # clearance repulsion is manual-only
+    # Clearance repulsion needs 0 (no-contact) labels, which only the per-joint manual
+    # annotation carries — frame labels are positive-only by construction.
+    use_rep = use_ann and not on_frames
+    ann_rep_cfg = knobs["ann_repulsion"] if use_rep else None
     ann_vel_ang_w = float(knobs.get("ann_velocity", {}).get("angular_weight", 0.0))  # angular/linear ratio
-    # kinematics_2 contact-patch repair (ann_acquisition + ann_seating): per positive
-    # (frame, annotation-group) instance, pull ONE closest vertex toward a per-instance
-    # target patch of wall points and seat it at slight penetration. Needs the annotation
-    # group→member-joint mapping (contact_groups) and non-zero acquisition/seating weight.
-    use_contact_patch = (use_ann and contact_groups is not None and image_hw is not None
+    # Contact-patch repair (ann_acquisition + ann_seating): per positive (frame, group)
+    # instance, pull ONE closest body point toward a per-instance target patch of wall
+    # points and seat it at slight penetration. On the frame axis every contact frame is
+    # its own one-point group; on the joint axis it needs the annotation group→member-joint
+    # mapping (contact_groups). Either way a zero acquisition/seating weight turns it off.
+    use_contact_patch = (use_ann and image_hw is not None
+                         and (on_frames or contact_groups is not None)
                          and (_wmax("ann_acquisition") > 0.0 or _wmax("ann_seating") > 0.0))
 
     depth_pad, depth_valid = pad_frames(depth_points, channels=3,
                                         device=q_world_init.device, dtype=q_world_init.dtype)
 
-    # `v2j_sub` maps each subsampled vertex to its nearest rest-pose joint, so the
-    # kinematics_2 manual joint labels can reach vertices (attraction / repulsion masks).
-    # Auto (kinematics_1) mode needs no such map: its labels already live on the 12 contact
-    # frames, which ARE points.
+    # `v2j_sub` maps each subsampled vertex to its nearest rest-pose joint, so the manual
+    # per-joint labels can reach vertices (attraction / repulsion masks). Frame labels need
+    # no such map: they already live on the 12 contact frames, which ARE points.
     v2j_sub = None
-    if use_ann:
+    if use_ann and not on_frames:
         with torch.no_grad():
             v_rest, j_rest = mid.forward_shape(betas_mean[None])
         v2j_sub = vertex_to_joint(v_rest[0], j_rest[0])[sub]   # (Ns,) nearest joint per vertex
 
-    # kinematics_2 contact-patch groups: per annotation group, the subsampled-vertex ids it owns
-    # (via v2j_sub) + a per-frame in-contact flag (any member joint labeled 1). A group with no
-    # owned subsampled vertex is dropped — there is no vertex to seat.
+    # Contact-patch groups. Frame axis: each contact frame is one group of one point, and the
+    # label column IS the group's per-frame activity. Joint axis: per annotation group, the
+    # subsampled-vertex ids it owns (via v2j_sub) + a per-frame in-contact flag (any member
+    # joint labeled 1); a group owning no subsampled vertex is dropped (nothing to seat).
     group_vert_ids: list = []
     group_active = None
-    if use_contact_patch:
+    if use_contact_patch and on_frames:
+        group_vert_ids = [torch.tensor([i], dtype=torch.long, device=q_world_init.device)
+                          for i in range(contact_labels.shape[1])]
+        group_active = contact_labels == 1                     # (T, F)
+    elif use_contact_patch:
         cols = []
         for members in contact_groups:
             mj = torch.as_tensor(members, dtype=torch.long, device=q_world_init.device)
@@ -515,29 +537,22 @@ def optimize_person(
         group_active = (torch.stack(cols, 1) if cols
                         else torch.zeros((T, 0), dtype=torch.bool, device=q_world_init.device))
 
-    # per-vertex label-confidence weight (kinematics_2-on-auto). Scales the attraction; the
-    # velocity damper takes the per-joint conf directly. None ⇒ every active vertex weighted 1.
-    conf_v = None
-    if contact_conf is not None and v2j_sub is not None:
-        conf_v = contact_conf[:, v2j_sub].clamp(0.0, 1.0)      # (T, Ns)
-
     incontact_v = nocontact_v = incontact_f = None
     def _bind_labels(labels: torch.Tensor) -> None:
         """Set ``contact_labels`` + the mask of the points the annotation terms act on.
 
-        Auto (kinematics_1) labels live on the contact frames, so the mask is the labels
-        themselves; manual (kinematics_2) labels live on joints and are spread onto the
-        subsampled vertices through ``v2j_sub``.
+        Frame labels live on the contact frames, so the mask is the labels themselves;
+        manual per-joint labels are spread onto the subsampled vertices through ``v2j_sub``.
         """
         nonlocal contact_labels, incontact_v, nocontact_v, incontact_f
         contact_labels = labels
-        if use_auto:
+        if on_frames:
             incontact_f = labels == 1                         # (T, F) per contact frame
             return
         vlabel = labels[:, v2j_sub]                           # (T, Ns) tri-state per vertex
         incontact_v, nocontact_v = (vlabel == 1), (vlabel == 0)
     if use_ann:
-        _bind_labels(contact_labels)                          # manual labels bind now (kinematics_2)
+        _bind_labels(contact_labels)                          # supplied labels bind now
 
     # Init-projection 2D anchor target: each BODY joint's projection at the call's
     # input pose. body_idx excludes the 30 finger joints (tiny in image space, they
@@ -631,11 +646,11 @@ def optimize_person(
             return scene_signed_distance(st["fw"], *cand, chunk=chunk)
 
         def _inst_nn():
-            # Per-instance closest (member vertex, patch point), shared by acquisition + seating.
+            # Per-instance closest (member point, patch point), shared by acquisition + seating.
             patches = patch_cell["patches"]
             if patches is None:
                 return None
-            return _contact_instance_nn(st["vw"][:, sub], patches)
+            return _contact_instance_nn(st["fw"] if on_frames else st["vw"][:, sub], patches)
 
         st.put_lazy("vismask", _vis)
         st.put_lazy("sig", _sig)
@@ -785,24 +800,24 @@ def optimize_person(
         problem.add_term("radial_velocity", lambda st: radial_velocity_loss(
             st["jw"], cam_centers, frame_valid=frame_valid))
 
-    # Contact attraction pulls labeled points ONTO the wall: the 12 contact-frame POINTS
-    # for kinematics_1's auto labels (band from [auto_contact]), the in-contact joints'
-    # vertices for kinematics_2's manual labels (band from [ann_attraction]). Clearance
-    # repulsion pushes no-contact-joint verts off — kinematics_2 only, since auto labels
+    # Contact attraction pulls labeled points ONTO the wall: the 12 contact-frame POINTS on
+    # the frame axis (band from [auto_contact] when kinematics_1 detected them itself, else
+    # [ann_attraction]), the in-contact joints' vertices on the joint axis. Clearance
+    # repulsion pushes no-contact-joint verts off — joint axis only, since frame labels
     # carry no 0s (nocontact_v is empty).
     if (use_ann or use_auto) and use_pen:
         def _attraction(st):
-            sig = st["sig_f" if use_auto else "sig"]
-            active = incontact_f if use_auto else incontact_v
+            sig = st["sig_f" if on_frames else "sig"]
+            active = incontact_f if on_frames else incontact_v
             if sig is None or active is None:
                 return q.new_zeros(())
             loss, gap_cm, n_attr = attraction_penalty(
                 *sig, conf_thresh=float(ann_at_cfg["conf_thresh"]),
                 band_m=float(ann_at_cfg["band_m"]), max_dist_m=float(ann_at_cfg["max_dist_m"]),
-                active_mask=active, active_weight=None if use_auto else conf_v)
+                active_mask=active)
             return loss, {"cm": gap_cm, "n": n_attr}
         problem.add_term("ann_attraction", _attraction)
-    if use_ann and use_pen:
+    if use_rep and use_pen:
         def _repulsion(st):
             sig = st["sig"]
             if sig is None or nocontact_v is None:
@@ -845,16 +860,15 @@ def optimize_person(
         problem.add_term("ann_seating", _seating)
     if use_ann or use_auto:
         # Velocity damper (hold the labeled points still) needs only world placements, so it
-        # runs in every phase the labels are present (refine + lbfgs for auto, all
-        # phases for manual). Auto labels damp the contact FRAMES, manual ones the joints —
-        # the loss is the same, only the (T, K) point set differs.
-        pos_key, quat_key = ("fw", "fwq") if use_auto else ("jw", "jwq")
+        # runs in every phase the labels are present. Frame labels damp the contact FRAMES,
+        # per-joint ones the joints — the loss is the same, only the (T, K) point set differs.
+        pos_key, quat_key = ("fw", "fwq") if on_frames else ("jw", "jwq")
 
         def _velocity(st):
             if contact_labels is None:
                 return q.new_zeros(())
             loss, speed_cms, ang_deg_s, n_steps = joint_velocity_loss(
-                st[pos_key], contact_labels, fps=fps, joint_weight=contact_conf,
+                st[pos_key], contact_labels, fps=fps,
                 world_quats=st[quat_key], angular_weight=ann_vel_ang_w)
             return loss, {"cm_s": speed_cms, "deg_s": ang_deg_s, "n": n_steps}
         problem.add_term("ann_velocity", _velocity)
@@ -865,7 +879,7 @@ def optimize_person(
             if contact_labels is None:
                 return q.new_zeros(())
             loss, accel_cms2, n_stencils = joint_acceleration_loss(
-                st[pos_key], contact_labels, fps=fps, joint_weight=contact_conf)
+                st[pos_key], contact_labels, fps=fps)
             return loss, {"cm_s2": accel_cms2, "n": n_stencils}
         problem.add_term("ann_acceleration", _acceleration)
 
@@ -892,10 +906,11 @@ def optimize_person(
                       f"{int((lab == 1).any(1).sum())}/{lab.shape[0]} frames w/ contact  ({per_frame})")
             if use_contact_patch and use_pen and ph.scene:
                 with torch.no_grad():
-                    vw_sub0 = mid.forward(betas, normalize_q(q, mid.num_joints)).vertices[:, sub]
+                    o0 = mid.forward(betas, normalize_q(q, mid.num_joints))
+                    pts0 = o0.frames_world[..., :3] if on_frames else o0.vertices[:, sub]
                 aq_cfg = knobs["ann_acquisition"]
                 patch_cell["patches"] = _build_contact_patches(
-                    vw_sub0, group_vert_ids, group_active, scene_pts, scene_normals, scene_conf,
+                    pts0, group_vert_ids, group_active, scene_pts, scene_normals, scene_conf,
                     extrinsics, K, image_hw[0], image_hw[1], radius_px=float(aq_cfg["radius_px"]),
                     patch_k=int(aq_cfg["patch_k"]), conf_thresh=float(aq_cfg["conf_thresh"]))
                 pk = patch_cell["patches"]

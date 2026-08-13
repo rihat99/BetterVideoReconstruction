@@ -7,13 +7,13 @@ Dispatches ``root`` → ``kinematics_1`` → ``kinematics_2`` → ``dynamics`` �
 
 The stages: ``root`` places each body rigidly (root SE3, joints frozen);
 ``kinematics_1`` runs the visually-guided kinematic fit (full → refine → L-BFGS);
-``kinematics_2`` refines it against manual per-joint contact annotation;
+``kinematics_2`` repairs it against the contact labels of ``contacts_1``;
 ``dynamics`` solves per-contact force via RNEA on the frozen ``q``; ``kindyn_1``
-(experimental) re-optimizes the ``kinematics_2`` pose jointly with contact forces.
+re-optimizes the ``kinematics_2`` pose jointly with the contact forces.
 ``root`` + ``kinematics_1`` share one optimization anchored to the starting pose —
 the scale stage's pre-fit (``geometry/prefit.npz``) when present, else the
 converter; the default chain is ``root, kinematics_1`` (``kinematics_2`` needs
-annotation, ``dynamics`` needs contacts, ``kindyn_1`` needs both).
+``contacts_1``, ``kindyn_1`` needs its own body's contacts).
 
 Run from CLI::
 
@@ -72,7 +72,7 @@ def run(source, predictions_dir, config_path, *, stages=None, annotations=None) 
         k2 = opts.get("kinematics_2", {})
         run_kinematics_2(source, pred, cfg, cfg.device, annotations=annotations,
                          overlay=bool(k2.get("overlay", False)),
-                         labels_mode=str(k2.get("labels", "manual")))
+                         labels_mode=str(k2.get("labels", "auto")))
     if "dynamics" in requested:
         dyn = opts.get("dynamics", {})
         run_dynamics(pred, cfg, dyn.get("device", "cuda"),
@@ -81,9 +81,9 @@ def run(source, predictions_dir, config_path, *, stages=None, annotations=None) 
         kd = opts.get("kindyn_1", {})
         run_kindyn(source, pred, cfg, cfg.device, annotations=annotations,
                    overlay=bool(kd.get("overlay", False)),
-                   labels_mode=str(kd.get("labels", "manual")),
+                   labels_mode=str(kd.get("labels", "auto")),
                    bodies=str(kd.get("bodies", "kinematic_2")),
-                   cones=bool(kd.get("cones", False)))
+                   cones=bool(kd.get("cones", True)))
 
 
 def main(argv=None) -> int:
