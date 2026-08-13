@@ -122,6 +122,14 @@ with cone violations ≤ 1e-3 N, and the refined body keeps its contacts
 (re-scored .748). Integration smoke at the final state (fresh frames-v3
 labels, 2 scenes): contacts_1 .859 → contacts_2 .884 at equal precision.
 
+**Shipped result** (all 13 `out/` trees regenerated at HEAD, full chain, zero
+failures): contacts_1 pooled P .850 / R .673 / **F1 .751**; contacts_2 pooled
+P .838 / R .713 / **F1 .771**. The chain improves 10 of 13 scenes on top of
+the frames-v3 labels — biggest 2nwG .658 → .801 and gtIGgs .870 → .894 — and
+costs a little on competition_2 (.630 → .616), vcRBT (.840 → .831) and
+sport_climb (.320 → .317). competition_2 is now the weakest non-rope scene in
+both readouts (precision .55 — worth an eyeball).
+
 ## Evidence
 
 - Control: `scratch/round2_control/` (frozen recipe, all tables), farms
