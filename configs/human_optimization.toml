@@ -9,7 +9,7 @@
 # the square, so for those two a kindyn weight w matches a dynamics weight √w.
 
 [stages]
-run = ["root", "kinematics_1"]   # default chain; kinematics_2 (needs annotations) + dynamics are opt-in
+run = ["root", "kinematics_1"]   # default chain; kinematics_2 / kindyn_1 (full-auto since 2026-08) are opt-in
 
 [stages.root]
 iters = { root = 150 }
