@@ -35,22 +35,25 @@ palms+fingers → hand, toes+heel → foot. Tables (PNG + `metrics.json`):
 | Contact reading | P | R | F1 |
 |---|---|---|---|
 | Main chain (optim + model) | 0.953 | 0.935 | **0.944** |
-| Main chain (optim only) | **0.962** | 0.914 | 0.937 |
+| Main chain (optim only) | **0.962** | 0.905 | 0.932 |
 | Dev chain (optim + forces) | 0.949 | 0.883 | 0.915 |
 | Learned model (p > 0.5) | 0.927 | **0.939** | 0.933 |
 
-The "optim only" row is the main chain's `contacts_2` with the model fusion
-undone — the fusion records every limb-frame it flipped in `fusion_changed`,
-so the pre-fusion reading is recovered exactly by flipping those back. (It is
-not perfectly model-free: the kinematics_2 body it was read from had been
-repaired toward fused labels. That influence stays baked in.)
+The "optim only" row is the main chain's `contacts_1` with its fusion flipped
+back (`fusion_changed` records every flip) — the reading **before the model
+enters the chain anywhere**. It reproduces the official table's old
+"Optimization" row to the digit. There is no model-free `contacts_2` in the
+main chain: the kinematics_2 body was repaired toward the *fused* contacts_1
+labels, so the model's contacts are baked into that geometry and a
+contacts_2-pre-fusion reading silently re-detects them (first version of this
+row made that mistake; it read .937).
 
 Always-contact floor: **0.878** (climbers are usually touching — quote it next
 to every F1 here). The split is easy, as expected: everything scores high.
-Model fusion buys the main chain +0.7 F1 (.937 → .944), all recall. The
-apples-to-apples no-model comparison is optim-only vs dev: here the dev chain
-is 2.2 points behind (.915 vs .937) — on easy scenes the old completion
-machinery's recall beats the force witness.
+Model fusion buys the main chain +1.2 F1 (.932 → .944). The no-model
+comparison favors the main chain here: dev .915 vs optim-only .932
+(position-matched at contacts_1, dev reads .906) — on easy scenes the
+completion machinery's recall beats the force witness.
 
 ## Hard examples — the 13 annotated `data/` scenes, 19,802 limb-frames
 
@@ -61,22 +64,24 @@ Main row = the main checkout's `out/<scene>/human_optim/contacts_2.npz`
 | Contact reading | P | R | F1 |
 |---|---|---|---|
 | Main chain (optim + model) | 0.900 | 0.776 | 0.833 |
-| Main chain (optim only) | **0.907** | 0.733 | 0.811 |
+| Main chain (optim only) | **0.908** | 0.672 | 0.772 |
 | Dev chain (optim + forces) | 0.889 | 0.763 | 0.821 |
 | Learned model (p > 0.5) | 0.874 | **0.827** | **0.850** |
 
-Always-contact floor: 0.819. Here the no-model comparison flips: the dev chain
-beats the main chain's optim-only reading (.821 vs .811, recall .763 vs .733;
-on the unseen 7 below, .773 vs .768). The force witness pays on hard scenes —
-what it was built for — and the easy-scene gap above is the price. Model
-fusion is worth +2.2 F1 to the main chain here (.811 → .833).
+Always-contact floor: 0.819. Here the no-model comparison flips hard: without
+the model the main chain drops to .772 (recall .672 — the floaters' feet go
+missing), while the dev chain holds .821. The force witness is worth +4.9 F1
+over the model-free main chain on hard scenes — what it was built for — and
+even position-matched at contacts_1 the dev chain is ahead (.795 vs .772).
+Model fusion is worth +6.1 F1 to the main chain here (.772 → .833); the dev
+chain gets within 1.2 of the fused main chain with no model at all.
 
 Two caveats before reading a winner:
 
 - **6 of the 13 scenes are in the learned model's train split** (gtIGgs, vcRBT,
   2nwG, 3DAg, 9Rvr, PfwFWSoPF — it trained on those frames with pipeline
   pseudo-labels). On the 7 scenes it never saw, the readings converge:
-  main .786, main optim-only .768, dev .773, learned .788 — near-ties at or below
+  main .786, main optim-only .766, dev .773, learned .788 — near-ties at or below
   that subset's always-contact floor of .795. On raw limb-level F1, nothing
   currently beats "always touching" on the hardest unseen scenes; the methods
   earn their keep on precision (~.80–.84 vs the floor's .66), not F1.
