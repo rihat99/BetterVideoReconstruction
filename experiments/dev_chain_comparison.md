@@ -34,15 +34,23 @@ palms+fingers → hand, toes+heel → foot. Tables (PNG + `metrics.json`):
 
 | Contact reading | P | R | F1 |
 |---|---|---|---|
-| Main chain (optim + model) | **0.953** | 0.935 | **0.944** |
+| Main chain (optim + model) | 0.953 | 0.935 | **0.944** |
+| Main chain (optim only) | **0.962** | 0.914 | 0.937 |
 | Dev chain (optim + forces) | 0.949 | 0.883 | 0.915 |
 | Learned model (p > 0.5) | 0.927 | **0.939** | 0.933 |
 
+The "optim only" row is the main chain's `contacts_2` with the model fusion
+undone — the fusion records every limb-frame it flipped in `fusion_changed`,
+so the pre-fusion reading is recovered exactly by flipping those back. (It is
+not perfectly model-free: the kinematics_2 body it was read from had been
+repaired toward fused labels. That influence stays baked in.)
+
 Always-contact floor: **0.878** (climbers are usually touching — quote it next
 to every F1 here). The split is easy, as expected: everything scores high.
-The dev chain matches the main chain's precision but gives up 5 recall points —
-about the size of the model fusion's contribution, which the dev chain no
-longer has.
+Model fusion buys the main chain +0.7 F1 (.937 → .944), all recall. The
+apples-to-apples no-model comparison is optim-only vs dev: here the dev chain
+is 2.2 points behind (.915 vs .937) — on easy scenes the old completion
+machinery's recall beats the force witness.
 
 ## Hard examples — the 13 annotated `data/` scenes, 19,802 limb-frames
 
@@ -52,16 +60,23 @@ Main row = the main checkout's `out/<scene>/human_optim/contacts_2.npz`
 
 | Contact reading | P | R | F1 |
 |---|---|---|---|
-| Main chain (optim + model) | **0.900** | 0.776 | 0.833 |
+| Main chain (optim + model) | 0.900 | 0.776 | 0.833 |
+| Main chain (optim only) | **0.907** | 0.733 | 0.811 |
 | Dev chain (optim + forces) | 0.889 | 0.763 | 0.821 |
 | Learned model (p > 0.5) | 0.874 | **0.827** | **0.850** |
 
-Always-contact floor: 0.819. Two caveats before reading a winner:
+Always-contact floor: 0.819. Here the no-model comparison flips: the dev chain
+beats the main chain's optim-only reading (.821 vs .811, recall .763 vs .733;
+on the unseen 7 below, .773 vs .768). The force witness pays on hard scenes —
+what it was built for — and the easy-scene gap above is the price. Model
+fusion is worth +2.2 F1 to the main chain here (.811 → .833).
+
+Two caveats before reading a winner:
 
 - **6 of the 13 scenes are in the learned model's train split** (gtIGgs, vcRBT,
   2nwG, 3DAg, 9Rvr, PfwFWSoPF — it trained on those frames with pipeline
-  pseudo-labels). On the 7 scenes it never saw, the three readings converge:
-  main .786, dev .773, learned .788 — a statistical tie, sitting at or below
+  pseudo-labels). On the 7 scenes it never saw, the readings converge:
+  main .786, main optim-only .768, dev .773, learned .788 — near-ties at or below
   that subset's always-contact floor of .795. On raw limb-level F1, nothing
   currently beats "always touching" on the hardest unseen scenes; the methods
   earn their keep on precision (~.80–.84 vs the floor's .66), not F1.
