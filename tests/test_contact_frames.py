@@ -1,4 +1,4 @@
-"""Contact-frame detection: the surface guards, the stillness gate, the toe-pair tiebreak."""
+"""Contact-frame detection: the surface guards, the stillness gate, the foot-side tiebreak."""
 
 from __future__ import annotations
 
@@ -11,7 +11,7 @@ from better_robot.lie import so3
 from tools.body import frame_normals
 from tools.human_optim.contacts import (
     detect_frame_contacts, frame_guarded_sdf, frame_scene_signals, joint_drift,
-    merge_contact_spans, toe_pair_slots)
+    merge_contact_spans, toe_side_slots)
 
 # The 12 contact frames in their stored order — note slots 10/11 are RIGHT then LEFT.
 _FRAME_NAMES = ("toe_under_left", "toe_under_right", "heel_left", "heel_right",
@@ -169,8 +169,10 @@ def test_toe_pairs_of_one_foot_are_never_both_in_contact():
     detected = _detect(points, normals, torch.zeros(num_steps, num_frames), scene,
                        frame_names=list(_FRAME_NAMES), min_frames=1)
     assert detected.toe_suppressed.any(), "the stress case must actually exercise the rule"
-    for under, above in toe_pair_slots(_FRAME_NAMES):
-        assert not (detected.contact[:, under] & detected.contact[:, above]).any()
+    for sole, top in toe_side_slots(_FRAME_NAMES):
+        sole_on = detected.contact[:, list(sole)].any(dim=1)
+        top_on = detected.contact[:, list(top)].any(dim=1)
+        assert not (sole_on & top_on).any()
 
 
 def test_span_merging_cannot_resurrect_a_suppressed_toe():
@@ -206,12 +208,14 @@ def test_span_merging_cannot_resurrect_a_suppressed_toe():
     assert not (kept[:, under] & kept[:, above]).any()
 
 
-def test_toe_pair_slots_resolve_by_name_not_position():
-    """Slots 10/11 are finger_RIGHT then finger_LEFT — positional arithmetic would misfire."""
-    assert toe_pair_slots(_FRAME_NAMES) == ((0, 4), (1, 5))
+def test_toe_side_slots_resolve_by_name_not_position():
+    """Slots 10/11 are finger_RIGHT then finger_LEFT — positional arithmetic would misfire.
+
+    On the legacy 12-frame set the underside group resolves to (toe_under, heel) per foot."""
+    assert toe_side_slots(_FRAME_NAMES) == (((0, 2), (4,)), ((1, 3), (5,)))
     shuffled = tuple(reversed(_FRAME_NAMES))
-    assert toe_pair_slots(shuffled) == ((11, 7), (10, 6))
-    assert toe_pair_slots(["palm_left", "knee_left"]) == ()
+    assert toe_side_slots(shuffled) == (((11, 9), (7,)), ((10, 8), (6,)))
+    assert toe_side_slots(["palm_left", "knee_left"]) == ()
 
 
 # ── stillness ────────────────────────────────────────────────────────────────
