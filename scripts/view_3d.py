@@ -15,7 +15,8 @@ For each clip it shows, in the metric world frame:
   re-uploads),
 * the per-frame **camera** frustums + centre path,
 * the world-frame **gravity** arrow (when the geocalib stage has run),
-* a **ground plane** fitted to the lowest scene points, and
+* the **ground plane** the gravity stage fitted and accepted (drawn from
+  ``geocalib/gravity.npz``; absent when the floor was not visible), and
 * the fitted **SMPL-X bodies** for every tracked person, following the slider.
 
 **Body source** dropdown switches between:
@@ -36,6 +37,11 @@ For each clip it shows, in the metric world frame:
   force/torque data;
 * ``dynamics`` — force-only (no mesh): the 52-joint torque-scaled sphere/bone
   skeleton (via the independent ``skeleton`` layer) + blue contact-force arrows.
+
+The dynamics folder's **force display** dropdown picks the arrow regime:
+``per-joint`` accumulates each joint's frame forces into one arrow at the joint
+(the classic view), ``per-frame`` draws every contact frame's own solved force
+where it acts on the skin (kindyn sources, which store ``frame_forces``).
 
 The three mesh sources are each one skinned mesh per person, posed per frame (LBS
 in the browser, one upload) over a single averaged ``betas`` identity.

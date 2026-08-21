@@ -15,9 +15,7 @@ import numpy as np
 from .helpers import (
     _BODY_COLORS,
     _camera_world_pose,
-    _fit_ground_plane,
     _time_color,
-    _unit,
     _unlit_glb,
     _wxyz_shortest_arc_z,
 )
@@ -145,9 +143,10 @@ class ClipScene:
                               head_radius=camera_scale * 0.25, head_length=camera_scale * 0.4),
             ]
 
-        # -- ground plane: estimation turned off (code kept in ``_build_ground``) --
+        # -- ground plane: drawn from the fit the gravity stage saved (if accepted) --
         self.ground_nodes: list = []
         self.ground_angle: float | None = None
+        self._build_ground()
 
         # -- per-point scene normal arrows (debug layer, built lazily on first toggle) --
         self.normal_nodes: list = []
@@ -197,7 +196,10 @@ class ClipScene:
         self._translucent: str | None = None   # active source whose mesh is currently translucent
         for source, skel in self.skels.items():
             body = data.skinned.get(source)
-            if body is None:
+            # A force source's skeleton is its torque-scaled dyn skeleton — building the
+            # 22-joint overlay too would draw two skeletons on top of each other. Its
+            # skel dict still feeds the contact-frames layer below.
+            if body is None or source in data.forces:
                 continue
             _f, body_oids, people = body
             names, parents = skel["joint_names"], skel["parents"]
@@ -264,6 +266,20 @@ class ClipScene:
         self.forces = data.forces                          # {source: force dict}
         self.force_nodes: dict[str, list[dict]] = {}
         self._dyn_finger: dict[str, np.ndarray] = {}       # source -> (J,) finger/palm mask
+        # Per-person contact-frame world positions for the "per-frame" force display —
+        # reused from the SAME body forward pass that poses the source's mesh, so a
+        # per-frame arrow starts exactly on the drawn skin. Only sources that store
+        # ``frame_forces`` and have a skinned body ("kindyn_1" / "kindyn_manual")
+        # qualify; "dynamics" (per-joint forces, no mesh) falls back to per-joint.
+        self._force_frame_pos: dict[str, list[np.ndarray | None]] = {}
+        for source, dyn in self.forces.items():
+            body = data.skinned.get(source)
+            if dyn.get("ff") is not None and body is not None:
+                _fcs, _oids, people = body
+                counts = {person["frame_pos"].shape[1] for person in people if person is not None}
+                if len(people) == dyn["P"] and counts == {dyn["ff"].shape[2]}:
+                    self._force_frame_pos[source] = [
+                        None if person is None else person["frame_pos"] for person in people]
         for source, dyn in self.forces.items():
             unit_cyl = _unit_cylinder()
             Jd = dyn["jw"].shape[2]
@@ -325,11 +341,14 @@ class ClipScene:
         gtxt = "—"
         if d.gravity is not None:
             g = d.gravity["g"]
-            tag = ("default↓" if d.gravity["is_fallback"]
-                   else f"GeoCalib, spread {d.gravity['spread']:.1f}°")
+            tag = {"ground": "ground plane",
+                   "fallback_down": "default↓"}.get(
+                d.gravity.get("source", ""), f"GeoCalib, spread {d.gravity['spread']:.1f}°")
             gtxt = f"[{g[0]:+.2f} {g[1]:+.2f} {g[2]:+.2f}] ({tag})"
         srcs = ", ".join(self.body_source_names) or "—"
-        gnd = "" if self.ground_angle is None else f" · ground ∠grav {self.ground_angle:.1f}°"
+        gnd = "" if self.ground_angle is None else f" · ground ∠prior {self.ground_angle:.1f}°"
+        if not gnd and d.gravity is not None and d.gravity.get("ground_reject"):
+            gnd = f" · ground: {d.gravity['ground_reject']}"
         return (f"**{d.name}** — {d.n_frames} frames · {len(d.scene_points):,} scene pts · "
                 f"{self.n_cameras} cameras · {len(d.human_points):,} human pts · "
                 f"climbers {d.obj_ids}\n\nbodies: {srcs} · gravity: {gtxt}{gnd}")
@@ -388,32 +407,27 @@ class ClipScene:
             head_length=0.3 * length)]
 
     def _build_ground(self) -> None:
-        """Fit a plane to the lowest scene points and draw it as a ground grid.
+        """Draw the accepted ground-plane fit as a grid.
 
-        (Currently not called — ground estimation is turned off in the viewer.)
-
-        Uses :func:`~tools.viewer.helpers._fit_ground_plane`; the recovered normal
-        should sit close to the gravity axis on a level floor, and ``ground_angle``
-        records that offset (degrees) for the info panel. The grid (natively in its
-        local x-y plane, normal ``+z``) is rotated so ``+z`` aligns with the fitted
-        up-normal and placed at the plane centroid.
+        The plane is fitted (and gated) by the gravity stage and saved in
+        ``geocalib/gravity.npz``; the viewer only draws what the pipeline used.
+        ``ground_angle`` is the fitted normal's angle to the prior down direction,
+        shown in the info panel. The grid (natively in its local x-y plane, normal
+        ``+z``) is rotated so ``+z`` aligns with the fitted up-normal and placed
+        at the plane centroid.
         """
-        g_down = (np.asarray(self.data.gravity["g"], np.float64)
-                  if self.data.gravity is not None
-                  else np.array([0.0, 1.0, 0.0]))             # VGGT world up is -y ⇒ down +y
-        fit = _fit_ground_plane(self.data.scene_points, g_down)
-        if fit is None:
+        plane = None if self.data.gravity is None else self.data.gravity.get("ground")
+        if plane is None:
             return
-        centroid, normal, extent = fit
-        up = _unit(-g_down)
-        self.ground_angle = float(np.degrees(np.arccos(np.clip(normal @ up, -1.0, 1.0))))
-        size = extent * _GROUND_GRID_MULT
+        self.ground_angle = plane["angle_deg"]
+        size = plane["extent"] * _GROUND_GRID_MULT
         self.ground_nodes = [self.server.scene.add_grid(
             "/clip/ground", width=size, height=size,
             cell_size=max(size / 20.0, 0.05), section_size=max(size / 4.0, 0.25),
             cell_color=(170, 170, 170), section_color=(110, 110, 110),
-            plane="xy", wxyz=_wxyz_shortest_arc_z(normal),
-            position=tuple(float(x) for x in centroid), visible=self.layers["ground"])]
+            plane="xy", wxyz=_wxyz_shortest_arc_z(plane["normal"]),
+            position=tuple(float(x) for x in plane["centroid"]),
+            visible=self.layers["ground"])]
 
     # -- layer visibility --
     def _apply_static_layers(self) -> None:
@@ -428,9 +442,11 @@ class ClipScene:
         self.camera_cursor.visible = self.layers["cameras"]
         for h in self.gravity_nodes:
             h.visible = self.layers["gravity"]
+        for h in self.ground_nodes:
+            h.visible = self.layers["ground"]
 
     def set_static_layer(self, name: str, on: bool) -> None:
-        """Toggle one static layer (``scene`` / ``normals`` / ``cameras`` / ``gravity``)."""
+        """Toggle one static layer (``scene`` / ``normals`` / ``cameras`` / ``gravity`` / ``ground``)."""
         if name == "scene":
             self.scene_node.visible = on
         elif name == "normals":
@@ -444,6 +460,9 @@ class ClipScene:
             self.camera_cursor.visible = on
         elif name == "gravity":
             for h in self.gravity_nodes:
+                h.visible = on
+        elif name == "ground":
+            for h in self.ground_nodes:
                 h.visible = on
 
     def _build_scene_node(self):
@@ -760,20 +779,37 @@ class ClipScene:
                     h.visible = True
                 else:
                     h.visible = False
-            # Contact-force arrows at the contact joints — their own toggle, independent
-            # of the skeleton layer. Remove the old node before re-adding (reusing the
-            # handle would leak a node every frame).
+            # Contact-force arrows — their own toggle, independent of the skeleton layer.
+            # Two display regimes (the ``force display`` dropdown): "per-joint" draws one
+            # accumulated arrow at each loaded joint; "per-frame" draws every contact
+            # frame's own solved force where it acts, for sources that store
+            # ``frame_forces``. Remove the old node before re-adding (reusing the handle
+            # would leak a node every frame).
             if nd["forces"] is not None:
                 nd["forces"].remove()
                 nd["forces"] = None
             if valid and ly.get("dyn_forces", True):
-                idx = np.flatnonzero(fmag > 1e-3)
+                frame_pos = self._force_frame_pos.get(source)
+                per_frame = (ly.get("dyn_force_mode", "per-joint") == "per-frame"
+                             and frame_pos is not None and frame_pos[p] is not None)
+                if per_frame:
+                    vec = dyn["ff"][p, f]                                 # (F, 3)
+                    anchor = frame_pos[p][f]                              # (F, 3)
+                    keep = (np.linalg.norm(vec, axis=-1) > 1e-3) & np.isfinite(anchor).all(-1)
+                    idx = np.flatnonzero(keep)
+                else:
+                    vec, anchor = fw, jw
+                    idx = np.flatnonzero(fmag > 1e-3)
                 if idx.size:
-                    seg = np.stack([jw[idx], jw[idx] + fw[idx] * _DYN_FSCALE], axis=1)
+                    seg = np.stack([anchor[idx], anchor[idx] + vec[idx] * _DYN_FSCALE], axis=1)
+                    # Per-frame arrows are several per limb, so draw them thinner than
+                    # the single accumulated per-joint arrow.
+                    shaft, head_r, head_l = ((0.006, 0.016, 0.032) if per_frame
+                                             else (0.012, 0.028, 0.05))
                     nd["forces"] = self.server.scene.add_arrows(
                         f"/clip/{source}/p{nd['oid']:02d}/forces", points=seg.astype(np.float32),
-                        colors=_DYN_FORCE_RGB, shaft_radius=0.012,
-                        head_radius=0.028, head_length=0.05)
+                        colors=_DYN_FORCE_RGB, shaft_radius=shaft,
+                        head_radius=head_r, head_length=head_l)
             # Root residual wrench: force (green) and torque (magenta) at the pelvis,
             # each on its own toggle. A physically-consistent solve drives these toward
             # zero, so short arrows are good — they show what the contact forces failed

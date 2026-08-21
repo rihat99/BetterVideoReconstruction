@@ -36,7 +36,13 @@ _SCENE_CONF_DROP_Q = 0.1
 
 
 def _load_gravity(pred: Path) -> dict | None:
-    """World-frame gravity from ``geocalib/gravity.npz`` (unit down + source flag)."""
+    """World-frame gravity from ``geocalib/gravity.npz`` (unit down + source flag).
+
+    When the gravity stage fitted and accepted a ground plane, ``ground`` carries
+    it (centroid / up-normal / draw extent / angle to the prior down) so the
+    viewer can draw the grid the pipeline actually used; a rejected fit leaves
+    ``ground`` ``None`` and puts the reason in ``ground_reject``.
+    """
     f = pred / "geocalib" / "gravity.npz"
     if not f.exists():
         return None
@@ -46,7 +52,15 @@ def _load_gravity(pred: Path) -> dict | None:
     source = str(gd["source"]) if "source" in gd.files else "geocalib"
     spread = (float(gd["inlier_spread_median_deg"])
               if "inlier_spread_median_deg" in gd.files else float("nan"))
-    return {"g": g, "is_fallback": source == "fallback_down", "spread": spread}
+    ground = None
+    if "ground_accepted" in gd.files and bool(gd["ground_accepted"]):
+        ground = {"centroid": np.asarray(gd["ground_centroid"], np.float64),
+                  "normal": np.asarray(gd["ground_normal"], np.float64),
+                  "extent": float(gd["ground_extent"]),
+                  "angle_deg": float(gd["ground_angle_deg"])}
+    reject = str(gd["ground_reject"]) if "ground_reject" in gd.files else ""
+    return {"g": g, "is_fallback": source == "fallback_down", "source": source,
+            "spread": spread, "ground": ground, "ground_reject": reject}
 
 
 def _load_force_data(pred: Path, filename: str) -> dict | None:
@@ -89,6 +103,8 @@ def _load_force_data(pred: Path, filename: str) -> dict | None:
         "jw": dd["joints_world"].astype(np.float32),            # (P, N, J, 3)
         "tm": tm,
         "fw": dd["contact_forces_world"].astype(np.float32),    # (P, N, J, 3)
+        "ff": (dd["frame_forces"].astype(np.float32)            # (P, N, F, 3): the same forces
+               if "frame_forces" in dd.files else None),        # per contact FRAME, unfolded
         "bw": (dd["base_wrench"].astype(np.float32)             # (P, N, 6): root force | torque
                if "base_wrench" in dd.files else None),
         "jc": jc,                                               # (P, N, J): per-joint in-contact (fingers folded to wrist)
@@ -124,18 +140,20 @@ def _load_sensor_forces(pred: Path) -> dict | None:
 
 
 def _load_skeleton(pred: Path, body_fn: str = "kinematic_1.npz",
-                   contacts_fn: str = "contacts_1.npz",
+                   contacts_fn: str | None = "contacts_1.npz",
                    frame_names: list[str] | None = None) -> dict | None:
     """Body-skeleton topology + per-contact-frame contact labels.
 
     The joint tree (``parents`` / ``joint_names``, 52 native joints) comes from
     ``human_optim/<body_fn>``, so the skeleton draws even without a contact pass.
-    Contact itself lives on the 12 **contact frames** — named points on the skin
-    (toes, heels, knees, palms, fingertips), each rigidly attached to a joint — and
-    is read from ``human_optim/<contacts_fn>`` when that file carries the current
-    label schema (``contact_label_schema == _CONTACT_SCHEMA``). Each refined body
-    pairs with the contact artifact measured ON it (kinematic_1 ↔ contacts_1,
-    kinematic_2 ↔ contacts_2).
+    Contact itself lives on the **contact frames** — named points on the skin,
+    each rigidly attached to a joint — and is read from ``human_optim/<contacts_fn>``
+    when that file carries the current label schema
+    (``contact_label_schema == _CONTACT_SCHEMA``). Each refined body pairs with the
+    contact artifact measured ON it (kinematic_1 ↔ contacts_1, kinematic_2 ↔
+    contacts_2). ``contacts_fn=None`` means the body npz is **self-labeled** — the
+    kindyn stages write ``frame_contact`` next to ``q`` themselves — so the labels
+    come straight from ``body_fn`` with no schema check.
 
     A missing, older, or mismatched contact file just leaves the contact fields
     ``None``: the body and its skeleton still load, they only lose the contact
@@ -143,7 +161,7 @@ def _load_skeleton(pred: Path, body_fn: str = "kinematic_1.npz",
 
     :param pred: the clip's ``out/<stem>/`` directory.
     :param body_fn: refined-body npz under ``human_optim/``.
-    :param contacts_fn: contact npz measured on that body.
+    :param contacts_fn: contact npz measured on that body, or ``None`` (self-labeled).
     :param frame_names: the contact-frame names the posed body actually reports
         (from :func:`_smplx_kinematic_skinned`); the labels are dropped when the
         file names a different frame set.
@@ -160,6 +178,17 @@ def _load_skeleton(pred: Path, body_fn: str = "kinematic_1.npz",
         "frame_parent": None,                                    # (F,) parent joint per frame
         "contact_oids": None,                                    # (P,) or None
     }
+    if contacts_fn is None:
+        if "frame_contact" not in kd.files:
+            return out
+        names = [str(x) for x in np.asarray(kd["contact_frame_names"]).tolist()]
+        if frame_names is not None and names != frame_names:
+            return out
+        out["frame_contact"] = np.asarray(kd["frame_contact"], bool)
+        out["frame_names"] = names
+        out["frame_parent"] = np.asarray(kd["contact_frame_parents"], np.int32)
+        out["contact_oids"] = np.asarray(kd["object_ids"], np.int32)
+        return out
     cf = pred / "human_optim" / contacts_fn
     if not cf.exists():
         return out
@@ -579,10 +608,15 @@ def load_clip_data(pred: Path, *, device: str, show_smplx: bool,
 
     # Body skeletons + their contact-frame labels. The posed body names the contact
     # frames it reports, so a contact artifact for a different frame set is dropped.
+    # The kindyn bodies are self-labeled (contacts_fn=None): their npz carries
+    # frame_contact next to q, which feeds the contact-frames layer; their skeleton
+    # stays the force-source torque skeleton (ClipScene skips their 22-joint overlay).
     skeletons: dict = {}
     if show_smplx:
         for name, body_fn, contacts_fn in (("kinematics", "kinematic_1.npz", "contacts_1.npz"),
-                                           ("kinematics_2", "kinematic_2.npz", "contacts_2.npz")):
+                                           ("kinematics_2", "kinematic_2.npz", "contacts_2.npz"),
+                                           ("kindyn_1", "kindyn_1.npz", None),
+                                           ("kindyn_manual", "kindyn_manual.npz", None)):
             body = skinned.get(name)
             person = next((p for p in body[2] if p is not None), None) if body else None
             sk = _load_skeleton(pred, body_fn, contacts_fn,
