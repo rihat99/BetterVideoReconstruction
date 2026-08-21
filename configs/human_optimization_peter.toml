@@ -191,7 +191,6 @@ angular_weight = 0.1
 groups = ["left_hand", "right_hand", "left_foot", "right_foot"]
 detect_thresh_m = 0.08   # enter: a still joint within this of the wall becomes a label
 detect_exit_m   = 0.12   # stay (hysteresis); >= detect_thresh_m
-min_frames = 3
 band_m = 0.25            # PETER: wider pull — a predicted label is trusted from further out (was 0.15)
 max_dist_m = 0.30        # guard; > band_m and > detect_exit_m
 prune_margin_m = 0.30    # scene_sdf AABB prune; >= max_dist_m
@@ -208,7 +207,7 @@ still_m  = 0.03        # readout net-drift recall knob (raise → more recall); 
 overlay = true             # render the contact skeleton overlay
 close_thresh_m = 0.03  # enter: "just outside" distance counted as contact
 exit_thresh_m = 0.035  # stay: looser hysteresis exit (holds a span, kills 1-frame boundary flicker)
-min_frames = 3         # drop contact spans shorter than this many frames
+min_span_s = 0.1       # min contact/release span (seconds; frames = ceil(s·fps)) — applied to the fused labels AFTER gap-welding; raw detection keeps a fixed 3-frame blip killer (DETECT_MIN_FRAMES)
 max_dist_m = 0.10
 conf_thresh = 0.1      # residual absolute floor (VGGT conf ≥~1 ⇒ non-binding)
 conf_drop_q = 0.1      # quantile gate at scene load: drop the lowest-confidence scene voxels

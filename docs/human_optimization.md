@@ -153,6 +153,19 @@ Only `kinematics_1` reads the knob.
   0): unlike the higher differences it penalizes motion itself, not the roughness of
   motion, so it slows the climber as well as the jitter. Measured at the accel weights it
   bought only −2.3% jitter and cost F1 (.578 → .575).
+- **These weights are tuned at 30 fps, and `kindyn_1` restores that meaning at any frame
+  rate.** A k-th per-frame difference of a smooth motion shrinks like `1/fps^k`, so on a
+  60 fps clip the same weight restrains the physical derivative `(60/30)^2k` times less —
+  while the per-frame pose noise the terms exist to damp does not shrink at all. Measured
+  consequence: on 60 fps scenes the kindyn physics term overpowered the smoothness terms
+  and shook the force-bearing limbs. So in the `kindyn_1` solve every per-frame-difference
+  weight (the motion terms, `radial_velocity`, `ann_velocity`, and the force/torque
+  smoothness) is scaled by `(fps/30)^2k` at runtime (`fps_scaled_weights`), identity at
+  ≤ 30 fps; kindyn's RNEA velocity/acceleration likewise use a stencil `round(fps/30)`
+  frames wide — the acceleration estimate (and its noise) a 30 fps camera of the same
+  motion would give. The pure kinematic stages deliberately keep their raw weights at
+  every fps: scaling them too was tried and measured to stiffen `kinematics_2` against
+  the contact-patch repair (the body seats less, and 60 fps contact recall collapsed).
 - A difference is **dropped where its stencil touches an untracked frame**. Those frames
   hold a pose copied from their nearest tracked neighbour, so the step across a gap is
   an artefact of the hold, not motion — without the gate the smoothness terms spend

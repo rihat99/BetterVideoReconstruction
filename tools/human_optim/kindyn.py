@@ -44,7 +44,7 @@ from tools.smplx_robot.dynamics import velocity_acceleration_from_trajectory
 
 from . import paths
 from .camera import world_from_cam
-from .config import HumanOptimConfig
+from .config import FPS_REF, HumanOptimConfig, fps_scaled_weights
 from .forces import cone_generators
 from .optimizer import PhaseSpec, optimize_person
 from .qmath import normalize_q
@@ -100,6 +100,7 @@ class DynamicsSpec:
     valid: np.ndarray             #: (T,) bool per-frame validity
     total_mass: float             #: body mass, kg (baked inertia sum)
     res_scale: float = 1.0        #: 1 / (valid frames × body weight²) — see the class docstring
+    spacing: int = 1              #: v/a stencil step (frames) — round(fps/30), keeps the accel noise at the 30 fps reference
     cone_axis: torch.Tensor | None = None   #: (T, 12, 3) frozen contact normal per frame
     cone_gen: torch.Tensor | None = None    #: (T, 12, 4, 3) frozen pyramid edge directions
     mu: float = 1.0                         #: tan(cone half-angle) — the friction coefficient
@@ -193,7 +194,8 @@ class DynamicsSpec:
         """
         from better_robot.dynamics import rnea
 
-        v, a = velocity_acceleration_from_trajectory(self.model, qn, self.dt)
+        v, a = velocity_acceleration_from_trajectory(self.model, qn, self.dt,
+                                                     spacing=self.spacing)
         oMi, frames7 = self.placements(qn)
         fext, f_eff = self.build_fext(f_world, oMi, frames7)
         return rnea(self.model, qn, v, a, fext=fext), f_eff
@@ -269,7 +271,8 @@ class DynamicsSpec:
         w = self.weights
         with torch.no_grad():
             qn = qn_init.detach()
-            v, a = velocity_acceleration_from_trajectory(self.model, qn, self.dt)
+            v, a = velocity_acceleration_from_trajectory(self.model, qn, self.dt,
+                                                         spacing=self.spacing)
             oMi, frames7 = self.placements(qn)
             oMi, frames7 = oMi.detach(), frames7.detach()
             base0 = self.wrench_rms(rnea(self.model, qn, v, a))
@@ -443,13 +446,16 @@ def build_dynamics_spec(body, betas: torch.Tensor, frame_labels: torch.Tensor,
     fpair = mask[1:] * mask[:-1] * valid_pair[:, None]
 
     body_weight_n = total_mass * _GRAVITY_MAG
+    # High-fps clips: wider v/a stencil (fps-invariant accel noise) + the 30 fps
+    # restraint of the force/torque smoothness weights. Both identity at fps <= 30.
     spec = DynamicsSpec(
         model=model, frame_ids=frame_ids, parent_ids=parent_ids, parent_body=parent_body,
         frame_names=frame_names, mask=mask, fpair=fpair, valid_pair=valid_pair,
-        dt=1.0 / float(fps), weights=weights, dyn_opt=dyn_opt,
+        dt=1.0 / float(fps), weights=fps_scaled_weights(weights, fps), dyn_opt=dyn_opt,
         gravity_world=np.asarray(gravity_world, np.float32), valid=np.asarray(valid, bool),
         total_mass=total_mass, mu=math.tan(math.radians(float(half_angle_deg))),
-        res_scale=1.0 / (max(int(valid_t.sum()), 1) * body_weight_n ** 2))
+        res_scale=1.0 / (max(int(valid_t.sum()), 1) * body_weight_n ** 2),
+        spacing=max(1, round(float(fps) / FPS_REF)))
     if cones:
         with torch.no_grad():
             _, frames7 = spec.placements(normalize_q(q_world.to(dev), body.num_joints))

@@ -33,11 +33,31 @@ chunked-batched machinery the per-iteration losses need.
 
 from __future__ import annotations
 
+import math
 from collections.abc import Sequence
 from typing import NamedTuple
 
 import numpy as np
 import torch
+
+
+#: Raw-detection blip killer, deliberately a FIXED frame count at every fps: at 60 fps a
+#: true contact often surfaces as dense 3–5-frame flicker, and a longer gate would delete
+#: it before the stage's gap-welding can fuse it into a span (measured: 2nwG contact
+#: recall .67 → .42 with a 0.1 s gate inside detection). The duration rule that IS
+#: fps-aware (:func:`min_span_frames`) runs in ``estimate_contacts`` after the welding.
+DETECT_MIN_FRAMES = 3
+
+
+def min_span_frames(min_span_s: float, fps: float) -> int:
+    """``[contacts].min_span_s`` (seconds) → the frame count the POST-WELD span rule uses.
+
+    ``ceil`` so the duration gate never weakens with frame rate: 0.1 s is 3 frames
+    at every shipped 24–30 fps rate (the old ``min_frames = 3``) and 5–6 at 50–60
+    fps. Applied to the fused labels after gap-welding — never inside raw detection,
+    where :data:`DETECT_MIN_FRAMES` rules (see its note).
+    """
+    return max(1, math.ceil(float(min_span_s) * float(fps)))
 
 
 @torch.no_grad()

@@ -38,7 +38,8 @@ if TYPE_CHECKING:
 from tools.body import frame_normals
 
 from .camera import project, transform_points
-from .contacts import detect_frame_contacts, joint_drift, vertex_to_joint
+from .config import fps_scaled_weights
+from .contacts import DETECT_MIN_FRAMES, detect_frame_contacts, joint_drift, vertex_to_joint
 from .keypoints import smooth_tracks
 from tools.optim import Phase, Problem, State, run_phases
 
@@ -726,7 +727,7 @@ def optimize_person(
             points, frame_normals(frames7), drift, scene_pts, scene_normals, scene_conf,
             frame_names=mid.contact_frame_names,
             close_thresh_m=float(ac["detect_thresh_m"]), exit_thresh_m=float(ac["detect_exit_m"]),
-            min_frames=int(ac["min_frames"]), still_m=float(ac["still_m"]),
+            min_frames=DETECT_MIN_FRAMES, still_m=float(ac["still_m"]),
             max_dist_m=float(ac["max_dist_m"]), conf_thresh=float(ac["conf_thresh"]),
             prune_margin_m=float(ac["prune_margin_m"]))
         keep = detected.contact
@@ -928,8 +929,15 @@ def optimize_person(
     # L-BFGS frees every DOF group (the polish), but a frozen group must STAY frozen there
     # too — so the finger freeze is the one mask that survives into the L-BFGS phase.
     lbfgs_mask = {"q": finger_freeze_mask(nq, q.device)} if freeze_fingers else None
+    # kindyn only: restore the 30 fps restraint of the per-frame-difference terms
+    # (identity at fps <= 30) so the physics residual cannot out-muscle them and shake
+    # the force-bearing limbs on a high-fps clip. The pure kinematic stages keep their
+    # raw weights at every fps — scaling them too was tried (2026-08-22) and measured
+    # to stiffen kinematics_2 against the contact-patch repair (the body seats less,
+    # 60 fps contact recall collapses .67 -> .42 on 2nwG).
+    scale_w = (lambda w: fps_scaled_weights(w, fps)) if dynamics is not None else (lambda w: w)
     engine_phases = [
-        Phase(ph.name, int(ph.iters), ph.weights, optimizer=ph.optimizer,
+        Phase(ph.name, int(ph.iters), scale_w(ph.weights), optimizer=ph.optimizer,
               grad_mask=(lbfgs_mask if ph.optimizer == "lbfgs" else
                          {"q": _dof_mask(ph.dofs, nq, q.device, freeze_fingers=freeze_fingers)}),
               on_start=_phase_start(ph))

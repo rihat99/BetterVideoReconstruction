@@ -62,12 +62,13 @@ from tools.body import frame_normals, load_body  # noqa: E402
 from tools.config import load_toml  # noqa: E402
 from tools.geometry.normals import load_scene_cloud  # noqa: E402
 from tools.human_optim import (  # noqa: E402
-    detect_frame_contacts, joint_drift, merge_contact_spans,
+    DETECT_MIN_FRAMES, detect_frame_contacts, joint_drift, merge_contact_spans,
+    min_span_frames,
     project, transform_points, world_from_cam,
 )
 from tools.human_optim import paths  # noqa: E402
 from tools.human_optim.forces import (  # noqa: E402
-    ForceKnobs, close_gaps, force_labels, resolve_toe_conflicts, solve_person_forces,
+    ForceKnobs, close_gaps, force_labels, min_span, resolve_toe_conflicts, solve_person_forces,
 )
 from tools.human_optim.qmath import normalize_q  # noqa: E402
 
@@ -90,7 +91,7 @@ def _load_config(path: Path) -> dict:
     c = cfg.setdefault("contacts", {})
     c.setdefault("close_thresh_m", 0.03)   # enter: "just outside" distance counted as contact
     c.setdefault("exit_thresh_m", 0.035)   # stay: looser hysteresis exit (kills boundary flicker)
-    c.setdefault("min_frames", 3)          # drop contact spans shorter than this many frames
+    c.setdefault("min_span_s", 0.1)        # drop contact spans shorter than this (seconds; frames = ceil(s*fps))
     c.setdefault("max_dist_m", 0.10)       # far guard (a match behind an occluder is not a surface)
     c.setdefault("conf_thresh", 0.1)       # residual absolute floor (VGGT conf ≥~1 ⇒ non-binding)
     c.setdefault("conf_drop_q", 0.1)       # quantile confidence gate: drop the lowest scene voxels
@@ -205,6 +206,7 @@ def run(source: str | Path, predictions_dir: str | Path, config_path: str | Path
     parents = np.asarray(kin["parents"], dtype=np.int32)
     valid_mask = np.asarray(kin["valid_mask"], dtype=bool)
     fps = float(tr.get("fps", kin.get("fps", 30.0)))   # the drift window needs the true clip fps
+    min_frames = min_span_frames(cc["min_span_s"], fps)   # the span rules count frames
 
     extrinsics = torch.as_tensor(tr["extrinsics"], dtype=torch.float32, device=device)       # (N,4,4)
     intrinsics = torch.as_tensor(tr["intrinsics_px_orig"], dtype=torch.float32, device=device)
@@ -274,7 +276,7 @@ def run(source: str | Path, predictions_dir: str | Path, config_path: str | Path
             points, normals, drift, scene_pts, scene_normals, scene_conf,
             frame_names=frame_names,
             close_thresh_m=float(cc["close_thresh_m"]), exit_thresh_m=float(cc["exit_thresh_m"]),
-            min_frames=int(cc["min_frames"]), still_m=float(cg["still_m"]),
+            min_frames=DETECT_MIN_FRAMES, still_m=float(cg["still_m"]),
             max_dist_m=float(cc["max_dist_m"]), conf_thresh=float(cc["conf_thresh"]),
             prune_margin_m=float(cc["prune_margin_m"]))
 
@@ -308,7 +310,7 @@ def run(source: str | Path, predictions_dir: str | Path, config_path: str | Path
             force_solution.magnitude, frame_names=frame_names, valid=valid_mask[p],
             threshold_n=float(cf["theta_bw"]) * force_solution.body_weight_n,
             hold_n=float(cf["theta_hold_bw"]) * force_solution.body_weight_n,
-            min_frames=int(cc["min_frames"]))
+            min_frames=DETECT_MIN_FRAMES)
         force_label[:, knee_columns] = False        # force on a knee is ~all false positives
         contact_np = contact.cpu().numpy() | force_label
         contact_np[~valid_mask[p]] = False
@@ -317,8 +319,13 @@ def run(source: str | Path, predictions_dir: str | Path, config_path: str | Path
         # but the union puts two of them end to end and can leave a one- or two-frame hole
         # between them that neither arm ever saw. The same number governs both directions:
         # a contact lasts at least min_frames, and so does a release.
-        contact_np = close_gaps(contact_np, int(cc["min_frames"]))
+        contact_np = close_gaps(contact_np, min_frames)
         contact_np[~valid_mask[p]] = False          # never bridge across untracked steps
+        # The fps-aware duration rule, applied only now that the union is welded. At
+        # <=30 fps this is a no-op (every arm above already enforces 3 frames); at high
+        # fps it drops the still-isolated micro-spans the welding could not fuse.
+        contact_np = min_span(contact_np, min_frames)
+        contact_np[~valid_mask[p]] = False
 
         # Both readouts keep one toe per foot, but they can keep DIFFERENT ones, and the
         # union would then hold both at once. The toe rule settles it for the whole contact
@@ -326,7 +333,7 @@ def run(source: str | Path, predictions_dir: str | Path, config_path: str | Path
         # of one foot, so "this foot is in contact" is untouched.
         contact_np = resolve_toe_conflicts(contact_np, force_solution.magnitude,
                                            frame_names=frame_names,
-                                           min_frames=int(cc["min_frames"]))
+                                           min_frames=DETECT_MIN_FRAMES)
         merged_np = merged.cpu().numpy() & contact_np      # a bridged step that lost its
         merged_np[~valid_mask[p]] = False                  # toe is no longer a contact
         frame_force[p] = force_solution.forces
@@ -395,7 +402,8 @@ def run(source: str | Path, predictions_dir: str | Path, config_path: str | Path
         source_transform_sha256=np.str_(_sha256(transform_path)),
         close_thresh_m=np.float32(cc["close_thresh_m"]),
         exit_thresh_m=np.float32(cc["exit_thresh_m"]),
-        min_frames=np.int32(cc["min_frames"]),
+        min_span_s=np.float32(cc["min_span_s"]),
+        min_frames=np.int32(min_frames),
         max_dist_m=np.float32(cc["max_dist_m"]),
         conf_thresh=np.float32(cc["conf_thresh"]),
         prune_margin_m=np.float32(cc["prune_margin_m"]),

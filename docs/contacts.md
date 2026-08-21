@@ -124,11 +124,14 @@ one. Bridged frames are flagged in the output (`merged`) so a consumer can ignor
 them.
 
 **One debounce over the union.** After the geometric and force labels are
-combined, gaps shorter than `min_frames` are filled. Each readout already drops
+combined, gaps shorter than the span rule are filled. Each readout already drops
 its own too-short spans, but the union puts two of them end to end and can leave
 a one- or two-frame hole that neither arm ever saw. The rule is symmetric and
-uses the same number: a contact lasts at least `min_frames`, and so does a
-release.
+uses the same number: a contact lasts at least `min_span_s`, and so does a
+release. The knob is in **seconds** (`min_span_s`, default 0.1 s; frames =
+ceil(s·fps)) — a frame count would let a 60 fps clip keep contacts half as long
+as a 25 fps clip keeps them, which is exactly the label flicker we measured on
+the 60 fps scenes.
 
 ## The force witness: contacts the distance gate cannot see
 
@@ -178,9 +181,10 @@ can never drift apart.
 All in `configs/human_optimization.toml`.
 
 `[contacts]` — the readout: `close_thresh_m` / `exit_thresh_m` (hysteresis),
-`min_frames`, `max_dist_m` and `conf_thresh` (the surface guards), `conf_drop_q`
-and `normal_k` (scene-cloud loading), `prune_margin_m`, and the three `merge_*`
-knobs. `min_frames` also sets the union debounce, in both directions.
+`min_span_s` (the span rule, seconds), `max_dist_m` and `conf_thresh` (the
+surface guards), `conf_drop_q` and `normal_k` (scene-cloud loading),
+`prune_margin_m`, and the three `merge_*` knobs. `min_span_s` also sets the
+union debounce, in both directions.
 
 `[contact_force]` — the force witness: `theta_bw` / `theta_hold_bw` (the load
 thresholds a label enters and holds at), `gap_dstar_m` and `stillness_vstar_mps`

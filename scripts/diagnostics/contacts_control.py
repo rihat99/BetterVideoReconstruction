@@ -75,7 +75,8 @@ from tools.config import load_toml  # noqa: E402
 from tools.geometry.normals import load_scene_cloud  # noqa: E402
 from tools.human_optim.camera import world_from_cam  # noqa: E402
 from tools.human_optim.contacts import (  # noqa: E402
-    detect_frame_contacts, frame_scene_signals, joint_drift, merge_contact_spans,
+    DETECT_MIN_FRAMES, detect_frame_contacts, frame_scene_signals, joint_drift,
+    merge_contact_spans,
 )
 from tools.human_optim.forces import (  # noqa: E402
     NO_SCENE_M, SEARCH_MARGIN_M, ForceKnobs, force_labels, resolve_toe_conflicts,
@@ -157,7 +158,7 @@ def prepare_scene(stem: str, root: Path, body, config: dict, device: str, *,
             frame_names=frame_names,
             close_thresh_m=float(contacts["close_thresh_m"]),
             exit_thresh_m=float(contacts["exit_thresh_m"]),
-            min_frames=int(contacts["min_frames"]), still_m=float(gate["still_m"]),
+            min_frames=DETECT_MIN_FRAMES, still_m=float(gate["still_m"]),
             max_dist_m=float(contacts["max_dist_m"]),
             conf_thresh=float(contacts["conf_thresh"]),
             prune_margin_m=float(contacts["prune_margin_m"]))
@@ -197,7 +198,7 @@ def prepare_scene(stem: str, root: Path, body, config: dict, device: str, *,
                 object_ids=[p.object_id for p in people], valid_mask=valid_mask,
                 num_frames=int(kin["num_frames"]),
                 knee_columns=[i for i, n in enumerate(frame_names) if n.startswith("knee")],
-                min_frames=int(contacts["min_frames"]))
+                min_frames=DETECT_MIN_FRAMES)
     return people, meta
 
 

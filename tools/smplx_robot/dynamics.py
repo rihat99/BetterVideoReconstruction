@@ -13,6 +13,7 @@ def velocity_acceleration_from_trajectory(
     model,
     q: torch.Tensor,
     dt: float,
+    spacing: int = 1,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     """Central-difference generalised velocity and acceleration from ``q(t)``.
 
@@ -20,22 +21,30 @@ def velocity_acceleration_from_trajectory(
         subtraction) and ``nv``.
     :param q: ``(T, nq)`` configuration trajectory.
     :param dt: frame interval, seconds.
-    :returns: ``(v, a)``, each ``(T, nv)`` tangent-space; the boundary frames are
-        pinned to zero so RNEA stays well-defined at the endpoints (quasi-static).
+    :param spacing: stencil step in frames. ``1`` is the classic per-frame central
+        difference. A high-fps clip amplifies per-frame pose noise into the
+        acceleration by ``fps²``, so callers pass ``round(fps/30)`` to keep the
+        stencil's TIME step (and with it the noise amplification) at the 30 fps
+        reference — the estimate a 30 fps camera of the same motion would give.
+    :returns: ``(v, a)``, each ``(T, nv)`` tangent-space; the first and last
+        ``spacing`` frames are pinned to zero so RNEA stays well-defined at the
+        endpoints (quasi-static).
 
-    Matches ``better_robot.residuals.acceleration``::
+    At ``spacing=1`` matches ``better_robot.residuals.acceleration``::
 
-        a[t] = (difference(q[t], q[t+1]) − difference(q[t−1], q[t])) / dt²
+        a[t] = (difference(q[t], q[t+h]) − difference(q[t−h], q[t])) / (h·dt)²
     """
     T = q.shape[0]
-    if T < 3:
-        raise ValueError(f"need at least 3 frames for central differences, got T={T}")
+    h = max(1, int(spacing))
+    if T < 2 * h + 1:
+        raise ValueError(f"need at least {2 * h + 1} frames for spacing={h} central "
+                         f"differences, got T={T}")
 
-    diff_fwd = model.difference(q[:-1], q[1:])  # (T-1, nv)
+    diff_fwd = model.difference(q[:-h], q[h:])  # (T-h, nv) step-h tangent differences
 
     v = torch.zeros(T, model.nv, dtype=q.dtype, device=q.device)
-    v[1:-1] = 0.5 * (diff_fwd[:-1] + diff_fwd[1:]) / dt
+    v[h:-h] = 0.5 * (diff_fwd[:-h] + diff_fwd[h:]) / (h * dt)
 
     a = torch.zeros(T, model.nv, dtype=q.dtype, device=q.device)
-    a[1:-1] = (diff_fwd[1:] - diff_fwd[:-1]) / (dt * dt)
+    a[h:-h] = (diff_fwd[h:] - diff_fwd[:-h]) / (h * dt) ** 2
     return v, a

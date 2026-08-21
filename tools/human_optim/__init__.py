@@ -20,6 +20,7 @@ from .completion import (
     load_dynamics_context,
 )
 from .contacts import (
+    DETECT_MIN_FRAMES,
     FrameContacts,
     contact_from_sdf,
     detect_frame_contacts,
@@ -33,6 +34,7 @@ from .contacts import (
     lift_joint_min_distance,
     joint_occlusion_gap,
     lift_joint_contact,
+    min_span_frames,
     merge_contact_spans,
     suppress_toe_sides,
     toe_side_slots,
@@ -66,6 +68,7 @@ __all__ = [
     "COMPLETION_DEFAULTS",
     "complete_person",
     "load_dynamics_context",
+    "DETECT_MIN_FRAMES",
     "FrameContacts",
     "contact_from_sdf",
     "detect_frame_contacts",
@@ -78,6 +81,7 @@ __all__ = [
     "joint_guarded_min_sdf",
     "lift_joint_min_distance",
     "joint_occlusion_gap",
+    "min_span_frames",
     "lift_joint_contact",
     "merge_contact_spans",
     "suppress_toe_sides",

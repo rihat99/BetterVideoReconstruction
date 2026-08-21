@@ -16,6 +16,37 @@ from pathlib import Path
 
 STAGE_ORDER = ("root", "kinematics_1", "kinematics_2", "dynamics", "kindyn_1")
 
+#: Reference frame rate the loss weights are tuned at.
+FPS_REF = 30.0
+
+#: Difference order k of every per-frame-difference loss term.
+_DIFF_ORDER = {
+    "velocity_root": 1, "velocity_joint": 1, "radial_velocity": 1, "ann_velocity": 1,
+    "force_smooth_mag": 1, "force_smooth_dir": 1, "torque_smooth": 1,
+    "accel_root": 2, "accel_joint": 2, "ann_acceleration": 2,
+    "jerk_root": 3, "jerk_joint": 3,
+    "snap_root": 4, "snap_joint": 4,
+}
+
+
+def fps_scaled_weights(weights: dict[str, float], fps: float) -> dict[str, float]:
+    """Scale the per-frame-difference weights by ``(fps/30)^2k`` above 30 fps.
+
+    Every difference term folds a constant ``fps^k`` into its weight (k = the
+    difference order), so a weight tuned at 30 fps restrains the k-th *physical*
+    derivative ``(fps/30)^2k`` times weaker on a higher-fps clip — while the
+    per-frame pose noise the terms exist to damp does not shrink at all (measured
+    as the kindyn shake on 60 fps scenes). Multiplying by ``(fps/FPS_REF)^2k``
+    keeps one weight meaning one thing at every frame rate. Clamped to identity at
+    ``fps <= 30`` so every clip at or below the tuning reference keeps its exact
+    shipped behaviour.
+    """
+    s = max(float(fps), FPS_REF) / FPS_REF
+    if s == 1.0:
+        return dict(weights)
+    return {term: w * s ** (2 * _DIFF_ORDER[term]) if term in _DIFF_ORDER else w
+            for term, w in weights.items()}
+
 
 @dataclass(frozen=True)
 class HumanOptimConfig:

@@ -170,10 +170,10 @@ hovering at the line switch on and off every other frame; a second, lower
 threshold means the label only lets go on a real drop. It can only *lengthen* a
 contact that already started — it never starts one.
 
-**A contact lasts, and so does a release.** Runs shorter than `min_frames`
-(default 3) are dropped as flicker. Gaps shorter than `min_frames` are filled,
-because no real grip is released and retaken that fast. One number, both
-directions.
+**A contact lasts, and so does a release.** Runs shorter than `min_span_s`
+(default 0.1 s, converted to frames as ceil(s·fps)) are dropped as flicker.
+Gaps shorter than the same span are filled, because no real grip is released
+and retaken that fast. One number, both directions.
 
 **Union with the geometric label.** The force label is added to the distance-and-
 stillness label; force only ever adds. Knee frames are excluded from the force
@@ -306,7 +306,7 @@ and only the first two are worth touching.
 | `gap_dstar_m` | 0.05 | how quickly the gap price bites, in metres |
 | `stillness_vstar_mps` | 0.2 | how quickly the stillness price bites, in m/s |
 
-`min_frames` is shared with the geometric readout and lives in `[contacts]`.
+`min_span_s` is shared with the geometric readout and lives in `[contacts]`.
 
 Everything else about the solve is fixed in code, because it was measured and it
 does not want tuning: a 45° friction cone, 2000 solver iterations, a small
