@@ -387,28 +387,35 @@ def hysteresis(series: np.ndarray, *, enter_above: float, hold_above: float) -> 
 
 def resolve_toe_conflicts(labels: np.ndarray, magnitude: np.ndarray, *, frame_names,
                           min_frames: int = 3) -> np.ndarray:
-    """Give each foot ONE toe patch per contact — the side the solved force loaded.
+    """Give each foot ONE toe side per contact — the side the solved force loaded.
 
-    The two toe frames are the same place on the toe with opposite normals. ``toe_under``
-    is the sole — the foot stands on a hold; ``toe_above`` is the top of the toe — the
-    foot presses it against a hold (a toe hook, or the whole body inverted in a bat hang).
-    At most one of them touches, so a label naming both is wrong — and the readouts do
-    name both, because the geometric detector and :func:`force_labels` each keep a single
-    toe but can keep *different* ones.
+    A foot's contact frames come in two sides facing opposite ways through the foot:
+    the underside (``heel`` plus ``toe_under`` in the legacy set; ``heel`` plus
+    ``ball_inner`` / ``ball_outer`` / ``big_toe`` in the full-body set) — the foot stands on a hold; and ``toe_above``, the top of the
+    toe — the foot presses it against a hold (a toe hook, or the whole body inverted in
+    a bat hang). At most one side touches, so a label naming both is wrong — and the
+    readouts do name both, because the geometric detector and :func:`force_labels` each
+    keep a single side but can keep *different* ones.
 
     The verdict is the force solve's own load allocation, summed over the whole contact.
-    A contact is one unbroken run of "this foot is touching" (either toe frame on); across
+    A contact is one unbroken run of "this foot is touching" (any toe frame on); across
     that run each side is scored by how much force the solve put through it::
 
-        standing = Σ |f|[toe_under]        hooking = Σ |f|[toe_above]
+        standing = Σ |f|[underside frames]        hooking = Σ |f|[toe_above]
 
-    The bigger sum takes the entire run; ties keep ``toe_under`` (standing is much the
+    The bigger sum takes the entire run; ties keep the underside (standing is much the
     more common contact, and the result then never depends on evaluation order). This
     works because each frame's force lives in a cone about that frame's *own* skin normal:
     the solve can only load the side whose orientation can explain the body's motion, so
     "which side carried the load" already contains the normal information — the body's
     normals, which are exact, not the cloud's. Whole-run evidence instead of one frame,
-    so the patch cannot change while the foot stays on the hold.
+    so the side cannot change while the foot stays on the hold.
+
+    Within the winning side each frame keeps its own label — which underside points touch
+    is real information (edging vs a flat foot, heel on or off). Steps of the run where only the losing side
+    was labelled are given to the winning side's most-loaded frame, so the union — which
+    is what "this foot is in contact" means, and all the scorer and the downstream stages
+    read — comes out unchanged.
 
     Two earlier readings of the same data were refuted by eyeballing the disputed spans:
 
@@ -420,23 +427,25 @@ def resolve_toe_conflicts(labels: np.ndarray, magnitude: np.ndarray, *, frame_na
       hold, and a standing toe-top naturally faces the wall. It is only trustworthy on
       large volumes the cloud actually resolved — where it agrees with the load anyway.
 
-    This only ever *moves* a label between the two frames of one foot. Their union — which
-    is what "this foot is in contact" means, and all the scorer and the downstream stages
-    read — comes out unchanged. Runs shorter than ``min_frames`` are dropped at the end.
-    Pairs are resolved by NAME (:func:`toe_pair_slots`): the stored frame order is not the
-    obvious one.
+    Runs shorter than ``min_frames`` are dropped at the end. Sides are resolved by NAME
+    (:func:`toe_side_slots`): the stored frame order is not the obvious one.
     """
-    from .contacts import toe_pair_slots
+    from .contacts import toe_side_slots
 
     out = np.array(labels, dtype=bool, copy=True)
-    pairs = toe_pair_slots(frame_names)
-    for under, above in pairs:
-        for start, stop in _runs(out[:, under] | out[:, above]):
-            standing = magnitude[start:stop, under].sum()
-            hooking = magnitude[start:stop, above].sum()
-            out[start:stop, under] = standing >= hooking
-            out[start:stop, above] = standing < hooking
-    toe_columns = sorted({column for pair in pairs for column in pair})
+    sides = toe_side_slots(frame_names)
+    for sole, top in sides:
+        sole, top = list(sole), list(top)
+        for start, stop in _runs(out[:, sole + top].any(axis=1)):
+            standing = magnitude[start:stop, sole].sum()
+            hooking = magnitude[start:stop, top].sum()
+            win, lose = (sole, top) if standing >= hooking else (top, sole)
+            out[start:stop, lose] = False
+            gap = ~out[start:stop, win].any(axis=1)
+            if gap.any():
+                dominant = win[int(np.argmax(magnitude[start:stop, win].sum(axis=0)))]
+                out[start:stop, dominant] |= gap
+    toe_columns = sorted({c for sole, top in sides for c in (*sole, *top)})
     out[:, toe_columns] = min_span(out[:, toe_columns], min_frames)
     return out
 
@@ -444,7 +453,7 @@ def resolve_toe_conflicts(labels: np.ndarray, magnitude: np.ndarray, *, frame_na
 def force_labels(magnitude: np.ndarray, *, frame_names, valid: np.ndarray,
                  threshold_n: float, hold_n: float | None = None,
                  min_frames: int = 3) -> tuple[np.ndarray, np.ndarray]:
-    """Contact labels from solved force magnitudes ``(T, 12)`` → ``(labels, toe_split)``.
+    """Contact labels from solved force magnitudes ``(T, F)`` → ``(labels, toe_split)``.
 
     A frame enters contact when it carries more than ``threshold_n`` newtons and holds it
     while it carries more than ``hold_n`` (default ``None`` = no hysteresis, i.e. one
@@ -453,20 +462,20 @@ def force_labels(magnitude: np.ndarray, *, frame_names, valid: np.ndarray,
     rule the stage applies to the union, so there is only ever one toe rule in the
     pipeline.
 
-    ``toe_split`` marks the steps where both toes of a foot were labelled and the rule had
-    to choose; it is a pure diagnostic.
+    ``toe_split`` marks the steps where both sides of a foot's toe were labelled and the
+    rule had to choose; it is a pure diagnostic.
     """
-    from .contacts import toe_pair_slots
+    from .contacts import toe_side_slots
 
     fires = hysteresis(magnitude, enter_above=threshold_n,
                        hold_above=threshold_n if hold_n is None else hold_n)
     fires &= np.asarray(valid, bool)[:, None]
     fires = min_span(fires, min_frames)
     toe_split = np.zeros_like(fires)
-    for under, above in toe_pair_slots(frame_names):
-        both = fires[:, under] & fires[:, above]
-        toe_split[:, under] |= both
-        toe_split[:, above] |= both
+    for sole, top in toe_side_slots(frame_names):
+        cols = [*sole, *top]
+        both = fires[:, list(sole)].any(axis=1) & fires[:, list(top)].any(axis=1)
+        toe_split[:, cols] |= (both[:, None] & fires[:, cols])
     resolved = resolve_toe_conflicts(
         fires, magnitude, frame_names=frame_names, min_frames=min_frames)
     return resolved, toe_split

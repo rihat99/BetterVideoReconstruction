@@ -16,20 +16,20 @@ with hysteresis, a minimum duration and a span merge behind a re-grip guard (bri
 frames flagged in ``merged``).
 
 **Force** — freeze the pose and ask what force is unexplained, then solve which of the
-12 frames could have supplied it (:mod:`tools.human_optim.forces`). A frame that has to
-carry real load is in contact whatever its distance says, which is how a contact on a
+contact frames could have supplied it (:mod:`tools.human_optim.forces`). A frame that has
+to carry real load is in contact whatever its distance says, which is how a contact on a
 badly reconstructed body is recovered at all. See ``docs/force_contacts.md``.
 
 The union is then debounced once (a contact lasts at least ``min_frames``, and so does a
 release) and each foot is given a single toe patch per contact — whichever side of the
-toe the force solve loaded (``toe_under`` standing on the hold, ``toe_above`` pressed
-against one), once for the whole contact rather than per step.
+toe the force solve loaded (the sole-side frame standing on the hold, ``toe_above``
+pressed against one), once for the whole contact rather than per step.
 
 Stillness reads the body's persisted pre-enforcement drift (``drift_pre``) — motion
 measured before any contact attraction acted. The force solve requires it and will not
 re-measure drift on an enforced body.
 
-Renders ``contacts_<tag>_overlay.mp4``: the 12 projected contact points, **red** in
+Renders ``contacts_<tag>_overlay.mp4``: the projected contact points, **red** in
 contact / **green** otherwise.
 
 Run from CLI::
@@ -38,7 +38,7 @@ Run from CLI::
         --source video.mp4 --predictions out/video/ --config configs/human_optimization.toml
 
 Reads:  human_optim/kinematic_1.npz, geometry/scene.npz, geometry/transform.npz
-Writes: human_optim/contacts_1.npz          (frame_contact (P,N,12) bool + the signed /
+Writes: human_optim/contacts_1.npz          (frame_contact (P,N,F) bool + the signed /
                                              Euclidean / normal / drift signals behind it)
         human_optim/contacts_1_overlay.mp4  ([contacts].overlay; default on)
 """

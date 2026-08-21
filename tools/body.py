@@ -36,14 +36,17 @@ _DEFAULT_MODEL_PATH = Path(
     "/data3/rikhat.akizhanov/better/BetterHuman/models/smplx/SMPLX_NEUTRAL.npz"
 )
 
-#: The 12 authored **contact frames** — named mesh points (toes, heels, knees,
-#: palms, fingertips) baked onto the body as BetterRobot frames. Each frame's
+#: The authored **contact frames** — named mesh points baked onto the body as
+#: BetterRobot frames. ``better_contacts.json`` is the full-body set (33 frames:
+#: per-foot heel / ball_inner / ball_outer / big_toe / toe_above, hands, knees,
+#: elbows, forearms, shoulders, sit bones, hips, chest, sacrum, back, head) that
+#: extends the original 12-frame climbing set (``contacts.json``). Each frame's
 #: origin is a template vertex and its local z axis is that vertex's outward
 #: rest-pose surface normal, so forward kinematics reports both a contact point
 #: and the direction the skin faces there. Contact detection lives entirely on
 #: these frames (see ``docs/contacts.md``).
 _DEFAULT_CONTACT_FRAMES = Path(
-    "/data3/rikhat.akizhanov/better/BetterHuman/studio_data/frames/smplx_neutral/contacts.json"
+    "/data3/rikhat.akizhanov/better/BetterHuman/studio_data/frames/smplx_neutral/better_contacts.json"
 )
 
 
@@ -95,7 +98,7 @@ class _Posed:
         self.joints_world = _JointsWorld(joint_placements)
         #: World joint positions with shape ``(..., 52, 3)``.
         self.joints = joint_placements[..., :3]
-        #: Contact-frame world poses ``(..., 12, 7)`` (position + scalar-last
+        #: Contact-frame world poses ``(..., F, 7)`` (position + scalar-last
         #: quaternion), in :attr:`Body.contact_frame_names` order. Unscaled, like
         #: the joints — a stage that re-applies a per-person scale about the
         #: pelvis scales the frame POSITIONS only (a uniform scale leaves the
@@ -140,11 +143,11 @@ class Body:
             [base.structure.parents], dtype=torch.long, device=self._device
         )
 
-        #: The resolved :class:`better_human.ContactFrames` spec of the 12 contact frames.
+        #: The resolved :class:`better_human.ContactFrames` spec of the contact frames.
         self.contact_frames = base.contact_frames
-        #: Contact-frame names in authored order, e.g. ``"toe_under_left"`` (length 12).
+        #: Contact-frame names in authored order, e.g. ``"big_toe_left"`` (length F).
         self.contact_frame_names = tuple(self.contact_frames.names)
-        #: Parent joint of each contact frame, as a native 52-joint index (length 12).
+        #: Parent joint of each contact frame, as a native 52-joint index (length F).
         self.contact_frame_parents = tuple(self.contact_frames.parent_joints)
         #: Template mesh vertex carrying each contact frame (length 12).
         self.contact_frame_vertices = tuple(self.contact_frames.vertex_ids)

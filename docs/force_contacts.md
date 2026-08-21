@@ -183,23 +183,28 @@ The only place the force can *remove* a geometric label is the toe pair, next.
 
 ## Step 8: the toe rule — which side did the load go through?
 
-`toe_under` and `toe_above` are the same place on the toe with opposite normals.
-`toe_under` is the sole: the foot **stands** on a hold. `toe_above` is the top of
-the toe: the foot presses it **against** a hold — a toe hook, or the whole body
-inverted in a bat hang. At most one of them is touching, so a label naming both
-is wrong — and both readouts do produce that, because each keeps a single toe but
-they can keep different ones.
+A foot's contact frames come in two sides facing opposite ways through the foot.
+The underside (`heel` + `toe_under` in the legacy 12-frame set; `heel` +
+`ball_inner` / `ball_outer` / `big_toe` in the full-body set): the foot
+**stands** on a hold. `toe_above`, the top of the toe: the foot presses it
+**against** a hold — a toe hook, or the whole body inverted in a bat hang. At
+most one side is touching, so a label naming both is wrong — and both readouts
+do produce that, because each keeps a single side but they can keep different
+ones.
 
 The decision is made **once per contact**. A contact is one unbroken run of
-"this foot is touching" (either frame on). Across that whole run each side is
+"this foot is touching" (any toe frame on). Across that whole run each side is
 scored by how much force the solve put through it:
 
-    standing  =  Σ |force on toe_under|
+    standing  =  Σ |force on the underside frames|
     hooking   =  Σ |force on toe_above|
 
-The bigger sum takes the entire run; exact ties keep `toe_under`, since standing
-is much the more common contact and the result then never depends on evaluation
-order.
+The bigger sum takes the entire run; exact ties keep the underside, since
+standing is much the more common contact and the result then never depends on
+evaluation order. Within the winning side each frame keeps its own label — which
+underside points touch is real information (edging vs a flat foot, heel on or
+off); run steps where only the losing side was labelled go to the winner's
+most-loaded frame.
 
 Why this is the right reading: every solved force lives in a cone about its own
 frame's skin normal, so the solve can only put load through the side whose
@@ -221,9 +226,9 @@ called all eight correctly, where each of the two earlier readings managed four:
 
 Two properties make the rule safe. The patch cannot change while the foot stays
 on the hold, by construction — the old per-step tiebreak switched patch 0.38
-times per foot-contact. And the rule only ever *moves* a label between the two
-frames of one foot — the union of the pair, which is what "this foot is in
-contact" means and all that the scorer and downstream stages read, comes out
+times per foot-contact. And the rule only ever *moves* labels between the two
+sides of one foot — the union over its toe frames, which is what "this foot is
+in contact" means and all that the scorer and downstream stages read, comes out
 unchanged. (That invariance also means the F1 table below cannot see this rule;
 its evidence is the viewer and the physics stages downstream, which inherit the
 frame's normal for their friction cones.)

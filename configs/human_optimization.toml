@@ -271,7 +271,8 @@ conf_thresh = 0.1      # residual absolute floor (VGGT conf ≥~1 ⇒ non-bindin
 conf_drop_q = 0.1      # quantile gate at scene load: drop the lowest-confidence scene voxels
 # A contact frame's own normal is NOT a gate — scene points and pose are too noisy to veto on.
 # It is used in one place only, with no knob: when both toe frames of a foot are candidates,
-# the one looking more into the wall wins and the other is dropped (toe_under vs toe_above).
+# the one looking more into the wall wins and the other is dropped (the sole-side toe frame —
+# toe_under in the legacy set, big_toe in better_contacts — vs toe_above).
 normal_k = 16
 prune_margin_m = 0.10
 # span-merge: bridge a short same-frame gap the point barely moved across AND stayed near the wall

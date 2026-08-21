@@ -1,18 +1,19 @@
 """Score frames-era contact predictions against the manual per-joint annotations.
 
-The frames-era detector labels 12 body contact frames (toe_under / toe_above / heel /
-knee / palm / finger × left/right). The manual annotations in ``data/<stem>.npz`` label
-coarse joints (a 10-joint or a 14-joint schema). To compare them we fold each coarse
-joint's frames together with an OR — a joint is predicted in contact if ANY of its
-frames is:
+The frames-era detector labels named body contact frames (the legacy 12-frame climbing
+set, or the full-body ``better_contacts`` set with per-foot ball / big_toe frames). The
+manual annotations in ``data/<stem>.npz`` label coarse joints (a 10-joint or a 14-joint
+schema). To compare them we fold each coarse joint's frames together with an OR — a
+joint is predicted in contact if ANY of its frames is:
 
     hand  <- palm | finger                    (both schemas)
     knee  <- knee                             (both schemas)
-    foot  <- toe_under | toe_above            (14-joint schema: its "foot" means the toe)
+    foot  <- all toe/ball frames              (14-joint schema: its "foot" means the forefoot)
     ankle <- heel                             (14-joint schema only)
-    foot  <- toe_under | toe_above | heel     (10-joint schema: "foot" is the whole foot)
+    foot  <- toe/ball frames | heel           (10-joint schema: "foot" is the whole foot)
 
-hip, elbow and shoulder have no contact frame at all, so they are excluded from scoring.
+hip, elbow, shoulder and the torso/head frames are excluded from scoring, so the metric
+stays comparable across frame sets.
 
 Annotations are tri-state: 1 = contact, 0 = no contact, -1 = unlabeled. Only cells that
 are 0 or 1 and whose frame is in the prediction's ``valid_mask`` are scored. Annotated
@@ -37,21 +38,29 @@ if str(_REPO_ROOT) not in sys.path:
 from tools.human_optim.stages import _ANN_TO_SMPLX, _ANN_TO_SMPLX_14  # noqa: E402
 
 # Which contact frames fold onto which annotated coarse joint, per annotation schema.
+# Names cover BOTH frame sets — the legacy 12-frame set (toe_under) and the full-body
+# better_contacts set (ball_inner / ball_outer / big_toe); names the prediction does
+# not carry are skipped at fold time. The full set's elbow / shoulder / hip / torso
+# frames stay unscored so the metric keeps meaning what it always meant.
 _HANDS = {
     "left_hand": ("palm_left", "finger_left"),
     "right_hand": ("palm_right", "finger_right"),
 }
 _KNEES = {"left_knee": ("knee_left",), "right_knee": ("knee_right",)}
+_TOES_L = ("toe_under_left", "toe_above_left", "ball_inner_left", "ball_outer_left",
+           "big_toe_left")
+_TOES_R = ("toe_under_right", "toe_above_right", "ball_inner_right", "ball_outer_right",
+           "big_toe_right")
 _FOLD_10: dict[str, tuple[str, ...]] = {
     **_HANDS,
-    "left_foot": ("toe_under_left", "toe_above_left", "heel_left"),
-    "right_foot": ("toe_under_right", "toe_above_right", "heel_right"),
+    "left_foot": (*_TOES_L, "heel_left"),
+    "right_foot": (*_TOES_R, "heel_right"),
     **_KNEES,
 }
 _FOLD_14: dict[str, tuple[str, ...]] = {
     **_HANDS,
-    "left_foot": ("toe_under_left", "toe_above_left"),
-    "right_foot": ("toe_under_right", "toe_above_right"),
+    "left_foot": _TOES_L,
+    "right_foot": _TOES_R,
     "left_ankle": ("heel_left",),
     "right_ankle": ("heel_right",),
     **_KNEES,
@@ -161,7 +170,8 @@ def score_scene(scene_dir: Path, tag: str) -> dict:
             continue
         scored_ids.append(object_id)
         for name, frames in fold.items():
-            predicted = np.any(frame_contact[person][:, [frame_idx[f] for f in frames]], axis=1)
+            cols = [frame_idx[f] for f in frames if f in frame_idx]
+            predicted = np.any(frame_contact[person][:, cols], axis=1)
             labels = ann_contacts[ann_person][:, ann_col[name]]
             keep = (labels >= 0) & valid_mask[person]
             _add_counts(joints[name], predicted[keep], labels[keep] == 1)

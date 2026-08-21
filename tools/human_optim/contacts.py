@@ -557,7 +557,7 @@ def merge_contact_spans(
 # the frame's normal comes from the fitted pose. Gating on "does the skin face the
 # wall?" threw away real contacts — a fingertip 3 cm from a hold whose baked pad
 # normal pointed away because the hand pose was wrong. The normal survives in exactly
-# ONE role, telling the two toe frames apart: see :func:`suppress_toe_pair`.
+# ONE role, telling the two toe sides apart: see :func:`suppress_toe_sides`.
 
 
 @torch.no_grad()
@@ -643,48 +643,64 @@ def frame_guarded_sdf(
     return torch.where(guard, sdf, torch.full_like(sdf, infinity))
 
 
-#: The two contact frames on each toe. They sit millimetres apart on the same toe, so no
-#: distance / confidence / stillness gate can ever separate them — only their normals can.
-TOE_PAIRS: tuple[tuple[str, str], ...] = (
-    ("toe_under_left", "toe_above_left"),
-    ("toe_under_right", "toe_above_right"),
+#: The foot's contact frames, underside vs top. A foot stands on its underside frames
+#: (heel included) or presses the top of its toe against a hold (toe hook) — never both
+#: at once. The two sides sit centimetres apart through the foot, so no distance /
+#: confidence / stillness gate can ever separate them — only their normals can. Names
+#: cover both frame sets: the legacy 12-frame set's underside is ``toe_under`` + ``heel``,
+#: the full-body set's (``better_contacts.json``) is ``ball_inner`` / ``ball_outer`` /
+#: ``big_toe`` + ``heel``; :func:`toe_side_slots` keeps only the names that exist.
+TOE_SIDES: tuple[tuple[tuple[str, ...], tuple[str, ...]], ...] = (
+    (("toe_under_left", "ball_inner_left", "ball_outer_left", "big_toe_left", "heel_left"),
+     ("toe_above_left",)),
+    (("toe_under_right", "ball_inner_right", "ball_outer_right", "big_toe_right",
+      "heel_right"),
+     ("toe_above_right",)),
 )
 
 
-def toe_pair_slots(frame_names: Sequence[str]) -> tuple[tuple[int, int], ...]:
-    """Resolve :data:`TOE_PAIRS` to ``(under, above)`` column indices into ``frame_names``.
+def toe_side_slots(
+    frame_names: Sequence[str],
+) -> tuple[tuple[tuple[int, ...], tuple[int, ...]], ...]:
+    """Resolve :data:`TOE_SIDES` to per-foot ``(sole, top)`` column-index tuples.
 
     Always by NAME, never by arithmetic on positions: the stored frame order is not the
-    obvious one (slots 10/11 are finger_RIGHT then finger_LEFT). A pair whose two names are
-    not both present is skipped, so a caller with a partial frame set still works.
+    obvious one (slots 10/11 are finger_RIGHT then finger_LEFT). Absent names are
+    dropped; a foot whose sole or top side comes out empty is skipped entirely, so a
+    caller with a partial frame set still works.
     """
     slot = {str(name): i for i, name in enumerate(frame_names)}
-    return tuple((slot[under], slot[above]) for under, above in TOE_PAIRS
-                 if under in slot and above in slot)
+    feet = []
+    for sole_names, top_names in TOE_SIDES:
+        sole = tuple(slot[n] for n in sole_names if n in slot)
+        top = tuple(slot[n] for n in top_names if n in slot)
+        if sole and top:
+            feet.append((sole, top))
+    return tuple(feet)
 
 
-def suppress_toe_pair(
+def suppress_toe_sides(
     gated_sdf: torch.Tensor,    # (T, F) drift-gated signed distance (m); +inf = cannot contact
     normal_dot: torch.Tensor,   # (T, F) dot(frame normal, −scene normal)
-    pairs: Sequence[tuple[int, int]],
+    sides: Sequence[tuple[tuple[int, ...], tuple[int, ...]]],
     *,
     exit_thresh_m: float,
 ) -> tuple[torch.Tensor, torch.Tensor]:
-    """Keep at most ONE toe frame per foot — the only place a normal decides anything.
+    """Keep at most ONE side of each foot's toe — the only place a normal decides anything.
 
-    ``toe_under`` (a toe hooked *under* a hold) and ``toe_above`` (a toe standing *on* it)
-    are the same place on the toe with opposite normals, so every other gate accepts or
-    rejects them together and both fire at once. We assume at most one of a pair really
-    touches at any step — both-at-once is physically possible but rare, and deliberately
-    ignored — and let the normal break the tie.
+    The underside frames (a foot standing *on* a hold) and ``toe_above`` (a toe hooked *under*
+    one) face opposite ways through the foot, so every other gate accepts or rejects them
+    together and both sides fire at once. We assume at most one side really touches at any
+    step — both-at-once is physically possible but rare, and deliberately ignored — and
+    let the normals break the tie.
 
-    **Candidacy**: at step ``t`` a toe is a candidate when its gated signal is below
+    **Candidacy**: at step ``t`` a frame is a candidate when its gated signal is below
     ``exit_thresh_m``, the loosest level at which :func:`hysteresis_spans` could still hold
-    it in a span. Where both toes of a foot are candidates, the one with the larger
-    ``normal_dot`` (looking more into the wall) keeps its signal and the other is forced to
-    the ``+inf`` sentinel — before hysteresis, so the loser can neither enter nor hold a
-    span at that step. Exact ties keep ``toe_under``, so the result never depends on
-    evaluation order. Steps where only one toe is a candidate pass through untouched.
+    it in a span. Where both sides of a foot have candidates, each side is scored by its
+    best-facing candidate (the largest ``normal_dot``); the losing side's candidate frames
+    are forced to the ``+inf`` sentinel — before hysteresis, so they can neither enter nor
+    hold a span at that step. Exact ties keep the underside, so the result never depends
+    on evaluation order. Steps where only one side has candidates pass through untouched.
 
     Returns ``(gated_sdf, suppressed)``, both ``(T, F)`` — ``suppressed`` marks the steps
     this rule forced out and is a pure diagnostic.
@@ -692,14 +708,20 @@ def suppress_toe_pair(
     out = gated_sdf.clone()
     suppressed = torch.zeros_like(gated_sdf, dtype=torch.bool)
     infinity = torch.finfo(gated_sdf.dtype).max
-    for under, above in pairs:
-        both = (out[:, under] < exit_thresh_m) & (out[:, above] < exit_thresh_m)
-        drop_above = both & (normal_dot[:, under] >= normal_dot[:, above])
-        drop_under = both & ~drop_above
-        out[:, above] = out[:, above].masked_fill(drop_above, infinity)
-        out[:, under] = out[:, under].masked_fill(drop_under, infinity)
-        suppressed[:, above] |= drop_above
-        suppressed[:, under] |= drop_under
+    lowest = torch.finfo(normal_dot.dtype).min
+    for sole, top in sides:
+        sole_cand = out[:, sole] < exit_thresh_m                     # (T, S)
+        top_cand = out[:, top] < exit_thresh_m                       # (T, K)
+        both = sole_cand.any(-1) & top_cand.any(-1)                  # (T,)
+        sole_score = normal_dot[:, sole].masked_fill(~sole_cand, lowest).amax(-1)
+        top_score = normal_dot[:, top].masked_fill(~top_cand, lowest).amax(-1)
+        drop_top = both & (sole_score >= top_score)
+        drop_sole = both & ~drop_top
+        for columns, cand, drop in ((top, top_cand, drop_top), (sole, sole_cand, drop_sole)):
+            forced = cand & drop[:, None]                            # (T, len(columns))
+            cols = list(columns)
+            out[:, cols] = out[:, cols].masked_fill(forced, infinity)
+            suppressed[:, cols] |= forced
     return out, suppressed
 
 
@@ -718,7 +740,7 @@ class FrameContacts(NamedTuple):
     conf: torch.Tensor
     #: ``(T, F)`` ``dot(frame normal, −scene normal)`` — diagnostic, and the toe tiebreaker.
     normal_dot: torch.Tensor
-    #: ``(T, F)`` bool — steps :func:`suppress_toe_pair` forced out (diagnostic).
+    #: ``(T, F)`` bool — steps :func:`suppress_toe_sides` forced out (diagnostic).
     toe_suppressed: torch.Tensor
 
 
@@ -739,15 +761,15 @@ def detect_frame_contacts(
     conf_thresh: float,
     prune_margin_m: float,
 ) -> FrameContacts:
-    """Detect contact on the 12 contact frames — the single detector for the whole pipeline.
+    """Detect contact on the contact frames — the single detector for the whole pipeline.
 
     Contact is **near the scene AND still**, in four steps: surface signals
     (:func:`frame_scene_signals`), the distance/confidence guards
-    (:func:`frame_guarded_sdf`), the stillness gate (:func:`drift_gate`) plus the toe-pair
-    tiebreak (:func:`suppress_toe_pair`), then temporal hysteresis
+    (:func:`frame_guarded_sdf`), the stillness gate (:func:`drift_gate`) plus the toe-side
+    tiebreak (:func:`suppress_toe_sides`), then temporal hysteresis
     (:func:`hysteresis_spans`) — a frame enters a contact span below ``close_thresh_m``,
     holds it below the looser ``exit_thresh_m``, and spans shorter than ``min_frames`` are
-    dropped. ``frame_names`` names the ``F`` columns and is only used to find the toe pairs
+    dropped. ``frame_names`` names the ``F`` columns and is only used to find the toe sides
     by name.
 
     ``drift`` is supplied by the CALLER, never measured here, because *which*
@@ -762,9 +784,9 @@ def detect_frame_contacts(
         prune_margin_m=prune_margin_m)
     guarded_sdf = frame_guarded_sdf(
         sdf, dmin, conf, max_dist_m=max_dist_m, conf_thresh=conf_thresh)
-    gated, toe_suppressed = suppress_toe_pair(
+    gated, toe_suppressed = suppress_toe_sides(
         drift_gate(guarded_sdf, drift, still_m=still_m), normal_dot,
-        toe_pair_slots(frame_names), exit_thresh_m=exit_thresh_m)
+        toe_side_slots(frame_names), exit_thresh_m=exit_thresh_m)
     contact = hysteresis_spans(gated, enter_below=close_thresh_m,
                                exit_below=exit_thresh_m, min_frames=min_frames)
     return FrameContacts(contact, guarded_sdf, sdf, dmin, conf, normal_dot, toe_suppressed)

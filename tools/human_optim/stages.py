@@ -629,12 +629,12 @@ def _contact_labels(contacts_p: np.ndarray, ann_names: list[str],
 
 def load_frame_contacts(pred: Path, tag: str, body_path: Path, N: int,
                         frame_names: list[str], stage_tag: str):
-    """Load + validate ``contacts_<tag>.npz`` as an AUTO label source (the 12 contact frames).
+    """Load + validate ``contacts_<tag>.npz`` as an AUTO label source (the contact frames).
 
     ``body_path`` is the body the contacts were measured ON (and that the caller is
     about to refine) — sha256 provenance ties the artifact to it, plus to the scene
     and transform, so a stale readout can never quietly drive a refinement. Returns
-    ``(cnt_oids, frame_contact)`` with ``frame_contact (Pc, N, 12)`` bool.
+    ``(cnt_oids, frame_contact)`` with ``frame_contact (Pc, N, F)`` bool.
     """
     cnt_path = paths.contacts_path(pred, tag)
     if not cnt_path.exists():
@@ -672,24 +672,36 @@ def load_frame_contacts(pred: Path, tag: str, body_path: Path, N: int,
 #: Which contact frames one coarse annotation joint covers — the inverse of the fold
 #: ``scripts/score_frame_contacts.py`` scores with. Used to put MANUAL per-joint
 #: annotations on the frame axis for the physics stages, whose contact points ARE the
-#: frames. ``hip`` / ``elbow`` / ``shoulder`` carry no contact frame and simply drop out.
+#: frames. Names cover BOTH frame sets (legacy ``toe_under`` and the full-body set's
+#: ``ball_* / big_toe`` / elbow / forearm / shoulder / hip_side frames);
+#: :func:`annotation_frame_labels` keeps only the names the body actually carries.
+#: ``hip`` maps to the greater-trochanter frame only — the sit bones, torso and head
+#: frames have no annotation joint and stay unlabeled.
 _ANN_TO_FRAMES: dict[str, tuple[str, ...]] = {
     "left_hand": ("palm_left", "finger_left"),
     "right_hand": ("palm_right", "finger_right"),
     "left_knee": ("knee_left",),
     "right_knee": ("knee_right",),
-    # 14-joint schema: "foot" means the toe, "ankle" the heel. In the 10-joint schema
-    # "foot" is the whole foot, so the heel joins it (see :func:`annotation_frame_labels`).
-    "left_foot": ("toe_under_left", "toe_above_left"),
-    "right_foot": ("toe_under_right", "toe_above_right"),
+    # 14-joint schema: "foot" means the forefoot, "ankle" the heel. In the 10-joint
+    # schema "foot" is the whole foot, so the heel joins it (see :func:`annotation_frame_labels`).
+    "left_foot": ("toe_under_left", "toe_above_left", "ball_inner_left", "ball_outer_left",
+                  "big_toe_left"),
+    "right_foot": ("toe_under_right", "toe_above_right", "ball_inner_right",
+                   "ball_outer_right", "big_toe_right"),
     "left_ankle": ("heel_left",),
     "right_ankle": ("heel_right",),
+    "left_elbow": ("elbow_left", "forearm_left"),
+    "right_elbow": ("elbow_right", "forearm_right"),
+    "left_shoulder": ("shoulder_left",),
+    "right_shoulder": ("shoulder_right",),
+    "left_hip": ("hip_side_left",),
+    "right_hip": ("hip_side_right",),
 }
 
 
 def annotation_frame_labels(contacts_p: np.ndarray, ann_names: list[str],
                             frame_names: list[str], N: int) -> np.ndarray:
-    """Expand one person's ``(J_ann, N)`` annotation onto the 12 contact frames ``(N, 12)``.
+    """Expand one person's ``(J_ann, N)`` annotation onto the contact frames ``(N, F)``.
 
     Tri-state in, tri-state out: an annotated joint's value is copied onto every contact
     frame it covers (:data:`_ANN_TO_FRAMES`); a frame no annotated joint covers stays

@@ -1,7 +1,7 @@
 # The contact stage: which points of the body touch the scene, and when
 
-Contact does not live on joints. It lives on **contact frames**: twelve named
-points on the skin, each of which knows which way it faces.
+Contact does not live on joints. It lives on **contact frames**: named points on
+the skin, each of which knows which way it faces.
 
 A *contact frame* is one mesh vertex turned into a rigid marker on the body. Its
 position is that vertex; its orientation is baked so that its local z axis is the
@@ -10,20 +10,39 @@ a parent joint once, at body build time, so posing the body reports each contact
 point *and* its outward direction straight out of forward kinematics. No mesh
 work per frame, no skinning, no lookup.
 
-The twelve frames, their parent joints and the mesh vertex each sits on:
+The current set is **33 frames covering the whole body** — grown from the
+original 12-frame climbing set (toes, heels, knees, palms, fingertips) so other
+sports and ground locomotion have the points they load. The foot alone carries
+five: heel, the two ball-of-foot points (inner and outer edge of the forefoot,
+so a flat foot can hold a roll torque), the pad of the big toe, and the top of
+the toe (toe hooks). The frames, their parent joints and the mesh vertex each
+sits on:
 
 | frame | parent joint | vertex | what it is |
 |---|---|---|---|
-| `toe_under_left` / `_right` | `left_foot` / `right_foot` | 5855 / 8549 | the **underside** of the toe |
-| `toe_above_left` / `_right` | `left_foot` / `right_foot` | 5895 / 8589 | the **top** of the same toe |
 | `heel_left` / `_right` | `left_ankle` / `right_ankle` | 8924 / 8712 | the back of the heel |
-| `knee_left` / `_right` | `left_knee` / `right_knee` | 3673 / 6434 | the front of the knee |
-| `palm_left` / `_right` | `left_wrist` / `right_wrist` | 4704 / 7440 | the middle of the palm |
+| `ball_inner_left` / `_right` | `left_foot` / `right_foot` | 5906 / 8600 | ball of the foot, big-toe side |
+| `ball_outer_left` / `_right` | `left_foot` / `right_foot` | 5916 / 8610 | ball of the foot, little-toe side |
+| `big_toe_left` / `_right` | `left_foot` / `right_foot` | 5847 / 8541 | the pad under the big toe |
+| `toe_above_left` / `_right` | `left_foot` / `right_foot` | 5895 / 8589 | the **top** of the toe |
+| `knee_left` / `_right` | `left_knee` / `right_knee` | 3677 / 6438 | just below the kneecap |
+| `palm_left` / `_right` | `left_wrist` / `right_wrist` | 4704 / 7440 | the heel of the palm |
 | `finger_left` / `_right` | `left_middle3` / `right_middle3` | 5077 / 7789 | the middle fingertip |
+| `elbow_left` / `_right` | `left_elbow` / `right_elbow` | 4374 / 7110 | the tip of the elbow |
+| `forearm_left` / `_right` | `left_elbow` / `right_elbow` | 4364 / 7100 | the underside of the mid-forearm |
+| `shoulder_left` / `_right` | `left_shoulder` / `right_shoulder` | 4078 / 6822 | the side of the shoulder (deltoid) |
+| `back_left` / `back_right` | `left_collar` / `right_collar` | 5566 / 8278 | the shoulder blade |
+| `sit_left` / `_right` | `pelvis` | 3463 / 6224 | the sit bones |
+| `hip_side_left` / `_right` | `left_hip` / `right_hip` | 3958 / 6706 | the side of the hip |
+| `pelvis_front_left` / `_right` | `pelvis` | 4420 / 7156 | the front of the pelvis |
+| `sacrum` | `pelvis` | 5613 | the base of the spine |
+| `chest` | `spine2` | 3855 | the lower breastbone |
+| `head` | `head` | 9003 | the crown of the head |
 
 The set is authored in
-`BetterHuman/studio_data/frames/smplx_neutral/contacts.json` and baked on by
-`tools/body.py`. Because the fingertip frames hang off finger joints, those
+`BetterHuman/studio_data/frames/smplx_neutral/better_contacts.json` and baked on
+by `tools/body.py` (the legacy 12-frame set lives next to it in
+`contacts.json`). Because the fingertip frames hang off finger joints, those
 joints must exist in the optimized body — but their pose is **frozen**: at depth
 and keypoint resolution there is nothing to fit a finger with, so the fingers
 simply follow the wrist and carry their frame along.
@@ -69,15 +88,17 @@ wall and still is the evidence we actually trust.
 
 The normal survives in exactly one place, with no knob attached.
 
-## Telling the two toe frames apart
+## Telling the two foot sides apart
 
-`toe_under` and `toe_above` sit millimetres apart on the same toe. Every gate
-above accepts or rejects them together, so both fire on the same hold — and then
-the body appears to be standing on a foothold and hooking under it at the same
-time. Their normals point opposite ways, so inside this detector the one whose
-normal looks more into the wall keeps the step and the other is dropped before
-hysteresis; ties keep `toe_under`. That is the only thing a frame normal decides
-here, and it has no knob.
+A foot's contact frames come in two sides facing opposite ways through the
+foot: the underside (`heel` / `ball_inner` / `ball_outer` / `big_toe` —
+`toe_under` in the legacy set) and `toe_above`, the top of the toe. Every gate
+above accepts or rejects them together, so both sides fire on the same hold —
+and then the body appears to be standing on a foothold and hooking under it at
+the same time. Their normals point opposite ways, so inside this detector the
+side whose best candidate looks more into the wall keeps the step and the other
+side's candidates are dropped before hysteresis; ties keep the underside. That
+is the only thing a frame normal decides here, and it has no knob.
 
 That tiebreak is all the `kinematics_1` auto-labels have to go on, since no force
 has been solved yet when they are detected. In the standalone readout it is
@@ -182,16 +203,16 @@ witness).
 
 | field | shape | meaning |
 |---|---|---|
-| `frame_contact` | `(P, N, 12)` bool | **the label** |
-| `merged` | `(P, N, 12)` bool | frames the span-merge bridged |
-| `frame_sdf_cm` | `(P, N, 12)` f32 | signed distance to the wall, cm (NaN = no scene point) |
-| `frame_distance_cm` | `(P, N, 12)` f32 | Euclidean distance to the nearest scene point, cm |
-| `frame_normal_dot` | `(P, N, 12)` f32 | how well the two normals face, in [−1, 1] |
-| `frame_drift_m` | `(P, N, 12)` f32 | the net window drift the stillness gate read |
-| `frame_force` | `(P, N, 12, 3)` f32 | the solved world contact force, newtons |
-| `frame_force_bw` | `(P, N, 12)` f32 | its magnitude as a fraction of body weight |
-| `frame_force_label` | `(P, N, 12)` bool | the force decision, before the union |
-| `frame_wall_dot` | `(P, N, 12)` f32 | cone direction vs the wall's normal, at the force search radius |
+| `frame_contact` | `(P, N, F)` bool | **the label** |
+| `merged` | `(P, N, F)` bool | frames the span-merge bridged |
+| `frame_sdf_cm` | `(P, N, F)` f32 | signed distance to the wall, cm (NaN = no scene point) |
+| `frame_distance_cm` | `(P, N, F)` f32 | Euclidean distance to the nearest scene point, cm |
+| `frame_normal_dot` | `(P, N, F)` f32 | how well the two normals face, in [−1, 1] |
+| `frame_drift_m` | `(P, N, F)` f32 | the net window drift the stillness gate read |
+| `frame_force` | `(P, N, F, 3)` f32 | the solved world contact force, newtons |
+| `frame_force_bw` | `(P, N, F)` f32 | its magnitude as a fraction of body weight |
+| `frame_force_label` | `(P, N, F)` bool | the force decision, before the union |
+| `frame_wall_dot` | `(P, N, F)` f32 | cone direction vs the wall's normal, at the force search radius |
 | `body_weight_n` | `(P,)` f32 | baked body mass × g |
 | `residual_force_before_n` / `_after_n` | `(P, N)` f32 | unexplained root force, before and after the solve |
 | `contact_frame_names` | `(12,)` | frame names, in label order |
