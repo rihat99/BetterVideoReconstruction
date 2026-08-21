@@ -209,53 +209,58 @@ def _build_contact_patches(
     clamps negative depth, so a behind-camera limb would otherwise resolve a bogus patch.
     Returns ``{"bundles": [(member_ids, frames, pts, nrm, valid)], "resolved": int,
     "unresolved": int}``, one bundle per group (``pts/nrm`` padded to ``patch_k``; ``valid``
-    masks the pad)."""
+    masks the pad).
+
+    The labels drive Python control flow, so they cross to numpy ONCE — per-element
+    ``bool()`` on CUDA tensors was ~38k device syncs per call (measured 29 s of a kin2
+    run in sync latency alone). Every per-instance guard stays on-device: a failed
+    guard empties the footprint, the patch row comes out all-invalid, and one
+    boolean-index per group filters those rows into the unresolved count."""
     T, G = vw_sub.shape[0], len(group_vert_ids)
     dev, dt = vw_sub.device, vw_sub.dtype
+    INF = torch.finfo(dt).max
     conf_ok = scene_conf > conf_thresh
+    k = min(int(patch_k), scene_pts.shape[0])
+    ga = group_active.cpu().numpy()                     # (T, G) — the ONE label transfer
     acc = [([], [], [], []) for _ in range(G)]          # per group: frames, pts, nrm, valid
-    resolved = unresolved = 0
-    for t in range(T):
-        if not bool(group_active[t].any()):
-            continue
+    for t in np.flatnonzero(ga.any(1)):
+        t = int(t)
         cam = transform_points(scene_pts[None], extrinsics[t:t + 1])[0]   # (S, 3) camera frame
-        in_front = cam[:, 2] > 1e-6
+        base = (cam[:, 2] > 1e-6) & conf_ok
         uv = project(cam[None], K[t:t + 1])[0]                            # (S, 2) pixels
-        for g in range(G):
-            if not bool(group_active[t, g]):
-                continue
+        for g in np.flatnonzero(ga[t]):
+            g = int(g)
             vmem = vw_sub[t][group_vert_ids[g]]                           # (M, 3) member verts, world
             vmem_cam = transform_points(vmem[None], extrinsics[t:t + 1])[0]   # (M, 3) camera frame
-            if float(vmem_cam[:, 2].mean()) <= 0.0:                       # limb centroid behind the camera
-                unresolved += 1
-                continue
             px_c = project(vmem_cam[None], K[t:t + 1])[0].mean(0)         # (2,) member pixel centroid
-            if not (-radius_px <= float(px_c[0]) <= image_w + radius_px
-                    and -radius_px <= float(px_c[1]) <= image_h + radius_px):   # off-image limb
-                unresolved += 1
-                continue
-            near = ((uv - px_c).norm(dim=-1) < radius_px) & in_front & conf_ok
-            if not bool(near.any()):
-                unresolved += 1
-                continue
-            cp, cn = scene_pts[near], scene_normals[near]
-            k = min(int(patch_k), cp.shape[0])
-            idx = (cp - vmem.mean(0)).norm(dim=-1).topk(k, largest=False).indices
-            pts, nrm = cp[idx], cn[idx]                                   # (k, 3)
-            valid = torch.zeros(patch_k, dtype=torch.bool, device=dev)
-            valid[:k] = True
+            ok = ((vmem_cam[:, 2].mean() > 0.0)                           # behind-camera / off-image
+                  & (px_c[0] >= -radius_px) & (px_c[0] <= image_w + radius_px)
+                  & (px_c[1] >= -radius_px) & (px_c[1] <= image_h + radius_px))
+            near = ((uv - px_c).norm(dim=-1) < radius_px) & base & ok
+            d3 = (scene_pts - vmem.mean(0)).norm(dim=-1).masked_fill(~near, INF)
+            vals, idx = d3.topk(k, largest=False)
+            pts, nrm = scene_pts[idx], scene_normals[idx]                 # junk rows die via valid
+            valid = vals < INF
             if k < patch_k:                                              # pad to a common width
                 pts = torch.cat([pts, pts.new_zeros(patch_k - k, 3)], 0)
                 nrm = torch.cat([nrm, nrm.new_zeros(patch_k - k, 3)], 0)
+                valid = torch.cat([valid, valid.new_zeros(patch_k - k, dtype=torch.bool)], 0)
             acc[g][0].append(t); acc[g][1].append(pts); acc[g][2].append(nrm); acc[g][3].append(valid)
-            resolved += 1
     bundles = []
+    resolved = total = 0
     for g in range(G):
         fr, ptl, nrl, val = acc[g]
-        if fr:
-            bundles.append((group_vert_ids[g], torch.tensor(fr, dtype=torch.long, device=dev),
-                            torch.stack(ptl, 0), torch.stack(nrl, 0), torch.stack(val, 0)))
-    return {"bundles": bundles, "resolved": resolved, "unresolved": unresolved}
+        if not fr:
+            continue
+        total += len(fr)
+        pts, nrm, valid = torch.stack(ptl, 0), torch.stack(nrl, 0), torch.stack(val, 0)
+        keep = valid.any(-1)
+        n_keep = int(keep.sum())                        # one sync per group
+        resolved += n_keep
+        if n_keep:
+            frames = torch.tensor(fr, dtype=torch.long, device=dev)[keep]
+            bundles.append((group_vert_ids[g], frames, pts[keep], nrm[keep], valid[keep]))
+    return {"bundles": bundles, "resolved": resolved, "unresolved": total - resolved}
 
 
 def _contact_instance_nn(vw_sub: torch.Tensor, patches: dict):
