@@ -113,6 +113,9 @@ conf_floor = 0.01          # minimum reliable absolute GeoCalib confidence
 min_diversity_deg = 8.0    # minimum selected camera-rotation spread
 max_spread_deg = 5.0       # maximum reliable gravity inlier spread
 fallback_gravity = "0,1,0" # world-down direction used when inference is unreliable
+ground = true              # fit a floor plane to the fused scene; its normal wins when accepted
+ground_min_points = 500    # reject the floor fit below this many inlier points
+ground_max_tilt_deg = 30.0 # reject when the floor normal strays this far from the prior down
 weights = "pinhole"        # GeoCalib checkpoint: pinhole | distorted
 skip_existing = false      # skip when geocalib/gravity.npz exists
 

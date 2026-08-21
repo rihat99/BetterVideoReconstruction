@@ -91,7 +91,7 @@ Default chain in order (rows 1–8; `human_optimization` runs its `root` +
 | 8 | `human_optimization.py` (`root`+`kinematics_1`) | `sam3d/smplx_params.npz`, `sapiens/pose.npz`, `geometry/` (init pose = `prefit.npz` when present) | `human_optim/kinematic_1.npz` (world-frame `q (P,N,211)` + per-contact-frame `drift_pre`/`auto_labels (P,N,12)`), optional overlay |
 | – | `human_optimization.py --stages kinematics_2` | `kinematic_1.npz` + `contacts_1.npz` frame labels (per-joint `data/<stem>.npz` via `[stages.kinematics_2].labels = "manual"`) | `human_optim/kinematic_2.npz` (contact-patch repair: each labelled contact frame pulled onto the wall seen at its own pixel; `drift_pre` forwarded) |
 | – | `estimate_contacts.py` | a refined body (`--bodies`), `geometry/`, its `drift_pre` | `human_optim/contacts_<tag>.npz` — **per-contact-frame** labels (schema 2 `frames-v4`: 12 frames, geometric gates ∪ the force witness, toe rule = whichever side the solve loaded, debounce + hysteresis; see `docs/force_contacts.md`) |
-| – | `estimate_gravity_geocalib.py` | frames, `geometry/transform.npz` | `geocalib/gravity.npz` (world-frame down + `reliable` flag) |
+| – | `estimate_gravity_geocalib.py` | frames, `geometry/transform.npz`, `geometry/scene.npz` | `geocalib/gravity.npz` (world-frame down + `source`: reliable GeoCalib > gated ground-plane fit > camera-down fallback; the accepted floor plane is saved for the viewer) |
 | – | `human_optimization.py --stages kindyn_1` | a refined body + its contacts (default `kinematic_2.npz` + `contacts_2.npz`; `[stages.kindyn_1].bodies`), gravity | `human_optim/kindyn_1.npz` (pose AND per-contact-frame forces solved together; each force in a 45° cone about that frame's contact normal) |
 | – | `human_optimization.py --stages dynamics` | a refined body + its contacts, gravity — **frozen this era** (still reads the per-joint `joint_contact` the frame stage no longer writes) | `human_optim/dynamics.npz` (world contact forces at 6 joints — hands/feet/ankles — + joint torques + per-frame root `base_wrench`) |
 
@@ -162,8 +162,9 @@ BetterVideoReconstruction/
   the optimization path poses via `better_human` (`SMPLXMid`, 52 joints,
   `q (N,211)`). No per-body scale — `estimate_scale` sizes the world to the body.
 - **Keypoints are Goliath-308**, not COCO-wholebody (`tools/human_optim/keypoints.py`).
-- **Camera is VGGT's** (scale-invariant intrinsics); **gravity is GeoCalib's**
-  (world-frame, `reliable` flag, world-down fallback); **VGGT geometry is
+- **Camera is VGGT's** (scale-invariant intrinsics); **gravity is the gravity stage's**
+  (world-frame; reliable GeoCalib, else a gated floor-plane fit to the fused
+  scene, else world-down); **VGGT geometry is
   up-to-scale**: `fuse` builds the clouds unscaled (`metric=False`), then
   `estimate_scale` measures `s` against the fused human points and rescales the
   saved geometry in place (`metric=True`; downstream stages check the flag).

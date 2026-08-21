@@ -22,8 +22,19 @@ Output ``<tree>/<clip>/human_optim/sensor_forces.npz`` per video frame, in the
 REACTION sense (force on the climber, comparable to the predicted contact
 forces): ``reaction_world (N, 4, 3)`` per channel and ``total_world (N, 3)``.
 
+The climb_wall_2 demonstrator rig is different: its four channels ARE per-limb
+contact forces (one board per limb, verified independent), logged in the board
+frame the datasheet documents (+x up along the wall plane, +y right, +z out of
+the wall toward the climber; wall inclined ~16 deg). Its rotation below comes
+from that DATASHEET, not from any fit: true gravity (3-view floor fit) plus an
+exact 16 deg overhang tilt determine the frame up to its horizontal facing
+direction (azimuth), the one scalar a datasheet cannot contain — that comes
+from the fused scene's wall normal. Nothing touches our predictions, which
+makes the measured-vs-predicted comparison fully independent.
+
 Usage:
     uv run python scripts/peter_sensor_forces.py [--tree out_climb_wall_single]
+    uv run python scripts/peter_sensor_forces.py --tree out_climb_wall_2_single
 """
 from __future__ import annotations
 
@@ -47,6 +58,34 @@ CALIB_CLIPS = ["trial_10", "trial_11", "trial_12", "trial_13", "trial_14_part1",
 NOTE = ("channels are support-cell reactions of one shared structure, not per-limb "
         "contact forces; only total_world is a clean physical force")
 
+# climb_wall_2 (the 2026-08 demonstrator rig): channels ARE per-limb forces, in
+# the datasheet's board frame (+x up along the wall, +y right, +z out toward the
+# climber; wall inclined 16 deg). One rotation to world (cam_left), built from
+# the datasheet (scratch/cw2_wall_datasheet.py, 2026-08-20): up = -gravity from
+# the 3-view floor fit (scratch/cw2_gravity_fit.py), tilt pinned to the spec's
+# EXACT 16 deg overhang (z = cos16*h - sin16*up, x = sin16*h + cos16*up), and
+# only the wall's horizontal facing direction h read from the fused-scene
+# normal (0.38 deg from the scene-measured tilt). Zero force fitting; the
+# measured-vs-kindyn total-force angle is 4.1-6.3 deg per clip — an honest,
+# independent match.
+R_CW2_WALL_TO_WORLD = np.array([
+    [+0.0934, -0.9280, +0.3608],
+    [-0.8488, +0.1152, +0.5160],
+    [-0.5204, -0.3544, -0.7769],
+], dtype=np.float32)
+NOTE_CW2 = ("channels are TRUE per-limb contact forces (one board per limb; "
+            "verified: only the touched channel responds at the sync tap, a "
+            "released limb reads ~0 mid-climb); coupling is only a <1 s "
+            "structural ring after impacts")
+
+# gt dataset name -> (rotation, method tag, calibration clips, note)
+RIGS = {
+    "climb_wall": (R_SENSOR_TO_WORLD, "total-kabsch-v1", CALIB_CLIPS, NOTE),
+    "climb_wall_2": (R_CW2_WALL_TO_WORLD, "wall-datasheet-v1",
+                     [f"trial_0{n}{p}" for n, parts in [(1, 2), (2, 2), (3, 3)]
+                      for p in [f"_part{i + 1}" for i in range(parts)]], NOTE_CW2),
+}
+
 
 def per_frame(forces: np.ndarray, ratio: float, n_frames: int) -> np.ndarray:
     """Average the ~98.85 Hz samples into per-video-frame values, ``(N, 4, 3)``."""
@@ -61,7 +100,11 @@ def main() -> None:
     args = ap.parse_args()
 
     tree = REPO / "peter" / args.tree
-    gt = REPO / "peter" / args.tree.removeprefix("out_").removesuffix("_single").removesuffix("_multi")
+    dataset = args.tree.removeprefix("out_").removesuffix("_single").removesuffix("_multi")
+    gt = REPO / "peter" / dataset
+    if dataset not in RIGS:
+        raise SystemExit(f"[peter_sensor_forces] no rig calibration for {dataset!r}")
+    rotation, method, calib_clips, note = RIGS[dataset]
     clips = sorted(p.name for p in gt.iterdir() if p.is_dir() and (p / "forces.npz").exists())
     for clip in clips:
         out_dir = tree / clip / "human_optim"
@@ -75,16 +118,16 @@ def main() -> None:
         n = int(z["n_frames"])
         s = per_frame(np.asarray(z["forces"], np.float32),
                       float(z["fps"]) / float(z["video_fps"]), n)
-        reaction = -(s @ R_SENSOR_TO_WORLD.T)
+        reaction = -(s @ rotation.T)
         np.savez(
             out_dir / "sensor_forces.npz",
             reaction_world=reaction.astype(np.float32),
             total_world=reaction.sum(1).astype(np.float32),
             limbs=np.asarray(z["limbs"]),
-            R_sensor_to_world=R_SENSOR_TO_WORLD,
-            method=np.str_("total-kabsch-v1"),
-            calib_clips=np.array(CALIB_CLIPS),
-            note=np.str_(NOTE),
+            R_sensor_to_world=rotation,
+            method=np.str_(method),
+            calib_clips=np.array(calib_clips),
+            note=np.str_(note),
             video_fps=np.float32(z["video_fps"]),
             source=z["source"],
         )
