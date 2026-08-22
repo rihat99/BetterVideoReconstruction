@@ -700,8 +700,12 @@ class ClipScene:
                 h.visible = False
         # Outward-normal arrows: one node per person, remove-then-add each frame
         # (reusing the handle would leak a node), coloured like their spheres.
+        # Their own ``frame normal arrows`` toggle, independent of the frames layer.
         if nd["arrows"] is not None:
             nd["arrows"].remove()
+            nd["arrows"] = None
+        if not self.layers.get("frame_normals", False):
+            return
         seg = np.stack([fp, fp + fn * _FRAME_NORMAL_LEN], axis=1).astype(np.float32)
         colors = np.where(hot[:, None], np.array(_CONTACT_RGB, np.uint8),
                           np.array(_FREE_RGB, np.uint8)).astype(np.uint8)

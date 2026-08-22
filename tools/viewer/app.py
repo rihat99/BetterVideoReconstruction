@@ -20,6 +20,7 @@ from .scene import ClipScene, _SKEL_ALPHA
 
 _LAYER_LABELS = (("body", "SMPL-X body"), ("skeleton", "body skeleton"),
                  ("contact_frames", "contact frames"),
+                 ("frame_normals", "frame normal arrows"),
                  ("human", "human points"), ("scene", "scene points"),
                  ("normals", "scene normals"),
                  ("cameras", "cameras"), ("gravity", "gravity"),
@@ -40,7 +41,7 @@ _DYN_LAYER_LABELS = (("dyn_torque", "joint torques (sphere size)"),
 
 # Layer checkboxes that only apply to the contact-frame overlay — hidden unless the
 # active body source has contact labels (see ``ClipScene.frame_sources``).
-_FRAME_LAYER_KEYS = ("contact_frames",)
+_FRAME_LAYER_KEYS = ("contact_frames", "frame_normals")
 
 # World-frame up vector per ``--up`` axis, mirroring ``SceneApi.set_up_direction``.
 # ``set_up_direction`` rotates the scene root (it does NOT set the camera's
@@ -65,6 +66,7 @@ class Viewer:
                          show_smplx=show_smplx, human_max_points=human_max_points,
                          video=video, video_dir=video_dir)
         self.layers = {"body": show_smplx, "skeleton": False, "contact_frames": True,
+                       "frame_normals": False,
                        "human": False, "scene": True, "normals": False,
                        "cameras": True, "gravity": False, "ground": True,
                        # force/torque section (torque scaling + fingers off by default)

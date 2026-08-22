@@ -626,6 +626,14 @@ def load_clip_data(pred: Path, *, device: str, show_smplx: bool,
 
     video_frames, play_fps = (_load_video_frames(pred, len(extr), video_dir=video_dir)
                               if video else (None, None))
+    if play_fps is None and "fps" in transform.files:
+        # No decodable source video (video pane off, or --scenes farm without the
+        # clip) — fall back to the container fps the pipeline recorded, scaled for
+        # any uniform frame subsample exactly like the video path above.
+        fi = transform["frame_indices"] if "frame_indices" in transform.files else None
+        span = float(fi[-1] - fi[0]) if fi is not None and len(fi) > 1 else 0.0
+        raw = float(transform["fps"])
+        play_fps = (raw * (len(fi) - 1) / span if span > 0.0 else raw) or None
     return ClipData(
         path=pred, name=pred.name,
         scene_points=sp, scene_colors=sco,
