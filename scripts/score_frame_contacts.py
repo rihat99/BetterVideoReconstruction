@@ -43,8 +43,8 @@ from tools.human_optim.stages import _ANN_TO_SMPLX, _ANN_TO_SMPLX_14  # noqa: E4
 # not carry are skipped at fold time. The full set's elbow / shoulder / hip / torso
 # frames stay unscored so the metric keeps meaning what it always meant.
 _HANDS = {
-    "left_hand": ("palm_left", "finger_left"),
-    "right_hand": ("palm_right", "finger_right"),
+    "left_hand": ("palm_left", "finger_left", "palm_distal_left", "thumb_left"),
+    "right_hand": ("palm_right", "finger_right", "palm_distal_right", "thumb_right"),
 }
 _KNEES = {"left_knee": ("knee_left",), "right_knee": ("knee_right",)}
 _TOES_L = ("toe_under_left", "toe_above_left", "ball_inner_left", "ball_outer_left",

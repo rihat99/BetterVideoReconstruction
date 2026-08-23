@@ -678,8 +678,8 @@ def load_frame_contacts(pred: Path, tag: str, body_path: Path, N: int,
 #: ``hip`` maps to the greater-trochanter frame only — the sit bones, torso and head
 #: frames have no annotation joint and stay unlabeled.
 _ANN_TO_FRAMES: dict[str, tuple[str, ...]] = {
-    "left_hand": ("palm_left", "finger_left"),
-    "right_hand": ("palm_right", "finger_right"),
+    "left_hand": ("palm_left", "finger_left", "palm_distal_left", "thumb_left"),
+    "right_hand": ("palm_right", "finger_right", "palm_distal_right", "thumb_right"),
     "left_knee": ("knee_left",),
     "right_knee": ("knee_right",),
     # 14-joint schema: "foot" means the forefoot, "ankle" the heel. In the 10-joint
