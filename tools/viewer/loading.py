@@ -9,6 +9,7 @@ inside the loaders that need them, so importing this module stays light.
 """
 from __future__ import annotations
 
+import json
 import sys
 import warnings
 from dataclasses import dataclass, field
@@ -222,12 +223,40 @@ def _load_skeleton(pred: Path, body_fn: str = "kinematic_1.npz",
 _VIDEO_EXTS = (".mp4", ".mov", ".avi", ".mkv", ".webm")
 
 
+def _manifest_video(pred: Path) -> Path | None:
+    """Source video the batch pipeline recorded for this clip, if it still exists.
+
+    ``scripts/pipeline.py`` appends one row per processed clip to
+    ``_batch_manifest.jsonl`` next to the clip's output tree, including the
+    absolute ``source`` path — so a batch stored away from the repo still knows
+    where its footage lives. The last row wins (reruns append).
+    """
+    manifest = pred.parent / "_batch_manifest.jsonl"
+    if not manifest.exists():
+        return None
+    found = None
+    for line in manifest.read_text().splitlines():
+        try:
+            row = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        named = (row.get("stem") == pred.name
+                 or Path(row.get("out_dir", "")).name == pred.name)
+        if named and row.get("source"):
+            found = Path(row["source"])
+    if found is not None and found.is_file() and found.suffix.lower() in _VIDEO_EXTS:
+        return found
+    return None
+
+
 def _load_video_frames(pred: Path, n_frames: int, *, video_dir: Path | None,
                        max_dim: int = 400) -> tuple[np.ndarray | None, float | None]:
     """Load the clip's original footage + its playback fps, aligned to the frame index.
 
     Finds ``<video_dir>/<clip-stem>.<ext>`` (``video_dir`` defaults to the repo's
-    ``data/``) and decodes it the **same way the pipeline did** — cv2 sequential —
+    ``data/``), falling back to the ``source`` path in the batch manifest next to
+    the clip (see :func:`_manifest_video`), and decodes it the **same way the
+    pipeline did** — cv2 sequential —
     so the RGB lines up with the geometry frame-for-frame. VGGT records the
     original index of each processed frame in ``vggt/camera.npz``
     (``frame_indices``); those pick the frames matching the ``n_frames`` extrinsics
@@ -250,6 +279,8 @@ def _load_video_frames(pred: Path, n_frames: int, *, video_dir: Path | None,
     vdir = video_dir if video_dir is not None else _REPO_ROOT / "data"
     video = next((vdir / f"{pred.name}{ext}" for ext in _VIDEO_EXTS
                   if (vdir / f"{pred.name}{ext}").exists()), None)
+    if video is None:
+        video = _manifest_video(pred)
     if video is None:
         return None, None
 
