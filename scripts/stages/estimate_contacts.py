@@ -220,7 +220,7 @@ def run(source: str | Path, predictions_dir: str | Path, config_path: str | Path
           f"close<{float(cc['close_thresh_m']) * 100:.0f}cm, "
           f"still<{float(cg['still_m']) * 100:.1f}cm")
 
-    body = load_body(device=device)
+    body = load_body(device=device, frames_allow=cc.get("frames") or None)
     frame_names = list(body.contact_frame_names)
     num_contact_frames = len(frame_names)
     knee_columns = [i for i, n in enumerate(frame_names) if n.startswith("knee")]

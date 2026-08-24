@@ -15,13 +15,15 @@ from pathlib import Path
 import torch
 
 
-def load_smplx_mid(model_path: str | Path | None = None, device: str | torch.device = "cpu"):
+def load_smplx_mid(model_path: str | Path | None = None, device: str | torch.device = "cpu",
+                   frames_allow=None):
     """Load the 52-joint SMPL-X body used across the pipeline.
 
     Redirects to :func:`tools.body.load_body`. ``model_path`` is kept for call-site
     compatibility but ignored — BetterHuman bundles its own validated
-    ``SMPLX_NEUTRAL.npz``.
+    ``SMPLX_NEUTRAL.npz``. ``frames_allow`` restricts the contact frames by name
+    (``None`` keeps all).
     """
     from tools.body import load_body
 
-    return load_body(device=device)
+    return load_body(device=device, frames_allow=frames_allow)

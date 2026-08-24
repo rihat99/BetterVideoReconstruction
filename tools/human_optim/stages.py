@@ -250,7 +250,9 @@ def _body_context(knobs: dict, device: str):
     linear, log-mapped to ``[lo, hi]`` over ``radius`` m — defaults reproduce the
     base field).
     """
-    mid = load_smplx_mid(_DEFAULT_SMPLX_MODEL, device)
+    # [contacts].frames restricts where contact may live (empty/absent = all frames).
+    allow = knobs.get("contacts", {}).get("frames") or None
+    mid = load_smplx_mid(_DEFAULT_SMPLX_MODEL, device, frames_allow=allow)
     fvids = torch.as_tensor([int(x) for x in mid.frame_vertex_ids], dtype=torch.long, device=device)
     corr = build_correspondence(list(mid.frame_names),
                                 include_hands=bool(knobs["keypoints"]["include_hands"]), device=device)

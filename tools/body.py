@@ -20,6 +20,8 @@ person's optimization.
 
 from __future__ import annotations
 
+from collections.abc import Sequence
+from dataclasses import replace as _dataclass_replace
 from pathlib import Path
 
 import torch
@@ -111,9 +113,14 @@ class Body:
 
     :param base: an unshaped :class:`better_human.SMPLX` (``use_face=False``,
         ``use_hands=True``, ``num_betas=10``) built with contact frames.
+    :param frames_allow: contact-frame names to keep (authored order preserved);
+        ``None`` keeps every frame the body carries. The filter is the one place
+        a recipe restricts where contact may live (e.g. the climb-wall rule:
+        hands + feet only) — everything downstream (detection, labels, forces)
+        simply sees a smaller frame set.
     """
 
-    def __init__(self, base: bh.SMPLX) -> None:
+    def __init__(self, base: bh.SMPLX, frames_allow: Sequence[str] | None = None) -> None:
         if getattr(base, "contact_frames", None) is None:
             raise ValueError("body was built without contact frames; pass contact_frames= to SMPLX")
         self._base = base
@@ -143,8 +150,22 @@ class Body:
             [base.structure.parents], dtype=torch.long, device=self._device
         )
 
+        spec = base.contact_frames
+        if frames_allow is not None:
+            allowed = set(frames_allow)
+            unknown = allowed.difference(spec.names)
+            if unknown:
+                raise ValueError(f"unknown contact frames in allowlist: {sorted(unknown)}")
+            keep = [i for i, name in enumerate(spec.names) if name in allowed]
+            spec = _dataclass_replace(
+                spec,
+                names=tuple(spec.names[i] for i in keep),
+                vertex_ids=tuple(spec.vertex_ids[i] for i in keep),
+                parent_joints=tuple(spec.parent_joints[i] for i in keep),
+                frame_ids=tuple(spec.frame_ids[i] for i in keep),
+            )
         #: The resolved :class:`better_human.ContactFrames` spec of the contact frames.
-        self.contact_frames = base.contact_frames
+        self.contact_frames = spec
         #: Contact-frame names in authored order, e.g. ``"big_toe_left"`` (length F).
         self.contact_frame_names = tuple(self.contact_frames.names)
         #: Parent joint of each contact frame, as a native 52-joint index (length F).
@@ -263,12 +284,14 @@ class Body:
         }
 
 
-def load_body(model_path: str | Path | None = None, device: str | torch.device = "cpu") -> Body:
+def load_body(model_path: str | Path | None = None, device: str | torch.device = "cpu",
+              frames_allow: Sequence[str] | None = None) -> Body:
     """Load the SMPL-X body used throughout the pipeline, contact frames baked on.
 
     :param model_path: path to a ``SMPLX_*.npz`` weight file; defaults to the
         BetterHuman-bundled neutral model.
     :param device: torch device for the model tensors.
+    :param frames_allow: contact-frame names to keep; ``None`` keeps all.
     """
     base = bh.SMPLX(
         model_path=str(model_path if model_path is not None else _DEFAULT_MODEL_PATH),
@@ -278,4 +301,4 @@ def load_body(model_path: str | Path | None = None, device: str | torch.device =
         device=device,
         contact_frames=_DEFAULT_CONTACT_FRAMES,
     )
-    return Body(base)
+    return Body(base, frames_allow=frames_allow)
