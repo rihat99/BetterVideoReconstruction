@@ -1,7 +1,7 @@
 """Per-clip reconstruction-quality signals and the calibrated failure flags.
 
 Two failure modes, two flags (thresholds in ``[quality]`` of the human-optimization
-TOML; calibrated 2026-08-26 against the user's verdict on 23 labelled clips —
+TOML; calibrated 2026-08-24 against the user's verdict on 23 labelled clips —
 high_jump / -bUyE / 1FGkg / pommel_horse bad, everything else including olympics_2
 and balance_beam passes):
 
@@ -40,20 +40,31 @@ def cam_motion_ratio(extrinsics: np.ndarray, scene_points: np.ndarray) -> float:
     return spread / max(depth, 1e-9)
 
 
-def smear_stats(human_points: np.ndarray, frame_id: np.ndarray,
+def smear_stats(human_points: np.ndarray, frame_id: np.ndarray, obj_id: np.ndarray,
                 extrinsics: np.ndarray) -> tuple[float, float]:
-    """(median smear, fraction of measurable frames above 2.5) over the clip."""
+    """(median smear, fraction above 2.5) over all measurable (person, frame) clouds.
+
+    Grouped per person, matching how the scale stage measures smear: pooling two
+    people into one frame cloud would read their body separation as smear when it
+    is along the view ray, or dilute a real streak when it is lateral.
+    """
     from .depth_smear import alongray_smear
 
     ext = np.asarray(extrinsics, np.float64)
     R, t = ext[:, :3, :3], ext[:, :3, 3]
     cam = -np.einsum("nij,ni->nj", R, t)
-    pts, fr = np.asarray(human_points), np.asarray(frame_id)
-    order = np.argsort(fr, kind="stable")
-    pts, fr = pts[order], fr[order]
-    bounds = np.searchsorted(fr, np.arange(ext.shape[0] + 1))
-    smears = [alongray_smear(pts[bounds[i]:bounds[i + 1]], cam[i])
-              for i in range(ext.shape[0])]
+    pts = np.asarray(human_points)
+    fr = np.asarray(frame_id, np.int64)
+    oid = np.asarray(obj_id, np.int64)
+    if not pts.shape[0]:
+        return float("nan"), float("nan")
+    key = oid * np.int64(ext.shape[0]) + fr
+    order = np.argsort(key, kind="stable")
+    pts, fr, key = pts[order], fr[order], key[order]
+    starts = np.flatnonzero(np.r_[True, key[1:] != key[:-1]])
+    bounds = np.r_[starts, key.size]
+    smears = [alongray_smear(pts[bounds[i]:bounds[i + 1]], cam[fr[bounds[i]]])
+              for i in range(starts.size)]
     smears = np.asarray([s for s in smears if np.isfinite(s)])
     if not smears.size:
         return float("nan"), float("nan")

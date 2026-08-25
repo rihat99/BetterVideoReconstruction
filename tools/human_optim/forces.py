@@ -75,7 +75,7 @@ class ForceKnobs:
     #: Gap price: force further than this from the scene is expensive (m), measured
     #: relative to the nearest candidate frame of the same step.
     gap_dstar_m: float = 0.05
-    #: Plain magnitude price (inside the square, like the dynamics stage).
+    #: Plain magnitude price (inside the square).
     mag_weight: float = 0.01
     #: Projected-Adam iterations for the whole-sequence solve.
     iters: int = 2000
@@ -108,9 +108,6 @@ class ForceSolution:
     residual_torque_after_nm: np.ndarray
     #: Total baked body mass × g, newtons — the natural scale for a force threshold.
     body_weight_n: float
-    #: Worst KKT violation of the ``λ ≥ 0`` constraint at the returned point, in
-    #: body-weight units. Near zero = the convex solve converged.
-    kkt_violation: float = 0.0
 
 
 class FrameDynamics:
@@ -216,7 +213,10 @@ def solve_frame_forces(dyn: FrameDynamics, *, valid: np.ndarray, drift_m: torch.
     # no scene evidence is not a candidate. Everywhere else in this pipeline a hole in the
     # cloud reads as *unknown*, and unknown never manufactures a contact.
     known = torch.isfinite(dist_m) & (dist_m < NO_SCENE_M)
-    candidate = valid_t[:, None] & known
+    # The same policy for the stillness witness: NaN drift means the pre-enforcement
+    # motion was never measured there (untracked window, or a person detection never
+    # ran on) — no stillness evidence, so the step is not a candidate either.
+    candidate = valid_t[:, None] & known & torch.isfinite(drift_m)
 
     # Cone forces: four pyramid edges per frame, coefficients constrained nonnegative, so
     # the force cannot leave the cone and there is nothing to tune. The coefficients ARE
@@ -229,7 +229,9 @@ def solve_frame_forces(dyn: FrameDynamics, *, valid: np.ndarray, drift_m: torch.
     coefficients = torch.zeros((num_steps, num_frames, 4), device=device, requires_grad=True)
     active = candidate.to(torch.float32)[..., None]
 
-    speed = drift_m / float(drift_window_s)
+    # NaN-drift steps were excluded from candidacy above; zeroing their (unused) price
+    # keeps the loss finite (0 × NaN would poison the whole objective).
+    speed = torch.nan_to_num(drift_m, nan=0.0) / float(drift_window_s)
     # Relative pricing is the floater rescue: with every frame far from the wall, absolute
     # pricing makes all force so expensive that the solve leaves gravity unbalanced and
     # nothing crosses the threshold — on exactly the bodies the force witness exists to
@@ -273,20 +275,7 @@ def solve_frame_forces(dyn: FrameDynamics, *, valid: np.ndarray, drift_m: torch.
         with torch.no_grad():
             coefficients.clamp_(min=0.0)                   # projection onto λ ≥ 0
 
-    # KKT check for the nonnegativity constraint: at the optimum each coefficient either
-    # sits at zero with a non-negative gradient (pushing further down is blocked) or is
-    # positive with a vanishing gradient. The worst of the two, in body-weight units, is
-    # how we know the convex solve converged rather than merely stopped.
-    optimizer.zero_grad()
-    loss_of(compose()).backward()
     with torch.no_grad():
-        gradient = coefficients.grad
-        violation = torch.maximum(
-            torch.where(coefficients > 0, gradient.abs(), torch.zeros_like(gradient)),
-            torch.clamp(-gradient, min=0.0))
-        live = active[..., 0].bool()
-        kkt = float(violation[live].max()) if bool(live.any()) else 0.0
-
         force = compose() * weight                                    # back to newtons
         before = dyn.tau
         after = before - torch.einsum("tfkn,tfk->tn", dyn.jacobians, force)
@@ -304,7 +293,6 @@ def solve_frame_forces(dyn: FrameDynamics, *, valid: np.ndarray, drift_m: torch.
         residual_force_after_n=to_numpy(after[:, :3].norm(dim=-1)),
         residual_torque_after_nm=to_numpy(after[:, 3:6].norm(dim=-1)),
         body_weight_n=weight,
-        kkt_violation=kkt,
     )
 
 
@@ -486,8 +474,8 @@ def resolve_toe_conflicts(labels: np.ndarray, magnitude: np.ndarray, *, frame_na
 
 def force_labels(magnitude: np.ndarray, *, frame_names, valid: np.ndarray,
                  threshold_n: float, hold_n: float | None = None,
-                 min_frames: int = 3) -> tuple[np.ndarray, np.ndarray]:
-    """Contact labels from solved force magnitudes ``(T, F)`` → ``(labels, toe_split)``.
+                 min_frames: int = 3) -> np.ndarray:
+    """Contact labels ``(T, F)`` from solved force magnitudes.
 
     A frame enters contact when it carries more than ``threshold_n`` newtons and holds it
     while it carries more than ``hold_n`` (default ``None`` = no hysteresis, i.e. one
@@ -495,21 +483,10 @@ def force_labels(magnitude: np.ndarray, *, frame_names, valid: np.ndarray,
     patch per contact (:func:`resolve_toe_conflicts` on the same magnitudes) — the same
     rule the stage applies to the union, so there is only ever one toe rule in the
     pipeline.
-
-    ``toe_split`` marks the steps where both sides of a foot's toe were labelled and the
-    rule had to choose; it is a pure diagnostic.
     """
-    from .contacts import toe_side_slots
-
     fires = hysteresis(magnitude, enter_above=threshold_n,
                        hold_above=threshold_n if hold_n is None else hold_n)
     fires &= np.asarray(valid, bool)[:, None]
     fires = min_span(fires, min_frames)
-    toe_split = np.zeros_like(fires)
-    for sole, top in toe_side_slots(frame_names):
-        cols = [*sole, *top]
-        both = fires[:, list(sole)].any(axis=1) & fires[:, list(top)].any(axis=1)
-        toe_split[:, cols] |= (both[:, None] & fires[:, cols])
-    resolved = resolve_toe_conflicts(
+    return resolve_toe_conflicts(
         fires, magnitude, frame_names=frame_names, min_frames=min_frames)
-    return resolved, toe_split

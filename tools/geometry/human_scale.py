@@ -9,10 +9,13 @@ log-scales across the clip.
 
 VGGT has **one** scale for the whole clip (depth + camera translations share it),
 so the per-frame estimates are noisy observations of a single constant. The
-combine is therefore a confidence-weighted robust mean in log space: a MAD gate
-around the median drops whole bad frames, then the survivors' log-scales are
-averaged weighted by each frame's confidence mass. Log space keeps the estimate
-symmetric under too-near / too-far errors (scale is multiplicative).
+combine is therefore a confidence-weighted robust mean in log space: a weighted
+MAD gate around the weighted median drops whole bad frames, then the survivors'
+log-scales are averaged weighted by each frame's confidence mass. The gate must
+be weighted too — the smear downweighting hands garbage frames near-zero weight,
+and on a clip where they are the *majority* an unweighted median would centre on
+the garbage cluster and reject the clean frames as outliers. Log space keeps the
+estimate symmetric under too-near / too-far errors (scale is multiplicative).
 """
 from __future__ import annotations
 
@@ -66,8 +69,10 @@ def combine_log_scales(
         raise ValueError("no valid per-frame log-scales to combine")
 
     logs, w = frame_log[finite], frame_weight[finite]
-    center = float(np.median(logs))
-    mad = float(np.median(np.abs(logs - center)))
+    # Weighted centre + weighted MAD: a downweighted frame must not steer the gate
+    # any more than it steers the average (see the module docstring).
+    center = weighted_median(logs, w)
+    mad = weighted_median(np.abs(logs - center), w)
     # A near-zero MAD (all frames agree) leaves every frame an inlier.
     inlier = np.abs(logs - center) <= mad_k * mad if mad > 0.0 else np.ones_like(logs, bool)
 

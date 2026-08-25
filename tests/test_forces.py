@@ -168,7 +168,7 @@ def test_union_of_the_two_readouts_never_holds_both_toes() -> None:
     geometric[:, 0] = True                             # detector says toe_under_left
     magnitude = np.zeros((steps, 4), dtype=np.float32)
     magnitude[2:7, 1] = 400.0                          # the force loaded the toe top
-    force, _ = force_labels(magnitude, frame_names=_TOE_NAMES, valid=np.ones(steps, bool),
+    force = force_labels(magnitude, frame_names=_TOE_NAMES, valid=np.ones(steps, bool),
                             threshold_n=30.0, min_frames=3)
     union = geometric | force
     assert (union[:, 0] & union[:, 1]).sum() > 0, "the union really does hold both toes"
@@ -186,7 +186,7 @@ def test_threshold_and_min_span_drop_weak_and_brief_load() -> None:
     magnitude[0:2, 0] = 100.0        # two frames only — too brief
     magnitude[3:6, 2] = 100.0        # three frames — survives
     magnitude[3:6, 3] = 10.0         # below threshold
-    labels, _ = force_labels(magnitude, frame_names=_TOE_NAMES, valid=np.ones(6, bool),
+    labels = force_labels(magnitude, frame_names=_TOE_NAMES, valid=np.ones(6, bool),
                              threshold_n=30.0, min_frames=3)
     assert labels[:, 0].tolist() == [False] * 6
     assert labels[:, 2].tolist() == [False, False, False, True, True, True]
@@ -197,7 +197,7 @@ def test_invalid_frames_can_never_be_labelled() -> None:
     """A step where the person is not tracked carries no contact, whatever the force says."""
     magnitude = np.full((6, 4), 500.0, dtype=np.float32)
     valid = np.array([True, True, True, False, False, False])
-    labels, _ = force_labels(magnitude, frame_names=_TOE_NAMES, valid=valid,
+    labels = force_labels(magnitude, frame_names=_TOE_NAMES, valid=valid,
                              threshold_n=30.0, min_frames=3)
     assert not labels[3:].any()
 
@@ -255,9 +255,9 @@ def test_force_labels_hysteresis_extends_a_contact_it_never_starts_one() -> None
     magnitude[2:5, 2] = 100.0        # clearly loaded: opens the span
     magnitude[5:8, 2] = 40.0         # fading, but never released
     magnitude[0:2, 3] = 40.0         # never crosses the enter threshold at all
-    plain, _ = force_labels(magnitude, frame_names=_TOE_NAMES, valid=np.ones(10, bool),
+    plain = force_labels(magnitude, frame_names=_TOE_NAMES, valid=np.ones(10, bool),
                             threshold_n=60.0, min_frames=3)
-    held, _ = force_labels(magnitude, frame_names=_TOE_NAMES, valid=np.ones(10, bool),
+    held = force_labels(magnitude, frame_names=_TOE_NAMES, valid=np.ones(10, bool),
                            threshold_n=60.0, hold_n=30.0, min_frames=3)
     assert plain[:, 2].sum() == 3
     assert held[:, 2].sum() == 6, "the fading tail stays in contact"
@@ -310,3 +310,47 @@ def test_missing_evidence_reads_far_and_fast_in_the_veto() -> None:
     assert veto.tolist() == [[False, True, False]], (
         "NaN dist + still stays (far but still); NaN dist + NaN drift is vetoed; "
         "near needs no stillness at all")
+
+
+# ───────────────────────── the solve's NaN-drift policy ─────────────────────────
+
+class _StubDyn:
+    """Just enough of :class:`FrameDynamics` for :func:`solve_frame_forces`:
+    two contact frames whose Jacobians map force straight onto the root force rows,
+    a constant 1-BW gravity residual, and upward cone axes."""
+
+    def __init__(self, steps: int, frames: int = 2, nv: int = 6):
+        self.points = torch.zeros(steps, frames, 3)
+        self.body_weight_n = 700.0
+        self.tau = torch.zeros(steps, nv)
+        # The solve's residual is tau − J·f, so a +W row is a load the (+y) cones
+        # can carry: the no-contact RNEA says W newtons of support are missing.
+        self.tau[:, 1] = self.body_weight_n
+        self.jacobians = torch.zeros(steps, frames, 3, nv)
+        for i in range(3):
+            self.jacobians[:, :, i, i] = 1.0          # world force → root force rows
+        self.cone_axes = torch.zeros(steps, frames, 3)
+        self.cone_axes[:, :, 1] = 1.0                 # every cone can push +y (up)
+
+
+def test_nan_drift_steps_are_not_candidates_and_never_poison_the_solve() -> None:
+    """A step with NaN pre-enforcement drift has no stillness evidence: it carries
+    exactly zero force, while the finite-drift steps still balance gravity — the
+    9/361 corpus scenes with tracking gaps must produce a witness, not a NaN loss."""
+    from tools.human_optim.forces import solve_frame_forces
+
+    steps = 6
+    dyn = _StubDyn(steps)
+    drift = torch.zeros(steps, 2)
+    drift[2] = float("nan")                           # a gap-window step
+    dist = torch.full((steps, 2), 0.02)               # near the wall everywhere
+    knobs = ForceKnobs(gap_dstar_m=0.25, stillness_vstar_mps=0.2)
+    sol = solve_frame_forces(
+        dyn, valid=np.ones(steps, bool), drift_m=drift, drift_window_s=0.35,
+        dist_m=dist, normal_dot=torch.ones(steps, 2), knobs=knobs)
+    assert np.isfinite(sol.forces).all()
+    assert not sol.candidate[2].any(), "NaN drift must exclude the step from candidacy"
+    assert sol.magnitude[2].sum() == 0.0
+    finite_steps = [t for t in range(steps) if t != 2]
+    total = sol.forces[finite_steps, :, 1].sum(axis=1)
+    assert (total > 0.5 * dyn.body_weight_n).all(), "finite steps still carry the load"

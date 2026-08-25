@@ -29,8 +29,9 @@ Four terms:
   frames should move like the converter's did (suppresses per-frame jitter
   without fighting real motion).
 
-The refined bodies double as a starting point for the kinematic stage (not
-wired up yet). Everything runs in the VGGT camera frame, like the converter.
+The refined bodies double as the kinematic stage's starting pose
+(``geometry/prefit.npz``). Everything runs in the VGGT camera frame, like the
+converter.
 """
 from __future__ import annotations
 

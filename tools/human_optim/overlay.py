@@ -40,21 +40,14 @@ def _project_person(mid, q, betas, fvids, corr, extr, K, device, scale=1.0, chun
     return torch.cat(px, 0).cpu().numpy()
 
 
-def render_contact_overlay(source, out_path, points_2d, contact, parents,
-                           valid_mask, H, W, fps, label_confidence=None):
-    """Write an mp4 of projected body points coloured by scene contact.
+def render_contact_overlay(source, out_path, points_2d, contact, valid_mask, H, W, fps):
+    """Write an mp4 of projected contact-frame points coloured by scene contact.
 
     One point set per tracked person, each point drawn as a dot — **red** when it
     is in contact with the scene, **green** otherwise. Everything is precomputed
-    by the stage; this only rasterizes.
-
-    ``points_2d (P, N, K, 2)`` are the projected pixels and ``contact (P, N, K)``
-    their contact flags — the 12 contact frames for the contact stage. ``parents
-    (K,)`` optionally names a tree parent per point (-1 for a root), drawn as grey
-    bones; pass ``None`` for a point set with no tree, e.g. the contact frames.
-    ``valid_mask (P, N)`` gates frames where a person isn't tracked. When
-    ``label_confidence (P, N, K)`` is given, a **contact** dot's radius grows with
-    the confidence in its label.
+    by the stage; this only rasterizes. ``points_2d (P, N, K, 2)`` are the
+    projected pixels, ``contact (P, N, K)`` their contact flags, and
+    ``valid_mask (P, N)`` gates frames where a person isn't tracked.
     """
     import tempfile
 
@@ -79,22 +72,12 @@ def render_contact_overlay(source, out_path, points_2d, contact, parents,
                     if not valid_mask[p, i]:
                         continue
                     pts = points_2d[p, i]                       # (K, 2)
-                    if parents is not None:
-                        for j in range(1, J):                   # bones (grey)
-                            a, b = pts[int(parents[j])], pts[j]
-                            if ok(a) and ok(b):
-                                cv2.line(bgr, (int(a[0]), int(a[1])), (int(b[0]), int(b[1])),
-                                         (180, 180, 180), 1, cv2.LINE_AA)
                     for j in range(J):                          # points (red=contact / green=free)
                         uv = pts[j]
                         if not ok(uv):
                             continue
-                        touching = bool(contact[p, i, j])
-                        col = (0, 0, 255) if touching else (0, 255, 0)
-                        r = 3
-                        if touching and label_confidence is not None:  # confident contact ⇒ bigger dot
-                            r = 2 + int(round(4.0 * float(np.clip(label_confidence[p, i, j], 0.0, 1.0))))
-                        cv2.circle(bgr, (int(uv[0]), int(uv[1])), r, col, -1, cv2.LINE_AA)
+                        col = (0, 0, 255) if bool(contact[p, i, j]) else (0, 255, 0)
+                        cv2.circle(bgr, (int(uv[0]), int(uv[1])), 3, col, -1, cv2.LINE_AA)
                 writer.write(bgr)
         finally:
             writer.release()

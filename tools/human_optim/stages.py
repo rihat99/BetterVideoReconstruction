@@ -6,8 +6,8 @@ per person build the world-frame ``q``, run :func:`~tools.human_optim.optimizer.
 over a phase list, write the refined-body npz — differing only in where ``q`` starts
 (the scale stage's pre-fit — converter when absent — vs the previous refinement),
 the weight columns their phases use, and (for
-``kinematics_2``) the manual contact annotation. The force-only ``dynamics`` stage
-lives in :mod:`tools.human_optim.dynamics`.
+``kinematics_2``) the manual contact annotation. The joint kinematics+dynamics
+stage lives in :mod:`tools.human_optim.kindyn`.
 
 The caller (``scripts/stages/human_optimization.py``) has already put
 ``better_human`` on ``sys.path``; this module assumes it. Weights + knobs come from a
@@ -24,6 +24,7 @@ import numpy as np
 import torch
 
 from tools.geometry.normals import load_scene_cloud
+from tools.npz_io import atomic_savez
 from tools.smplx_robot import load_smplx_mid
 from tools.smplx_robot.vertex_weights import geodesic_endeffector_weights
 
@@ -175,8 +176,18 @@ def _person_depth_points(human: dict, oid: int, N: int, conf_drop_q: float,
 
 
 def _sapiens_for(pose: dict, oid: int, N: int):
-    """Return ``(keypoints (N,308,2), scores (N,308))`` for the person with id ``oid``."""
+    """Return ``(keypoints (N,308,2), scores (N,308))`` for the person with id ``oid``.
+
+    Sapiens tracks its own person set (only objects matching its prompt label), so a
+    sam3d person can be absent from ``pose.npz``. That person has no 2D witness —
+    all-zero scores, which every keypoint term already treats as "nothing seen".
+    """
     ids = [int(x) for x in pose["object_ids"]]
+    if oid not in ids:
+        print(f"  [sapiens] person obj_id={oid} not in pose.npz — no 2D witness")
+        kp = np.asarray(pose["keypoints"])
+        num_kp = kp.shape[2] if kp.ndim == 4 else 308
+        return np.zeros((N, num_kp, 2), np.float32), np.zeros((N, num_kp), np.float32)
     p = ids.index(oid)
     return pose["keypoints"][p], pose["keypoint_scores"][p]
 
@@ -279,8 +290,11 @@ def _person_visual_inputs(pose: dict, human: dict, oid: int, N: int, vmask: np.n
     and an empty cloud so no image/depth term can read a held pose as evidence.
     """
     kp_np, sc_np = _sapiens_for(pose, oid, N)
-    target_kp = torch.as_tensor(kp_np, dtype=torch.float32, device=device)
-    scores = torch.as_tensor(sc_np, dtype=torch.float32, device=device)
+    # A NaN target would poison the reprojection loss even at zero score (0 × NaN = NaN);
+    # sapiens zero-fills undetected keypoints, but a foreign/stale pose.npz must not be
+    # able to corrupt a scene silently.
+    target_kp = torch.nan_to_num(torch.as_tensor(kp_np, dtype=torch.float32, device=device))
+    scores = torch.nan_to_num(torch.as_tensor(sc_np, dtype=torch.float32, device=device))
     sampling = str(knobs["chamfer"].get("sampling", "stride"))
     jpx = jgrp = extr_np = K_np = None
     if sampling == "limb_quota":   # project the init body's joints once — the grouping reference
@@ -351,7 +365,7 @@ def _save_body(out_path: Path, mid, out: dict, betas_out: list, object_ids: np.n
     )
     if extra:
         save.update(extra)
-    np.savez(out_path, **save)
+    atomic_savez(out_path, **save)
     return save
 
 
@@ -482,10 +496,14 @@ def run_kinematic(source, pred: Path, cfg: HumanOptimConfig, stages_to_run,
     out = _new_out()
     betas_out = []
     drift_pre_p, auto_labels_p = [], []   # refine-start drift + frozen labels, per person
+    sap_ids = [int(x) for x in pose["object_ids"]]
+    num_cf = len(mid.contact_frame_names)
     for p in range(P):
         oid = int(object_ids[p])
         vmask = np.asarray(sp["valid_mask"][p], dtype=bool)
-        betas_mean = torch.as_tensor(params["betas"][p][vmask].mean(0), dtype=torch.float32, device=device)
+        betas_sel = (params["betas"][p][vmask] if vmask.any()
+                     else np.nan_to_num(params["betas"][p]))
+        betas_mean = torch.as_tensor(betas_sel.mean(0), dtype=torch.float32, device=device)
 
         def t(k):  # per-frame (N, ...) param tensor; invalid frames held from nearest valid
             return torch.as_tensor(_fill_invalid_frames(params[k][p], vmask),
@@ -494,6 +512,21 @@ def run_kinematic(source, pred: Path, cfg: HumanOptimConfig, stages_to_run,
         q_cam = mid.from_classic(betas_T, t("body_pose"), t("transl"), t("global_orient"),
                                  t("left_hand_pose"), t("right_hand_pose"))
         q_world = fold_root_to_world(q_cam, wfc)
+
+        # A person with zero valid frames has no evidence at all (a betas mean over the
+        # empty selection would be NaN and silently corrupt the whole fit); one absent
+        # from sapiens/pose.npz has no 2D witness, and a depth-only fit is unconstrained
+        # along the ray (the scale pre-fit skips such people for the same reason). Both
+        # pass through at the init pose, keeping the output row-aligned.
+        skip = (f"0/{N} valid frames" if not vmask.any()
+                else "no Sapiens keypoints" if oid not in sap_ids else None)
+        if skip:
+            print(f"[{tag}] person obj_id={oid}: {skip} — passed through unoptimized")
+            _append_classic(out, mid, betas_T, q_world)
+            betas_out.append(betas_mean.cpu().numpy().astype(np.float32))
+            drift_pre_p.append(np.full((N, num_cf), np.nan, np.float32))
+            auto_labels_p.append(np.full((N, num_cf), -1, np.int8))
+            continue
         smooth_finger_quats(q_world, vmask, finger_sigma_frames)
         q_world[:, 3:] += 1e-6 * torch.randn_like(q_world[:, 3:])   # break bit-exact static-frame ties
 
@@ -527,9 +560,8 @@ def run_kinematic(source, pred: Path, cfg: HumanOptimConfig, stages_to_run,
 
         _append_classic(out, mid, betas_T, q_opt)
         betas_out.append(betas_mean.cpu().numpy().astype(np.float32))
-        # None ⇒ detection did not run for this person (no scene / weight 0): write NaN drift +
-        # -1 labels; consumers then fall back to computing drift from the body.
-        num_cf = len(mid.contact_frame_names)
+        # None ⇒ detection did not run for this person (no scene / weight 0): write NaN
+        # drift + -1 labels; NaN carries "no stillness evidence" to every consumer.
         drift_pre_p.append(dp.cpu().numpy().astype(np.float32) if dp is not None
                            else np.full((N, num_cf), np.nan, np.float32))
         auto_labels_p.append(al.cpu().numpy().astype(np.int8) if al is not None
@@ -866,6 +898,8 @@ def run_kinematics_2(source, pred: Path, cfg: HumanOptimConfig, device: str, *,
             print(f"[{tag}] person obj_id={oid}: contacts on {nc} frames, no-contact on {nn} frames")
 
         print(f"[{tag}] person obj_id={oid} ({int(vmask.sum())}/{N} valid) …")
+        # Fingers stay UNfrozen here (unlike kinematics_1): the contact-patch repair
+        # must be able to reach a fingertip frame onto the wall.
         q_opt, before, after, _ = optimize_person(
             mid, betas_mean, q_world, extrinsics=extr, K=K, depth_points=depth,
             target_kp=target_kp, scores=scores, corr=corr, frame_vertex_ids=fvids,

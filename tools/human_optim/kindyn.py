@@ -46,7 +46,7 @@ from . import paths
 from .camera import world_from_cam
 from .config import FPS_REF, HumanOptimConfig, fps_scaled_weights
 from .force_confidence import force_confidence
-from .forces import cone_generators
+from .friction import cone_generators
 from .optimizer import PhaseSpec, optimize_person
 from .qmath import normalize_q
 from .stages import (
@@ -74,8 +74,7 @@ class DynamicsSpec:
 
     All five loss weights are **linear** — the term value is ``0.5·mean_t Σ residual²``
     and the engine multiplies by the (kindyn-column) weight, exactly like every kinematic
-    term. This differs from the standalone ``dynamics`` stage, which folds the weight
-    inside the square.
+    term.
 
     Every residual is divided by the body weight and averaged over the valid frames
     (:attr:`res_scale`). Without that the physics terms are a *sum* of newtons squared,
@@ -100,21 +99,33 @@ class DynamicsSpec:
     gravity_world: np.ndarray     #: (3,) scene world-down (for the output npz)
     valid: np.ndarray             #: (T,) bool per-frame validity
     total_mass: float             #: body mass, kg (baked inertia sum)
-    res_scale: float = 1.0        #: 1 / (valid frames × body weight²) — see the class docstring
+    res_scale: float = 1.0        #: 1 / (counted frames × body weight²) — see the class docstring
     spacing: int = 1              #: v/a stencil step (frames) — round(fps/30), keeps the accel noise at the 30 fps reference
+    dyn_row: torch.Tensor | None = None  #: (T,) float 0/1 — frames whose ±spacing stencil is fully tracked; only these rows carry the base-wrench residual (defaults to ``valid``)
     cone_axis: torch.Tensor | None = None   #: (T, 12, 3) frozen contact normal per frame
     cone_gen: torch.Tensor | None = None    #: (T, 12, 4, 3) frozen pyramid edge directions
     mu: float = 1.0                         #: tan(cone half-angle) — the friction coefficient
     base_wrench_before: float = float("nan")  #: per-frame RMS ‖root residual‖ with no contact force
     base_wrench_warm: float = float("nan")    #: …after the frozen-pose force warm-start
 
-    def wrench_rms(self, tau: torch.Tensor) -> float:
-        """Per-valid-frame RMS of the 6-row root residual — the stage's headline number.
+    def __post_init__(self) -> None:
+        # An occlusion gap holds the nearest tracked pose, so a v/a stencil that touches
+        # a held frame reads the mid-gap jump as a huge phantom acceleration. Only rows
+        # whose whole ±spacing stencil is tracked carry the base-wrench residual.
+        if self.dyn_row is None:
+            self.dyn_row = torch.as_tensor(np.asarray(self.valid, bool),
+                                           dtype=self.mask.dtype, device=self.mask.device)
+        self.dyn_pair = self.dyn_row[1:] * self.dyn_row[:-1]   # (T-1,) both-rows-counted steps
 
-        A root-mean-square, not the whole trajectory's Frobenius norm: the latter grows
-        with clip length, so two scenes could not be compared and the same reduction read
-        differently on a long clip than a short one."""
-        return float(tau[:, :6].pow(2).sum().div(max(int(self.valid.sum()), 1)).sqrt())
+    def wrench_rms(self, tau: torch.Tensor) -> float:
+        """Per-counted-frame RMS of the 6-row root residual — the stage's headline number.
+
+        A root-mean-square over the ``dyn_row`` frames, not the whole trajectory's
+        Frobenius norm: the latter grows with clip length, so two scenes could not be
+        compared and the same reduction read differently on a long clip than a short
+        one."""
+        sq = (self.dyn_row[:, None] * tau[:, :6].pow(2)).sum()
+        return float(sq.div(max(int(self.dyn_row.sum()), 1)).sqrt())
 
     @property
     def C(self) -> int:
@@ -226,12 +237,20 @@ class DynamicsSpec:
         st.put_lazy("dyn_split", lambda: self.force_split(st["f_world"]))
 
     def register(self, problem) -> None:
-        """Register the five dynamics terms (active only where their weight is)."""
+        """Register the five dynamics terms (active only where their weight is).
+
+        A person with no contact labels registers nothing: with zero force capacity
+        the base-wrench term's only descent direction is accelerating the body at
+        gravity — a freefall bias on exactly the person promised a pure kinematic
+        re-fit."""
+        if not bool(self.mask.any()):
+            return
         half = 0.5 * self.res_scale
 
         def _base(st):
             tau = st["dyn"][0]
-            return half * tau[:, :6].pow(2).sum(), {"bwN": tau[:, :6].pow(2).sum().sqrt()}
+            sq = (self.dyn_row[:, None] * tau[:, :6].pow(2)).sum()
+            return half * sq, {"bwN": sq.sqrt()}
 
         def _fmag(st):
             f_eff = st["dyn"][1]
@@ -248,7 +267,7 @@ class DynamicsSpec:
         def _tsmooth(st):
             tau = st["dyn"][0]
             dtau = tau[1:, 6:] - tau[:-1, 6:]
-            return half * (self.valid_pair[:, None] * dtau.pow(2)).sum()
+            return half * (self.dyn_pair[:, None] * dtau.pow(2)).sum()
 
         problem.add_term("base_wrench", _base)
         problem.add_term("force_magnitude", _fmag)
@@ -265,7 +284,8 @@ class DynamicsSpec:
         phase starts from a physically-reasonable point for both ``q`` and ``f``.
         Both leaves are solved (free force AND pyramid activations) so the returned
         values seed the joint phase coherently. Returns ``(f_free (T, 12, 3),
-        gen_u (T, 12, 4) or None)``, detached, plus the before/after base wrench.
+        gen_u (T, 12, 4) or None)``, detached; the before/after base wrench lands
+        on :attr:`base_wrench_before` / :attr:`base_wrench_warm`.
         """
         from better_robot.dynamics import rnea
 
@@ -296,14 +316,14 @@ class DynamicsSpec:
             f_world = self.compose_forces(f, gen_u)
             fext, f_eff = self.build_fext(f_world, oMi, frames7)
             tau = rnea(self.model, qn, v, a, fext=fext)
-            loss = (w["base_wrench"] * half * tau[:, :6].pow(2).sum()
+            loss = (w["base_wrench"] * half * (self.dyn_row[:, None] * tau[:, :6].pow(2)).sum()
                     + w["force_magnitude"] * half * f_eff.pow(2).sum())
             if f.shape[0] > 1:
                 df_par, df_perp = self.force_split(f_world)
                 loss = loss + w["force_smooth_mag"] * half * (self.fpair[..., None] * df_par.pow(2)).sum()
                 loss = loss + w["force_smooth_dir"] * half * (self.fpair[..., None] * df_perp.pow(2)).sum()
                 dtau = tau[1:, 6:] - tau[:-1, 6:]
-                loss = loss + w["torque_smooth"] * half * (self.valid_pair[:, None] * dtau.pow(2)).sum()
+                loss = loss + w["torque_smooth"] * half * (self.dyn_pair[:, None] * dtau.pow(2)).sum()
             loss.backward()
             return loss
 
@@ -332,7 +352,7 @@ class DynamicsSpec:
             f_world = self.compose_forces(f_free, gen_u)                    # (T, 12, 3) newtons
             f_final = f_world * self.mask[..., None]
             tau, _ = self.forward(qn, f_world)                              # (T, nv)
-            oMi, frames7 = self.placements(qn)
+            oMi, _ = self.placements(qn)
             base1 = self.wrench_rms(tau)
 
             idx_vs = [int(x) for x in self.model.idx_vs]
@@ -352,11 +372,15 @@ class DynamicsSpec:
                 force_world[:, jb] += frame_force[:, c]                     # two toes share a foot
 
             inval = ~self.valid.astype(bool)
-            torque_mag[inval] = 0.0
+            # RNEA products are meaningless where the residual was not enforced (untracked
+            # frames AND rows whose stencil straddles a gap); forces are real on any
+            # tracked frame the labels cover.
+            ungated = ~self.dyn_row.bool().cpu().numpy()
+            torque_mag[ungated] = 0.0
             force_world[inval] = 0.0
             frame_force[inval] = 0.0
             base_wrench = tau[:, :6].cpu().numpy().astype(np.float32)
-            base_wrench[inval] = 0.0
+            base_wrench[ungated] = 0.0
 
             fnorm = f_final.norm(dim=-1)                                    # (T, 12)
             act = self.mask.bool().any(dim=1)
@@ -372,7 +396,7 @@ class DynamicsSpec:
                 if bool(fp.any()):
                     fjit_mag, fjit_dir = float(dmag[fp].mean()), float(dperp[fp].mean())
                 dtq = (tau[1:, 6:] - tau[:-1, 6:]).norm(dim=-1)
-                vp = self.valid_pair.bool()
+                vp = self.dyn_pair.bool()
                 tjit = float(dtq[vp].mean()) if bool(vp.any()) else 0.0
             # Cone violation of the solved forces vs the TRUE cone (N). Generator forces live
             # in the inscribed pyramid, so this must read ~0; nonzero means a broken invariant.
@@ -392,14 +416,11 @@ class DynamicsSpec:
             joint_torques=tau.cpu().numpy().astype(np.float32),
             base_wrench=base_wrench,
             frame_forces=frame_force,
-            frame_points=frames7[..., :3].cpu().numpy().astype(np.float32),
             total_mass=np.float32(self.total_mass),
             base_wrench_before=np.float32(self.base_wrench_before),
             base_wrench_warm=np.float32(self.base_wrench_warm),
-            base_wrench_after=np.float32(base1), mean_force=np.float32(mean_f),
+            base_wrench_after=np.float32(base1),
             cone_violation_max_n=np.float32(cone_viol_max),
-            jitter_force_mag=np.float32(fjit_mag), jitter_force_dir=np.float32(fjit_dir),
-            jitter_torque=np.float32(tjit),
         )
 
 
@@ -449,14 +470,23 @@ def build_dynamics_spec(body, betas: torch.Tensor, frame_labels: torch.Tensor,
     body_weight_n = total_mass * _GRAVITY_MAG
     # High-fps clips: wider v/a stencil (fps-invariant accel noise) + the 30 fps
     # restraint of the force/torque smoothness weights. Both identity at fps <= 30.
+    spacing = max(1, round(float(fps) / FPS_REF))
+    # Rows whose ±spacing stencil never touches an untracked frame — a gap holds the
+    # nearest tracked pose and differencing across the held jump would read as a huge
+    # phantom acceleration, so only these rows carry the base-wrench residual.
+    vb = np.asarray(valid, bool)
+    ok = vb.copy()
+    for k in range(1, spacing + 1):
+        ok[k:] &= vb[:-k]
+        ok[:-k] &= vb[k:]
     spec = DynamicsSpec(
         model=model, frame_ids=frame_ids, parent_ids=parent_ids, parent_body=parent_body,
         frame_names=frame_names, mask=mask, fpair=fpair, valid_pair=valid_pair,
         dt=1.0 / float(fps), weights=fps_scaled_weights(weights, fps), dyn_opt=dyn_opt,
-        gravity_world=np.asarray(gravity_world, np.float32), valid=np.asarray(valid, bool),
+        gravity_world=np.asarray(gravity_world, np.float32), valid=vb,
         total_mass=total_mass, mu=math.tan(math.radians(float(half_angle_deg))),
-        res_scale=1.0 / (max(int(valid_t.sum()), 1) * body_weight_n ** 2),
-        spacing=max(1, round(float(fps) / FPS_REF)))
+        res_scale=1.0 / (max(int(ok.sum()), 1) * body_weight_n ** 2),
+        spacing=spacing, dyn_row=torch.as_tensor(ok, dtype=dtype, device=dev))
     if cones:
         with torch.no_grad():
             _, frames7 = spec.placements(normalize_q(q_world.to(dev), body.num_joints))
@@ -606,6 +636,8 @@ def run_kindyn(source, pred: Path, cfg: HumanOptimConfig, device: str, *,
             q_world=q_world, cones=cones, half_angle_deg=half_angle)
 
         print(f"[{tag}] person obj_id={oid} ({int(vmask.sum())}/{N} valid) …")
+        # Fingers stay UNfrozen (like kinematics_2): a fingertip contact frame must be
+        # able to move with the physics residual.
         q_opt, before, after, aux = optimize_person(
             mid, betas_mean, q_world, extrinsics=extr, K=K, depth_points=depth,
             target_kp=target_kp, scores=scores, corr=corr, frame_vertex_ids=fvids,
@@ -648,7 +680,7 @@ def run_kindyn(source, pred: Path, cfg: HumanOptimConfig, device: str, *,
     extra = dict(
         contact_forces_world=np.stack(force_world_p, 0),
         torque_mag=np.stack(torque_p, 0),
-        base_wrench=np.stack(base_wrench_p, 0),
+        base_wrench=np.stack(base_wrench_p, 0),               # (P, N, 6) ROOT-LOCAL frame
         joints_world=np.stack(joints_world_p, 0),
         joint_torques=np.stack(joint_torque_p, 0),
         frame_forces=np.stack(frame_force_p, 0),              # (P, N, 12, 3) world newtons

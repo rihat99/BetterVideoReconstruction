@@ -1,8 +1,8 @@
 """Per-clip reconstruction-quality table — find the scenes where VGGT failed.
 
 One row per ``out/<stem>/`` tree — raw metrics plus a ``flag`` column carrying the
-calibrated verdicts (``[quality]`` in ``configs/pipeline.toml``; user-labelled
-operating point, 2026-08-26). The metric columns:
+calibrated verdicts (``[quality]`` in ``configs/human_optimization.toml``;
+user-labelled operating point, 2026-08-24). The metric columns:
 
 * **cam/depth** — camera translation spread over the clip divided by the median
   scene-to-camera distance. A hallucinated dolly (VGGT turning a tripod pan+zoom
@@ -58,7 +58,7 @@ def clip_row(pred: Path) -> dict | None:
     if (geo / "human.npz").exists():
         human = dict(np.load(geo / "human.npz", allow_pickle=True))
         row["smear_med"], row["smear_frac"] = smear_stats(
-            human["points"], human["frame_id"], tr["extrinsics"])
+            human["points"], human["frame_id"], human["obj_id"], tr["extrinsics"])
     else:
         row["smear_med"], row["smear_frac"] = float("nan"), float("nan")
     row["scale_mad"] = float("nan")

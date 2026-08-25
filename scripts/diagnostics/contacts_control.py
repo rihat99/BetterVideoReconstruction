@@ -263,7 +263,7 @@ def control_labels(people: list[PersonSignals], meta: dict, *, gap_m: float,
     for person in people:
         norm = control_score(person, gap_m, speed_mps, power)
         magnitude = np.where(np.isfinite(norm), radius - norm, _UNRANKED)
-        fired, _ = force_labels(magnitude, frame_names=meta["frame_names"],
+        fired = force_labels(magnitude, frame_names=meta["frame_names"],
                                 valid=person.valid, threshold_n=0.0,
                                 min_frames=meta["min_frames"])
         fired[:, meta["knee_columns"]] = False
@@ -310,7 +310,7 @@ def force_arm(stem: str, root: Path, body, config: dict, device: str, people: li
             knobs=_FORCE_KNOBS)
         relative_magnitude.append(solution.magnitude / solution.body_weight_n)
         for theta in thetas:
-            label, _ = force_labels(solution.magnitude, frame_names=meta["frame_names"],
+            label = force_labels(solution.magnitude, frame_names=meta["frame_names"],
                                     valid=signals.valid,
                                     threshold_n=theta * solution.body_weight_n,
                                     min_frames=meta["min_frames"])

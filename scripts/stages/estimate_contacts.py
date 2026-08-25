@@ -62,8 +62,9 @@ from tools.body import frame_normals, load_body  # noqa: E402
 from tools.config import load_toml  # noqa: E402
 from tools.geometry.normals import load_scene_cloud  # noqa: E402
 from tools.geometry.quality import cam_motion_ratio, quality_flag, smear_stats  # noqa: E402
+from tools.npz_io import atomic_savez  # noqa: E402
 from tools.human_optim import (  # noqa: E402
-    DETECT_MIN_FRAMES, detect_frame_contacts, joint_drift, merge_contact_spans,
+    DETECT_MIN_FRAMES, detect_frame_contacts, merge_contact_spans,
     min_span_frames,
     project, transform_points, world_from_cam,
 )
@@ -156,10 +157,12 @@ def _pose(body, betas: torch.Tensor, q: torch.Tensor, scale: float, *, chunk: in
 def _drift_pre(kin: dict, person: int, shape, device: str) -> torch.Tensor:
     """The persisted pre-enforcement drift ``(N, 12)`` for one person, or a hard error.
 
-    The force solve prices force by how still a frame is. If that stillness were measured
-    on the *enforced* body, the optimizer's own contact damping would be voting for its own
-    labels, so there is deliberately no fallback here: a body without ``drift_pre`` cannot
-    have a force witness computed from it.
+    The stillness witnesses price force / gate far labels by how still a frame is. If
+    that stillness were measured on the *enforced* body, the optimizer's own contact
+    damping would be voting for its own labels, so there is deliberately no fallback
+    here: a body without ``drift_pre`` cannot have a contact readout. NaN entries are
+    legitimate — an untracked window (or a person detection never ran on) carries no
+    stillness evidence, and every consumer treats NaN drift as "not still".
     """
     if "drift_pre" not in kin:
         raise SystemExit("[estimate_contacts] kinematic_1.npz has no drift_pre — the force "
@@ -167,9 +170,9 @@ def _drift_pre(kin: dict, person: int, shape, device: str) -> torch.Tensor:
                          "it on the enforced body; re-run human_optimization")
     drift = torch.as_tensor(np.asarray(kin["drift_pre"])[person],
                             dtype=torch.float32, device=device)
-    if tuple(drift.shape) != tuple(shape) or not bool(torch.isfinite(drift).all()):
-        raise SystemExit("[estimate_contacts] drift_pre is the wrong shape or has "
-                         "non-finite entries; refusing to guess")
+    if tuple(drift.shape) != tuple(shape):
+        raise SystemExit("[estimate_contacts] drift_pre has the wrong shape; "
+                         "refusing to guess")
     return drift
 
 
@@ -238,7 +241,7 @@ def run(source: str | Path, predictions_dir: str | Path, config_path: str | Path
                              stillness_vstar_mps=float(cf["stillness_vstar_mps"]))
 
     # Gravity for the force solve: GeoCalib's world-down when the stage ran, else VGGT's
-    # world-down convention — the same fallback the dynamics stage uses.
+    # world-down convention — the same fallback kindyn uses.
     gravity_path = pred / "geocalib" / "gravity.npz"
     if gravity_path.exists():
         gravity_world = np.asarray(np.load(gravity_path)["gravity_world"], np.float32)
@@ -273,16 +276,10 @@ def run(source: str | Path, predictions_dir: str | Path, config_path: str | Path
         person_valid = torch.as_tensor(valid_mask[p], device=device)
 
         # The persisted pre-enforcement drift is the honest motion measurement: the
-        # optimizer's own damping must not be able to manufacture apparent stillness.
-        # Fall back per element to drift re-measured on this body (old npz / NaN).
-        drift = joint_drift(points, fps=fps, window_s=float(cg["window_s"]),
-                            valid_mask=person_valid)
-        if "drift_pre" in kin:
-            persisted = torch.as_tensor(
-                np.asarray(kin["drift_pre"])[p], dtype=drift.dtype, device=drift.device)
-            if persisted.shape == drift.shape:
-                drift = torch.where(
-                    torch.isfinite(persisted) & torch.isfinite(drift), persisted, drift)
+        # optimizer's own damping must not be able to manufacture apparent stillness,
+        # so there is no re-measure on this body. NaN entries carry no stillness
+        # evidence and every consumer treats them as "not still".
+        drift = _drift_pre(kin, p, (num_frames, num_contact_frames), device)
 
         detected = detect_frame_contacts(
             points, normals, drift, scene_pts, scene_normals, scene_conf,
@@ -315,7 +312,7 @@ def run(source: str | Path, predictions_dir: str | Path, config_path: str | Path
         # when it has to carry real load. Add-only, with exactly one exception: the toe
         # pair (see below), where "at most one toe per foot" outranks add-only.
         force_solution = solve_person_forces(
-            body, betas, q, valid_mask[p], drift_pre=_drift_pre(kin, p, drift.shape, device),
+            body, betas, q, valid_mask[p], drift_pre=drift,
             drift_window_s=float(cg["window_s"]), gravity_world=gravity_world, fps=fps,
             scene_pts=scene_pts, scene_normals=scene_normals, scene_conf=scene_conf,
             knobs=force_knobs)
@@ -337,7 +334,7 @@ def run(source: str | Path, predictions_dir: str | Path, config_path: str | Path
                 near_m=float(cc["max_dist_m"]), still_m=float(cg["still_m"]),
                 far_still_x=float(cf["far_still_x"]))
             label_magnitude = np.where(veto, 0.0, label_magnitude)
-        force_label, _ = force_labels(
+        force_label = force_labels(
             label_magnitude, frame_names=frame_names, valid=valid_mask[p],
             threshold_n=float(cf["theta_bw"]) * force_solution.body_weight_n,
             hold_n=float(cf["theta_hold_bw"]) * force_solution.body_weight_n,
@@ -421,7 +418,8 @@ def run(source: str | Path, predictions_dir: str | Path, config_path: str | Path
     smear_med = float("nan")
     if human_path.exists():
         with np.load(human_path) as human:
-            smear_med, _ = smear_stats(human["points"], human["frame_id"], tr["extrinsics"])
+            smear_med, _ = smear_stats(human["points"], human["frame_id"],
+                                       human["obj_id"], tr["extrinsics"])
     res_bw = residual_before_n / np.maximum(body_weight_n[:, None], 1e-9)
     res_before_bw = float(np.median(res_bw[valid_mask])) if valid_mask.any() else float("nan")
     flag = quality_flag(cam_ratio, res_before_bw, smear_med,
@@ -487,14 +485,14 @@ def run(source: str | Path, predictions_dir: str | Path, config_path: str | Path
     if np.isinf(frame_sdf_cm).any() or np.isinf(frame_distance_cm).any():
         raise RuntimeError("frame scene diagnostics may be NaN when missing, but never infinite")
     out_path = paths.contacts_path(pred, tag)
-    np.savez(out_path, **save)
+    atomic_savez(out_path, **save)
     print(f"[estimate_contacts] wrote {out_path}")
 
     if overlay:
         from tools.human_optim.overlay import render_contact_overlay
         rendered = render_contact_overlay(
             source, paths.overlay_path(pred, f"contacts_{tag}"), frames_2d, frame_contact,
-            None, valid_mask, height, width, fps)
+            valid_mask, height, width, fps)
         print(f"[estimate_contacts] wrote {rendered}")
     return out_path
 
