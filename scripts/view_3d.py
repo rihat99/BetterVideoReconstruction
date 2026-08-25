@@ -34,9 +34,7 @@ For each clip it shows, in the metric world frame:
 * ``kindyn_1`` / ``kindyn_manual`` — the joint kinematics+dynamics bodies
   (``human_optim/kindyn_{1,manual}.npz``; ``kindyn_manual`` is the
   manual-annotation reference chain), skinned meshes that also carry
-  force/torque data;
-* ``dynamics`` — force-only (no mesh): the 52-joint torque-scaled sphere/bone
-  skeleton (via the independent ``skeleton`` layer) + blue contact-force arrows.
+  force/torque data.
 
 The dynamics folder's **force display** dropdown picks the arrow regime:
 ``per-joint`` accumulates each joint's frame forces into one arrow at the joint

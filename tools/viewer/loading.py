@@ -2,7 +2,7 @@
 
 Every loader here reads one clip's ``out/<stem>/`` tree into plain numpy: the
 fused scene + human geometry, the per-frame cameras, the world-frame gravity, and
-each SMPL-X body source (raw / kinematic / dynamics). :func:`load_clip_data`
+each SMPL-X body source (raw / kinematic / kindyn). :func:`load_clip_data`
 orchestrates them into a :class:`ClipData`, which :mod:`tools.viewer.scene` then
 turns into viser nodes. ``torch`` / ``viser.transforms`` are imported lazily
 inside the loaders that need them, so importing this module stays light.
@@ -10,7 +10,6 @@ inside the loaders that need them, so importing this module stays light.
 from __future__ import annotations
 
 import json
-import sys
 import warnings
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -67,12 +66,11 @@ def _load_gravity(pred: Path) -> dict | None:
 def _load_force_data(pred: Path, filename: str) -> dict | None:
     """Numpy arrays for a force/torque body source (``human_optim/<filename>``).
 
-    Shared by every source that solves contact forces: ``dynamics.npz`` (force-only)
-    and the kinematics+dynamics bodies ``kindyn_1.npz`` / ``kindyn_manual.npz`` (the
-    manual-annotation reference chain). All store the same force fields, so the viewer
-    draws them the same way. ``joint_contact`` is optional — older kindyn npz omit
-    it, and the caller then reads which joints are in contact from where the solved
-    contact force is non-zero.
+    Shared by the kinematics+dynamics bodies ``kindyn_1.npz`` / ``kindyn_manual.npz``
+    (the manual-annotation reference chain). Both store the same force fields, so the
+    viewer draws them the same way. ``joint_contact`` is optional — older kindyn npz
+    omit it, and the caller then reads which joints are in contact from where the
+    solved contact force is non-zero.
     """
     f = pred / "human_optim" / filename
     if not f.exists():
@@ -107,7 +105,9 @@ def _load_force_data(pred: Path, filename: str) -> dict | None:
         "ff": (dd["frame_forces"].astype(np.float32)            # (P, N, F, 3): the same forces
                if "frame_forces" in dd.files else None),        # per contact FRAME, unfolded
         "bw": (dd["base_wrench"].astype(np.float32)             # (P, N, 6): root force | torque
-               if "base_wrench" in dd.files else None),
+               if "base_wrench" in dd.files else None),         #   in the ROOT-LOCAL frame
+        "rootq": (dd["q"][:, :, 3:7].astype(np.float32)         # (P, N, 4) scalar-last root quat
+                  if "q" in dd.files else None),                #   (rotates bw to world for drawing)
         "jc": jc,                                               # (P, N, J): per-joint in-contact (fingers folded to wrist)
         "joint_names": names,                                   # (J,) native names (finger toggle)
         "valid": valid,
@@ -545,7 +545,7 @@ class ClipData:
     fov_y: np.ndarray
     gravity: dict | None
     skinned: dict          # name -> (faces, object_ids, people); "original" first
-    forces: dict           # force source name ("dynamics"/"kindyn_1"/"kindyn_manual") -> force dict
+    forces: dict           # force source name ("kindyn_1"/"kindyn_manual") -> force dict
     sensors: dict | None   # measured wall-sensor forces (climb_wall), see _load_sensor_forces
     skeletons: dict        # body source name -> joint tree + contact-frame labels (_load_skeleton)
     n_frames: int
@@ -628,10 +628,10 @@ def load_clip_data(pred: Path, *, device: str, show_smplx: bool,
             if pf is not None:
                 skinned["prefit"] = pf
 
-    # Force/torque sources, in display order — the force-only dynamics stage and the
-    # kinematics+dynamics stage, whichever exist. Same fields, drawn the same way.
+    # Force/torque sources, in display order — the kinematics+dynamics bodies,
+    # whichever exist.
     forces: dict = {}
-    for name, fn in (("dynamics", "dynamics.npz"), ("kindyn_1", "kindyn_1.npz"),
+    for name, fn in (("kindyn_1", "kindyn_1.npz"),
                      ("kindyn_manual", "kindyn_manual.npz")):
         fd = _load_force_data(pred, fn)
         if fd is not None:

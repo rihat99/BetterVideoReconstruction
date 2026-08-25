@@ -4,7 +4,7 @@ Builds every scene node for a single clip from its :class:`~tools.viewer.loading
 — the scene cloud, the per-point normal arrows (debug), the camera frustums +
 centre path, the gravity arrow, the per-frame human
 points, the skinned SMPL-X bodies, their joint skeletons and contact frames, and
-the force/torque skeletons (dynamics / kindyn_1) — and
+the force/torque skeletons (kindyn_1 / kindyn_manual) — and
 moves them together with the frame slider. One ``/clip`` root frame owns them all, so :meth:`ClipScene.dispose`
 tears the whole clip down in a single removal.
 """
@@ -54,6 +54,16 @@ _CAM_MAX_FRUSTUMS = 24
 # draw the ground grid this many times the fitted floor's data extent, so it reads
 # as a floor spanning the scene rather than a small patch under the climber
 _GROUND_GRID_MULT = 10.0
+
+
+def _quat_mat(q: np.ndarray) -> np.ndarray:
+    """3×3 rotation from a scalar-last quaternion (normalized defensively)."""
+    x, y, z, w = np.asarray(q, np.float64) / max(float(np.linalg.norm(q)), 1e-9)
+    return np.array([
+        [1 - 2 * (y * y + z * z), 2 * (x * y - z * w), 2 * (x * z + y * w)],
+        [2 * (x * y + z * w), 1 - 2 * (x * x + z * z), 2 * (y * z - x * w)],
+        [2 * (x * z - y * w), 2 * (y * z + x * w), 1 - 2 * (x * x + y * y)],
+    ], np.float32)
 
 
 def _unit_cylinder(color: tuple[int, int, int] = (235, 235, 235)):
@@ -260,9 +270,8 @@ class ClipScene:
                 self.frame_nodes[source] = nodes
 
         # -- force/torque skeletons (spheres + bones), one per force source
-        #    ("dynamics" and/or "kindyn_1"), hidden; forces added per frame. Node paths
-        #    are keyed by the source name, so "dynamics" keeps its original /clip/dynamics
-        #    paths and each source's nodes stay independent. --
+        #    ("kindyn_1" / "kindyn_manual"), hidden; forces added per frame. Node paths
+        #    are keyed by the source name, so each source's nodes stay independent. --
         self.forces = data.forces                          # {source: force dict}
         self.force_nodes: dict[str, list[dict]] = {}
         self._dyn_finger: dict[str, np.ndarray] = {}       # source -> (J,) finger/palm mask
@@ -270,7 +279,7 @@ class ClipScene:
         # reused from the SAME body forward pass that poses the source's mesh, so a
         # per-frame arrow starts exactly on the drawn skin. Only sources that store
         # ``frame_forces`` and have a skinned body ("kindyn_1" / "kindyn_manual")
-        # qualify; "dynamics" (per-joint forces, no mesh) falls back to per-joint.
+        # qualify; anything else falls back to per-joint.
         self._force_frame_pos: dict[str, list[np.ndarray | None]] = {}
         for source, dyn in self.forces.items():
             body = data.skinned.get(source)
@@ -309,12 +318,12 @@ class ClipScene:
                 if jnames else np.zeros(Jd, bool))
 
         # Available body sources (display order) + default. A force source that is also a
-        # skinned body ("kindyn_1") already appears via ``data.skinned``; "dynamics" (no
-        # mesh) is appended. kinematics_2 is selectable but kinematic_1 stays the default.
+        # skinned body ("kindyn_1") already appears via ``data.skinned``. kinematics_2 is
+        # selectable but kinematic_1 stays the default.
         self.body_source_names = (
             list(data.skinned) + [s for s in self.forces if s not in data.skinned])
         self.default_body = next(
-            (s for s in ("kinematics", "kinematics_2", "prefit", "original", "dynamics")
+            (s for s in ("kinematics", "kinematics_2", "prefit", "original")
              if s in self.body_source_names), None)
         self.active = self.default_body
 
@@ -720,9 +729,8 @@ class ClipScene:
         so the overlay reads through; restore any previously translucent mesh.
 
         One rule for all three overlays — the kinematic 52-joint skeleton, the contact
-        frames, and a force source's torque skeleton. The force-only ``dynamics`` source
-        has no mesh, so it never triggers this. Pushed only on a state change, so idle
-        playback stays cheap.
+        frames, and a force source's torque skeleton. Pushed only on a state change, so
+        idle playback stays cheap.
         """
         src = self.active
         covered = ((self.layers.get("skeleton", False) and src in self._skeleton_sources)
@@ -817,15 +825,24 @@ class ClipScene:
             # Root residual wrench: force (green) and torque (magenta) at the pelvis,
             # each on its own toggle. A physically-consistent solve drives these toward
             # zero, so short arrows are good — they show what the contact forces failed
-            # to explain.
+            # to explain. RNEA expresses the wrench in the free-flyer root's LOCAL
+            # frame; rotate it to world before drawing, or the arrows point wrong
+            # whenever the pelvis is rotated.
             bw = dyn.get("bw")
+            rq = dyn.get("rootq")
             root = jw[0]
+            bw_force = bw_torque = None
+            if bw is not None:
+                R = _quat_mat(rq[p, f]) if rq is not None else np.eye(3, dtype=np.float32)
+                bw_force, bw_torque = R @ bw[p, f, :3], R @ bw[p, f, 3:]
             self._root_arrow(source, nd, "root_force",
-                             valid and bw is not None and ly.get("dyn_root_force", True),
-                             root, None if bw is None else bw[p, f, :3] * _DYN_FSCALE, (60, 220, 90))
+                             valid and bw_force is not None and ly.get("dyn_root_force", True),
+                             root, None if bw_force is None else bw_force * _DYN_FSCALE,
+                             (60, 220, 90))
             self._root_arrow(source, nd, "root_torque",
-                             valid and bw is not None and ly.get("dyn_root_torque", True),
-                             root, None if bw is None else bw[p, f, 3:] * _DYN_TSCALE, (220, 60, 220))
+                             valid and bw_torque is not None and ly.get("dyn_root_torque", True),
+                             root, None if bw_torque is None else bw_torque * _DYN_TSCALE,
+                             (220, 60, 220))
             # Measured wall-sensor forces (climb_wall GT), same scale as the solved
             # arrows so lengths compare directly: orange per-channel reactions at the
             # four limb joints. A channel is its support cell's reaction —
