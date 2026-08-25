@@ -129,8 +129,9 @@ ann_acceleration    = [   0,    0,    0,    0,    0 ]   # OFF — near-redundant
 # the square, smoothness linear, raw newtons summed over the clip). kindyn_1 column =
 # all-LINEAR weights for the same terms in the joint engine, where every residual is first
 # divided by BODY WEIGHT and averaged over valid frames — so these five numbers are
-# dimensionless and mean the same thing on a 60-frame clip and a 900-frame one. The four
-# ratios to base_wrench are the dynamics stage's (1 : 0.01 : 0.2 : 0.05 : 0.1), kept.
+# dimensionless and mean the same thing on a 60-frame clip and a 900-frame one. The
+# smoothness ratios were retuned 2026-08-25 (see the sweep note below); the dynamics
+# column mirrors the kindyn one at 1/100 scale.
 #
 # base_wrench is THE trade knob: it buys physics with pose. Ladder on boulder_1 + the
 # repaired gtIGgs floater (2026-08-12), root residual as N per frame RMS — the frozen-pose
@@ -148,8 +149,16 @@ ann_acceleration    = [   0,    0,    0,    0,    0 ]   # OFF — near-redundant
 [loss_weights.dynamics]
 base_wrench         = [   0,    0,    0,  1.0,  100 ]
 force_magnitude     = [   0,    0,    0, 0.01,    1 ]
-force_smooth_mag    = [   0,    0,    0, 0.20,   20 ]   # smooth the force MAGNITUDE across persisting contacts (harder than direction)
-force_smooth_dir    = [   0,    0,    0, 0.05,    5 ]   # smooth the force DIRECTION (may adapt faster than magnitude)
+# mag x2 / dir x4 by the 2026-08-25 sweep (6 clips, 5 settings; smoothness pairs are masked
+# to persisting contacts, so 1-frame forces are untouchable by construction — verified):
+# at (40,20) direction jitter median falls 16-19% and magnitude jitter 8-35% on 5/6 clips
+# for <=0.005 BW extra root residual; (80,20) smooths magnitude hardest but barely helps
+# direction, and (20,20) helps direction while WORSENING magnitude 4-20%. Known caveat:
+# 2nwG (60 fps -> fps-scaling puts the effective pair at 160/80) pays +13% magnitude jitter
+# and +8% relative residual at this point — every other clip, including the other 60 fps
+# one, wins.
+force_smooth_mag    = [   0,    0,    0, 0.40,   40 ]   # smooth the force MAGNITUDE across persisting contacts (harder than direction)
+force_smooth_dir    = [   0,    0,    0, 0.20,   20 ]   # smooth the force DIRECTION (may adapt faster than magnitude)
 torque_smooth       = [   0,    0,    0, 0.10,   10 ]
 
 [optimizer]
@@ -159,6 +168,12 @@ lr_lbfgs = 1.0
 lbfgs_history = 10
 
 [chamfer]
+sat_m = 0.25           # saturate per-point distances at sat_m*tanh(d/sat_m): near the body it is
+                       # the identity (shipped calibration untouched), far depth outliers stop
+                       # pulling (gradient fades to 0) instead of dragging with constant force.
+                       # The prefit's GM chamfer + both reproj terms already carry this lesson.
+                       # A/B 2026-08-25 (6 scenes): pooled F1 .762 vs .760 off, boulder_1 +.022,
+                       # jitter unchanged — outlier immunity at zero climbing cost. 0 = off.
 conf_drop_q = 0.3      # PER-FRAME quantile: drop each frame's lowest-confidence depth fraction (human cloud un-gated at fuse)
 max_points = 1500
 vertex_subsample = 1000
@@ -264,6 +279,15 @@ conf_thresh = 0.1
 [contact_gate]
 window_s = 0.35        # drift window (~11 frames at 30 fps)
 still_m  = 0.04        # THE recall knob (raise → more recall), shared by the kin1 detector and the readout
+# Closeness that OUTRANKS stillness — and duration: a frame whose guarded signed distance is
+# below this stays contact evidence even while moving fast, and a span pressing below it survives
+# the duration rules (the 3-frame blip killer and the post-weld min_span) however brief. A
+# sprinting foot plant presses into the floor but can never look still — the drift window
+# straddles the swing — and a one-frame bounce is real contact, not flicker. ONE value for both
+# sports since 2026-08-25: the 13-scene climbing A/B (with min_span_s 0.06) took pooled F1
+# .729 -> .768 — sport_climb's fast rope-climbing steps alone went .27 -> .62; the stillness
+# gate had been killing real presses there too. -1 = off.
+still_override_m = 0.01
 
 [contacts]
 frames = []            # contact-frame allowlist by NAME; empty = every frame the body carries.
@@ -273,7 +297,7 @@ frames = []            # contact-frame allowlist by NAME; empty = every frame th
 overlay = true         # render the contact overlay
 close_thresh_m = 0.03  # enter: "just outside" distance counted as contact
 exit_thresh_m = 0.035  # stay: looser hysteresis exit (holds a span, kills 1-frame boundary flicker)
-min_span_s = 0.1       # min contact/release span (seconds; frames = ceil(s·fps)) — applied to the fused labels AFTER gap-welding; raw detection keeps a fixed 3-frame blip killer (DETECT_MIN_FRAMES)
+min_span_s = 0.06      # min contact/release span (seconds; frames = ceil(s·fps)) — applied to the fused labels AFTER gap-welding; raw detection keeps a fixed 3-frame blip killer (DETECT_MIN_FRAMES). 0.06 (a sprint stance is ~0.1 s) unified for both sports 2026-08-25 — see still_override_m
 max_dist_m = 0.10
 conf_thresh = 0.1      # residual absolute floor (VGGT conf ≥~1 ⇒ non-binding)
 conf_drop_q = 0.1      # quantile gate at scene load: drop the lowest-confidence scene voxels
@@ -304,6 +328,33 @@ theta_hold_bw = 0.03       # …and keeps the label until the load drops below t
                            # set equal to theta_bw for a single threshold)
 gap_dstar_m = 0.05         # gap price: force this far from the scene is already expensive
 stillness_vstar_mps = 0.2  # stillness price: force on a frame drifting this fast is expensive
+# A FAR force label needs stillness (replaces the old absolute label_max_dist_m gate,
+# 2026-08-25). Within the detector's own trust radius ([contacts].max_dist_m) load alone
+# labels — a fast foot plant that carries weight is a contact. Beyond it geometry is blind,
+# so the load claim needs the stillness witness: drift over the [contact_gate] window at
+# most far_still_x * still_m. Real far support holds still — the gtIGgs floater (labels at
+# a median 44 cm) and a beam routine whose beam cloud sits half a metre off both survive —
+# while the mid-air scraps a bad-depth flight parks on flying limbs move fast and are cut
+# (high_jump / 1FGkg far floods drop to zero). The bar is 4x looser than the detector's
+# still_m because a badly reconstructed body jitters (at 1x, gtIGgs loses half its rescue).
+# Measured on the 13 annotated climbing scenes: F1 .729 vs .736 with no rule at all, vs
+# .603 with the old 0.20 m gate. One rule, both sports. 0 = off.
+far_still_x = 4.0
+
+# Per-clip reconstruction-quality FLAGS, computed and saved by estimate_contacts (the
+# earliest stage where all three signals exist — the residual comes from its force
+# witness) into contacts_<tag>.npz as quality_flag + the raw metrics. Calibrated
+# 2026-08-26 against the user's verdict on 23 labelled clips (high_jump / -bUyE / 1FGkg /
+# pommel_horse = bad; olympics_2 / balance_beam pass; every climbing scene passes).
+# Small dataset — revisit as it grows. The CAMERA flag needs BOTH witnesses: cam/depth
+# alone cannot tell a real handheld move (boulder_1 reads 0.71 with coherent physics,
+# 1.0 BW) from a hallucinated dolly (1FGkg reads 0.68 with 2.8 BW of inexplicable
+# acceleration) — the residual is the tiebreak.
+[quality]
+cam_depth_max = 0.4        # camera-translation spread / median scene depth above this ...
+res_before_bw_max = 2.5    # ... AND median pre-force root residual above this = "camera" flag
+smear_med_max = 2.0        # median along-ray human-cloud smear above this = "depth" flag
+                           # (same 2.0 as the chamfer smear weight's dead zone — one meaning)
 
 # Force application points for the dynamics stage: two hands (wrist + fingers folded
 # onto the wrist), two feet, two ankles — six joints. A joint carries a force only on
