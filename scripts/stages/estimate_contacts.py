@@ -61,6 +61,7 @@ import torch  # noqa: E402
 from tools.body import frame_normals, load_body  # noqa: E402
 from tools.config import load_toml  # noqa: E402
 from tools.geometry.normals import load_scene_cloud  # noqa: E402
+from tools.geometry.quality import cam_motion_ratio, quality_flag, smear_stats  # noqa: E402
 from tools.human_optim import (  # noqa: E402
     DETECT_MIN_FRAMES, detect_frame_contacts, joint_drift, merge_contact_spans,
     min_span_frames,
@@ -68,7 +69,9 @@ from tools.human_optim import (  # noqa: E402
 )
 from tools.human_optim import paths  # noqa: E402
 from tools.human_optim.forces import (  # noqa: E402
-    ForceKnobs, close_gaps, force_labels, min_span, resolve_toe_conflicts, solve_person_forces,
+    NO_SCENE_M,
+    ForceKnobs, close_gaps, far_still_veto, force_labels, min_span, resolve_toe_conflicts,
+    solve_person_forces,
 )
 from tools.human_optim.qmath import normalize_q  # noqa: E402
 
@@ -109,9 +112,15 @@ def _load_config(path: Path) -> dict:
     f.setdefault("theta_hold_bw", 0.03)     # …and stays loaded until it drops below this (hysteresis)
     f.setdefault("gap_dstar_m", 0.05)       # gap price: force this far from the scene is expensive
     f.setdefault("stillness_vstar_mps", 0.2)  # stillness price: force on a limb this fast is expensive
+    f.setdefault("far_still_x", 4.0)        # far force labels need stillness at this multiple of still_m; 0 = off
     g = cfg.setdefault("contact_gate", {})
     g.setdefault("window_s", 0.35)         # drift window (s) for the stillness gate
     g.setdefault("still_m", 0.03)          # net drift (m) at which stillness = 0.5
+    g.setdefault("still_override_m", -1.0)  # closeness that outranks stillness; -1 = off
+    q = cfg.setdefault("quality", {})
+    q.setdefault("cam_depth_max", 0.4)     # camera flag: cam-travel/scene-depth above this ...
+    q.setdefault("res_before_bw_max", 2.5)  # ... AND pre-force residual above this (both witnesses)
+    q.setdefault("smear_med_max", 2.0)     # depth flag: median along-ray smear above this
     cfg.setdefault("runtime", {}).setdefault("device", "cuda")
     return cfg
 
@@ -247,6 +256,9 @@ def run(source: str | Path, predictions_dir: str | Path, config_path: str | Path
     frame_force = np.zeros((*shape, 3), dtype=np.float32)
     frame_force_bw = np.zeros(shape, dtype=np.float32)
     frame_force_label = np.zeros(shape, dtype=bool)
+    frame_contact_geom = np.zeros(shape, dtype=bool)
+    frame_pressed = np.zeros(shape, dtype=bool)
+    force_dist_m = np.full(shape, np.nan, dtype=np.float32)
     frame_wall_dot = np.full(shape, -1.0, dtype=np.float32)
     body_weight_n = np.zeros(num_people, dtype=np.float32)
     residual_before_n = np.zeros((num_people, num_frames), dtype=np.float32)
@@ -277,6 +289,7 @@ def run(source: str | Path, predictions_dir: str | Path, config_path: str | Path
             frame_names=frame_names,
             close_thresh_m=float(cc["close_thresh_m"]), exit_thresh_m=float(cc["exit_thresh_m"]),
             min_frames=DETECT_MIN_FRAMES, still_m=float(cg["still_m"]),
+            still_override_m=float(cg["still_override_m"]),
             max_dist_m=float(cc["max_dist_m"]), conf_thresh=float(cc["conf_thresh"]),
             prune_margin_m=float(cc["prune_margin_m"]))
 
@@ -306,14 +319,39 @@ def run(source: str | Path, predictions_dir: str | Path, config_path: str | Path
             drift_window_s=float(cg["window_s"]), gravity_world=gravity_world, fps=fps,
             scene_pts=scene_pts, scene_normals=scene_normals, scene_conf=scene_conf,
             knobs=force_knobs)
+        # A FAR force label needs stillness ([contact_force].far_still_x). Within the
+        # detector's own trust radius ([contacts].max_dist_m) load alone suffices — a fast
+        # foot plant that carries weight is a contact. Beyond it geometry is blind, and the
+        # load claim needs the stillness witness: a misregistered body that is really
+        # supported holds still (the gtIGgs floater, a beam routine whose beam cloud sits
+        # half a metre off), while the mid-air scraps a bad-depth flight parks on flying
+        # limbs move fast and are cut. The bar is a multiple of still_m looser than the
+        # detector's, because a badly reconstructed body jitters — measured 2026-08-25:
+        # at 4x, climbing F1 pays .007 while the high_jump/1FGkg far floods drop to zero.
+        # The solve itself is untouched — residuals, load allocation and the toe rule see
+        # every candidate. NaN distance = no scene evidence = far.
+        label_magnitude = force_solution.magnitude
+        if float(cf["far_still_x"]) > 0.0:
+            veto = far_still_veto(
+                force_solution.dist_m, drift.cpu().numpy(),
+                near_m=float(cc["max_dist_m"]), still_m=float(cg["still_m"]),
+                far_still_x=float(cf["far_still_x"]))
+            label_magnitude = np.where(veto, 0.0, label_magnitude)
         force_label, _ = force_labels(
-            force_solution.magnitude, frame_names=frame_names, valid=valid_mask[p],
+            label_magnitude, frame_names=frame_names, valid=valid_mask[p],
             threshold_n=float(cf["theta_bw"]) * force_solution.body_weight_n,
             hold_n=float(cf["theta_hold_bw"]) * force_solution.body_weight_n,
             min_frames=DETECT_MIN_FRAMES)
         force_label[:, knee_columns] = False        # force on a knee is ~all false positives
         contact_np = contact.cpu().numpy() | force_label
         contact_np[~valid_mask[p]] = False
+
+        # The penetration exception, carried through to the union rules: a step pressing
+        # below [contact_gate].still_override_m already survived the detector's blip
+        # killer however brief, and the post-weld duration rule must not take it back.
+        # All-False when the override is off (climbing unchanged).
+        pressed = ((detected.guarded_sdf < float(cg["still_override_m"]))
+                   & torch.isfinite(drift) & ~detected.toe_suppressed).cpu().numpy()
 
         # One debounce over the union. Each readout already drops its own too-short spans,
         # but the union puts two of them end to end and can leave a one- or two-frame hole
@@ -324,7 +362,7 @@ def run(source: str | Path, predictions_dir: str | Path, config_path: str | Path
         # The fps-aware duration rule, applied only now that the union is welded. At
         # <=30 fps this is a no-op (every arm above already enforces 3 frames); at high
         # fps it drops the still-isolated micro-spans the welding could not fuse.
-        contact_np = min_span(contact_np, min_frames)
+        contact_np = min_span(contact_np, min_frames, pressed)
         contact_np[~valid_mask[p]] = False
 
         # Both readouts keep one toe per foot, but they can keep DIFFERENT ones, and the
@@ -333,9 +371,13 @@ def run(source: str | Path, predictions_dir: str | Path, config_path: str | Path
         # of one foot, so "this foot is in contact" is untouched.
         contact_np = resolve_toe_conflicts(contact_np, force_solution.magnitude,
                                            frame_names=frame_names,
-                                           min_frames=DETECT_MIN_FRAMES)
+                                           min_frames=DETECT_MIN_FRAMES, keep=pressed)
         merged_np = merged.cpu().numpy() & contact_np      # a bridged step that lost its
         merged_np[~valid_mask[p]] = False                  # toe is no longer a contact
+        frame_contact_geom[p] = contact.cpu().numpy() & valid_mask[p][:, None]
+        frame_pressed[p] = pressed
+        force_dist_m[p] = np.where(force_solution.dist_m < NO_SCENE_M,
+                                   force_solution.dist_m, np.nan)
         frame_force[p] = force_solution.forces
         frame_force_bw[p] = force_solution.magnitude / force_solution.body_weight_n
         frame_force_label[p] = force_label
@@ -369,13 +411,40 @@ def run(source: str | Path, predictions_dir: str | Path, config_path: str | Path
             print(f"    {name:<17s} rate={rate:5.1%}  spans={_count_spans(contact_np[:, i]):3d}  "
                   f"toe-tiebreak suppressed={int(toe_tiebreak[i]):4d}")
 
+    # ── the per-clip quality flag ([quality]) — can this reconstruction be trusted? ──
+    # Computed here because this is the earliest stage where all three signals exist:
+    # the camera ratio and the smear come from geometry/, the residual from the force
+    # witness above. Saved with its raw metrics so the verdict is re-derivable.
+    qc = cfg["quality"]
+    cam_ratio = cam_motion_ratio(tr["extrinsics"], scene_npz["points"])
+    human_path = pred / "geometry" / "human.npz"
+    smear_med = float("nan")
+    if human_path.exists():
+        with np.load(human_path) as human:
+            smear_med, _ = smear_stats(human["points"], human["frame_id"], tr["extrinsics"])
+    res_bw = residual_before_n / np.maximum(body_weight_n[:, None], 1e-9)
+    res_before_bw = float(np.median(res_bw[valid_mask])) if valid_mask.any() else float("nan")
+    flag = quality_flag(cam_ratio, res_before_bw, smear_med,
+                        cam_depth_max=float(qc["cam_depth_max"]),
+                        res_before_bw_max=float(qc["res_before_bw_max"]),
+                        smear_med_max=float(qc["smear_med_max"]))
+    print(f"[estimate_contacts] quality: cam/depth {cam_ratio:.2f}, smear med {smear_med:.2f}, "
+          f"res_before {res_before_bw:.2f} BW → flag '{flag or 'pass'}'")
+
     save = dict(
         contact_label_schema=np.int32(CONTACT_LABEL_SCHEMA),
         contact_label_method=np.str_(CONTACT_LABEL_METHOD),
+        quality_flag=np.str_(flag),                       # "" = pass; "camera" / "depth" / "camera+depth"
+        quality_cam_ratio=np.float32(cam_ratio),          # camera-travel spread / median scene depth
+        quality_smear_med=np.float32(smear_med),          # median along-ray human-cloud smear
+        quality_res_before_bw=np.float32(res_before_bw),  # median pre-force root residual, body weights
         frame_contact=frame_contact,
         frame_force=frame_force,                 # (P,N,12,3) world contact force, newtons
         frame_force_bw=frame_force_bw,           # (P,N,12) the same as a fraction of body weight
         frame_force_label=frame_force_label,     # (P,N,12) the force decision BEFORE the union
+        frame_contact_geom=frame_contact_geom,   # (P,N,12) the geometric arm BEFORE the union
+        frame_pressed=frame_pressed,             # (P,N,12) penetration-exception keep mask
+        force_dist_m=force_dist_m,               # (P,N,12) scene distance as the force solve saw it (1 m search; NaN = no scene evidence)
         frame_wall_dot=frame_wall_dot,           # (P,N,12) dot(cone axis, wall normal), force search radius
         body_weight_n=body_weight_n,             # (P,) baked mass x g
         residual_force_before_n=residual_before_n,   # (P,N) root residual with no contact force
@@ -384,6 +453,8 @@ def run(source: str | Path, predictions_dir: str | Path, config_path: str | Path
         force_theta_hold_bw=np.float32(cf["theta_hold_bw"]),
         force_gap_dstar_m=np.float32(cf["gap_dstar_m"]),
         force_stillness_vstar_mps=np.float32(cf["stillness_vstar_mps"]),
+        force_far_still_x=np.float32(cf["far_still_x"]),
+        still_override_m=np.float32(cg["still_override_m"]),
         frame_sdf_cm=frame_sdf_cm,
         frame_distance_cm=frame_distance_cm,
         frame_drift_m=frame_drift_m,
