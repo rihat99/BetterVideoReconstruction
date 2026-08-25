@@ -294,13 +294,13 @@ The frame model removes the reason they were needed:
 
 Dropped with the old model, on this branch: completion, prediction fusion,
 per-label confidence, the ray-cast occlusion witness, and the depth-fit
-wiring. `tools/human_optim/{completion,fusion,confidence,depth_fit}.py` still
-exist for the stages that have not been reworked yet, but nothing in the contact
-path calls them, and `docs/contact_confidence.md` /
+wiring. `completion.py` and `fusion.py` are deleted;
+`tools/human_optim/{confidence,depth_fit}.py` survive only for the frozen
+per-joint scorer (`scripts/score_contacts.py`), nothing in the contact path
+calls them, and `docs/contact_confidence.md` /
 `docs/contact_fusion.md` / `docs/depth_fit.md` describe the retired per-joint
-era. Consumers pinned to the old schema (the dataset export, the offline scorer,
-`kinematics_2`, `dynamics`) fail loudly on `contact_label_schema = 2` rather than
-misreading it.
+era. Consumers pinned to a schema (the offline scorer, `kinematics_2`, `kindyn_1`)
+fail loudly on a mismatched `contact_label_schema` rather than misreading it.
 
 ### Rules that keep it honest
 

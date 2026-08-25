@@ -1,8 +1,8 @@
 # Human optimization: the body refinement stages
 
 `scripts/stages/human_optimization.py` — one dispatcher over the
-body-refinement stages: `root`, `kinematics_1`, `kinematics_2`, `dynamics`, and
-`kindyn_1` (joint kinematics + dynamics). One config,
+body-refinement stages: `root`, `kinematics_1`, `kinematics_2`, and `kindyn_1`
+(joint kinematics + dynamics). One config,
 `configs/human_optimization.toml`.
 
 The default pipeline chain runs `root` + `kinematics_1`. The remaining stages
@@ -372,78 +372,14 @@ while Cartesian joint acceleration rises 5.91 → 6.64 mm/frame² and root
 translation acceleration 4.05 → 4.90, essentially all of it in the four scenes
 whose bodies actually moved.
 
-## dynamics — force-only RNEA
-
-With the kinematic trajectory **frozen**, solve for the world-frame contact forces.
-RNEA (recursive Newton-Euler) computes, for a given motion, the forces and torques each
-joint must produce. The body's root is a free-flyer — nothing can push on it — so a
-physically consistent solution must make the six root components vanish. Those six are
-the *base wrench*: a 3D residual force plus a 3D residual torque left over at the pelvis.
-The optimizer (L-BFGS) finds per-frame forces at the **six contact joints** — the two
-hands (resolved at the wrist), the two feet, and the two ankles — minimizing:
-
-| term | what |
-|---|---|
-| `base_wrench` | squared base wrench — the physics residual |
-| `force_magnitude` | small L2 on the forces — picks the smallest forces that explain the motion |
-| `force_smooth_mag` | discourages frame-to-frame change in force **magnitude** on persistent contacts |
-| `force_smooth_dir` | the same for force **direction**, smoothed more gently — the force may re-aim faster than it changes size |
-| `torque_smooth` | the same for the joint torques |
-
-A joint carries a force only on the frames it is labelled in contact.
-
-**Friction cone.** A hold or foothold can only *push* on the body, never pull, and it
-can only push sideways so much before the foot slips. The forces it may apply form a
-cone around the surface normal, opening to a half-angle θ (default 45°, so the
-sideways force may be at most `tan θ = 1` times the outward push).
-
-The cone is not a loss term — it is built into the force itself. At each coned contact
-the force is a sum of the cone's four *edge directions* (the normal tilted by θ toward
-each side), each scaled by a learned non-negative amount. Any such sum lies inside the
-pyramid those edges span, so the force can never leave the cone or pull — by
-construction, with no weight to tune. (The pyramid is inscribed in the round cone, so
-between its edges it is slightly stricter than θ.)
-
-The surface normal at each contact comes from the fused scene cloud: take the nearest
-scene points to the joint and average their stored normals, which already point out of
-the wall toward the climber. A contact whose joint is too far from any surface, or
-whose neighbouring normals disagree (a thin hold or a concave corner averages opposing
-normals to nothing), falls back to a free force with no cone — better none than one
-aimed arbitrarily. Hands are left out on purpose: a climbing hand grips a hold and
-pulls down and inward on it, so its force is genuinely bilateral.
-
-Force smoothness is split in two so the **magnitude** of a contact force can be held
-steadier than its **direction**: `force_smooth_mag` damps the along-force change and
-`force_smooth_dir` the sideways (re-aiming) change, using an orthogonal split about the
-mean direction. Equal weights reproduce the old single `force_smooth` term exactly.
-
-The body's mass and per-segment inertia are **baked by BetterHuman**. The SMPL-X body
-is itself a BetterRobot model, and BetterHuman integrates real closed per-part meshes to
-get each segment's mass, centre of mass and inertia (about 72 kg at the neutral shape,
-and it shifts with the person's `betas`). This stage therefore no longer builds its own
-inertia — it reads the body's, which is both simpler and more faithful than the old
-convex-hull estimate that had to be rescaled to a fixed 70 kg.
-
-Gravity direction comes from the GeoCalib stage (world-frame; falls back to world-down
-when unreliable). Velocities and accelerations are central finite differences of the
-frozen `q` — not denoised, by decision: the forces should explain the reconstructed
-motion, not a prettified one. The per-frame base wrench is saved so the viewer can draw
-the leftover root force and torque as arrows at the pelvis (the **root wrench** layer).
-
-By default the stage refines the `kinematics_1` body (`[stages.dynamics].bodies`, which
-can point at `kinematics_2` instead) and runs on the GPU. The reworked BetterRobot RNEA
-is fast in plain PyTorch; its Warp kernel, though available, measured slower for this
-force-plus-gradient solve, so the torch path is used.
-
 ## kindyn_1 — joint kinematics + dynamics
 
 **Why it exists.** The chain above is one-way: `kinematics_1/2` fit the motion
-using only what the camera sees, then `dynamics` solves the contact forces on
-that finished, **frozen** pose. The physics never gets a say in the motion — if
-the pose is a little off, the force solve just absorbs the error into a large
-leftover base wrench. `kindyn_1` closes the loop: it optimizes the pose **and**
-the contact forces together, so the physics residual can push back on the
-motion.
+using only what the camera sees; a frozen-pose force solve (like the contact
+readout's force witness) can then only absorb any pose error into a large
+leftover base wrench — the physics never gets a say in the motion. `kindyn_1`
+closes the loop: it optimizes the pose **and** the contact forces together, so
+the physics residual can push back on the motion.
 
 **What it optimizes.** It starts from the converged `kinematics_2` body and its
 contact labels — by default `contacts_2.npz`, the readout measured on that very
@@ -452,7 +388,7 @@ whose coarse joints are spread onto the contact frames each one covers;
 `bodies = "kinematic_1"` starts from `kinematic_1` + `contacts_1` for chains
 that skip `kinematics_2`.) The objective is the full `kinematics_2` objective —
 reprojection, priors, motion smoothness, scene penetration, the annotation
-terms — **plus** the `dynamics` terms (`base_wrench`, `force_magnitude`,
+terms — **plus** the physics terms (`base_wrench`, `force_magnitude`,
 `force_smooth_mag`/`_dir`, `torque_smooth`), with one world-force vector per
 **contact frame** per video frame added as extra optimization variables, masked
 to the steps the labels say that frame touches. Chamfer stays off, for the same
@@ -495,9 +431,8 @@ came from the *scene* cloud at foot and ankle joints, where a thin hold or a
 concave corner averages neighbouring normals to noise; the body's own skin
 normal has no such failure mode and needs no scene lookup at all.
 
-**How it runs.** Two steps. First, a quick frozen-pose force solve (like the
-`dynamics` stage's, but with this stage's weights) establishes physically
-reasonable forces — with zero forces the body is in freefall, and the base
+**How it runs.** Two steps. First, a quick frozen-pose force solve establishes
+physically reasonable forces — with zero forces the body is in freefall, and the base
 wrench says nothing useful about the pose. Then a single joint **L-BFGS**
 polish moves the pose and forces together.
 
@@ -518,17 +453,18 @@ slightly different, self-consistent pair — a possible future alternation step.
 **The weights.** The kinematic columns of `kindyn_1` are copied straight from
 `kinematics_2`, so the visual fit is asked for exactly as before. The five
 dynamics weights are **linear** — the term is `0.5 · mean over valid frames of
-Σ residual²` and the weight multiplies it, like every other engine term — unlike
-the standalone `dynamics` stage, which folds the weight inside the square.
+Σ residual²` and the weight multiplies it, like every other engine term.
 
 Every physics residual is first divided by the **body weight** and averaged over
-the valid frames. Without that the terms are a *sum* of newtons squared, so the
+the counted frames. Only frames whose whole velocity/acceleration stencil is
+tracked count: an occlusion gap holds the nearest tracked pose, and differencing
+across the held jump would read as a huge phantom acceleration that the solve
+would spend its budget bending the pose to explain. Without that the terms are a *sum* of newtons squared, so the
 same weight pulls hard on a 900-frame clip and barely registers on a 60-frame
 one, and harder on a heavy climber than a light one — while every kinematic term
 stays a per-frame mean. In body-weight units all five are O(1) and one number
 means one thing everywhere. (The force witness solves in the same units for the
-same reason.) The three smoothness terms keep the `dynamics` stage's ratios to
-`base_wrench` exactly.
+same reason.)
 
 `base_wrench` is the trade knob — it buys physics with pose — and the ladder
 behind the shipped 100 is in the config comments. The headline: on `boulder_1`

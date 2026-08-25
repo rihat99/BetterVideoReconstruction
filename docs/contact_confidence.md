@@ -195,8 +195,8 @@ for evaluation.
 
 ## What confidence can and cannot do
 
-Measured on the annotated corpora (selective-risk curves,
-`scripts/diagnostics/confidence_risk.py`): keeping the top half of contact
+Measured on the annotated corpora (selective-risk curves, 2026-07): keeping
+the top half of contact
 labels by confidence raises their precision from 0.961 to **0.983** on the
 frozen test set (the v5 algebra managed 0.972), at essentially unchanged
 mean confidence. But no confidence reaches precision 1.0: the curves

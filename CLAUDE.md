@@ -7,7 +7,8 @@ plus **per-contact-joint forces** on the refined bodies. Track the people (SAM 3
 **anchor VGGT's metric scale to the human body** (rescales the fused geometry in
 place) → **visually-guided kinematic refinement**. The
 default chain ends at the refined SMPL-X bodies; scene contacts, gravity,
-annotation-guided refinement, and force dynamics are standalone SMPL-X stages.
+annotation-guided refinement, and the joint kinematics+dynamics stage are
+standalone SMPL-X stages.
 
 The algorithm docs live in `docs/` and are the reference for auditing the
 optimization — keep them current when the code changes:
@@ -51,9 +52,9 @@ process: `--source`, `--predictions`, `--save-dir`, stage/scene selection,
 - [`configs/pipeline.toml`](configs/pipeline.toml) — one section per stage
   (`[sam3] [vggt] [sapiens] [scale] [fuse] [sam3d] [smplx] [gravity] [viewer]`),
   read by the stage CLIs themselves + `[steps]`/`[runtime]` for the orchestrator.
-- [`configs/human_optimization.toml`](configs/human_optimization.toml) — the five
-  human-optimization stages: loss weights as length-5 columns
-  `[root, kinematics_1, kinematics_2, dynamics, kindyn_1]` (a term is off where its
+- [`configs/human_optimization.toml`](configs/human_optimization.toml) — the four
+  human-optimization stages: loss weights as length-4 columns
+  `[root, kinematics_1, kinematics_2, kindyn_1]` (a term is off where its
   column is 0), per-stage `[stages.*]` options, shared knob sections, `[contacts]` +
   `[contact_force]`.
 - [`configs/corpus.toml`](configs/corpus.toml) — ClimbingVideos DB fan-out (data
@@ -71,9 +72,9 @@ process: `--source`, `--predictions`, `--save-dir`, stage/scene selection,
   knobs come from the same pipeline/human-optimization TOMLs (written per shard
   with the corpus overrides), so the two pipelines cannot drift. Selection:
   `--scenes/--sample/--limit`, plus `--dry-run`. DB access in `scripts/scene_db.py`.
-- `scripts/export_contact_dataset.py` packages a standalone 22-joint train/test
-  contact corpus; `scripts/score_contacts.py` scores contacts against manual
-  annotations.
+- `scripts/score_frame_contacts.py` scores the stage's contact-frame labels
+  against manual annotations (`score_contacts.py` is the frozen per-joint-era
+  scorer).
 
 ## The pipeline & `out/<stem>/` contract
 
@@ -94,7 +95,6 @@ Default chain in order (rows 1–8; `human_optimization` runs its `root` +
 | – | `estimate_contacts.py` | a refined body (`--bodies`), `geometry/`, its `drift_pre` | `human_optim/contacts_<tag>.npz` — **per-contact-frame** labels (schema 2 `frames-v4`: 12 frames, geometric gates ∪ the force witness, toe rule = whichever side the solve loaded, debounce + hysteresis; see `docs/force_contacts.md`) |
 | – | `estimate_gravity_geocalib.py` | frames, `geometry/transform.npz`, `geometry/scene.npz` | `geocalib/gravity.npz` (world-frame down + `source`: reliable GeoCalib > gated ground-plane fit > camera-down fallback; the accepted floor plane is saved for the viewer) |
 | – | `human_optimization.py --stages kindyn_1` | a refined body + its contacts (default `kinematic_2.npz` + `contacts_2.npz`; `[stages.kindyn_1].bodies`), gravity | `human_optim/kindyn_1.npz` (pose AND per-contact-frame forces solved together; each force in a 45° cone about that frame's contact normal) |
-| – | `human_optimization.py --stages dynamics` | a refined body + its contacts, gravity — **frozen this era** (still reads the per-joint `joint_contact` the frame stage no longer writes) | `human_optim/dynamics.npz` (world contact forces at 6 joints — hands/feet/ankles — + joint torques + per-frame root `base_wrench`) |
 
 Viewer: `scripts/view_3d.py out/<stem>/` (viser: fused scene + cameras + human
 points + bodies; the **`body source`** dropdown switches `original` / `prefit` /
@@ -130,8 +130,8 @@ BetterVideoReconstruction/
 │   ├── pipeline.py                # LOCAL pipeline (subprocess orchestrator)
 │   ├── corpus.py                  # DATASET pipeline: any stage over the scene DB
 │   ├── scene_db.py                # scene-DB access + target selection
-│   ├── export_contact_dataset.py  # dataset packaging (frames/masks/labels)
-│   ├── score_contacts.py          # contact scoring vs manual annotations
+│   ├── score_frame_contacts.py    # contact-frame scoring vs manual annotations
+│   ├── score_contacts.py          # per-joint-era scorer (frozen)
 │   ├── view_3d.py                 # viser viewer
 │   ├── _pym_preload.py            # libstdc++ LD_PRELOAD shim for pymomentum
 │   └── stages/                    # the per-stage CLIs in the table above
@@ -155,8 +155,8 @@ BetterVideoReconstruction/
   and a list of `Phase` rows (weight column, iters, Adam/L-BFGS, DOF masks). A
   term is active iff its phase weight is non-zero, so the TOML weight columns ARE
   the objective. Kinematics (`tools/human_optim/optimizer.py`) and the scale
-  stage's pre-fit run on it; `dynamics` keeps its own small L-BFGS solve (its
-  weights multiply inside squared norms).
+  stage's pre-fit run on it; the force witness keeps its own small projected-Adam
+  solve (its weights multiply inside squared norms).
 - **Multi-person throughout.** Every stage from `sam3d` on carries a leading
   `(P, N, …)` axis with `object_ids (P,)`.
 - **Body is SMPL-X.** `convert_mhr_to_smplx` uses pip `smplx` (the only place);

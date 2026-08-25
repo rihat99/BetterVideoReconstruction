@@ -138,7 +138,10 @@ This distinction is not pedantic. The nearest-neighbour search reports a huge
 sentinel number when it finds nothing. Treating that number as a distance once
 silently ruined an entire comparison: relative pricing subtracted sentinel minus
 sentinel, got zero, and handed those steps completely free force. One policy,
-applied before any pricing: no scene evidence, not a candidate. Everywhere else
+applied before any pricing: no scene evidence, not a candidate. The stillness
+witness gets the same treatment: a step whose pre-enforcement drift is NaN
+(an untracked window, or a person detection never ran on) has no stillness
+evidence and is not a candidate either. Everywhere else
 in this pipeline a hole in the cloud reads as *unknown*, and unknown never
 manufactures a contact.
 
