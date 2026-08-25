@@ -75,12 +75,15 @@ def cloud_chamfer(
     *,
     gm_scale_m: float,
     chunk: int = 16,
+    frame_weights: torch.Tensor | None = None,   # (T,) per-frame depth-quality weight
 ) -> torch.Tensor:
     """One-sided Geman-McClure chamfer: each depth point → nearest visible vertex.
 
     Residuals below ``gm_scale_m`` pull ~quadratically; gross outliers saturate
     with vanishing gradient. Averaged over frames that have both a visible
     vertex and a depth point; frame-chunked ``cdist`` bounds memory.
+    ``frame_weights`` makes that average a weighted one (the depth-smear hook,
+    :mod:`tools.geometry.depth_smear`); ``None`` is the plain mean.
     """
     num_frames = vertices_sub.shape[0]
     if cloud.shape[1] == 0:
@@ -97,7 +100,10 @@ def cloud_chamfer(
         gm = geman_mcclure(d2v.square(), s2)
         parts.append((gm * cloud_valid[start:end]).sum(1) / n_pts[start:end].clamp_min(1))
     terms = torch.where(frame_ok, torch.cat(parts), vertices_sub.new_zeros(()))
-    return terms.sum() / frame_ok.sum().clamp_min(1)
+    if frame_weights is None:
+        return terms.sum() / frame_ok.sum().clamp_min(1)
+    fw = frame_weights * frame_ok
+    return (terms * fw).sum() / fw.sum().clamp_min(1e-6)
 
 
 def joint_velocity_loss(
@@ -213,6 +219,7 @@ def prefit_person_round(
     lr: float,
     chunk: int = 16,
     freeze_scale: bool = False,
+    cloud_frame_weights: torch.Tensor | None = None,   # (T,) depth-smear weights
 ) -> tuple[torch.Tensor, float]:
     """One body-alignment round; returns ``(refined q (T, 211), fitted scale)``.
 
@@ -264,7 +271,8 @@ def prefit_person_round(
         s = torch.exp(log_s)
         return cloud_chamfer(
             st["vertices"][:, sub] / s, front, cloud, cloud_valid,
-            gm_scale_m=weights.gm_chamfer_m / float(s.detach()), chunk=chunk)
+            gm_scale_m=weights.gm_chamfer_m / float(s.detach()), chunk=chunk,
+            frame_weights=cloud_frame_weights)
 
     problem.add_term("chamfer", _chamfer)
     problem.add_term("reproj", lambda st: sapiens_reprojection_gm(

@@ -76,6 +76,11 @@ Then the per-frame numbers are pooled into one clip scale:
 - **One scale per clip.** VGGT has a single scale by construction. The per-frame
   scales are only measurements to be pooled, never applied per frame. The
   diagnostics plot makes a drifting or bimodal clip visible at a glance.
+- **Smeared frames vote less.** A frame whose human cloud is streaked along the
+  view ray (VGGT's fast-motion failure — see `docs/quality.md`) would size the
+  world to the streak; its vote is multiplied by the depth-smear weight, which
+  is exactly 1 on clean frames and near 0 on streaked ones. The same weight
+  multiplies the pre-fit's per-frame chamfer and scale measurements.
 
 ## The pre-fit: move the body to the depth, move the scale to the body
 

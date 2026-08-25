@@ -36,6 +36,7 @@ if TYPE_CHECKING:
     from .kindyn import DynamicsSpec
 
 from tools.body import frame_normals
+from tools.geometry.depth_smear import padded_frame_weights
 
 from .camera import project, transform_points
 from .config import fps_scaled_weights
@@ -473,6 +474,7 @@ def optimize_person(
     sap_gm_px = float(kp["gm_scale_px"])
     pen_cfg = knobs["penetration"]
     chunk = int(knobs["chamfer"]["chunk"])
+    chamfer_sat = float(knobs["chamfer"].get("sat_m", 0.0))
     max_cand = int(pen_cfg["max_candidates"])
 
     # Union over the phases about to run — decides what to SET UP once (the per-iter
@@ -511,6 +513,17 @@ def optimize_person(
 
     depth_pad, depth_valid = pad_frames(depth_points, channels=3,
                                         device=q_world_init.device, dtype=q_world_init.dtype)
+    # Depth-quality weights for the chamfer: a frame whose human cloud is smeared along
+    # the view ray (VGGT's fast-motion failure) pulls the body toward garbage, so it gets
+    # proportionally less say and the image terms hold that frame instead. Dead-zoned at
+    # smear 2 — every clean clip measured keeps all-1 weights (bit-identical fit).
+    depth_frame_w = (padded_frame_weights(depth_pad, depth_valid, cam_centers)
+                     if cam_centers is not None else None)   # world-frame smear needs the cameras
+    if depth_frame_w is not None:
+        flagged = int((depth_frame_w < 0.5).sum())
+        if flagged:
+            print(f"    [chamfer] depth-smear downweighted {flagged}/{depth_pad.shape[0]} frames "
+                  f"(min weight {float(depth_frame_w.min()):.3f})")
 
     # `v2j_sub` maps each subsampled vertex to its nearest rest-pose joint, so the manual
     # per-joint labels can reach vertices (attraction / repulsion masks). Frame labels need
@@ -728,6 +741,7 @@ def optimize_person(
             frame_names=mid.contact_frame_names,
             close_thresh_m=float(ac["detect_thresh_m"]), exit_thresh_m=float(ac["detect_exit_m"]),
             min_frames=DETECT_MIN_FRAMES, still_m=float(ac["still_m"]),
+            still_override_m=float(ac.get("still_override_m", -1.0)),
             max_dist_m=float(ac["max_dist_m"]), conf_thresh=float(ac["conf_thresh"]),
             prune_margin_m=float(ac["prune_margin_m"]))
         keep = detected.contact
@@ -754,7 +768,7 @@ def optimize_person(
             gm_scale_px=init_gm_px, frame_mask=frame_valid, joint_weight=init_vis))
     problem.add_term("chamfer", lambda st: chamfer_loss(
         st["vw"][:, sub], st["vismask"], depth_pad, depth_valid, chunk=chunk,
-        vertex_weights=chamfer_weights))
+        vertex_weights=chamfer_weights, frame_weights=depth_frame_w, sat_m=chamfer_sat))
     # Fitted fingers drop out of the pose prior: their starting values are the converter's
     # hand pose, which is exactly what unfreezing them says we no longer trust.
     prior_joints = (None if freeze_fingers

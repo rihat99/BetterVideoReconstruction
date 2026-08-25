@@ -67,6 +67,7 @@ import numpy as np  # noqa: E402
 import torch  # noqa: E402
 
 from tools.config import load_toml, section  # noqa: E402
+from tools.geometry.depth_smear import alongray_smear, smear_weight  # noqa: E402
 from tools.geometry.human_scale import combine_log_scales, weighted_median  # noqa: E402
 from tools.geometry.intrinsics import denormalize_K  # noqa: E402
 from tools.human_optim import normalize_q  # noqa: E402
@@ -253,6 +254,11 @@ def _estimate_metric_scale(
                 args.conf_drop_q, args.min_inlier_verts)
             if not np.isfinite(log_s):
                 continue
+            # Depth-smear downweighting: a frame whose human cloud is streaked along the
+            # view ray (VGGT fast-motion failure) votes a garbage scale with full
+            # confidence — its say shrinks with the smear (dead-zoned: clean clips keep
+            # weight 1 everywhere, so their scale is unchanged).
+            weight *= smear_weight(alongray_smear(Xc[ok]))
             per_frame_scale[p, col] = float(np.exp(log_s))
             per_frame_weight[p, col] = weight
             pooled_log.append(log_s)
@@ -367,11 +373,19 @@ def _prefit_people_data(
                 Xc = Xc[(np.arange(args.max_points) * stride).astype(np.int64)]
             clouds.append(torch.as_tensor(Xc, dtype=torch.float32, device=device))
         cloud, cloud_valid = pad_frames(clouds, channels=3, device=device, dtype=torch.float32)
+        # Depth-smear weights (camera-frame points, origin = camera): smeared frames get
+        # less chamfer pull AND a smaller scale vote; clean clips stay all-1 (dead zone).
+        cloud_qw = torch.as_tensor(
+            [smear_weight(alongray_smear(c.cpu().numpy())) for c in clouds],
+            dtype=torch.float32, device=device)
+        n_flagged = int((cloud_qw < 0.5).sum())
+        if n_flagged:
+            print(f"  [prefit] obj_id={oid}: depth-smear downweighted {n_flagged}/{cols.size} frames")
 
         pairs = torch.as_tensor(np.flatnonzero(np.diff(cols) == 1), dtype=torch.long, device=device)
         people.append(dict(
             oid=oid, cols=cols, idxs=idxs, betas=betas, q0n=q0n, q=q0n.clone(),
-            cloud=cloud, cloud_valid=cloud_valid,
+            cloud=cloud, cloud_valid=cloud_valid, cloud_qw=cloud_qw,
             K_orig=torch.as_tensor(K_orig[cols], dtype=torch.float32, device=device),
             kp=torch.as_tensor(pose["keypoints"][sap][idxs], dtype=torch.float32, device=device),
             scores=torch.as_tensor(pose["keypoint_scores"][sap][idxs], dtype=torch.float32,
@@ -421,7 +435,8 @@ def _prefit_bodies(
                 cloud=person["cloud"], cloud_valid=person["cloud_valid"],
                 K_orig=person["K_orig"], target_kp=person["kp"], scores=person["scores"],
                 corr=corr, frame_vertex_ids=fvids, sub=sub, pairs=person["pairs"],
-                weights=weights, iters=args.iters, lr=args.lr, freeze_scale=r > 0)
+                weights=weights, iters=args.iters, lr=args.lr, freeze_scale=r > 0,
+                cloud_frame_weights=person["cloud_qw"])
         pooled_log, pooled_w = [], []
         for p, person in enumerate(people):
             if person is None:
@@ -430,6 +445,7 @@ def _prefit_bodies(
                 mid, person["betas"], person["q"], cloud=person["cloud"],
                 cloud_valid=person["cloud_valid"], sub=sub, s=person["s_fit"],
                 gm_scale_m=args.gm_chamfer_m)
+            ws = ws * person["cloud_qw"].cpu().numpy()   # smeared frames vote less scale
             per_frame_scale[p, person["cols"]] = np.exp(logs).astype(np.float32)
             per_frame_weight[p, person["cols"]] = ws.astype(np.float32)
             pooled_log.append(logs)

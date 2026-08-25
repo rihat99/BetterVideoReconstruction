@@ -155,6 +155,8 @@ def chamfer_loss(
     *,
     chunk: int = 16,
     vertex_weights: torch.Tensor | None = None,   # (Ns,) per-vertex body-part emphasis
+    frame_weights: torch.Tensor | None = None,    # (T,) per-frame depth-quality weight
+    sat_m: float = 0.0,                           # saturate per-point distances (m); 0 = off
 ) -> torch.Tensor:
     """Bidirectional chamfer between visible vertices and depth points.
 
@@ -181,6 +183,19 @@ def chamfer_loss(
     (e.g. the extremities, whose metric depth VGGT most distorts) over the torso; a
     weight of ``None`` reproduces the plain uniform mean.
 
+    ``frame_weights`` ``(T,)`` turns the frame average into a weighted one — the
+    depth-quality hook (:mod:`tools.geometry.depth_smear`): a frame whose human
+    depth is smeared along the view ray should pull the body far less than a clean
+    one. ``None``, or all-equal weights, reproduce the plain mean exactly.
+
+    ``sat_m`` caps each per-point distance at ``sat_m * tanh(d / sat_m)`` before the
+    means. Near the body (``d ≪ sat_m``) this is the identity, so the shipped
+    calibration is untouched; far outliers — a depth tail smeared along the view
+    ray, a mismatched patch behind an occluder — saturate and their *gradient*
+    fades to zero instead of pulling with constant force forever. The plain mean
+    is L1-like (bounded pull per point, but it never lets go); this is its
+    outlier-proof version, the same lesson the prefit's Geman-McClure chamfer and
+    both reprojection terms already carry. ``0`` = off.
     """
     T = vertices_sub.shape[0]
     if depth_padded.shape[1] == 0:            # no depth in any frame (else the cdist→min(2) below crashes)
@@ -199,6 +214,9 @@ def chamfer_loss(
             iv = d.masked_fill(~vismask[s:e][:, :, None], INF).argmin(1)       # (b, Md)
         v2d = (v - p.gather(1, jv[..., None].expand(-1, -1, 3))).norm(dim=-1)  # (b, Ns)
         d2v = (p - v.gather(1, iv[..., None].expand(-1, -1, 3))).norm(dim=-1)  # (b, Md)
+        if sat_m > 0.0:
+            v2d = sat_m * torch.tanh(v2d / sat_m)
+            d2v = sat_m * torch.tanh(d2v / sat_m)
         if vertex_weights is None:
             v2d_mean = (v2d * vismask[s:e]).sum(1) / nv[s:e].clamp_min(1)
         else:
@@ -207,7 +225,10 @@ def chamfer_loss(
         d2v_mean = (d2v * depth_valid[s:e]).sum(1) / nd[s:e].clamp_min(1)
         parts.append(v2d_mean + d2v_mean)                                 # (b,)
     terms = torch.where(fvalid, torch.cat(parts), vertices_sub.new_zeros(()))
-    return terms.sum() / fvalid.sum().clamp_min(1)
+    if frame_weights is None:
+        return terms.sum() / fvalid.sum().clamp_min(1)
+    fw = frame_weights * fvalid
+    return (terms * fw).sum() / fw.sum().clamp_min(1e-6)
 
 
 def scene_signed_distance(

@@ -90,8 +90,19 @@ below are the config names.
   extremities of depth evidence.
 - On the body side, vertices carry an **extremity emphasis** weight (hands/feet up to
   ×10, torso down to ×0.1) so the same imbalance does not recur among the vertices.
+- Each matched distance is **saturated** at `[chamfer].sat_m` (0.25 m, `s·tanh(d/s)`):
+  near the body this is the identity, so nothing about the fit changes, but a far
+  outlier — a depth tail smeared along the view ray, a patch that really belongs to
+  the background — stops pulling instead of dragging the body with constant force
+  forever. The reprojection terms and the prefit's chamfer were always robust this
+  way; this closes the same gap for the kinematic chamfer.
 - Visibility is recomputed every iteration (front-facing vertices only): the depth map
   sees only the front surface.
+- Each frame's contribution is multiplied by its **depth-smear weight**
+  (`docs/quality.md`): a frame whose human cloud is streaked along the view ray
+  (VGGT's fast-motion failure) pulls the body far less, and the image terms hold
+  that frame instead. The weight is exactly 1 on every clean frame measured, so
+  this only acts where the depth actually broke.
 
 ### Priors
 
