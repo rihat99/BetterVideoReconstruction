@@ -28,7 +28,7 @@ overlay = true             # render mask and bbox overlays
 fps = ""                   # overlay fps; empty uses source fps or 30
 checkpoint = ""            # SAM 3 checkpoint path; empty uses HuggingFace download
 masks_subdir = "sam3"      # output subdir under each item
-skip_existing = false      # skip items whose bboxes.npz already exists
+skip_existing = true       # skip items whose bboxes.npz already exists
 dtype = "fp16"             # model dtype hint retained from the precompute runner
 
 [vggt]                      # VGGT-Omega multi-view camera + depth → vggt/camera.npz
@@ -40,7 +40,7 @@ mode = "balanced"           # load_and_preprocess_images sizing: balanced | max_
 save_depth = true           # also dump per-frame depth + confidence at the VGGT resolution (heavy; scale + fuse need it)
 checkpoint = "facebook/VGGT-Omega" # local .pt path or HF repo id
 subdir = "vggt"             # output subdir under each item
-skip_existing = false      # skip items whose camera.npz already exists
+skip_existing = true       # skip items whose camera.npz already exists
 dtype = "fp16"             # model dtype hint
 
 [sapiens]                   # Sapiens2 pose (keypoints) → sapiens/
@@ -52,7 +52,7 @@ batch_size = 1             # bbox-crop batch size for pose inference
 checkpoint_root = ""        # checkpoint tree override; empty uses the HF cache
 score_thresh = 0.3         # overlay keypoint score threshold
 fps = ""                   # overlay fps; empty uses 30
-skip_existing = false      # skip items whose task output already exists
+skip_existing = true       # skip items whose task output already exists
 dtype = "fp16"             # model dtype hint
 
 [scale]                     # human-anchored metric scale (runs AFTER fuse; rescales geometry/ in place)
@@ -89,7 +89,7 @@ obj_ids = ""                # tracked people to fit; empty → ALL tracked, else
 inference_type = "full"     # "full" (body+hands) or "body"
 overlay = false             # no sam3d overlay for this batch
 subdir = "sam3d"            # manifest batch output subdir
-skip_existing = false      # batch mode: skip existing params.npz
+skip_existing = true       # batch mode: skip existing params.npz
 hf_repo = "facebook/sam-3d-body-dinov3" # SAM-3D-Body HuggingFace repo
 fps = ""                   # overlay fps; empty uses source fps or 30
 
@@ -98,7 +98,7 @@ iters = 300                 # fine-stage Adam iterations
 gender = "neutral"          # neutral | male | female
 overlay = false             # no smplx overlay for this batch
 subdir = "sam3d"            # manifest batch input/output subdir
-skip_existing = false      # batch mode: skip existing smplx_params.npz
+skip_existing = true       # batch mode: skip existing smplx_params.npz
 smplx_model_folder = ""     # model parent override; empty uses better_human/models
 batch_size = 64            # converter frame batch size
 fps = ""                   # overlay fps; empty uses source fps or 30
