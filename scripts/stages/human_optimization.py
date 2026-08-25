@@ -7,13 +7,13 @@ Dispatches ``root`` → ``kinematics_1`` → ``kinematics_2`` → ``dynamics`` �
 
 The stages: ``root`` places each body rigidly (root SE3, joints frozen);
 ``kinematics_1`` runs the visually-guided kinematic fit (full → refine → L-BFGS);
-``kinematics_2`` refines it against manual per-joint contact annotation;
+``kinematics_2`` repairs it against the contact labels of ``contacts_1``;
 ``dynamics`` solves per-contact force via RNEA on the frozen ``q``; ``kindyn_1``
-(experimental) re-optimizes the ``kinematics_2`` pose jointly with contact forces.
+re-optimizes the ``kinematics_2`` pose jointly with the contact forces.
 ``root`` + ``kinematics_1`` share one optimization anchored to the starting pose —
 the scale stage's pre-fit (``geometry/prefit.npz``) when present, else the
 converter; the default chain is ``root, kinematics_1`` (``kinematics_2`` needs
-annotation, ``dynamics`` needs contacts, ``kindyn_1`` needs both).
+``contacts_1``, ``kindyn_1`` needs its own body's contacts).
 
 Run from CLI::
 
@@ -21,9 +21,10 @@ Run from CLI::
         --source video.mp4 --predictions out/video/ [--stages root,kinematics_1] [--overlay]
 
 Reads:  sam3d/smplx_params.npz, sapiens/pose.npz, geometry/{human,transform,scene}.npz;
-        (kinematics_2) human_optim/kinematic_1.npz + data/<stem>.npz;
-        (dynamics) human_optim/kinematic_2.npz + human_optim/contacts_2.npz + geocalib/gravity.npz
-Writes: human_optim/{root,kinematic_1,kinematic_2,dynamics}.npz (+ *_overlay.mp4)
+        (kinematics_2) human_optim/kinematic_1.npz + its contact labels;
+        (kindyn_1)     the [stages.kindyn_1].bodies body + its contacts_<tag>.npz
+                       (+ geocalib/gravity.npz when present)
+Writes: human_optim/{root,kinematic_1,kinematic_2,kindyn_1}.npz (+ *_overlay.mp4)
 """
 
 from __future__ import annotations
@@ -40,7 +41,6 @@ for _p in (str(_BETTER_HUMAN_SRC), str(_REPO_ROOT)):
 import argparse  # noqa: E402
 
 from tools.human_optim.config import STAGE_ORDER, load_config  # noqa: E402
-from tools.human_optim.dynamics import run_dynamics  # noqa: E402
 from tools.human_optim.kindyn import run_kindyn  # noqa: E402
 from tools.human_optim.stages import run_kinematic, run_kinematics_2  # noqa: E402
 
@@ -66,30 +66,27 @@ def run(source, predictions_dir, config_path, *, stages=None, annotations=None) 
         k1 = opts.get("kinematics_1", {})
         run_kinematic(source, pred, cfg, kin_stages, cfg.device,
                       overlay=bool(k1.get("overlay", False)),
-                      labels_mode=str(k1.get("labels", "auto")))
+                      labels_mode=str(k1.get("labels", "auto")),
+                      freeze_fingers=bool(k1.get("freeze_fingers", True)))
     if "kinematics_2" in requested:
         k2 = opts.get("kinematics_2", {})
         run_kinematics_2(source, pred, cfg, cfg.device, annotations=annotations,
                          overlay=bool(k2.get("overlay", False)),
-                         labels_mode=str(k2.get("labels", "manual")))
-    if "dynamics" in requested:
-        dyn = opts.get("dynamics", {})
-        run_dynamics(pred, cfg, dyn.get("device", "cuda"),
-                     bodies=str(dyn.get("bodies", "kinematic_1")))
+                         labels_mode=str(k2.get("labels", "auto")))
     if "kindyn_1" in requested:
         kd = opts.get("kindyn_1", {})
         run_kindyn(source, pred, cfg, cfg.device, annotations=annotations,
                    overlay=bool(kd.get("overlay", False)),
-                   labels_mode=str(kd.get("labels", "manual")),
+                   labels_mode=str(kd.get("labels", "auto")),
                    bodies=str(kd.get("bodies", "kinematic_2")),
-                   cones=bool(kd.get("cones", False)))
+                   cones=bool(kd.get("cones", True)))
 
 
 def main(argv=None) -> int:
     ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     ap.add_argument("--source", default=None,
                     help="original video / frames — needed for overlays and kinematics_2 "
-                         "annotation auto-resolution; not needed for dynamics")
+                         "annotation auto-resolution")
     ap.add_argument("--predictions", required=True)
     ap.add_argument("--stages", default=None,
                     help="comma-separated subset of root,kinematics_1,kinematics_2,dynamics,kindyn_1 "

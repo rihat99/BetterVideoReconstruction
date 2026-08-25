@@ -1,53 +1,45 @@
-"""Scene-contact estimation for the optimized SMPL-X bodies.
+"""Scene-contact estimation on the 12 contact frames of the optimized SMPL-X bodies.
 
-Reads the refined world-frame SMPL-X trajectory (``human_optim/kinematic_1.npz``)
-and the static scene cloud (``geometry/scene.npz``) and marks, for every tracked
-person, which **joints** are in contact with the scene:
+Reads a refined world-frame SMPL-X trajectory (``human_optim/kinematic_1.npz``) and
+the static scene cloud (``geometry/scene.npz``) and answers one question for every
+tracked person, every video frame and each of the 12 **contact frames** — the named
+mesh points (toes, heels, knees, palms, fingertips) baked onto the body, each
+carrying its own outward surface normal: *is this point touching the scene?*
 
-  1. pose each person's :class:`SMPLXMid` mesh per frame (re-applying the stored
-     global scale about the pelvis, exactly as the kinematic stage / viewers do),
-  2. signed-distance each body vertex to the scene surface (the same point-cloud
-     SDF the kinematic stage's penetration loss uses) → per-vertex contact
-     (inside the scene, or just outside it within ``close_thresh_m``),
-  3. lift to **per-joint** contact by nearest-joint assignment — a joint is in
-     contact if any vertex closest to it is (vertex→joint by rest-pose 3D distance),
-  4. keep a joint-frame only if the joint is also **still** — its net displacement
-     over a ~1/3 s window is under ``2·still_m`` (a joint sliding along the wall is a
-     pass, not a grip) — then temporal hysteresis (enter/exit) + a min-duration.
+Two readouts answer it, and the stage unions them.
 
-The stillness gate reads the body's persisted pre-enforcement drift (``drift_pre``)
-when present, and a **span-merge** bridges short flicker gaps behind a
-re-grip guard (the bridged frames flagged in ``merged``). Each joint-frame then gets
-a **label confidence** in [0,1] (:mod:`tools.human_optim.confidence`) — for BOTH the
-contact and no-contact classes. One class-independent visibility factor multiplies
-continuous surface or motion evidence. Fully occluded or
-out-of-frame joints are zero-confidence; approaching no-contact joints retain strong
-motion evidence even near the wall, while stationary no-contact joints are untrusted
-regardless of their reconstructed wall distance.
+**Geometry** — pose each person per frame (re-applying the stored global scale about
+the pelvis) and read the contact-frame world poses straight out of forward kinematics;
+for each one find the nearest scene point; then run the shared detector
+(:func:`~tools.human_optim.contacts.detect_frame_contacts`): near the wall AND still,
+with hysteresis, a minimum duration and a span merge behind a re-grip guard (bridged
+frames flagged in ``merged``).
 
-Finally, when the clip carries an external image model's per-limb contact
-probabilities (``predictions/contacts.npz``), the two witnesses are fused by adding
-their log-odds (:mod:`tools.human_optim.fusion`): the model can turn a limb on where
-the geometry knows nothing, or off where the geometry is barely sure, and clipping its
-probability bounds how far it may ever move a label. Without that file the stage is
-unchanged (bit-for-bit).
+**Force** — freeze the pose and ask what force is unexplained, then solve which of the
+contact frames could have supplied it (:mod:`tools.human_optim.forces`). A frame that has
+to carry real load is in contact whatever its distance says, which is how a contact on a
+badly reconstructed body is recovered at all. See ``docs/force_contacts.md``.
 
-Renders ``contacts_1_overlay.mp4``: the projected SMPL-X skeleton, joints **red**
-in contact (dot size ∝ confidence) / **green** otherwise.
+The union is then debounced once (a contact lasts at least ``min_frames``, and so does a
+release) and each foot is given a single toe patch per contact — whichever side of the
+toe the force solve loaded (the sole-side frame standing on the hold, ``toe_above``
+pressed against one), once for the whole contact rather than per step.
+
+Stillness reads the body's persisted pre-enforcement drift (``drift_pre``) — motion
+measured before any contact attraction acted. The force solve requires it and will not
+re-measure drift on an enforced body.
+
+Renders ``contacts_<tag>_overlay.mp4``: the projected contact points, **red** in
+contact / **green** otherwise.
 
 Run from CLI::
 
     .venv/bin/python scripts/stages/estimate_contacts.py \\
         --source video.mp4 --predictions out/video/ --config configs/human_optimization.toml
 
-Reads:  human_optim/kinematic_1.npz, geometry/scene.npz, geometry/transform.npz,
-        geometry/human.npz (optional for old artifacts; supplies depth-fit diagnostics)
-        predictions/contacts.npz (optional; the image model's per-limb probabilities)
-Writes: human_optim/contacts_1.npz          (joint_contact (P,N,J) bool + signed/Euclidean
-                                             scene-distance diagnostics + merged + auditable
-                                             visibility/evidence terms + label_confidence +
-                                             per-joint depth gap/count/trust + the fused
-                                             prediction probabilities and what they changed)
+Reads:  human_optim/kinematic_1.npz, geometry/scene.npz, geometry/transform.npz
+Writes: human_optim/contacts_1.npz          (frame_contact (P,N,F) bool + the signed /
+                                             Euclidean / normal / drift signals behind it)
         human_optim/contacts_1_overlay.mp4  ([contacts].overlay; default on)
 """
 
@@ -58,78 +50,78 @@ import sys
 from pathlib import Path
 
 _REPO_ROOT = Path(__file__).resolve().parents[2]
-_BETTER_HUMAN_SRC = _REPO_ROOT.parent / "better_human" / "src"
-for _p in (str(_BETTER_HUMAN_SRC), str(_REPO_ROOT)):
-    if Path(_p).exists() and _p not in sys.path:
-        sys.path.insert(0, _p)
+if str(_REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(_REPO_ROOT))
 
 import argparse  # noqa: E402
 
 import numpy as np  # noqa: E402
 import torch  # noqa: E402
 
+from tools.body import frame_normals, load_body  # noqa: E402
 from tools.config import load_toml  # noqa: E402
 from tools.geometry.normals import load_scene_cloud  # noqa: E402
+from tools.geometry.quality import cam_motion_ratio, quality_flag, smear_stats  # noqa: E402
+from tools.npz_io import atomic_savez  # noqa: E402
 from tools.human_optim import (  # noqa: E402
-    COMPLETION_DEFAULTS, DEPTH_FIT_DEFAULTS, NO_DATA_TRUST,
-    complete_person, contact_from_sdf, drift_gated_contact, joint_depth_fit, joint_drift,
-    joint_guarded_min_sdf,
-    joint_occlusion_gap, lift_joint_contact, lift_joint_min_distance, load_dynamics_context,
-    merge_contact_spans, project, scene_sdf, stillness_weight,
-    transform_points, vertex_to_joint, world_from_cam,
+    DETECT_MIN_FRAMES, detect_frame_contacts, merge_contact_spans,
+    min_span_frames,
+    project, transform_points, world_from_cam,
 )
 from tools.human_optim import paths  # noqa: E402
-from tools.human_optim.confidence import (  # noqa: E402
-    CONTACT_CONFIDENCE_DEFAULTS, CONTACT_CONFIDENCE_METHOD,
-    CONTACT_CONFIDENCE_SCHEMA, SCENE_FREE_CONFIDENCE_METHOD,
-    confidence_config, joint_label_confidence, occlusion_group_ids)
-from tools.human_optim.fusion import (  # noqa: E402
-    _LIMB_REPS, FUSION_METHOD, PRED_LIMBS, fuse_person, load_pred_prob_limb)
+from tools.human_optim.forces import (  # noqa: E402
+    NO_SCENE_M,
+    ForceKnobs, close_gaps, far_still_veto, force_labels, min_span, resolve_toe_conflicts,
+    solve_person_forces,
+)
 from tools.human_optim.qmath import normalize_q  # noqa: E402
-from tools.smplx_robot import load_smplx_mid  # noqa: E402
 
 _DEFAULT_CONFIG = _REPO_ROOT / "configs" / "human_optimization.toml"
-_DEFAULT_SMPLX_MODEL = (
-    _REPO_ROOT.parent / "better_human" / "models" / "smplx" / "SMPLX_NEUTRAL.npz"
-)
+
+#: Bumped from 1 (the per-joint era) — the label axis is now the 12 contact frames. The
+#: force witness (method "frames-v2") only ADDS fields and changes no shape, so readers of
+#: schema 2 keep working; ``contact_label_method`` is what distinguishes the two.
+CONTACT_LABEL_SCHEMA = 2
+
+CONTACT_LABEL_METHOD = "frames-v4"   # v1 = geometry only; v2 adds the force witness;
+                                     # v3 debounce + force hysteresis; v4 the toe rule reads
+                                     # the solved load allocation (v3 read its vertical sign,
+                                     # which renamed every bat hang to a stance)
 
 
 def _load_config(path: Path) -> dict:
     """Operational knobs for the contact stage (no loss weights here)."""
     cfg = load_toml(path) if path.exists() else {}
     c = cfg.setdefault("contacts", {})
-    c.setdefault("close_thresh_m", 0.02)   # enter: "just outside" distance counted as contact
-    c.setdefault("exit_thresh_m", 0.035)   # stay: looser hysteresis exit (holds a span, kills boundary flicker)
-    c.setdefault("min_frames", 3)          # drop contact spans shorter than this many frames
-    c.setdefault("max_dist_m", 0.10)       # deep-occluder guard (reject spurious deep penetration)
+    c.setdefault("close_thresh_m", 0.03)   # enter: "just outside" distance counted as contact
+    c.setdefault("exit_thresh_m", 0.035)   # stay: looser hysteresis exit (kills boundary flicker)
+    c.setdefault("min_span_s", 0.1)        # drop contact spans shorter than this (seconds; frames = ceil(s*fps))
+    c.setdefault("max_dist_m", 0.10)       # far guard (a match behind an occluder is not a surface)
     c.setdefault("conf_thresh", 0.1)       # residual absolute floor (VGGT conf ≥~1 ⇒ non-binding)
-    c.setdefault("conf_drop_q", 0.1)       # quantile confidence gate: drop the lowest fraction of scene voxels
+    c.setdefault("conf_drop_q", 0.1)       # quantile confidence gate: drop the lowest scene voxels
     c.setdefault("normal_k", 16)           # kNN for PCA scene-normal estimation
-    c.setdefault("prune_margin_m", 0.10)   # per-frame scene-AABB margin for the SDF nearest-neighbour
-    c.setdefault("merge_dist_m", 0.03)     # span-merge: bridge a flicker gap the joint barely moved across
+    c.setdefault("prune_margin_m", 0.10)   # per-frame scene-AABB margin for the nearest-neighbour
+    c.setdefault("merge_dist_m", 0.03)     # span-merge: bridge a gap the point barely moved across
     c.setdefault("merge_max_gap_s", 2.0)   # …only gaps shorter than this
-    c.setdefault("merge_sdf_m", 0.08)      # …re-grip guard: it stayed within this of the wall the whole gap
-    c.setdefault("use_scene", True)        # false: the scene cloud is untrustworthy — labels come from
-                                           # predictions/contacts.npz gated on stillness alone (no SDF
-                                           # detector, no completion, no fusion, no depth-fit)
-    c.setdefault("overlay", True)           # render the contact skeleton overlay
-    comp = c.setdefault("completion", {})   # detector-completion knobs (defaults in completion.py)
-    for key, val in COMPLETION_DEFAULTS.items():
-        comp.setdefault(key, val)
-    # Predicted-contact fusion: how far the image model may move a label (see fusion.py).
-    c.setdefault("fusion", {}).setdefault("pred_clamp", 0.10)
-    d = cfg.setdefault("depth_fit", {})
-    for key, val in DEPTH_FIT_DEFAULTS.items():
-        d.setdefault(key, val)
+    c.setdefault("merge_sdf_m", 0.08)      # …re-grip guard: it stayed this near the wall throughout
+    c.setdefault("overlay", True)          # render the contact overlay
+    if not bool(c.get("use_scene", True)):
+        raise SystemExit("[estimate_contacts] use_scene=false is not supported by the contact-frame "
+                         "detector — contact is measured against the scene cloud only")
+    f = cfg.setdefault("contact_force", {})
+    f.setdefault("theta_bw", 0.05)          # a frame carrying this fraction of body weight is loaded
+    f.setdefault("theta_hold_bw", 0.03)     # …and stays loaded until it drops below this (hysteresis)
+    f.setdefault("gap_dstar_m", 0.05)       # gap price: force this far from the scene is expensive
+    f.setdefault("stillness_vstar_mps", 0.2)  # stillness price: force on a limb this fast is expensive
+    f.setdefault("far_still_x", 4.0)        # far force labels need stillness at this multiple of still_m; 0 = off
     g = cfg.setdefault("contact_gate", {})
     g.setdefault("window_s", 0.35)         # drift window (s) for the stillness gate
-    g.setdefault("still_m", 0.025)         # net drift (m) at which stillness = 0.5 (gate kills frames >= 2·still_m)
-    # Per-joint label confidence (readout-only; NOT registered in config.py). Defaults +
-    # semantics live in tools/human_optim/confidence.py, shared with the scorer's --reliability.
-    k = cfg.setdefault("contact_confidence", {})
-    for key, val in CONTACT_CONFIDENCE_DEFAULTS.items():
-        k.setdefault(key, val)
-    cfg["contact_confidence"] = confidence_config(k)
+    g.setdefault("still_m", 0.03)          # net drift (m) at which stillness = 0.5
+    g.setdefault("still_override_m", -1.0)  # closeness that outranks stillness; -1 = off
+    q = cfg.setdefault("quality", {})
+    q.setdefault("cam_depth_max", 0.4)     # camera flag: cam-travel/scene-depth above this ...
+    q.setdefault("res_before_bw_max", 2.5)  # ... AND pre-force residual above this (both witnesses)
+    q.setdefault("smear_med_max", 2.0)     # depth flag: median along-ray smear above this
     cfg.setdefault("runtime", {}).setdefault("device", "cuda")
     return cfg
 
@@ -140,24 +132,59 @@ def _sha256(path: Path) -> str:
 
 
 @torch.no_grad()
-def _pose(mid, betas: torch.Tensor, q: torch.Tensor, scale: float, *, chunk=64):
-    """Pose all frames → ``(joints (N,J,3), vertices (N,V,3))`` in the world frame.
+def _pose(body, betas: torch.Tensor, q: torch.Tensor, scale: float, *, chunk: int = 64):
+    """Pose all frames → contact-frame world poses ``(N, F, 7)``.
 
-    Re-applies the per-person global ``scale`` about the pelvis (joint 0), the
-    same operation the kinematic optimizer and viewers use, so the contact SDF
-    sees the body at its stored metric size.
+    Re-applies the per-person global ``scale`` about the pelvis (joint 0), the same
+    operation the kinematic optimizer and viewers use, so the contact detector sees
+    the body at its stored metric size. A uniform scale about a point moves
+    positions only — the frame rotations, and therefore the outward normals, are
+    untouched.
     """
-    N = q.shape[0]
-    jws, vws = [], []
-    for s in range(0, N, chunk):
-        e = min(s + chunk, N)
-        out = mid.forward(betas[None].expand(e - s, -1), normalize_q(q[s:e], mid.num_joints))
-        jw = out.joints_world.tensor()[..., :3]
-        vw = out.vertices
-        root = jw[:, :1, :]
-        jws.append(root + scale * (jw - root))
-        vws.append(root + scale * (vw - root))
-    return torch.cat(jws, 0), torch.cat(vws, 0)
+    num_frames = q.shape[0]
+    posed = []
+    for start in range(0, num_frames, chunk):
+        end = min(start + chunk, num_frames)
+        out = body.forward(betas[None].expand(end - start, -1),
+                           normalize_q(q[start:end], body.num_joints))
+        frames = out.frames_world.clone()
+        root = out.joints[:, :1, :]
+        frames[..., :3] = root + scale * (frames[..., :3] - root)
+        posed.append(frames)
+    return torch.cat(posed, 0)
+
+
+def _drift_pre(kin: dict, person: int, shape, device: str) -> torch.Tensor:
+    """The persisted pre-enforcement drift ``(N, 12)`` for one person, or a hard error.
+
+    The stillness witnesses price force / gate far labels by how still a frame is. If
+    that stillness were measured on the *enforced* body, the optimizer's own contact
+    damping would be voting for its own labels, so there is deliberately no fallback
+    here: a body without ``drift_pre`` cannot have a contact readout. NaN entries are
+    legitimate — an untracked window (or a person detection never ran on) carries no
+    stillness evidence, and every consumer treats NaN drift as "not still".
+    """
+    if "drift_pre" not in kin:
+        raise SystemExit("[estimate_contacts] kinematic_1.npz has no drift_pre — the force "
+                         "witness needs pre-enforcement stillness and will not re-measure "
+                         "it on the enforced body; re-run human_optimization")
+    drift = torch.as_tensor(np.asarray(kin["drift_pre"])[person],
+                            dtype=torch.float32, device=device)
+    if tuple(drift.shape) != tuple(shape):
+        raise SystemExit("[estimate_contacts] drift_pre has the wrong shape; "
+                         "refusing to guess")
+    return drift
+
+
+def _finite_cm(values: torch.Tensor) -> np.ndarray:
+    """Metres → centimetres as float32, with the ``±inf`` sentinels turned into ``NaN``."""
+    out = (values * 100.0).cpu().numpy().astype(np.float32)
+    return np.where(np.isfinite(out), out, np.nan).astype(np.float32)
+
+
+def _count_spans(mask: np.ndarray) -> int:
+    """Number of contiguous ``True`` runs in a 1-D bool array."""
+    return int(np.count_nonzero(mask[1:] & ~mask[:-1]) + (1 if mask.size and mask[0] else 0))
 
 
 def run(source: str | Path, predictions_dir: str | Path, config_path: str | Path, *,
@@ -165,7 +192,6 @@ def run(source: str | Path, predictions_dir: str | Path, config_path: str | Path
     cfg = _load_config(Path(config_path))
     device = cfg["runtime"]["device"]
     cc = cfg["contacts"]
-    df = cfg["depth_fit"]
     cg = cfg["contact_gate"]
     pred = Path(predictions_dir)
 
@@ -173,457 +199,301 @@ def run(source: str | Path, predictions_dir: str | Path, config_path: str | Path
     # annotation-guided kinematics_2. Output tag mirrors it: contacts_1 / contacts_2.
     kin_path = paths.body_path(pred, bodies)
     tag = bodies.removeprefix("kinematic_")
-    use_scene = bool(cc["use_scene"])
     scene_path = pred / "geometry" / "scene.npz"
+    transform_path = pred / "geometry" / "transform.npz"
     if not kin_path.exists():
         raise SystemExit(f"missing {kin_path} — run human_optimization {bodies} first")
-    if use_scene and not scene_path.exists():
+    if not scene_path.exists():
         raise SystemExit(f"missing {scene_path} — run fuse_geometry.py first (needs vggt --save-depth)")
 
-    transform_path = pred / "geometry" / "transform.npz"
     kin = dict(np.load(kin_path, allow_pickle=True))
-    source_body_sha256 = _sha256(kin_path)
-    source_scene_sha256 = _sha256(scene_path) if use_scene else ""
-    source_transform_sha256 = _sha256(transform_path)
     tr = dict(np.load(transform_path, allow_pickle=True))
     if not bool(tr.get("metric", True)):  # absent flag = old already-metric artifact
         raise SystemExit(f"geometry under {pred} is up-to-scale — run estimate_scale after fuse")
-    sc = dict(np.load(scene_path, allow_pickle=True)) if use_scene else None
-    human_path = pred / "geometry" / "human.npz"
-    human_cloud = None
-    source_human_sha256 = ""
-    if not use_scene:
-        pass  # scene-free mode also skips the human cloud (depth-fit fields stay no-data)
-    elif human_path.exists():
-        source_human_sha256 = _sha256(human_path)
-        with np.load(human_path) as human:
-            human_cloud = tuple(torch.as_tensor(
-                np.asarray(human[name]), device=device)
-                for name in ("points", "frame_id", "obj_id"))
-    else:
-        print(f"[estimate_contacts] warning: missing {human_path}; depth-fit fields have no data")
-    N, P = int(kin["num_frames"]), int(kin["num_people"])
-    H, W = int(kin["video_height"]), int(kin["video_width"])
+    scene_npz = dict(np.load(scene_path, allow_pickle=True))
+
+    num_frames, num_people = int(kin["num_frames"]), int(kin["num_people"])
+    height, width = int(kin["video_height"]), int(kin["video_width"])
     object_ids = np.asarray(kin["object_ids"], dtype=np.int32)
     parents = np.asarray(kin["parents"], dtype=np.int32)
     valid_mask = np.asarray(kin["valid_mask"], dtype=bool)
-    fps = float(tr.get("fps", kin.get("fps", 30.0)))   # drift window needs the true clip fps
+    fps = float(tr.get("fps", kin.get("fps", 30.0)))   # the drift window needs the true clip fps
+    min_frames = min_span_frames(cc["min_span_s"], fps)   # the span rules count frames
 
-    # The image model's per-limb contact probability, aligned to this body's people and
-    # frames. Absent file ⇒ fusion is a no-op and every value below is unchanged. A
-    # prediction on an invalid body frame is unusable (there is no label to fuse it with).
-    pred_clamp = float(cc["fusion"]["pred_clamp"])
-    pred_prob_limb = load_pred_prob_limb(pred, object_ids, np.asarray(tr["frame_indices"]))
-    if not use_scene and pred_prob_limb is None:
-        raise SystemExit("[estimate_contacts] use_scene=false needs predictions/contacts.npz — "
-                         "without the scene the model's contacts are the only label source")
-    do_fusion = pred_prob_limb is not None
-    if do_fusion:
-        pred_prob_limb[~valid_mask] = np.nan
-        n_pred = int(np.isfinite(pred_prob_limb).any(-1).sum())
-        print(f"[estimate_contacts] predicted contacts: {n_pred}/{P * N} person-frames, "
-              f"clamp {pred_clamp:.2f}")
-    else:
-        pred_prob_limb = np.full((P, N, len(PRED_LIMBS)), np.nan, np.float32)
-        print("[estimate_contacts] fusion: OFF (no predictions/contacts.npz)")
-    if not use_scene:
-        do_fusion = False  # scene-free: the predictions ARE the labels, there is nothing to fuse
-    fusion_changed = np.zeros((P, N, len(PRED_LIMBS)), dtype=np.int8)
+    extrinsics = torch.as_tensor(tr["extrinsics"], dtype=torch.float32, device=device)       # (N,4,4)
+    intrinsics = torch.as_tensor(tr["intrinsics_px_orig"], dtype=torch.float32, device=device)
+    cam_centers = world_from_cam(extrinsics)[:, :3, 3]
 
-    extr = torch.as_tensor(tr["extrinsics"], dtype=torch.float32, device=device)       # (N,4,4)
-    K = torch.as_tensor(tr["intrinsics_px_orig"], dtype=torch.float32, device=device)  # (N,3,3)
-    cam_centers = world_from_cam(extr)[:, :3, 3]
+    scene_pts, scene_normals, scene_conf = load_scene_cloud(
+        scene_npz, cam_centers, conf_drop_q=float(cc["conf_drop_q"]),
+        k=int(cc["normal_k"]), device=device)
+    print(f"[estimate_contacts] scene cloud {scene_pts.shape[0]} pts, normals: "
+          f"{'fuse' if 'normals' in scene_npz else 'PCA fallback'}; "
+          f"close<{float(cc['close_thresh_m']) * 100:.0f}cm, "
+          f"still<{float(cg['still_m']) * 100:.1f}cm")
 
-    scene_pts = scene_normals = scene_conf = None
-    if use_scene:
-        scene_pts, scene_normals, scene_conf = load_scene_cloud(
-            sc, cam_centers, conf_drop_q=float(cc.get("conf_drop_q", 0.0)),
-            k=int(cc["normal_k"]), device=device)
-        print(f"[estimate_contacts] scene cloud {scene_pts.shape[0]} pts, normals: "
-              f"{'fuse' if 'normals' in sc else 'PCA fallback'}; "
-              f"close<{float(cc['close_thresh_m']) * 100:.0f}cm")
-    else:
-        print("[estimate_contacts] scene: OFF (use_scene=false) — labels = predicted AND still")
+    body = load_body(device=device, frames_allow=cc.get("frames") or None)
+    frame_names = list(body.contact_frame_names)
+    num_contact_frames = len(frame_names)
+    knee_columns = [i for i, n in enumerate(frame_names) if n.startswith("knee")]
+    cf = cfg["contact_force"]
+    force_knobs = ForceKnobs(gap_dstar_m=float(cf["gap_dstar_m"]),
+                             stillness_vstar_mps=float(cf["stillness_vstar_mps"]))
 
-    mid = load_smplx_mid(_DEFAULT_SMPLX_MODEL, device)
-    J = mid.num_joints
-    mid_names = list(mid.joint_names)
-    occ_group_t = torch.as_tensor(occlusion_group_ids(mid_names), device=device)
-    faces_t = mid.faces.to(device).long()
-
-    # Contact completion setup (static support solve + union readout). It borrows the
-    # dynamics-stage knobs; its friction cones read the ungated scene cloud (conf_drop_q=0,
-    # matching the dynamics stage). Gravity follows the dynamics convention: geocalib
-    # world-down when present, else world-down [0, 1, 0].
-    # Completion runs only when the body carries the persisted pre-enforcement drift
-    # (``drift_pre``): its stillness gates need that honest witness. kinematics_1 saves it
-    # at refine start, and kinematics_2 forwards it unchanged — attraction and damping have
-    # acted on the kin2 POSE, but the stillness evidence still predates any enforcement.
-    # An old body npz without drift_pre stays detector-only (re-measured stillness there
-    # would be manufactured evidence).
-    do_completion = "drift_pre" in kin and use_scene
-    comp_ctx = load_dynamics_context(config_path)
-    comp_knobs = cc["completion"]
-    grav_path = pred / "geocalib" / "gravity.npz"
-    source_gravity = ""
-    source_gravity_sha256 = ""
-    if grav_path.exists():
-        gd = np.load(grav_path)
-        gravity_world = np.asarray(gd["gravity_world"], np.float32)
-        gsrc = str(gd["source"]) if "source" in gd.files else "geocalib"
-        source_gravity = grav_path.name
-        source_gravity_sha256 = _sha256(grav_path)
-        gravity_source = "geocalib"
+    # Gravity for the force solve: GeoCalib's world-down when the stage ran, else VGGT's
+    # world-down convention — the same fallback kindyn uses.
+    gravity_path = pred / "geocalib" / "gravity.npz"
+    if gravity_path.exists():
+        gravity_world = np.asarray(np.load(gravity_path)["gravity_world"], np.float32)
     else:
         gravity_world = np.array([0.0, 1.0, 0.0], np.float32)
-        gsrc = "fallback_down(no geocalib)"
-        gravity_source = "fallback_world_down"
-    cone_pts = cone_normals = None
-    if do_completion and comp_ctx.friction is not None:
-        cone_pts, cone_normals, _ = load_scene_cloud(
-            sc, cam_centers, conf_drop_q=0.0,
-            k=int(comp_ctx.friction["normal_k"]), device=device)
-    if do_completion:
-        print(f"[estimate_contacts] completion: {len(comp_ctx.groups)} groups, "
-              f"gravity={gravity_world.round(2)} ({gsrc}), "
-              f"friction cones {'ON' if cone_pts is not None else 'OFF'}")
-    else:
-        reason = "use_scene=false" if not use_scene else "post-enforcement body"
-        print(f"[estimate_contacts] completion: OFF for {bodies} ({reason})")
 
-    joint_contact = np.zeros((P, N, J), dtype=bool)
-    contact_source = np.zeros((P, N, J), dtype=np.int8)   # per joint-frame: 1=detector, 2=gate, 4=force
-    limb_force_n = np.zeros((P, N, len(comp_ctx.groups)), dtype=np.float32)
-    force_share = np.full((P, N, J), np.nan, dtype=np.float32)  # |f|/body-weight at the six limb joints; NaN = no force witness
-    body_weight_n = np.full(P, np.nan, dtype=np.float32)   # total baked mass × g per person
-    joint_sdf_cm = np.full((P, N, J), np.nan, dtype=np.float32)
-    joint_distance_cm = np.full((P, N, J), np.nan, dtype=np.float32)
-    joint_depth_gap_cm = np.full((P, N, J), np.nan, dtype=np.float32)
-    joint_occlusion_gap_cm = np.full((P, N, J), np.nan, dtype=np.float32)
-    joint_depth_points = np.zeros((P, N, J), dtype=np.float32)
-    joint_depth_trust = np.full((P, N, J), NO_DATA_TRUST, dtype=np.float32)
-    joints_2d = np.full((P, N, J, 2), np.nan, dtype=np.float32)
-    merged_all = np.zeros((P, N, J), dtype=bool)            #frames the span-merge bridged
-    confidence_all = {name: np.zeros((P, N, J), np.float32) for name in
-                      ("image_visibility", "occlusion_visibility",
-                       "visibility", "surface", "motion", "label_confidence")}
+    shape = (num_people, num_frames, num_contact_frames)
+    frame_contact = np.zeros(shape, dtype=bool)
+    merged_all = np.zeros(shape, dtype=bool)
+    frame_sdf_cm = np.full(shape, np.nan, dtype=np.float32)
+    frame_distance_cm = np.full(shape, np.nan, dtype=np.float32)
+    frame_drift_m = np.full(shape, np.nan, dtype=np.float32)
+    frame_normal_dot = np.full(shape, np.nan, dtype=np.float32)
+    frames_2d = np.full((*shape, 2), np.nan, dtype=np.float32)
+    frame_force = np.zeros((*shape, 3), dtype=np.float32)
+    frame_force_bw = np.zeros(shape, dtype=np.float32)
+    frame_force_label = np.zeros(shape, dtype=bool)
+    frame_contact_geom = np.zeros(shape, dtype=bool)
+    frame_pressed = np.zeros(shape, dtype=bool)
+    force_dist_m = np.full(shape, np.nan, dtype=np.float32)
+    frame_wall_dot = np.full(shape, -1.0, dtype=np.float32)
+    body_weight_n = np.zeros(num_people, dtype=np.float32)
+    residual_before_n = np.zeros((num_people, num_frames), dtype=np.float32)
+    residual_after_n = np.zeros((num_people, num_frames), dtype=np.float32)
 
-    # Pose everyone once. Besides avoiding repeated model inference, retaining the
-    # posed meshes lets one tracked person occlude another person's joints.
-    posed_people = []
-    for p in range(P):
+    for p in range(num_people):
+        object_id = int(object_ids[p])
         betas = torch.as_tensor(kin["betas"][p], dtype=torch.float32, device=device)
         q = torch.as_tensor(kin["q"][p], dtype=torch.float32, device=device)
-        scale = float(kin["scale"][p])
-        # Nearest-joint map from THIS person's shaped rest mesh: body shape moves
-        # boundary vertices between joints, so a zero-beta map would mislabel them.
-        # Scale is uniform about the pelvis ⇒ nearest-joint is scale-invariant, so the
-        # unscaled shaped rest mesh is exact here.
-        with torch.no_grad():
-            v_rest, j_rest = mid.forward_shape(betas[None])
-        v2j = vertex_to_joint(v_rest[0], j_rest[0])                  # (V,) per person
-        jw, vw = _pose(mid, betas, q, scale)                         # (N,J,3), (N,V,3) world
-        posed_people.append((v2j, jw, vw))
+        posed = _pose(body, betas, q, float(kin["scale"][p]))                 # (N, F, 7)
+        points, normals = posed[..., :3], frame_normals(posed)
+        person_valid = torch.as_tensor(valid_mask[p], device=device)
 
-    for p, (v2j, jw, vw) in enumerate(posed_people):
-        if human_cloud is not None:
-            depth_gap, depth_points, depth_trust = joint_depth_fit(
-                vw, *human_cloud, int(object_ids[p]), extr, K, v2j, J,
-                cell_px=int(df["cell_px"]), min_points=int(df["min_points"]),
-                trust_scale_log=float(df["trust_scale_log"]))
-            gap_np = depth_gap.cpu().numpy()
-            points_np = depth_points.cpu().numpy()
-            trust_np = depth_trust.cpu().numpy()
-            gap_np[~valid_mask[p]] = np.nan
-            points_np[~valid_mask[p]] = 0.0
-            trust_np[~valid_mask[p]] = NO_DATA_TRUST
-            joint_depth_gap_cm[p] = gap_np
-            joint_depth_points[p] = points_np
-            joint_depth_trust[p] = trust_np
-        prob_t = torch.as_tensor(pred_prob_limb[p], dtype=torch.float32, device=device)  # (N, 4)
-        if use_scene:
-            sdf, dmin, conf = scene_sdf(vw, scene_pts, scene_normals, scene_conf,
-                                        prune_margin_m=float(cc["prune_margin_m"]))
-            # Raw (unguarded) per-joint min-sdf diagnostic — kept as the continuous channel.
-            vcon = contact_from_sdf(sdf, dmin, conf, close_thresh_m=float(cc["close_thresh_m"]),
-                                    max_dist_m=float(cc["max_dist_m"]), conf_thresh=float(cc["conf_thresh"]))
-            _, jsdf = lift_joint_contact(vcon, sdf, v2j, J)
-            jdmin = lift_joint_min_distance(dmin, v2j, J)
-            # Final contact: a joint-frame must be BOTH near the wall and still. Drift-gate
-            # the guarded per-joint min-sdf (frames whose net window drift ≥ 2·still_m are a
-            # pass, not a grip → forced non-contact), then temporal hysteresis (enter<close,
-            # stay<exit) + min-duration, so labels stop flickering at the boundary.
-            gsdf = joint_guarded_min_sdf(sdf, dmin, conf, v2j, J,
-                                         max_dist_m=float(cc["max_dist_m"]), conf_thresh=float(cc["conf_thresh"]))
-        else:
-            # Scene-free: the model's per-limb probability plays the proximity witness.
-            # A limb the model calls in contact (p >= 0.5) gets pseudo-distance 0 at its
-            # rep joints, +inf elsewhere — the unchanged drift gate, hysteresis and
-            # min-duration below then read exactly "predicted AND still".
-            gsdf = torch.full((N, J), torch.finfo(torch.float32).max, device=device)
-            for c, reps in enumerate(_LIMB_REPS):
-                on = prob_t[:, c] >= 0.5
-                for j in reps:
-                    gsdf[on, j] = 0.0
-        # The persisted pre-enforcement drift is the honest motion measurement:
-        # later attraction/damping must not manufacture apparent stillness. Both
-        # the binary gate and no-contact confidence use it, with final-body drift
-        # as a per-element fallback for old/missing measurements.
-        motion_drift = joint_drift(
-            jw, fps=fps, window_s=float(cg["window_s"]),
-            valid_mask=torch.as_tensor(valid_mask[p], device=device))
-        gate_drift = motion_drift
-        # honest gate: when the body carries the refine-start drift_pre (kinematics_1),
-        # the stillness gate reads it (the pre-enforcement measurement) instead of re-measuring the
-        # final body — the damper can then no longer manufacture false stillness. Fall back per
-        # person to the computed final-body drift (kinematics_2 / old npz / NaN).
-        if "drift_pre" in kin:
-            dp = torch.as_tensor(
-                np.asarray(kin["drift_pre"])[p], dtype=jw.dtype, device=jw.device)
-            if dp.shape == motion_drift.shape:
-                gate_drift = torch.where(
-                    torch.isfinite(dp) & torch.isfinite(motion_drift), dp, motion_drift)
-        jc_pre = drift_gated_contact(gsdf, gate_drift, close_thresh_m=float(cc["close_thresh_m"]),
-                                     exit_thresh_m=float(cc["exit_thresh_m"]), min_frames=int(cc["min_frames"]),
-                                     still_m=float(cg["still_m"]))
-        # span-merge: bridge short same-joint gaps the joint barely moved across AND stayed near
-        # the wall throughout (flicker / brief re-settle); the re-grip guard blocks leave-and-return.
-        jc = merge_contact_spans(jc_pre, jw, gsdf, merge_dist_m=float(cc["merge_dist_m"]),
-                                 max_gap_s=float(cc["merge_max_gap_s"]), gap_sdf_m=float(cc["merge_sdf_m"]), fps=fps)
-        merged_bool = jc & ~jc_pre     #frames the merge bridged — confidence stays honest, the flag marks them
-        jw_cam = transform_points(jw, extr)
-        px = project(jw_cam, K)                                      # (N,J,2)
+        # The persisted pre-enforcement drift is the honest motion measurement: the
+        # optimizer's own damping must not be able to manufacture apparent stillness,
+        # so there is no re-measure on this body. NaN entries carry no stillness
+        # evidence and every consumer treats them as "not still".
+        drift = _drift_pre(kin, p, (num_frames, num_contact_frames), device)
 
-        jc_np = jc.cpu().numpy()
-        jc_np[~valid_mask[p]] = False
-        if use_scene:
-            joint_sdf_cm[p] = jsdf.cpu().numpy()
-            joint_distance_cm[p] = (jdmin * 100.0).cpu().numpy()
-        joints_2d[p] = px.cpu().numpy()
-        merged_np = merged_bool.cpu().numpy(); merged_np[~valid_mask[p]] = False
+        detected = detect_frame_contacts(
+            points, normals, drift, scene_pts, scene_normals, scene_conf,
+            frame_names=frame_names,
+            close_thresh_m=float(cc["close_thresh_m"]), exit_thresh_m=float(cc["exit_thresh_m"]),
+            min_frames=DETECT_MIN_FRAMES, still_m=float(cg["still_m"]),
+            still_override_m=float(cg["still_override_m"]),
+            max_dist_m=float(cc["max_dist_m"]), conf_thresh=float(cc["conf_thresh"]),
+            prune_margin_m=float(cc["prune_margin_m"]))
+
+        # Bridge short same-frame gaps the point barely moved across AND stayed near the
+        # wall throughout (flicker / brief re-settle); the re-grip guard blocks a genuine
+        # leave-and-return. The merge works one frame at a time, so on its own it can
+        # bridge a toe over a step where the pair tiebreak had already ruled that toe out —
+        # putting both toes of a foot back in contact at once. The tiebreak's verdict is
+        # final, so bridged steps never land on a suppressed one.
+        contact = merge_contact_spans(
+            detected.contact, points, detected.guarded_sdf,
+            merge_dist_m=float(cc["merge_dist_m"]), max_gap_s=float(cc["merge_max_gap_s"]),
+            gap_sdf_m=float(cc["merge_sdf_m"]), fps=fps) & ~detected.toe_suppressed
+        merged = contact & ~detected.contact
+
+        pixels = project(transform_points(points, extrinsics), intrinsics)     # (N, F, 2)
+
+        # ── the force witness ────────────────────────────────────────────────────
+        # The geometric detector above needs the frame to be NEAR the scene. When the
+        # reconstruction puts the body in the wrong place that never happens and a real
+        # contact is simply lost. So ask physics as well: solve the world forces at the 12
+        # frames that explain the body's leftover root wrench, and call a frame in contact
+        # when it has to carry real load. Add-only, with exactly one exception: the toe
+        # pair (see below), where "at most one toe per foot" outranks add-only.
+        force_solution = solve_person_forces(
+            body, betas, q, valid_mask[p], drift_pre=drift,
+            drift_window_s=float(cg["window_s"]), gravity_world=gravity_world, fps=fps,
+            scene_pts=scene_pts, scene_normals=scene_normals, scene_conf=scene_conf,
+            knobs=force_knobs)
+        # A FAR force label needs stillness ([contact_force].far_still_x). Within the
+        # detector's own trust radius ([contacts].max_dist_m) load alone suffices — a fast
+        # foot plant that carries weight is a contact. Beyond it geometry is blind, and the
+        # load claim needs the stillness witness: a misregistered body that is really
+        # supported holds still (the gtIGgs floater, a beam routine whose beam cloud sits
+        # half a metre off), while the mid-air scraps a bad-depth flight parks on flying
+        # limbs move fast and are cut. The bar is a multiple of still_m looser than the
+        # detector's, because a badly reconstructed body jitters — measured 2026-08-25:
+        # at 4x, climbing F1 pays .007 while the high_jump/1FGkg far floods drop to zero.
+        # The solve itself is untouched — residuals, load allocation and the toe rule see
+        # every candidate. NaN distance = no scene evidence = far.
+        label_magnitude = force_solution.magnitude
+        if float(cf["far_still_x"]) > 0.0:
+            veto = far_still_veto(
+                force_solution.dist_m, drift.cpu().numpy(),
+                near_m=float(cc["max_dist_m"]), still_m=float(cg["still_m"]),
+                far_still_x=float(cf["far_still_x"]))
+            label_magnitude = np.where(veto, 0.0, label_magnitude)
+        force_label = force_labels(
+            label_magnitude, frame_names=frame_names, valid=valid_mask[p],
+            threshold_n=float(cf["theta_bw"]) * force_solution.body_weight_n,
+            hold_n=float(cf["theta_hold_bw"]) * force_solution.body_weight_n,
+            min_frames=DETECT_MIN_FRAMES)
+        force_label[:, knee_columns] = False        # force on a knee is ~all false positives
+        contact_np = contact.cpu().numpy() | force_label
+        contact_np[~valid_mask[p]] = False
+
+        # The penetration exception, carried through to the union rules: a step pressing
+        # below [contact_gate].still_override_m already survived the detector's blip
+        # killer however brief, and the post-weld duration rule must not take it back.
+        # All-False when the override is off (climbing unchanged).
+        pressed = ((detected.guarded_sdf < float(cg["still_override_m"]))
+                   & torch.isfinite(drift) & ~detected.toe_suppressed).cpu().numpy()
+
+        # One debounce over the union. Each readout already drops its own too-short spans,
+        # but the union puts two of them end to end and can leave a one- or two-frame hole
+        # between them that neither arm ever saw. The same number governs both directions:
+        # a contact lasts at least min_frames, and so does a release.
+        contact_np = close_gaps(contact_np, min_frames)
+        contact_np[~valid_mask[p]] = False          # never bridge across untracked steps
+        # The fps-aware duration rule, applied only now that the union is welded. At
+        # <=30 fps this is a no-op (every arm above already enforces 3 frames); at high
+        # fps it drops the still-isolated micro-spans the welding could not fuse.
+        contact_np = min_span(contact_np, min_frames, pressed)
+        contact_np[~valid_mask[p]] = False
+
+        # Both readouts keep one toe per foot, but they can keep DIFFERENT ones, and the
+        # union would then hold both at once. The toe rule settles it for the whole contact
+        # at once — see resolve_toe_conflicts. It only moves a label between the two frames
+        # of one foot, so "this foot is in contact" is untouched.
+        contact_np = resolve_toe_conflicts(contact_np, force_solution.magnitude,
+                                           frame_names=frame_names,
+                                           min_frames=DETECT_MIN_FRAMES, keep=pressed)
+        merged_np = merged.cpu().numpy() & contact_np      # a bridged step that lost its
+        merged_np[~valid_mask[p]] = False                  # toe is no longer a contact
+        frame_contact_geom[p] = contact.cpu().numpy() & valid_mask[p][:, None]
+        frame_pressed[p] = pressed
+        force_dist_m[p] = np.where(force_solution.dist_m < NO_SCENE_M,
+                                   force_solution.dist_m, np.nan)
+        frame_force[p] = force_solution.forces
+        frame_force_bw[p] = force_solution.magnitude / force_solution.body_weight_n
+        frame_force_label[p] = force_label
+        frame_wall_dot[p] = force_solution.normal_dot
+        body_weight_n[p] = force_solution.body_weight_n
+        residual_before_n[p] = force_solution.residual_force_before_n
+        residual_after_n[p] = force_solution.residual_force_after_n
+        frame_contact[p] = contact_np
         merged_all[p] = merged_np
+        frame_sdf_cm[p] = _finite_cm(detected.sdf)
+        frame_distance_cm[p] = _finite_cm(detected.dmin)
+        frame_normal_dot[p] = detected.normal_dot.cpu().numpy().astype(np.float32)
+        frame_drift_m[p] = drift.cpu().numpy().astype(np.float32)
+        frames_2d[p] = pixels.cpu().numpy()
+        for array in (frame_sdf_cm[p], frame_distance_cm[p],
+                      frame_normal_dot[p], frame_drift_m[p]):
+            array[~valid_mask[p]] = np.nan
 
-        # Contact completion: the static support solve + loosened gates, unioned onto the
-        # detector labels (add-only). Additions land on each group's own joint; the source
-        # bitmask records where each label came from. Confidence below then runs on the
-        # COMPLETED labels.
-        detector_np = jc_np.copy()
-        # Provenance: 1 = geometric detector; 8 = model prediction (the schema-8 bit
-        # the fusion rescue uses) — scene-free labels are the model's.
-        src = np.where(detector_np, np.int8(1) if use_scene else np.int8(8), np.int8(0))
-        if do_completion:
-            comp = complete_person(
-                mid, torch.as_tensor(kin["betas"][p], dtype=torch.float32, device=device),
-                torch.as_tensor(kin["q"][p], dtype=torch.float32, device=device),
-                valid_mask[p], mid_names,
-                detector_contact=detector_np, joint_distance_cm=joint_distance_cm[p],
-                gate_drift=gate_drift, gravity_world=gravity_world, fps=fps,
-                cone_pts=cone_pts, cone_normals_t=cone_normals, ctx=comp_ctx,
-                knobs=comp_knobs, device=device)
-            for c, j in enumerate(comp["rep_idx"]):
-                jc_np[:, j] |= comp["gate_span"][:, c] | comp["force_span"][:, c]
-                src[comp["gate_span"][:, c], j] |= 2
-                src[comp["force_span"][:, c], j] |= 4
-            limb_force_n[p] = comp["limb_force_n"]
-            bw = comp["body_weight_n"]
-            body_weight_n[p] = bw
-            # Force share |f|/body-weight at each group's own joint feeds the
-            # source-conditional confidence. A failed solve (bw = inf) leaves the
-            # share NaN, so those frames carry no force witness.
-            if np.isfinite(bw) and bw > 0.0:
-                for c, j in enumerate(comp["rep_idx"]):
-                    force_share[p, :, j] = comp["limb_force_n"][:, c] / bw
-        joint_contact[p] = jc_np
-        contact_source[p] = src
-        # Per-joint confidence in the FINAL label.  The binary label is unchanged;
-        # the readout only assigns its continuous training weight.
-        jc_final = torch.as_tensor(jc_np, dtype=torch.bool, device=device)
-        if not use_scene:
-            # Scene-free confidence: belief(contact) = model probability × stillness.
-            # A label's confidence is that belief (contact) or its complement (no
-            # contact); joints outside the model's four limbs carry belief 0. The
-            # surface channel stays 0 (there is no wall witness); visibility is not
-            # assessed and stays 1 so nothing is spuriously down-weighted.
-            still = stillness_weight(gate_drift, still_m=float(cg["still_m"]))    # (N, J)
-            p_eff = torch.zeros((N, J), device=device)
-            for c, reps in enumerate(_LIMB_REPS):
-                pr = prob_t[:, c].clamp(pred_clamp, 1.0 - pred_clamp)
-                pr = torch.where(torch.isfinite(pr), pr, torch.full_like(pr, 0.5))
-                for j in reps:
-                    p_eff[:, j] = pr
-            belief = p_eff * still
-            lc = torch.where(jc_final, belief, 1.0 - belief).cpu().numpy()
-            mo = still.clamp(0.0, 1.0).cpu().numpy()
-            vis = np.ones((N, J), np.float32)
-            for name, val in (("label_confidence", lc), ("motion", mo),
-                              ("image_visibility", vis), ("occlusion_visibility", vis.copy()),
-                              ("visibility", vis.copy())):
-                val[~valid_mask[p]] = 0.0
-                confidence_all[name][p] = val
-            n_cf = int(jc_np.any(1).sum())
-            print(f"[estimate_contacts] obj_id={int(object_ids[p])}: {n_cf}/{N} frames with "
-                  f"≥1 joint in contact ({int(jc_np.sum())} joint-frame contact instances)")
-            continue
-        cf = cfg["contact_confidence"]
-        other_vw = None
-        if P > 1:
-            others = []
-            for i, person in enumerate(posed_people):
-                if i == p:
-                    continue
-                other_valid = torch.as_tensor(
-                    valid_mask[i], dtype=torch.bool, device=device)[:, None, None]
-                others.append(torch.where(
-                    other_valid, person[2], torch.full_like(person[2], float("nan"))))
-            other_vw = torch.stack(others, dim=1)
-        occ_gap = joint_occlusion_gap(
-            vw, jw, cam_centers, faces_t, v2j, occ_group_t, other_vertices=other_vw)
-        depth_trust_t = torch.as_tensor(
-            joint_depth_trust[p], dtype=jw.dtype, device=device)
-        depth_points_t = torch.as_tensor(
-            joint_depth_points[p], dtype=jw.dtype, device=device)
-        source_t = torch.as_tensor(contact_source[p], dtype=torch.int64, device=device)
-        share_t = torch.as_tensor(force_share[p], dtype=jw.dtype, device=device)
-        terms = joint_label_confidence(
-            jc_final, gsdf, gate_drift, depth_trust_t, depth_points_t, source_t, share_t,
-            px, jw_cam[..., 2], occ_gap, height=H, width=W, cfg=cf,
-            window_s=float(cg["window_s"]), min_depth_points=int(df["min_points"]))
-        # Occlusion gap (cm) is a NaN-or-finite diagnostic, not a bounded [0,1] term:
-        # keep its NaN (no surface in front) and NaN the invalid frames, exactly like
-        # joint_depth_gap_cm — never route it through the [0,1] zeroing below.
-        gap_cm = terms.pop("occlusion_gap") * 100.0
-        gap_cm[~valid_mask[p]] = np.nan
-        joint_occlusion_gap_cm[p] = gap_cm
-        for name, val in terms.items():
-            val[~valid_mask[p]] = 0.0
-            confidence_all[name][p] = val
-        # Predicted-contact fusion runs LAST, on the finished labels and confidence: the
-        # geometric witnesses stay exactly as they were, and only the limb-frames where
-        # the model disagrees strongly enough move (with their own fused confidence).
-        if do_fusion:
-            jc_np, fused_conf, fused_src, changed = fuse_person(
-                jc_np, confidence_all["label_confidence"][p], contact_source[p],
-                pred_prob_limb[p], min_frames=int(cc["min_frames"]), pred_clamp=pred_clamp)
-            joint_contact[p] = jc_np
-            contact_source[p] = fused_src
-            confidence_all["label_confidence"][p] = fused_conf
-            fusion_changed[p] = changed
-            flips = ", ".join(f"{name} +{int((changed[:, c] > 0).sum())}/"
-                              f"-{int((changed[:, c] < 0).sum())}"
-                              for c, name in enumerate(PRED_LIMBS))
-            print(f"[estimate_contacts] obj_id={int(object_ids[p])}: fusion rescued/vetoed "
-                  f"limb-frames — {flips}")
-        n_cf = int(jc_np.any(1).sum())
-        print(f"[estimate_contacts] obj_id={int(object_ids[p])}: {n_cf}/{N} frames with "
-              f"≥1 joint in contact ({int(jc_np.sum())} joint-frame contact instances)")
-        finite_joint = np.isfinite(joint_depth_gap_cm[p]).any(0)
-        if finite_joint.any():
-            med = np.full(J, np.nan, dtype=np.float32)
-            for j in np.flatnonzero(finite_joint):
-                med[j] = np.nanmedian(joint_depth_gap_cm[p, :, j])
-            worst = int(np.nanargmax(np.abs(med)))
-            print(f"[estimate_contacts] obj_id={int(object_ids[p])}: depth fit worst "
-                  f"{mid_names[worst]} median={float(med[worst]):+.1f}cm")
-        else:
-            print(f"[estimate_contacts] obj_id={int(object_ids[p])}: depth fit has no matched joints")
+        # How often did the toe tiebreak have to choose? Both toe frames of a foot were
+        # candidates at that step and the normal picked one; the count is the size of the
+        # both-fire problem the rule removes.
+        toe_tiebreak = (detected.toe_suppressed & person_valid[:, None]).sum(dim=0).cpu().numpy()
 
-    bounded_terms = (
-        "image_visibility", "occlusion_visibility", "visibility", "surface",
-        "motion", "label_confidence")
-    for name in bounded_terms:
-        value = confidence_all[name]
-        if not np.isfinite(value).all() or bool(((value < 0.0) | (value > 1.0)).any()):
-            raise RuntimeError(f"invalid confidence term {name}: expected finite values in [0,1]")
-    if np.isinf(joint_occlusion_gap_cm).any():
-        raise RuntimeError("joint occlusion gap may be NaN when missing, but never infinite")
-    if np.isinf(joint_sdf_cm).any() or np.isinf(joint_distance_cm).any():
-        raise RuntimeError("joint scene diagnostics may be NaN when missing, but never infinite")
-    if (not np.isfinite(joint_depth_trust).all()
-            or bool(((joint_depth_trust < 0.0) | (joint_depth_trust > 1.0)).any())):
-        raise RuntimeError("invalid joint_depth_trust: expected finite values in [0,1]")
-    if np.isinf(joint_depth_gap_cm).any() or not np.isfinite(joint_depth_points).all():
-        raise RuntimeError("joint depth gap may be NaN when missing, but never infinite")
-    # Completion outputs: solved forces must be finite (a non-finite solve is caught upstream
-    # and falls back to zeros), and any body weight the solve produced must be positive. The
-    # NaN (completion skipped / no witness) and +inf (solve failed) sentinels are left as-is.
-    if not np.isfinite(limb_force_n).all():
-        raise RuntimeError("limb_force_n must be finite (a non-finite solve force reached save)")
-    computed_weight = np.isfinite(body_weight_n)
-    if bool((body_weight_n[computed_weight] <= 0.0).any()):
-        raise RuntimeError("body_weight_n must be positive where the support solve produced a mass")
+        n_valid = int(valid_mask[p].sum())
+        print(f"[estimate_contacts] obj_id={object_id}: "
+              f"{int(contact_np.any(1).sum())}/{num_frames} frames with ≥1 contact "
+              f"({int(contact_np.sum())} frame-point contact instances, "
+              f"{int(merged_np.sum())} bridged)")
+        for i, name in enumerate(frame_names):
+            rate = float(contact_np[valid_mask[p], i].mean()) if n_valid else float("nan")
+            print(f"    {name:<17s} rate={rate:5.1%}  spans={_count_spans(contact_np[:, i]):3d}  "
+                  f"toe-tiebreak suppressed={int(toe_tiebreak[i]):4d}")
+
+    # ── the per-clip quality flag ([quality]) — can this reconstruction be trusted? ──
+    # Computed here because this is the earliest stage where all three signals exist:
+    # the camera ratio and the smear come from geometry/, the residual from the force
+    # witness above. Saved with its raw metrics so the verdict is re-derivable.
+    qc = cfg["quality"]
+    cam_ratio = cam_motion_ratio(tr["extrinsics"], scene_npz["points"])
+    human_path = pred / "geometry" / "human.npz"
+    smear_med = float("nan")
+    if human_path.exists():
+        with np.load(human_path) as human:
+            smear_med, _ = smear_stats(human["points"], human["frame_id"],
+                                       human["obj_id"], tr["extrinsics"])
+    res_bw = residual_before_n / np.maximum(body_weight_n[:, None], 1e-9)
+    res_before_bw = float(np.median(res_bw[valid_mask])) if valid_mask.any() else float("nan")
+    flag = quality_flag(cam_ratio, res_before_bw, smear_med,
+                        cam_depth_max=float(qc["cam_depth_max"]),
+                        res_before_bw_max=float(qc["res_before_bw_max"]),
+                        smear_med_max=float(qc["smear_med_max"]))
+    print(f"[estimate_contacts] quality: cam/depth {cam_ratio:.2f}, smear med {smear_med:.2f}, "
+          f"res_before {res_before_bw:.2f} BW → flag '{flag or 'pass'}'")
 
     save = dict(
-        joint_contact=joint_contact, joint_sdf_cm=joint_sdf_cm,
-        joint_distance_cm=joint_distance_cm, merged=merged_all,
-        contact_source=contact_source, limb_force_n=limb_force_n,
-        force_share=force_share, body_weight_n=body_weight_n,
-        completion_groups=np.array(list(comp_ctx.groups)),
-        completion_method=np.str_(
-            "static-support-v1" if do_completion
-            else f"skipped({'use_scene=false' if not use_scene else 'post-enforcement body'})"),
-        contact_label_schema=np.int32(1),
-        contact_label_method=np.str_(
-            "predicted-drift-gate-v1" if not use_scene
-            else ("completed-static-support-v1" if do_completion else "detector-v1")
-            + (f"+{FUSION_METHOD}" if do_fusion else "")),
-        pred_prob_limb=pred_prob_limb.astype(np.float32),
-        pred_limbs=np.array(PRED_LIMBS),
-        fusion_method=np.str_(FUSION_METHOD if do_fusion else "none"),
-        fusion_pred_clamp=np.float32(pred_clamp),
-        fusion_changed=fusion_changed,
-        joint_depth_gap_cm=joint_depth_gap_cm,
-        joint_depth_points=joint_depth_points,
-        joint_depth_trust=joint_depth_trust,
-        joint_image_visibility=confidence_all["image_visibility"],
-        joint_occlusion_visibility=confidence_all["occlusion_visibility"],
-        joint_occlusion_gap_cm=joint_occlusion_gap_cm,
-        joint_visibility=confidence_all["visibility"],
-        surface_evidence=confidence_all["surface"],
-        motion_evidence=confidence_all["motion"],
-        label_confidence=confidence_all["label_confidence"],
-        confidence_schema=np.int32(CONTACT_CONFIDENCE_SCHEMA),
-        confidence_method=np.str_(
-            CONTACT_CONFIDENCE_METHOD if use_scene else SCENE_FREE_CONFIDENCE_METHOD),
-        confidence_motion_source=np.str_("drift_pre_with_final_fallback"),
-        source_body=np.str_(kin_path.name), source_body_sha256=np.str_(source_body_sha256),
-        source_scene=np.str_(scene_path.name if use_scene else ""),
-        source_scene_sha256=np.str_(source_scene_sha256),
+        contact_label_schema=np.int32(CONTACT_LABEL_SCHEMA),
+        contact_label_method=np.str_(CONTACT_LABEL_METHOD),
+        quality_flag=np.str_(flag),                       # "" = pass; "camera" / "depth" / "camera+depth"
+        quality_cam_ratio=np.float32(cam_ratio),          # camera-travel spread / median scene depth
+        quality_smear_med=np.float32(smear_med),          # median along-ray human-cloud smear
+        quality_res_before_bw=np.float32(res_before_bw),  # median pre-force root residual, body weights
+        frame_contact=frame_contact,
+        frame_force=frame_force,                 # (P,N,12,3) world contact force, newtons
+        frame_force_bw=frame_force_bw,           # (P,N,12) the same as a fraction of body weight
+        frame_force_label=frame_force_label,     # (P,N,12) the force decision BEFORE the union
+        frame_contact_geom=frame_contact_geom,   # (P,N,12) the geometric arm BEFORE the union
+        frame_pressed=frame_pressed,             # (P,N,12) penetration-exception keep mask
+        force_dist_m=force_dist_m,               # (P,N,12) scene distance as the force solve saw it (1 m search; NaN = no scene evidence)
+        frame_wall_dot=frame_wall_dot,           # (P,N,12) dot(cone axis, wall normal), force search radius
+        body_weight_n=body_weight_n,             # (P,) baked mass x g
+        residual_force_before_n=residual_before_n,   # (P,N) root residual with no contact force
+        residual_force_after_n=residual_after_n,     # (P,N) and after the solve
+        force_theta_bw=np.float32(cf["theta_bw"]),
+        force_theta_hold_bw=np.float32(cf["theta_hold_bw"]),
+        force_gap_dstar_m=np.float32(cf["gap_dstar_m"]),
+        force_stillness_vstar_mps=np.float32(cf["stillness_vstar_mps"]),
+        force_far_still_x=np.float32(cf["far_still_x"]),
+        still_override_m=np.float32(cg["still_override_m"]),
+        frame_sdf_cm=frame_sdf_cm,
+        frame_distance_cm=frame_distance_cm,
+        frame_drift_m=frame_drift_m,
+        frame_normal_dot=frame_normal_dot,
+        merged=merged_all,
+        contact_frame_names=np.array(frame_names),
+        frame_parent_joint=np.array(body.contact_frame_parents, dtype=np.int64),
+        frame_vertex=np.array(body.contact_frame_vertices, dtype=np.int64),
+        joint_names=kin["joint_names"], parents=parents,
+        object_ids=object_ids, valid_mask=valid_mask,
+        num_people=np.int32(num_people), num_frames=np.int32(num_frames),
+        video_height=np.int32(height), video_width=np.int32(width), fps=np.float32(fps),
+        source_body=np.str_(kin_path.name), source_body_sha256=np.str_(_sha256(kin_path)),
+        source_scene=np.str_(scene_path.name), source_scene_sha256=np.str_(_sha256(scene_path)),
         source_transform=np.str_(transform_path.name),
-        source_transform_sha256=np.str_(source_transform_sha256),
-        source_human=np.str_(human_path.name if human_cloud is not None else ""),
-        source_human_sha256=np.str_(source_human_sha256),
-        source_gravity=np.str_(source_gravity),
-        source_gravity_sha256=np.str_(source_gravity_sha256),
-        gravity_source=np.str_(gravity_source),
-        object_ids=object_ids, joint_names=kin["joint_names"], parents=parents,
-        valid_mask=kin["valid_mask"],
-        num_people=np.int32(P), num_frames=np.int32(N),
-        video_height=np.int32(H), video_width=np.int32(W), fps=np.float32(fps),
+        source_transform_sha256=np.str_(_sha256(transform_path)),
         close_thresh_m=np.float32(cc["close_thresh_m"]),
         exit_thresh_m=np.float32(cc["exit_thresh_m"]),
-        min_frames=np.int32(cc["min_frames"]),
+        min_span_s=np.float32(cc["min_span_s"]),
+        min_frames=np.int32(min_frames),
         max_dist_m=np.float32(cc["max_dist_m"]),
+        conf_thresh=np.float32(cc["conf_thresh"]),
+        prune_margin_m=np.float32(cc["prune_margin_m"]),
+        merge_dist_m=np.float32(cc["merge_dist_m"]),
+        merge_max_gap_s=np.float32(cc["merge_max_gap_s"]),
+        merge_sdf_m=np.float32(cc["merge_sdf_m"]),
         drift_window_s=np.float32(cg["window_s"]),
         drift_still_m=np.float32(cg["still_m"]),
     )
-    save.update({f"confidence_{key}": np.float32(value)
-                 for key, value in cfg["contact_confidence"].items()})
-    save.update({f"depth_fit_{key}": np.float32(value)
-                 for key, value in cfg["depth_fit"].items()})
-    save.update({f"completion_{key}": (np.int32(value) if key == "min_span" else np.float32(value))
-                 for key, value in comp_knobs.items()})
-    if not np.array_equal(joint_contact, contact_source != 0):
-        raise RuntimeError("label provenance mismatch: joint_contact != (contact_source != 0)")
+    if np.isinf(frame_sdf_cm).any() or np.isinf(frame_distance_cm).any():
+        raise RuntimeError("frame scene diagnostics may be NaN when missing, but never infinite")
     out_path = paths.contacts_path(pred, tag)
-    np.savez(out_path, **save)
+    atomic_savez(out_path, **save)
     print(f"[estimate_contacts] wrote {out_path}")
 
     if overlay:
         from tools.human_optim.overlay import render_contact_overlay
-        ov = render_contact_overlay(source, paths.overlay_path(pred, f"contacts_{tag}"),
-                                    joints_2d, joint_contact, parents, valid_mask, H, W, fps,
-                                    label_confidence=confidence_all["label_confidence"])
-        print(f"[estimate_contacts] wrote {ov}")
+        rendered = render_contact_overlay(
+            source, paths.overlay_path(pred, f"contacts_{tag}"), frames_2d, frame_contact,
+            valid_mask, height, width, fps)
+        print(f"[estimate_contacts] wrote {rendered}")
     return out_path
 
 

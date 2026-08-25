@@ -19,13 +19,10 @@ def human_optim_dir(pred: str | Path) -> Path:
 
 
 def body_path(pred: str | Path, name: str) -> Path:
-    """Refined-body npz by basename (``root`` / ``kinematic_1`` / ``kinematic_2``)."""
+    """Refined-body npz by basename (``root`` / ``kinematic_1`` / ``kinematic_2`` /
+    ``kindyn_1`` / ``kindyn_manual``)."""
     return human_optim_dir(pred) / f"{name}.npz"
 
-
-def dynamics_path(pred: str | Path) -> Path:
-    """Force-only RNEA output npz."""
-    return human_optim_dir(pred) / "dynamics.npz"
 
 
 def contacts_path(pred: str | Path, tag: str) -> Path:
@@ -37,9 +34,3 @@ def overlay_path(pred: str | Path, name: str) -> Path:
     """Debug overlay mp4 (``name`` e.g. ``kinematic_1``, ``contacts_2``)."""
     return human_optim_dir(pred) / f"{name}_overlay.mp4"
 
-
-def diagnostics_dir(pred: str | Path) -> Path:
-    """Per-person loss-diagnostic directory (created on demand)."""
-    d = human_optim_dir(pred) / "diagnostics"
-    d.mkdir(parents=True, exist_ok=True)
-    return d

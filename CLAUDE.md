@@ -7,7 +7,8 @@ plus **per-contact-joint forces** on the refined bodies. Track the people (SAM 3
 **anchor VGGT's metric scale to the human body** (rescales the fused geometry in
 place) → **visually-guided kinematic refinement**. The
 default chain ends at the refined SMPL-X bodies; scene contacts, gravity,
-annotation-guided refinement, and force dynamics are standalone SMPL-X stages.
+annotation-guided refinement, and the joint kinematics+dynamics stage are
+standalone SMPL-X stages.
 
 The algorithm docs live in `docs/` and are the reference for auditing the
 optimization — keep them current when the code changes:
@@ -16,8 +17,10 @@ optimization — keep them current when the code changes:
 - [`docs/fusion.md`](docs/fusion.md) — up-to-scale clouds, relative two-pass voxel merge
 - [`docs/human_optimization.md`](docs/human_optimization.md) — the 4 stages, every loss term
 - [`docs/contacts.md`](docs/contacts.md) + [`docs/contact_confidence.md`](docs/contact_confidence.md) — contact labels + confidence
-- [`docs/contact_fusion.md`](docs/contact_fusion.md) — folding the external model's predicted contacts into the labels
+- [`docs/force_contacts.md`](docs/force_contacts.md) — the force witness: contact detection by inverse dynamics, end to end
+- [`docs/contact_fusion.md`](docs/contact_fusion.md) — retired per-joint-era mechanism (kept as a design record)
 - [`docs/depth_fit.md`](docs/depth_fit.md) — per-joint depth-fit metric (the "spaghettization" detector)
+- [`docs/quality.md`](docs/quality.md) — depth-smear downweighting, the scene-quality table, whole-body force confidence
 - [`docs/contact_points.md`](docs/contact_points.md) — investigation (not implemented): contact on mesh points instead of joints
 
 ## Experimental branch — working principles
@@ -51,9 +54,9 @@ process: `--source`, `--predictions`, `--save-dir`, stage/scene selection,
   read by the stage CLIs themselves + `[steps]`/`[runtime]` for the orchestrator.
 - [`configs/human_optimization.toml`](configs/human_optimization.toml) — the four
   human-optimization stages: loss weights as length-4 columns
-  `[root, kinematics_1, kinematics_2, dynamics]` (a term is off where its column
-  is 0), per-stage `[stages.*]` options, shared knob sections, `[contacts]` +
-  `[contact_confidence]`.
+  `[root, kinematics_1, kinematics_2, kindyn_1]` (a term is off where its
+  column is 0), per-stage `[stages.*]` options, shared knob sections, `[contacts]` +
+  `[contact_force]`.
 - [`configs/corpus.toml`](configs/corpus.toml) — ClimbingVideos DB fan-out (data
   root, devices, QA/discard) + the corpus tools (`[export]`, `[score]`).
 
@@ -69,9 +72,9 @@ process: `--source`, `--predictions`, `--save-dir`, stage/scene selection,
   knobs come from the same pipeline/human-optimization TOMLs (written per shard
   with the corpus overrides), so the two pipelines cannot drift. Selection:
   `--scenes/--sample/--limit`, plus `--dry-run`. DB access in `scripts/scene_db.py`.
-- `scripts/export_contact_dataset.py` packages a standalone 22-joint train/test
-  contact corpus; `scripts/score_contacts.py` scores contacts against manual
-  annotations.
+- `scripts/score_frame_contacts.py` scores the stage's contact-frame labels
+  against manual annotations (`score_contacts.py` is the frozen per-joint-era
+  scorer).
 
 ## The pipeline & `out/<stem>/` contract
 
@@ -87,19 +90,20 @@ Default chain in order (rows 1–8; `human_optimization` runs its `root` +
 | 5 | `convert_mhr_to_smplx.py` | `sam3d/params.npz` | `sam3d/smplx_params.npz` (`(P,N,…)` classic SMPL-X), overlay |
 | 6 | `fuse_geometry.py` | `vggt/`, `sam3/`, `sam3d/smplx_params.npz`, frames | `geometry/transform.npz` (cameras, `metric=False`), `geometry/scene.npz` (two-pass voxel merge + hidden-point prune + per-point normals), `geometry/human.npz` (per-frame human points) |
 | 7 | `estimate_scale.py` | `sam3d/smplx_params.npz`, `vggt/camera.npz`, `sapiens/pose.npz`, `geometry/` | `geometry/scale.npz` + rescales `transform/scene/human.npz` in place (`metric=True`); `geometry/prefit.npz` (dual scale+body pre-fit bodies, unless `prefit=false`) |
-| 8 | `human_optimization.py` (`root`+`kinematics_1`) | `sam3d/smplx_params.npz`, `sapiens/pose.npz`, `geometry/` (init pose = `prefit.npz` when present) | `human_optim/kinematic_1.npz` (world-frame `q (P,N,211)` + `drift_pre` + `auto_labels`), optional overlay |
-| – | `human_optimization.py --stages kinematics_2` | `kinematic_1.npz`, labels (`data/<stem>.npz` manual, or `contacts_1.npz` auto — `[stages.kinematics_2].labels`) | `human_optim/kinematic_2.npz` |
-| – | `estimate_contacts.py` | a refined body (`--bodies`), `geometry/` | `human_optim/contacts_<tag>.npz` (per-joint labels + confidence + depth-fit gap/trust) |
-| – | `estimate_gravity_geocalib.py` | frames, `geometry/transform.npz` | `geocalib/gravity.npz` (world-frame down + `reliable` flag) |
-| – | `human_optimization.py --stages dynamics` | a refined body + its contacts (default `kinematic_1.npz` + `contacts_1.npz`; `[stages.dynamics].bodies`), gravity | `human_optim/dynamics.npz` (world contact forces at 6 joints — hands/feet/ankles — + joint torques + per-frame root `base_wrench`) |
+| 8 | `human_optimization.py` (`root`+`kinematics_1`) | `sam3d/smplx_params.npz`, `sapiens/pose.npz`, `geometry/` (init pose = `prefit.npz` when present) | `human_optim/kinematic_1.npz` (world-frame `q (P,N,211)` + per-contact-frame `drift_pre`/`auto_labels (P,N,12)`), optional overlay |
+| – | `human_optimization.py --stages kinematics_2` | `kinematic_1.npz` + `contacts_1.npz` frame labels (per-joint `data/<stem>.npz` via `[stages.kinematics_2].labels = "manual"`) | `human_optim/kinematic_2.npz` (contact-patch repair: each labelled contact frame pulled onto the wall seen at its own pixel; `drift_pre` forwarded) |
+| – | `estimate_contacts.py` | a refined body (`--bodies`), `geometry/`, its `drift_pre` | `human_optim/contacts_<tag>.npz` — **per-contact-frame** labels (schema 2 `frames-v4`: 12 frames, geometric gates ∪ the force witness, toe rule = whichever side the solve loaded, debounce + hysteresis; see `docs/force_contacts.md`) |
+| – | `estimate_gravity_geocalib.py` | frames, `geometry/transform.npz`, `geometry/scene.npz` | `geocalib/gravity.npz` (world-frame down + `source`: reliable GeoCalib > gated ground-plane fit > camera-down fallback; the accepted floor plane is saved for the viewer) |
+| – | `human_optimization.py --stages kindyn_1` | a refined body + its contacts (default `kinematic_2.npz` + `contacts_2.npz`; `[stages.kindyn_1].bodies`), gravity | `human_optim/kindyn_1.npz` (pose AND per-contact-frame forces solved together; each force in a 45° cone about that frame's contact normal) |
 
 Viewer: `scripts/view_3d.py out/<stem>/` (viser: fused scene + cameras + human
 points + bodies; the **`body source`** dropdown switches `original` / `prefit` /
-`kinematics` / `kinematics_2` / `kindyn_1` / `kindyn_manual` / `dynamics`; the
-skeleton + contact/confidence/depth-trust layers draw for both `kinematics`
-(from `contacts_1`) and `kinematics_2` (from `contacts_2`); a **`scene normals`** debug layer
-draws the per-point normal arrows; a **`depth trust (spaghetti)`** layer colors
-joints by the per-joint depth-fit metric). `--scenes` browses the DB.
+`kinematics` (+ the frozen-era sources when their files exist); the skeleton
+draws all 52 joints — fingers as small 0.30× spheres; the **`contact frames`**
+layer draws the 12 contact frames red/green from `contacts_1` with a thin
+connector to each parent joint and a 6 cm outward-normal arrow; a
+**`scene normals`** debug layer draws the per-point normal arrows). `--scenes`
+browses the DB.
 
 ## Run
 
@@ -126,8 +130,8 @@ BetterVideoReconstruction/
 │   ├── pipeline.py                # LOCAL pipeline (subprocess orchestrator)
 │   ├── corpus.py                  # DATASET pipeline: any stage over the scene DB
 │   ├── scene_db.py                # scene-DB access + target selection
-│   ├── export_contact_dataset.py  # dataset packaging (frames/masks/labels)
-│   ├── score_contacts.py          # contact scoring vs manual annotations
+│   ├── score_frame_contacts.py    # contact-frame scoring vs manual annotations
+│   ├── score_contacts.py          # per-joint-era scorer (frozen)
 │   ├── view_3d.py                 # viser viewer
 │   ├── _pym_preload.py            # libstdc++ LD_PRELOAD shim for pymomentum
 │   └── stages/                    # the per-stage CLIs in the table above
@@ -151,16 +155,17 @@ BetterVideoReconstruction/
   and a list of `Phase` rows (weight column, iters, Adam/L-BFGS, DOF masks). A
   term is active iff its phase weight is non-zero, so the TOML weight columns ARE
   the objective. Kinematics (`tools/human_optim/optimizer.py`) and the scale
-  stage's pre-fit run on it; `dynamics` keeps its own small L-BFGS solve (its
-  weights multiply inside squared norms).
+  stage's pre-fit run on it; the force witness keeps its own small projected-Adam
+  solve (its weights multiply inside squared norms).
 - **Multi-person throughout.** Every stage from `sam3d` on carries a leading
   `(P, N, …)` axis with `object_ids (P,)`.
 - **Body is SMPL-X.** `convert_mhr_to_smplx` uses pip `smplx` (the only place);
   the optimization path poses via `better_human` (`SMPLXMid`, 52 joints,
   `q (N,211)`). No per-body scale — `estimate_scale` sizes the world to the body.
 - **Keypoints are Goliath-308**, not COCO-wholebody (`tools/human_optim/keypoints.py`).
-- **Camera is VGGT's** (scale-invariant intrinsics); **gravity is GeoCalib's**
-  (world-frame, `reliable` flag, world-down fallback); **VGGT geometry is
+- **Camera is VGGT's** (scale-invariant intrinsics); **gravity is the gravity stage's**
+  (world-frame; reliable GeoCalib, else a gated floor-plane fit to the fused
+  scene, else world-down); **VGGT geometry is
   up-to-scale**: `fuse` builds the clouds unscaled (`metric=False`), then
   `estimate_scale` measures `s` against the fused human points and rescales the
   saved geometry in place (`metric=True`; downstream stages check the flag).

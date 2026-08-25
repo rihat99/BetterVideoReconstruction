@@ -105,7 +105,7 @@ def _perclip_output(step: str, clip_dir: Path, cfg: dict) -> Path:
         if not ho_path.is_absolute():
             ho_path = _REPO_ROOT / ho_path
         st = list(load_toml(ho_path).get("stages", {}).get("run", ["root", "kinematics_1"]))
-        name = ("dynamics" if "dynamics" in st
+        name = ("kindyn_1" if "kindyn_1" in st
                 else "kinematic_2" if "kinematics_2" in st
                 else "kinematic_1" if "kinematics_1" in st
                 else "root")

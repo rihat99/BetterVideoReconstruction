@@ -1,5 +1,9 @@
 # Contact fusion: combining detected and predicted contacts
 
+> **Retired.** This describes the per-joint-era mechanism; `fusion.py`, the
+> `labels = "predicted"` wiring and the peter configs that used them are deleted
+> from the code and live in git history. Kept as a design record.
+
 The pipeline has two independent opinions about whether a limb touches the wall.
 
 - The **geometric labels** from the contact stage ([contacts.md](contacts.md)):
@@ -58,8 +62,8 @@ overrules the model's false positives wherever it actually measured something.
   `contact_source` gains bit 8.
 - **Veto** (fused says free, geometry said contact): every member joint of the
   limb is cleared.
-- Both kinds of change are dropped if they last fewer than `min_frames`
-  (3) frames — the stage's usual span rule, applied symmetrically.
+- Both kinds of change are dropped if they last less than `min_span_s`
+  (0.1 s) — the stage's usual span rule, applied symmetrically.
 - Changed joints get the fused confidence; untouched labels keep the witness
   confidence they already had.
 

@@ -37,7 +37,8 @@ other's.
 A clip that fails is reported and skipped — one bad clip never kills the batch.
 
 Knobs live in the TOMLs (``configs/pipeline_peter.toml`` for the model +
-geometry stages, ``configs/human_optimization.toml`` for the human stages);
+geometry stages, ``configs/human_optimization_peter.toml`` for the human
+stages — the general config restricted to hand/foot contact frames);
 this CLI only takes targets.
 
 Usage::
@@ -259,7 +260,7 @@ def main(argv: list[str] | None = None) -> int:
                         default=_REPO_ROOT / "configs" / "pipeline_peter.toml",
                         help="model + geometry stage TOML")
     parser.add_argument("--human-config", type=Path,
-                        default=_REPO_ROOT / "configs" / "human_optimization.toml",
+                        default=_REPO_ROOT / "configs" / "human_optimization_peter.toml",
                         help="human-optimization + contacts TOML")
     args = parser.parse_args(sys.argv[1:] if argv is None else argv)
 

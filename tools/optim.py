@@ -102,9 +102,9 @@ class Phase:
 
     ``weights`` is this phase's ``{term: weight}`` column (0 ⇒ the term is off
     here). ``grad_mask`` multiplies each named leaf's gradient after backward —
-    zeros freeze DOFs without touching the optimizer. ``on_start`` runs once
-    before the phase's first iteration (build scene candidates, detect labels…)
-    even when ``iters`` is 0.
+    zeros freeze DOFs without touching the optimizer, under Adam **and** L-BFGS.
+    ``on_start`` runs once before the phase's first iteration (build scene
+    candidates, detect labels…) even when ``iters`` is 0.
     """
 
     name: str
@@ -113,6 +113,16 @@ class Phase:
     optimizer: str = "adam"          # "adam" | "lbfgs"
     grad_mask: dict[str, torch.Tensor] | None = None
     on_start: Callable[[], None] | None = None
+
+
+def _apply_grad_mask(problem: Problem, grad_mask: dict[str, torch.Tensor] | None) -> None:
+    """Zero the frozen coordinates of each masked leaf's gradient, in place."""
+    if not grad_mask:
+        return
+    for name, mask in grad_mask.items():
+        grad = problem.leaves[name].grad
+        if grad is not None:
+            grad.mul_(mask)
 
 
 def _log(prefix: str, phase: str, it: int, loss: torch.Tensor, report: dict) -> None:
@@ -132,7 +142,6 @@ def run_phases(
     lr_decay: float | None = None,
     lr_lbfgs: float = 1.0,
     lbfgs_history: int = 10,
-    log_prefix: str = "    ",
 ) -> None:
     """Run ``phases`` in order, mutating the problem's leaves in place.
 
@@ -158,9 +167,10 @@ def run_phases(
                 opt.zero_grad()
                 loss, report = problem.evaluate(ph.weights)
                 loss.backward()
+                _apply_grad_mask(problem, ph.grad_mask)
                 step[0] += 1
                 if step[0] == 1 or step[0] % 5 == 0:
-                    _log(log_prefix, ph.name, step[0], loss, report)
+                    _log("    ", ph.name, step[0], loss, report)
                 return loss
 
             opt.step(closure)
@@ -175,13 +185,9 @@ def run_phases(
             opt.zero_grad()
             loss, report = problem.evaluate(ph.weights)
             loss.backward()
-            if ph.grad_mask:
-                for name, mask in ph.grad_mask.items():
-                    grad = problem.leaves[name].grad
-                    if grad is not None:
-                        grad.mul_(mask)
+            _apply_grad_mask(problem, ph.grad_mask)
             opt.step()
             if sched is not None:
                 sched.step()
             if it % max(1, iters // 4) == 0 or it == iters - 1:
-                _log(log_prefix, ph.name, it, loss, report)
+                _log("    ", ph.name, it, loss, report)

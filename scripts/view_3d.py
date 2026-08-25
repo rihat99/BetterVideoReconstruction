@@ -15,7 +15,8 @@ For each clip it shows, in the metric world frame:
   re-uploads),
 * the per-frame **camera** frustums + centre path,
 * the world-frame **gravity** arrow (when the geocalib stage has run),
-* a **ground plane** fitted to the lowest scene points, and
+* the **ground plane** the gravity stage fitted and accepted (drawn from
+  ``geocalib/gravity.npz``; absent when the floor was not visible), and
 * the fitted **SMPL-X bodies** for every tracked person, following the slider.
 
 **Body source** dropdown switches between:
@@ -23,15 +24,22 @@ For each clip it shows, in the metric world frame:
 * ``original`` — the raw, pre-optimization SAM-3D-Body → SMPL-X converter output
   (``smplx_params.npz``, folded to the world frame);
 * ``kinematics`` / ``kinematics_2`` — the refined world-frame bodies
-  (``human_optim/kinematic_{1,2}.npz``); both draw the skeleton overlay with
-  contact / confidence / depth-trust colouring from their own contact artifact
-  (``contacts_1`` / ``contacts_2``);
+  (``human_optim/kinematic_{1,2}.npz``); both draw the 52-joint skeleton overlay
+  (finger joints small, because the contact frames hang off them) and the
+  **contact frames** layer: the 12 named skin points — toes, heels, knees, palms,
+  fingertips — that contact is detected on, each shown as a sphere (red touching
+  the scene / green free, from its own contact artifact ``contacts_1`` /
+  ``contacts_2``), a thin link to the joint it rides on, and a short arrow along
+  its outward normal;
 * ``kindyn_1`` / ``kindyn_manual`` — the joint kinematics+dynamics bodies
   (``human_optim/kindyn_{1,manual}.npz``; ``kindyn_manual`` is the
   manual-annotation reference chain), skinned meshes that also carry
-  force/torque data;
-* ``dynamics`` — force-only (no mesh): the 52-joint torque-scaled sphere/bone
-  skeleton (via the independent ``skeleton`` layer) + blue contact-force arrows.
+  force/torque data.
+
+The dynamics folder's **force display** dropdown picks the arrow regime:
+``per-joint`` accumulates each joint's frame forces into one arrow at the joint
+(the classic view), ``per-frame`` draws every contact frame's own solved force
+where it acts on the skin (kindyn sources, which store ``frame_forces``).
 
 The three mesh sources are each one skinned mesh per person, posed per frame (LBS
 in the browser, one upload) over a single averaged ``betas`` identity.
@@ -45,10 +53,13 @@ toggle (off by default) rides the reconstructed camera — matching its pose and
 field of view each frame and locking out manual orbiting — so you watch from the
 filming camera's own viewpoint.
 
-The sidebar's **layers** checkboxes toggle whole groups on/off — SMPL-X body,
-human points, scene points, cameras, gravity, ground plane — so you never have to
-open viser's scene tree. Layer choices persist across example switches. A **sizes**
-panel scales the scene points, human points, and camera frustums independently.
+The sidebar's **layers** checkboxes toggle whole groups on/off — SMPL-X body, body
+skeleton, contact frames, human points, scene points, scene normals, cameras,
+gravity — so you never have to open viser's scene tree. Checkboxes that do not
+apply to the active body source are hidden (contact frames need a body with a
+contact artifact). Layer choices persist across example switches. A **sizes** panel
+scales the scene points, human points, and camera frustums independently; the mesh
+turns translucent while a skeleton or the contact frames overlay it.
 
 The view opens framed on the clip's average human root (so orbiting pivots on the
 climber, not the world origin), under viser's default lighting on a white backdrop.

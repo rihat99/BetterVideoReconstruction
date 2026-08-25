@@ -1,5 +1,17 @@
 """Scene-contact estimation for the optimized SMPL-X bodies.
 
+**Contact lives on the 12 contact frames** — named mesh points (toes, heels,
+knees, palms, fingertips) baked onto the body, each carrying its own outward
+surface normal (:mod:`tools.body`). :func:`detect_frame_contacts` is the one
+detector both the kinematic stage's frozen auto-labels and the standalone
+``estimate_contacts`` readout call, so the two can never drift apart. The rest of
+this module is the generic span/drift machinery it is built from
+(:func:`joint_drift`, :func:`stillness_weight`, :func:`hysteresis_spans`,
+:func:`drift_gated_contact`, :func:`merge_contact_spans` — all agnostic to what
+the ``K`` axis means) plus the older per-joint pieces the frozen offline scorer
+(``scripts/score_contacts.py``) still imports.
+
+The older per-joint model, kept for those stages:
 Given a posed (world-frame, scaled) SMPL-X mesh and the static scene point cloud,
 mark which body vertices touch the scene with a point-cloud SDF, then lift the
 per-vertex contacts to **per-joint** contacts by nearest-joint assignment (each
@@ -21,8 +33,31 @@ chunked-batched machinery the per-iteration losses need.
 
 from __future__ import annotations
 
+import math
+from collections.abc import Sequence
+from typing import NamedTuple
+
 import numpy as np
 import torch
+
+
+#: Raw-detection blip killer, deliberately a FIXED frame count at every fps: at 60 fps a
+#: true contact often surfaces as dense 3–5-frame flicker, and a longer gate would delete
+#: it before the stage's gap-welding can fuse it into a span (measured: 2nwG contact
+#: recall .67 → .42 with a 0.1 s gate inside detection). The duration rule that IS
+#: fps-aware (:func:`min_span_frames`) runs in ``estimate_contacts`` after the welding.
+DETECT_MIN_FRAMES = 3
+
+
+def min_span_frames(min_span_s: float, fps: float) -> int:
+    """``[contacts].min_span_s`` (seconds) → the frame count the POST-WELD span rule uses.
+
+    ``ceil`` so the duration gate never weakens with frame rate: 0.1 s is 3 frames
+    at every shipped 24–30 fps rate (the old ``min_frames = 3``) and 5–6 at 50–60
+    fps. Applied to the fused labels after gap-welding — never inside raw detection,
+    where :data:`DETECT_MIN_FRAMES` rules (see its note).
+    """
+    return max(1, math.ceil(float(min_span_s) * float(fps)))
 
 
 @torch.no_grad()
@@ -76,28 +111,6 @@ def scene_sdf(
         dmin[t] = dm
         conf[t] = cc[idx]
     return sdf, dmin, conf
-
-
-def contact_from_sdf(
-    sdf: torch.Tensor,      # (T, V) signed Euclidean SDF (m)
-    dmin: torch.Tensor,     # (T, V) Euclidean NN distance (m)
-    conf: torch.Tensor,     # (T, V) NN-point confidence
-    *,
-    close_thresh_m: float,
-    max_dist_m: float,
-    conf_thresh: float,
-) -> torch.Tensor:
-    """Boolean per-vertex contact ``(T, V)``.
-
-    A vertex is in contact when it is **inside** the scene (``sdf < 0``) or
-    **just outside** it (``0 ≤ sdf < close_thresh_m``) — i.e. ``sdf <
-    close_thresh_m`` — provided it is genuinely near a confident surface. Two
-    guards (mirroring the penetration loss) keep strays from false-flagging:
-    ``dmin < max_dist_m`` rejects a vertex whose only "penetration" is a deep,
-    almost-always-spurious correspondence behind an occluder, and ``conf >
-    conf_thresh`` trusts only well-observed scene points.
-    """
-    return (sdf < close_thresh_m) & (dmin < max_dist_m) & (conf > conf_thresh)
 
 
 _MT_EPS = 1e-8
@@ -230,54 +243,6 @@ def vertex_to_joint(vertices: torch.Tensor, joints: torch.Tensor) -> torch.Tenso
     return torch.cdist(vertices[None], joints[None])[0].argmin(dim=1)
 
 
-def lift_joint_contact(
-    vcontact: torch.Tensor,         # (T, V) bool per-vertex contact
-    sdf: torch.Tensor,              # (T, V) signed SDF (m) — for the diagnostic
-    v2j: torch.Tensor,              # (V,) long vertex→joint
-    num_joints: int,
-) -> tuple[torch.Tensor, torch.Tensor]:
-    """Lift per-vertex contacts to per-joint ``(T, J)``.
-
-    A joint is in contact when **any** vertex assigned to it is in contact (a
-    ``scatter`` max over the joint's vertices). Also returns ``joint_sdf_cm
-    (T, J)`` — the *minimum* signed distance (cm) over each joint's vertices, the
-    continuous quantity behind the boolean (handy for thresholding / diagnosis).
-    A joint with no near-surface vertex this frame gets ``nan``.
-    """
-    T = vcontact.shape[0]
-    dev = vcontact.device
-    INF = torch.finfo(sdf.dtype).max
-    idx = v2j[None].expand(T, -1)                               # (T, V)
-    jc = torch.zeros((T, num_joints), device=dev)
-    jc.scatter_reduce_(1, idx, vcontact.to(jc.dtype), reduce="amax", include_self=True)
-    jsdf = torch.full((T, num_joints), INF, device=dev, dtype=sdf.dtype)
-    jsdf.scatter_reduce_(1, idx, sdf, reduce="amin", include_self=True)
-    jsdf_cm = torch.where(jsdf < INF * 0.5, jsdf * 100.0, torch.full_like(jsdf, float("nan")))
-    return jc > 0.5, jsdf_cm
-
-
-def lift_joint_min_distance(
-    distance_m: torch.Tensor,       # (T, V) nonnegative per-vertex distance (m)
-    v2j: torch.Tensor,              # (V,) long vertex→joint
-    num_joints: int,
-) -> torch.Tensor:
-    """Minimum Euclidean scene distance for each joint's owned surface ``(T,J)``.
-
-    Unlike signed wall-normal SDF, this is a true clearance magnitude and cannot
-    read near zero merely because a far-away correspondence lies tangent to a bad
-    scene normal. A joint with no finite scene candidate is returned as ``NaN``.
-    """
-    T = distance_m.shape[0]
-    INF = torch.finfo(distance_m.dtype).max
-    idx = v2j[None].expand(T, -1)
-    finite_distance = torch.where(
-        torch.isfinite(distance_m), distance_m, torch.full_like(distance_m, INF))
-    out = torch.full(
-        (T, num_joints), INF, device=distance_m.device, dtype=distance_m.dtype)
-    out.scatter_reduce_(1, idx, finite_distance, reduce="amin", include_self=True)
-    return torch.where(out < INF * 0.5, out, torch.full_like(out, float("nan")))
-
-
 def joint_guarded_min_sdf(
     sdf: torch.Tensor,      # (T, V) signed SDF (m)
     dmin: torch.Tensor,     # (T, V) Euclidean NN distance (m)
@@ -290,16 +255,13 @@ def joint_guarded_min_sdf(
 ) -> torch.Tensor:
     """Per-joint minimum signed distance over each joint's GUARDED vertices ``(T, J)``.
 
-    A vertex contributes only if it passes the same far / confidence guards as
-    :func:`contact_from_sdf` (``dmin < max_dist_m`` and ``conf > conf_thresh``);
-    guarded-out vertices are set to ``+inf`` so they never win the per-joint min, and
-    a joint with no guarded vertex this frame is ``+inf``. This is the continuous
-    per-joint signal the temporal hysteresis (:func:`hysteresis_spans`) thresholds —
-    the guarded counterpart of :func:`lift_joint_contact`'s raw ``joint_sdf`` (which
-    stays unguarded as the diagnostic channel). Feeding hysteresis the guarded min
-    keeps its ``enter`` threshold exactly equivalent to the old per-vertex boolean
-    (``∃`` guarded vertex with ``sdf < enter``) while letting a looser ``exit`` hold
-    the span.
+    A vertex contributes only if it passes the far / confidence guards
+    (``dmin < max_dist_m`` and ``conf > conf_thresh``); guarded-out vertices are set
+    to ``+inf`` so they never win the per-joint min, and a joint with no guarded
+    vertex this frame is ``+inf``. This is the continuous per-joint signal the
+    temporal hysteresis (:func:`hysteresis_spans`) thresholds: its ``enter``
+    threshold is exactly "∃ guarded vertex with ``sdf < enter``" while a looser
+    ``exit`` holds the span.
     """
     guard = (dmin < max_dist_m) & (conf > conf_thresh)
     INF = torch.finfo(sdf.dtype).max
@@ -317,6 +279,7 @@ def hysteresis_spans(
     enter_below: float,
     exit_below: float,
     min_frames: int,
+    keep: torch.Tensor | None = None,
 ) -> torch.Tensor:
     """Temporal hysteresis + min-duration on a per-joint scalar series → ``(T, J)`` bool.
 
@@ -329,8 +292,11 @@ def hysteresis_spans(
       * close the span otherwise. A ``+inf`` / NaN frame (no guarded vertex) fails
         both tests and breaks the span.
 
-    Then any span shorter than ``min_frames`` is dropped (1–2-frame flicker). Returns
-    the boolean contact mask. Pure temporal post-process, no gradients.
+    Then any span shorter than ``min_frames`` is dropped (1–2-frame flicker) — unless
+    it contains a ``keep`` step (``(T, J)`` bool): a step that *presses into* the
+    surface is evidence, not flicker, however brief (see :func:`drift_gate` — the
+    penetration exception). Returns the boolean contact mask. Pure temporal
+    post-process, no gradients.
     """
     T, J = series.shape
     enter = series < enter_below                       # (T, J) — start condition (⊆ stay)
@@ -342,6 +308,7 @@ def hysteresis_spans(
         out[t] = active
     if min_frames > 1 and T > 0:
         oc = out.cpu().numpy()
+        kc = keep.cpu().numpy() if keep is not None else None
         for j in range(J):
             col = oc[:, j]
             t = 0
@@ -350,7 +317,7 @@ def hysteresis_spans(
                     s = t
                     while t < T and col[t]:
                         t += 1
-                    if t - s < min_frames:
+                    if t - s < min_frames and (kc is None or not kc[s:t, j].any()):
                         col[s:t] = False
                 else:
                     t += 1
@@ -428,6 +395,30 @@ def stillness_weight(drift: torch.Tensor, *, still_m: float) -> torch.Tensor:
     return (1.0 - drift / (2.0 * float(still_m))).clamp(0.0, 1.0)
 
 
+def drift_gate(guarded_min_sdf: torch.Tensor, drift: torch.Tensor, *,
+               still_m: float, still_override_m: float = -1.0) -> torch.Tensor:
+    """``guarded_min_sdf (T, K)`` with every step that failed the stillness gate at ``+inf``.
+
+    A step counts as still while :func:`stillness_weight` is above zero (drift below
+    ``2·still_m``). Forcing the rest to the sentinel — rather than masking — is what lets
+    :func:`hysteresis_spans` run unchanged: a moving step simply looks infinitely far from
+    the wall, so it can neither start nor hold a span.
+
+    ``still_override_m`` makes strong closeness outrank stillness: a step whose guarded
+    signed distance is below it keeps its signal even while moving fast. A sprinting foot
+    plant or a cartwheel hand is a real contact that no drift window can ever call still —
+    the window straddles the swing — but it *presses into the floor*, and that penetration
+    is evidence stillness cannot veto. The default (−1 m, below any reachable signed
+    distance) disables the override; the drift must still be a real measurement (an
+    untracked NaN step never passes).
+    """
+    weight = stillness_weight(drift, still_m=still_m)
+    pressed = (guarded_min_sdf < still_override_m) & torch.isfinite(drift)
+    infinity = torch.finfo(guarded_min_sdf.dtype).max
+    return torch.where((weight > 0.0) | pressed, guarded_min_sdf,
+                       torch.full_like(guarded_min_sdf, infinity))
+
+
 def drift_gated_contact(
     guarded_min_sdf: torch.Tensor,   # (T, J) guarded per-joint min signed distance (m)
     drift: torch.Tensor,             # (T, J) per-joint net window drift (m)
@@ -436,6 +427,7 @@ def drift_gated_contact(
     exit_thresh_m: float,
     min_frames: int,
     still_m: float,
+    still_override_m: float = -1.0,
 ) -> torch.Tensor:
     """The contact readout ``(T, J)`` bool: drift-gate, then temporal hysteresis.
 
@@ -446,13 +438,15 @@ def drift_gated_contact(
     :func:`hysteresis_spans` breaks the span there — exactly how the old hard speed
     veto plugged in, but with the windowed-drift signal that actually separates a
     grip from a slow pass. Shared by ``estimate_contacts`` and the offline scorer so
-    both score the identical readout.
+    both score the identical readout. ``still_override_m``: see :func:`drift_gate` —
+    a step pressing below it also exempts its span from the ``min_frames`` rule
+    (the same evidence outranks stillness *and* duration).
     """
-    w = stillness_weight(drift, still_m=still_m)
-    INF = torch.finfo(guarded_min_sdf.dtype).max
-    gated = torch.where(w > 0.0, guarded_min_sdf, torch.full_like(guarded_min_sdf, INF))
+    gated = drift_gate(guarded_min_sdf, drift, still_m=still_m,
+                       still_override_m=still_override_m)
     return hysteresis_spans(gated, enter_below=close_thresh_m,
-                            exit_below=exit_thresh_m, min_frames=min_frames)
+                            exit_below=exit_thresh_m, min_frames=min_frames,
+                            keep=gated < still_override_m)
 
 
 def _bool_spans(col) -> list[tuple[int, int]]:
@@ -516,3 +510,256 @@ def merge_contact_spans(
                 continue                   # re-grip guard: it left the wall in between
             out[t1 + 1:t2, j] = True
     return out
+
+
+# ── contact frames: the shared detector ───────────────────────────────────────
+# A contact frame is one mesh point that carries its own outward surface normal
+# (tools/body.py). TWO things must agree before it counts as touching:
+#   surface  — a confident scene point is close, and the frame sits at/just
+#              inside it (signed distance below the hysteresis thresholds);
+#   stillness — the frame barely drifted over a short window.
+# The frame's own normal is deliberately NOT a gate. Both inputs it would need are
+# too noisy to veto on: the scene normals come from a reconstructed point cloud, and
+# the frame's normal comes from the fitted pose. Gating on "does the skin face the
+# wall?" threw away real contacts — a fingertip 3 cm from a hold whose baked pad
+# normal pointed away because the hand pose was wrong. The normal survives in exactly
+# ONE role, telling the two toe sides apart: see :func:`suppress_toe_sides`.
+
+
+@torch.no_grad()
+def frame_scene_signals(
+    frame_points: torch.Tensor,    # (T, F, 3) world contact-frame positions
+    frame_normals: torch.Tensor,   # (T, F, 3) world outward unit normals
+    scene_pts: torch.Tensor,       # (M, 3) world scene points
+    scene_normals: torch.Tensor,   # (M, 3) outward unit normals
+    scene_conf: torch.Tensor,      # (M,) per-point confidence
+    *,
+    prune_margin_m: float = 0.10,
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+    """Per-(frame index, contact frame) scene signals ``(sdf, dmin, conf, normal_dot)``.
+
+    Each output is ``(T, F)``:
+
+      * ``sdf`` — **perpendicular** signed distance ``(p_f − p_nn)·n_scene`` to the
+        nearest scene point (metres); negative = behind the surface. Same
+        convention as :func:`scene_sdf`, so contact and the penetration loss agree.
+      * ``dmin`` — Euclidean distance to that nearest point (the far guard).
+      * ``conf`` — that point's confidence (the cloud-hole guard).
+      * ``normal_dot`` — ``dot(n_frame, −n_scene)`` ∈ [−1, 1]: ``+1`` when the
+        skin looks straight into the wall, ``−1`` when it faces away.
+
+    Only 12 points per time step, so the nearest neighbour is a plain per-frame
+    ``cdist`` after pruning the scene to the points' AABB + ``prune_margin_m``
+    (the margin must be at least the caller's ``max_dist_m``, or a true neighbour
+    just outside the box is lost). A time step with no scene point in its box
+    returns ``+inf`` distance, zero confidence and ``normal_dot = −1`` — no contact.
+    """
+    num_steps, num_frames = frame_points.shape[0], frame_points.shape[1]
+    device, dtype = frame_points.device, frame_points.dtype
+    infinity = torch.finfo(dtype).max
+    sdf = torch.full((num_steps, num_frames), infinity, device=device, dtype=dtype)
+    dmin = torch.full((num_steps, num_frames), infinity, device=device, dtype=dtype)
+    conf = torch.zeros((num_steps, num_frames), device=device, dtype=scene_conf.dtype)
+    normal_dot = torch.full((num_steps, num_frames), -1.0, device=device, dtype=dtype)
+    for t in range(num_steps):
+        points = frame_points[t]                                          # (F, 3)
+        if not bool(torch.isfinite(points).all()):
+            continue
+        low = points.amin(0) - prune_margin_m
+        high = points.amax(0) + prune_margin_m
+        near_box = ((scene_pts >= low) & (scene_pts <= high)).all(dim=-1)  # (M,) bool
+        if not bool(near_box.any()):
+            continue
+        candidate_pts = scene_pts[near_box]
+        candidate_normals = scene_normals[near_box]
+        distance = torch.cdist(points[None], candidate_pts[None])[0]       # (F, Mc)
+        nearest_distance, nearest = distance.min(dim=1)                    # (F,)
+        point, normal = candidate_pts[nearest], candidate_normals[nearest]
+        sdf[t] = ((points - point) * normal).sum(dim=-1)
+        dmin[t] = nearest_distance
+        conf[t] = scene_conf[near_box][nearest]
+        normal_dot[t] = -(frame_normals[t] * normal).sum(dim=-1)
+    return sdf, dmin, conf, normal_dot
+
+
+def frame_guarded_sdf(
+    sdf: torch.Tensor,          # (T, F) perpendicular signed distance (m)
+    dmin: torch.Tensor,         # (T, F) Euclidean NN distance (m)
+    conf: torch.Tensor,         # (T, F) NN-point confidence
+    *,
+    max_dist_m: float,
+    conf_thresh: float,
+) -> torch.Tensor:
+    """The continuous contact signal ``(T, F)``: ``sdf`` where both guards pass, ``+inf`` else.
+
+    Two guards, both cheap and both "no evidence ⇒ no contact":
+
+      * ``dmin < max_dist_m`` — the nearest scene point must genuinely be near
+        (a match behind an occluder is not a surface);
+      * ``conf > conf_thresh`` — a hole in the cloud must read as *unknown*, not
+        as *no wall*.
+
+    Forcing the failures to ``+inf`` (rather than masking) is what lets the plain
+    hysteresis / minimum-duration / span-merge machinery run unchanged — a guarded
+    step simply looks infinitely far from the wall, so it can never start or hold
+    a contact span.
+    """
+    guard = (dmin < max_dist_m) & (conf > conf_thresh)
+    infinity = torch.finfo(sdf.dtype).max
+    return torch.where(guard, sdf, torch.full_like(sdf, infinity))
+
+
+#: The foot's contact frames, underside vs top. A foot stands on its underside frames
+#: (heel included) or presses the top of its toe against a hold (toe hook) — never both
+#: at once. The two sides sit centimetres apart through the foot, so no distance /
+#: confidence / stillness gate can ever separate them — only their normals can. Names
+#: cover both frame sets: the legacy 12-frame set's underside is ``toe_under`` + ``heel``,
+#: the full-body set's (``better_contacts.json``) is ``ball_inner`` / ``ball_outer`` /
+#: ``big_toe`` + ``heel``; :func:`toe_side_slots` keeps only the names that exist.
+TOE_SIDES: tuple[tuple[tuple[str, ...], tuple[str, ...]], ...] = (
+    (("toe_under_left", "ball_inner_left", "ball_outer_left", "big_toe_left", "heel_left"),
+     ("toe_above_left",)),
+    (("toe_under_right", "ball_inner_right", "ball_outer_right", "big_toe_right",
+      "heel_right"),
+     ("toe_above_right",)),
+)
+
+
+def toe_side_slots(
+    frame_names: Sequence[str],
+) -> tuple[tuple[tuple[int, ...], tuple[int, ...]], ...]:
+    """Resolve :data:`TOE_SIDES` to per-foot ``(sole, top)`` column-index tuples.
+
+    Always by NAME, never by arithmetic on positions: the stored frame order is not the
+    obvious one (slots 10/11 are finger_RIGHT then finger_LEFT). Absent names are
+    dropped; a foot whose sole or top side comes out empty is skipped entirely, so a
+    caller with a partial frame set still works.
+    """
+    slot = {str(name): i for i, name in enumerate(frame_names)}
+    feet = []
+    for sole_names, top_names in TOE_SIDES:
+        sole = tuple(slot[n] for n in sole_names if n in slot)
+        top = tuple(slot[n] for n in top_names if n in slot)
+        if sole and top:
+            feet.append((sole, top))
+    return tuple(feet)
+
+
+def suppress_toe_sides(
+    gated_sdf: torch.Tensor,    # (T, F) drift-gated signed distance (m); +inf = cannot contact
+    normal_dot: torch.Tensor,   # (T, F) dot(frame normal, −scene normal)
+    sides: Sequence[tuple[tuple[int, ...], tuple[int, ...]]],
+    *,
+    exit_thresh_m: float,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Keep at most ONE side of each foot's toe — the only place a normal decides anything.
+
+    The underside frames (a foot standing *on* a hold) and ``toe_above`` (a toe hooked *under*
+    one) face opposite ways through the foot, so every other gate accepts or rejects them
+    together and both sides fire at once. We assume at most one side really touches at any
+    step — both-at-once is physically possible but rare, and deliberately ignored — and
+    let the normals break the tie.
+
+    **Candidacy**: at step ``t`` a frame is a candidate when its gated signal is below
+    ``exit_thresh_m``, the loosest level at which :func:`hysteresis_spans` could still hold
+    it in a span. Where both sides of a foot have candidates, each side is scored by its
+    best-facing candidate (the largest ``normal_dot``); the losing side's candidate frames
+    are forced to the ``+inf`` sentinel — before hysteresis, so they can neither enter nor
+    hold a span at that step. Exact ties keep the underside, so the result never depends
+    on evaluation order. Steps where only one side has candidates pass through untouched.
+
+    Returns ``(gated_sdf, suppressed)``, both ``(T, F)`` — ``suppressed`` marks the steps
+    this rule forced out and is a pure diagnostic.
+    """
+    out = gated_sdf.clone()
+    suppressed = torch.zeros_like(gated_sdf, dtype=torch.bool)
+    infinity = torch.finfo(gated_sdf.dtype).max
+    lowest = torch.finfo(normal_dot.dtype).min
+    for sole, top in sides:
+        sole_cand = out[:, sole] < exit_thresh_m                     # (T, S)
+        top_cand = out[:, top] < exit_thresh_m                       # (T, K)
+        both = sole_cand.any(-1) & top_cand.any(-1)                  # (T,)
+        sole_score = normal_dot[:, sole].masked_fill(~sole_cand, lowest).amax(-1)
+        top_score = normal_dot[:, top].masked_fill(~top_cand, lowest).amax(-1)
+        drop_top = both & (sole_score >= top_score)
+        drop_sole = both & ~drop_top
+        for columns, cand, drop in ((top, top_cand, drop_top), (sole, sole_cand, drop_sole)):
+            forced = cand & drop[:, None]                            # (T, len(columns))
+            cols = list(columns)
+            out[:, cols] = out[:, cols].masked_fill(forced, infinity)
+            suppressed[:, cols] |= forced
+    return out, suppressed
+
+
+class FrameContacts(NamedTuple):
+    """One clip's contact-frame readout — the boolean plus every signal behind it."""
+
+    #: ``(T, F)`` bool — the label.
+    contact: torch.Tensor
+    #: ``(T, F)`` the guarded signed distance the spans were cut from (``+inf`` = guarded out).
+    guarded_sdf: torch.Tensor
+    #: ``(T, F)`` raw perpendicular signed distance (m).
+    sdf: torch.Tensor
+    #: ``(T, F)`` Euclidean distance to the nearest scene point (m).
+    dmin: torch.Tensor
+    #: ``(T, F)`` confidence of that nearest scene point.
+    conf: torch.Tensor
+    #: ``(T, F)`` ``dot(frame normal, −scene normal)`` — diagnostic, and the toe tiebreaker.
+    normal_dot: torch.Tensor
+    #: ``(T, F)`` bool — steps :func:`suppress_toe_sides` forced out (diagnostic).
+    toe_suppressed: torch.Tensor
+
+
+def detect_frame_contacts(
+    frame_points: torch.Tensor,    # (T, F, 3) world contact-frame positions
+    frame_normals: torch.Tensor,   # (T, F, 3) world outward unit normals
+    drift: torch.Tensor,           # (T, F) net window drift (m) — the caller's measurement
+    scene_pts: torch.Tensor,       # (M, 3) world scene points
+    scene_normals: torch.Tensor,   # (M, 3) outward unit normals
+    scene_conf: torch.Tensor,      # (M,) per-point confidence
+    *,
+    frame_names: Sequence[str],
+    close_thresh_m: float,
+    exit_thresh_m: float,
+    min_frames: int,
+    still_m: float,
+    still_override_m: float = -1.0,
+    max_dist_m: float,
+    conf_thresh: float,
+    prune_margin_m: float,
+) -> FrameContacts:
+    """Detect contact on the contact frames — the single detector for the whole pipeline.
+
+    Contact is **near the scene AND still**, in four steps: surface signals
+    (:func:`frame_scene_signals`), the distance/confidence guards
+    (:func:`frame_guarded_sdf`), the stillness gate (:func:`drift_gate`) plus the toe-side
+    tiebreak (:func:`suppress_toe_sides`), then temporal hysteresis
+    (:func:`hysteresis_spans`) — a frame enters a contact span below ``close_thresh_m``,
+    holds it below the looser ``exit_thresh_m``, and spans shorter than ``min_frames`` are
+    dropped. ``frame_names`` names the ``F`` columns and is only used to find the toe sides
+    by name. ``still_override_m`` lets strong closeness outrank the stillness gate — a
+    fast foot plant pressing into the floor is a contact no drift window can call still
+    (see :func:`drift_gate`) — and the ``min_frames`` rule: a span pressing below it
+    survives however brief (a one-frame bounce is 1–2 frames at 25 fps, and penetration
+    is not flicker). The default disables both.
+
+    ``drift`` is supplied by the CALLER, never measured here, because *which*
+    motion measurement is honest depends on the stage: the kinematic fit passes
+    the drift of its starting pose (before any contact attraction acted), and the
+    readout stage passes that same persisted ``drift_pre``. Re-measuring drift on
+    an enforced body would be manufactured evidence. A ``NaN`` drift (an untracked
+    step) fails the stillness gate, so it can never hold a span.
+    """
+    sdf, dmin, conf, normal_dot = frame_scene_signals(
+        frame_points, frame_normals, scene_pts, scene_normals, scene_conf,
+        prune_margin_m=prune_margin_m)
+    guarded_sdf = frame_guarded_sdf(
+        sdf, dmin, conf, max_dist_m=max_dist_m, conf_thresh=conf_thresh)
+    gated, toe_suppressed = suppress_toe_sides(
+        drift_gate(guarded_sdf, drift, still_m=still_m,
+                   still_override_m=still_override_m), normal_dot,
+        toe_side_slots(frame_names), exit_thresh_m=exit_thresh_m)
+    contact = hysteresis_spans(gated, enter_below=close_thresh_m,
+                               exit_below=exit_thresh_m, min_frames=min_frames,
+                               keep=gated < still_override_m)
+    return FrameContacts(contact, guarded_sdf, sdf, dmin, conf, normal_dot, toe_suppressed)

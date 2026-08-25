@@ -61,16 +61,17 @@ for _p in (str(_BETTER_HUMAN_SRC), str(_REPO_ROOT)):
         sys.path.insert(0, _p)
 
 import argparse  # noqa: E402
-import os  # noqa: E402
 
 import numpy as np  # noqa: E402
 import torch  # noqa: E402
 
 from tools.config import load_toml, section  # noqa: E402
+from tools.geometry.depth_smear import alongray_smear, smear_weight  # noqa: E402
 from tools.geometry.human_scale import combine_log_scales, weighted_median  # noqa: E402
 from tools.geometry.intrinsics import denormalize_K  # noqa: E402
 from tools.human_optim import normalize_q  # noqa: E402
 from tools.human_optim.keypoints import build_correspondence  # noqa: E402
+from tools.npz_io import atomic_savez  # noqa: E402
 from tools.human_optim.losses import pad_frames  # noqa: E402
 from tools.human_optim.prefit import PrefitWeights, measure_person_scale, prefit_person_round  # noqa: E402
 from tools.human_optim.visibility import front_facing_mask, subsample_indices, vertex_normals  # noqa: E402
@@ -190,13 +191,14 @@ def _valid_cols(sp: dict, p: int, frame_indices: np.ndarray) -> np.ndarray:
 
 def _estimate_metric_scale(
     sp: dict, frame_indices: np.ndarray, K_vggt: np.ndarray, hv: int, wv: int,
-    object_ids: np.ndarray, extr: np.ndarray, human: dict, mid, device: str,
+    object_ids: np.ndarray, extr: np.ndarray, grouped: tuple, mid, device: str,
     args: argparse.Namespace,
 ) -> tuple[float, dict]:
     """Robust human-anchored scale from the fused human cloud + per-frame diagnostics.
 
-    ``extr`` must be in the same units as ``human['points']`` (both come from
-    ``geometry/`` as fuse — or a previous metricization — left them).
+    ``extr`` must be in the same units as the cloud in ``grouped`` (both come from
+    ``geometry/`` as fuse — or a previous metricization — left them; ``grouped``
+    is one :func:`_group_cloud` result shared with the pre-fit).
     """
     num_people = len(object_ids)
     n_frames = len(frame_indices)
@@ -205,7 +207,7 @@ def _estimate_metric_scale(
     pooled_log: list[float] = []
     pooled_weight: list[float] = []
 
-    pts, conf, key_sorted, order = _group_cloud(human, n_frames)
+    pts, conf, key_sorted, order = grouped
 
     for p in range(num_people):
         oid = int(object_ids[p])
@@ -253,6 +255,11 @@ def _estimate_metric_scale(
                 args.conf_drop_q, args.min_inlier_verts)
             if not np.isfinite(log_s):
                 continue
+            # Depth-smear downweighting: a frame whose human cloud is streaked along the
+            # view ray (VGGT fast-motion failure) votes a garbage scale with full
+            # confidence — its say shrinks with the smear (dead-zoned: clean clips keep
+            # weight 1 everywhere, so their scale is unchanged).
+            weight *= smear_weight(alongray_smear(Xc[ok]))
             per_frame_scale[p, col] = float(np.exp(log_s))
             per_frame_weight[p, col] = weight
             pooled_log.append(log_s)
@@ -265,14 +272,6 @@ def _estimate_metric_scale(
     diagnostics = dict(res, per_frame_scale=per_frame_scale, per_frame_weight=per_frame_weight,
                        n_pooled=len(pooled_log))
     return res["scale"], diagnostics
-
-
-def _replace_npz(path: Path, arrays: dict) -> None:
-    """Write ``arrays`` to a temp file and atomically rename it over ``path``."""
-    tmp = path.with_name(path.name + ".tmp")
-    with open(tmp, "wb") as f:
-        np.savez(f, **arrays)
-    os.replace(tmp, path)
 
 
 def _metricize_geometry(pred: Path, s: float, method: str = "human-log-ratio") -> float:
@@ -298,18 +297,18 @@ def _metricize_geometry(pred: Path, s: float, method: str = "human-log-ratio") -
         for k in keys:
             d[k] = (np.asarray(d[k], np.float32) * m).astype(np.float32)
         d["world_scale"] = np.float32(total)
-        _replace_npz(geo / name, d)
+        atomic_savez(geo / name, **d)
     extr = np.asarray(tr["extrinsics"], np.float32).copy()
     extr[:, :3, 3] *= s
     tr.update(extrinsics=extr, scale=np.float32(total), metric=np.bool_(True),
               scale_method=np.str_(f"{method} (estimate_scale)"))
-    _replace_npz(geo / "transform.npz", tr)
+    atomic_savez(geo / "transform.npz", **tr)
     return total
 
 
 def _prefit_people_data(
     sp: dict, pose: dict, frame_indices: np.ndarray, K_orig: np.ndarray,
-    object_ids: np.ndarray, extr: np.ndarray, human: dict, mid, device: str,
+    object_ids: np.ndarray, extr: np.ndarray, grouped: tuple, mid, device: str,
     args: argparse.Namespace,
 ) -> list:
     """Per-person tensors for the pre-fit rounds (``None`` for bodiless people).
@@ -322,7 +321,7 @@ def _prefit_people_data(
     jitter frame to frame, and a scale problem must not pick its own body size).
     """
     n_frames = len(frame_indices)
-    pts, conf, key_sorted, order = _group_cloud(human, n_frames)
+    pts, conf, key_sorted, order = grouped
     # Sapiens tracks its own person set — rows are aligned by object_id, NOT by
     # the SMPL-X row index (e.g. smplx may hold person [1] of sapiens' [0,1,2]).
     sap_rows = {int(x): i for i, x in enumerate(np.asarray(pose["object_ids"]).ravel())}
@@ -351,7 +350,7 @@ def _prefit_people_data(
                                   gather("right_hand_pose"))
             q0n = normalize_q(q0, mid.num_joints)
 
-        clouds = []
+        clouds, qws = [], []
         for col in cols:
             col = int(col)
             lo = np.searchsorted(key_sorted, oid * n_frames + col)
@@ -365,13 +364,21 @@ def _prefit_people_data(
             if Xc.shape[0] > args.max_points:
                 stride = Xc.shape[0] / float(args.max_points)
                 Xc = Xc[(np.arange(args.max_points) * stride).astype(np.int64)]
+            # Depth-smear weight (camera-frame points, origin = camera): a smeared frame
+            # gets less chamfer pull AND a smaller scale vote; clean clips stay all-1
+            # (dead zone).
+            qws.append(smear_weight(alongray_smear(Xc)))
             clouds.append(torch.as_tensor(Xc, dtype=torch.float32, device=device))
         cloud, cloud_valid = pad_frames(clouds, channels=3, device=device, dtype=torch.float32)
+        cloud_qw = torch.as_tensor(qws, dtype=torch.float32, device=device)
+        n_flagged = int((cloud_qw < 0.5).sum())
+        if n_flagged:
+            print(f"  [prefit] obj_id={oid}: depth-smear downweighted {n_flagged}/{cols.size} frames")
 
         pairs = torch.as_tensor(np.flatnonzero(np.diff(cols) == 1), dtype=torch.long, device=device)
         people.append(dict(
             oid=oid, cols=cols, idxs=idxs, betas=betas, q0n=q0n, q=q0n.clone(),
-            cloud=cloud, cloud_valid=cloud_valid,
+            cloud=cloud, cloud_valid=cloud_valid, cloud_qw=cloud_qw,
             K_orig=torch.as_tensor(K_orig[cols], dtype=torch.float32, device=device),
             kp=torch.as_tensor(pose["keypoints"][sap][idxs], dtype=torch.float32, device=device),
             scores=torch.as_tensor(pose["keypoint_scores"][sap][idxs], dtype=torch.float32,
@@ -383,8 +390,8 @@ def _prefit_people_data(
 def _prefit_bodies(
     sp: dict, pose: dict, s0: float, frame_indices: np.ndarray,
     K_orig: np.ndarray, object_ids: np.ndarray, extr: np.ndarray,
-    human: dict, mid, device: str, args: argparse.Namespace,
-) -> tuple[float, dict, list]:
+    grouped: tuple, mid, device: str, args: argparse.Namespace,
+) -> tuple[float, dict | None, list]:
     """The dual refinement: body rounds at fixed ``s`` ↔ scale re-measurements.
 
     Starting from the converter pose and the ruler's ``s0``, each round aligns
@@ -392,7 +399,9 @@ def _prefit_bodies(
     move), then re-measures ``s`` from the fit's own nearest-vertex
     correspondences (the scale move, :func:`measure_person_scale`). Stops early
     once ``s`` settles within 0.1%. Returns
-    ``(s_final, diagnostics of the last measurement, people)``.
+    ``(s_final, diagnostics of the last measurement, people)``; the diagnostics
+    are ``None`` when no person could be fitted (the caller keeps the ruler's),
+    with the all-``None`` people still written as converter passthrough.
     """
     corr = build_correspondence(list(mid.frame_names), device=device)
     fvids = torch.as_tensor([int(x) for x in mid.frame_vertex_ids], dtype=torch.long, device=device)
@@ -402,7 +411,11 @@ def _prefit_bodies(
         orient=args.w_orient, transl=args.w_transl, smooth=args.w_smooth,
         gm_chamfer_m=args.gm_chamfer_m, gm_reproj_px=args.gm_reproj_px)
     people = _prefit_people_data(sp, pose, frame_indices, K_orig, object_ids, extr,
-                                 human, mid, device, args)
+                                 grouped, mid, device, args)
+    if all(person is None for person in people):
+        print("  [prefit] WARNING: no fittable person (no body-valid frames / no "
+              "Sapiens ids match) — keeping the ruler scale")
+        return s0, None, people
 
     n_frames = len(frame_indices)
     per_frame_scale = np.full((len(object_ids), n_frames), np.nan, dtype=np.float32)
@@ -421,7 +434,8 @@ def _prefit_bodies(
                 cloud=person["cloud"], cloud_valid=person["cloud_valid"],
                 K_orig=person["K_orig"], target_kp=person["kp"], scores=person["scores"],
                 corr=corr, frame_vertex_ids=fvids, sub=sub, pairs=person["pairs"],
-                weights=weights, iters=args.iters, lr=args.lr, freeze_scale=r > 0)
+                weights=weights, iters=args.iters, lr=args.lr, freeze_scale=r > 0,
+                cloud_frame_weights=person["cloud_qw"])
         pooled_log, pooled_w = [], []
         for p, person in enumerate(people):
             if person is None:
@@ -430,15 +444,20 @@ def _prefit_bodies(
                 mid, person["betas"], person["q"], cloud=person["cloud"],
                 cloud_valid=person["cloud_valid"], sub=sub, s=person["s_fit"],
                 gm_scale_m=args.gm_chamfer_m)
+            ws = ws * person["cloud_qw"].cpu().numpy()   # smeared frames vote less scale
             per_frame_scale[p, person["cols"]] = np.exp(logs).astype(np.float32)
             per_frame_weight[p, person["cols"]] = ws.astype(np.float32)
             pooled_log.append(logs)
             pooled_w.append(ws)
-        res = combine_log_scales(np.concatenate(pooled_log), np.concatenate(pooled_w),
-                                 mad_k=args.mad_k)
+        pl, pw = np.concatenate(pooled_log), np.concatenate(pooled_w)
+        if not (np.isfinite(pl) & np.isfinite(pw) & (pw > 0.0)).any():
+            print("  [prefit] WARNING: round produced no finite scale votes — "
+                  "stopping at the current s")
+            break
+        res = combine_log_scales(pl, pw, mad_k=args.mad_k)
         s_new = res["scale"]
         diag = dict(res, per_frame_scale=per_frame_scale, per_frame_weight=per_frame_weight,
-                    n_pooled=int(np.isfinite(np.concatenate(pooled_log)).sum()))
+                    n_pooled=int(np.isfinite(pl).sum()))
         print(f"  [prefit] round {r + 1}: s {s:.4f} -> {s_new:.4f}")
         settled = abs(float(np.log(s_new / s))) < 1e-3
         s = s_new
@@ -459,7 +478,7 @@ def _save_prefit(pred: Path, sp: dict, object_ids: np.ndarray, people: list,
             src = classic["translation"] if key == "transl" else classic[key]
             out[key][p, person["idxs"]] = src.cpu().numpy().astype(np.float32)
     out_path = pred / "geometry" / "prefit.npz"
-    np.savez(
+    atomic_savez(
         out_path,
         valid_mask=np.asarray(sp["valid_mask"], dtype=bool),
         object_ids=np.asarray(object_ids, dtype=np.int32),
@@ -525,19 +544,26 @@ def estimate_scale(args: argparse.Namespace) -> None:
         human["points"] = np.asarray(human["points"], np.float32) * (float(tr["scale"]) / hu_ws)
 
     mid = load_smplx_mid(str(_DEFAULT_SMPLX_MODEL), device)
+    # One (person, frame)-sorted view of the fused human cloud, shared by the ruler
+    # and the pre-fit (built after the partial-rescale repair above).
+    grouped = _group_cloud(human, len(frame_indices))
 
     # The ruler on the converter bodies gives the starting scale …
     scale_ruler, diag = _estimate_metric_scale(sp, frame_indices, K_vggt, hv, wv,
-                                               object_ids, extr, human, mid, device, args)
+                                               object_ids, extr, grouped, mid, device, args)
     scale, people = scale_ruler, None
     if prefit:
-        # … and the dual refinement takes it from there (docs/scale.md).
+        # … and the dual refinement takes it from there (docs/scale.md). Prefit
+        # diagnostics of None = nothing was fittable: keep the ruler's scale and
+        # diagnostics, and still write the passthrough prefit.npz.
         pose = dict(np.load(pred / "sapiens" / "pose.npz", allow_pickle=True))
-        scale, diag, people = _prefit_bodies(sp, pose, scale_ruler, frame_indices,
-                                             K_orig, object_ids, extr, human,
-                                             mid, device, args)
+        scale, pf_diag, people = _prefit_bodies(sp, pose, scale_ruler, frame_indices,
+                                                K_orig, object_ids, extr, grouped,
+                                                mid, device, args)
+        if pf_diag is not None:
+            diag = pf_diag
     s_total = _metricize_geometry(pred, scale, method)
-    np.savez(
+    atomic_savez(
         scale_path,
         scale=np.float32(scale),
         scale_ruler=np.float32(scale_ruler),

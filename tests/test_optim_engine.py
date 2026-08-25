@@ -105,3 +105,27 @@ def test_all_zero_weights_raise():
     problem = _quadratic_problem(torch.zeros(1))
     with pytest.raises(ValueError):
         problem.evaluate({"fit": 0.0})
+
+
+# ── chamfer saturation ────────────────────────────────────────────────────────
+
+def test_chamfer_sat_is_identity_near_and_caps_far_outliers() -> None:
+    """sat_m=0 and a small sat-relative distance leave the loss unchanged; a far
+    depth outlier's contribution is capped near sat_m instead of growing linearly."""
+    import torch
+
+    from tools.human_optim.losses import chamfer_loss
+
+    verts = torch.zeros((1, 2, 3))
+    vis = torch.ones((1, 2), dtype=torch.bool)
+    near = torch.tensor([[[0.01, 0.0, 0.0], [0.0, 0.01, 0.0]]])
+    dvalid = torch.ones((1, 2), dtype=torch.bool)
+    plain = chamfer_loss(verts, vis, near, dvalid)
+    capped = chamfer_loss(verts, vis, near, dvalid, sat_m=0.25)
+    assert torch.allclose(plain, capped, rtol=1e-3), "near-field must keep the calibration"
+
+    far = torch.tensor([[[0.01, 0.0, 0.0], [5.0, 0.0, 0.0]]])   # one 5 m outlier point
+    plain_far = chamfer_loss(verts, vis, far, dvalid)
+    capped_far = chamfer_loss(verts, vis, far, dvalid, sat_m=0.25)
+    assert float(plain_far) > 2.0, "uncapped, the outlier dominates the mean"
+    assert float(capped_far) < 0.3, "capped, its contribution saturates near sat_m"

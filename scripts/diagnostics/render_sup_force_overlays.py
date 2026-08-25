@@ -20,12 +20,22 @@ dynamics stage had no valid body). Because both the model's forces and the rigs'
 forces then live in world axes, the wall comparison can print a median angle the way the
 kindyn overlay does — something the local-world-aligned prediction overlay could not.
 
-The two rigs are compared exactly as in the other overlays: on the campus board every
+The rigs are compared exactly as in the other overlays: on the campus board every
 panel is a **downward load** in newtons against that limb's plate (session 1 wired the
 hands only — those foot panels are shaded); on the wall only the **total** is a clean
 quantity, compared by size, with each corner cell's trace shaded inside its limb panel.
 Body-weight units become newtons through the SMPL-X mass in ``human_optim/kindyn_1.npz``,
 printed on the pane because it is known to run a few kilos high.
+
+The demonstrator wall (``peter/out_climb_wall_2_single/``) instead gets the
+**kindyn-style picture**, so the model's overlay and the solve's read side by side:
+every limb panel is a real comparison against that limb's own board (nothing shaded),
+with the model-vs-board direction error as a dashed line in the limb's colour on its
+own 0–180° right axis, drawn where both sides read above 50 N. On the video, one
+summed **green** arrow per limb (foot = toe + heel) beside the board's **red** arrow,
+two-ring contact discs (outer ring = the model's contact head above 0.5, inner = the
+board above 50 N), and a tiny dot-and-word legend instead of the caption; the clip's
+total ratio, median angle and the mass print to the console.
 
 Writes ``<clip>/predictions/forces_sup_overlay.mp4``.
 
@@ -48,10 +58,13 @@ _DIAGNOSTICS = Path(__file__).resolve().parent
 if str(_DIAGNOSTICS) not in sys.path:
     sys.path.insert(0, str(_DIAGNOSTICS))
 
-from render_kindyn_overlays import Clip, campus_clip, wall_clip  # noqa: E402
+from render_kindyn_overlays import (  # noqa: E402
+    BOARD_CONTACT_N, MEASURED_RGB, SOLVE_RGB, WALL2_ROOT, Clip, campus_clip, wall2_clip,
+    wall_clip, _draw_force_arrows as _draw_limb_arrows, _draw_legend, _project,
+)
 from render_prediction_overlays import (  # noqa: E402
-    CAMPUS_ROOT, LIMB_RGB, PANEL_SIZE, WALL_ROOT, _draw_caption, _fit,
-    _force_panel, _wall_panel,
+    CAMPUS_ROOT, LIMB_RGB, PANEL_SIZE, WALL_ROOT, _draw_caption, _draw_contact_discs,
+    _fit, _force_panel, _wall_panel,
 )
 
 GRAVITY = 9.81
@@ -63,6 +76,7 @@ GROUP_FOLD = [[0], [1], [2, 4], [3, 5]]  # six groups -> the four plate limbs
 GROUP_RGB = LIMB_RGB + [(148, 103, 189), (227, 119, 194)]  # heels get their own colours
 GROUP_LABEL = ["left hand", "right hand", "left foot (toe)", "right foot (toe)",
                "left heel", "right heel"]
+SUP_CONTACT_PROB = 0.5  # the model's contact head is a probability; 0.5 = its own claim
 
 
 def _draw_force_arrows(pane: np.ndarray, anchor_cam: np.ndarray, force_world: np.ndarray,
@@ -133,31 +147,58 @@ def render(clip: Clip) -> Path:
                    f"  model x m.g,  m = {mass:.1f} kg"),
         ]
     else:
-        # The wall's cells hold up one structure, so only the total is a clean force.
-        # Both sides are world-frame vectors here (the kindyn root quaternion put the
-        # model there), so the angle between the totals is meaningful — print it.
+        # A wall rig. On the first wall the cells hold up one structure, so only the
+        # total is a clean force; on the demonstrator wall a channel IS that limb's
+        # board, so every panel compares — with the model-vs-board direction error
+        # as a dashed line, exactly like the kindyn overlay. Both sides are
+        # world-frame vectors here (the kindyn root quaternion put the model there),
+        # so the angles are meaningful.
         limb_size = np.linalg.norm(folded, axis=-1)
         total = folded.sum(1)                                                 # (N, 3)
         model_total = np.linalg.norm(total, axis=-1)
         measured = clip.measured_total[:n_frames]
         measured_size = np.linalg.norm(measured, axis=-1)
+        cell = clip.measured_cell[:n_frames]
+        cell_size = np.linalg.norm(cell, axis=-1)
+        limb_angle = None
+        if clip.limbs_measured:
+            both = (limb_size > BOARD_CONTACT_N) & (cell_size > BOARD_CONTACT_N)
+            limb_angle = np.full_like(limb_size, np.nan)
+            limb_angle[both] = np.degrees(np.arccos(np.clip(
+                (folded[both] * cell[both]).sum(-1)
+                / (limb_size[both] * cell_size[both]), -1.0, 1.0)))
         panel, column_of, cursor_top, cursor_bottom = _wall_panel(
-            limb_size, np.linalg.norm(clip.measured_cell[:n_frames], axis=-1),
-            model_total, measured_size, fps, model_label="model")
+            limb_size, cell_size, model_total, measured_size, fps, model_label="model",
+            limbs_measured=clip.limbs_measured, limb_angle=limb_angle)
         both = (model_total > 1.0) & (measured_size > 1.0)
         angle = np.degrees(np.arccos(np.clip(
             (total[both] * measured[both]).sum(1)
             / (model_total[both] * measured_size[both]), -1.0, 1.0)))
-        caption += [
-            (None, "arrows = supervised force model (6 kindyn groups)"),
-            (None, f"graphs: force size [N],  black = measured,  foot = toe + heel,"
-                   f"  m = {mass:.1f} kg"),
-            (None, "limb graphs: black is that CORNER's cell, not that limb's force"),
-            (None, f"wall total vs model:  size ratio "
-                   f"{model_total.mean() / measured_size.mean():.2f},"
-                   f"  median angle {np.median(angle):.0f} deg"),
-        ]
-    caption += [(GROUP_RGB[g], GROUP_LABEL[g]) for g in range(len(SUP_GROUPS))]
+        if clip.limbs_measured:
+            print(f"[overlays] {clip.name}: total size ratio "
+                  f"{model_total.mean() / measured_size.mean():.2f}, "
+                  f"median angle {np.median(angle):.0f} deg, m = {mass:.1f} kg")
+        else:
+            caption += [
+                (None, "arrows = supervised force model (6 kindyn groups)"),
+                (None, f"graphs: force size [N],  black = measured,  foot = toe + heel,"
+                       f"  m = {mass:.1f} kg"),
+                (None, "limb graphs: black is that CORNER's cell, not that limb's force"),
+                (None, f"wall total vs model:  size ratio "
+                       f"{model_total.mean() / measured_size.mean():.2f},"
+                       f"  median angle {np.median(angle):.0f} deg"),
+            ]
+    if clip.limbs_measured:
+        # The kindyn-style picture: two-ring discs, one summed green arrow per limb,
+        # the board's own force in red, and a tiny legend instead of a caption.
+        valid = np.asarray(sup["valid_mask"], bool)[0, :n_frames]
+        probs = np.asarray(sup["contact_probs"], np.float32)[0, :n_frames]    # (N, 6)
+        limb_contact = np.stack([probs[:, g].max(1) for g in GROUP_FOLD], 1) > SUP_CONTACT_PROB
+        truth = clip.plate_contact[:n_frames]
+        measured_limb = clip.measured_cell[:n_frames]
+        legend = [(SOLVE_RGB, "model"), (MEASURED_RGB, "sensor")]
+    else:
+        caption += [(GROUP_RGB[g], GROUP_LABEL[g]) for g in range(len(SUP_GROUPS))]
 
     capture = cv2.VideoCapture(str(clip.video))
     source = (int(capture.get(cv2.CAP_PROP_FRAME_WIDTH)), int(capture.get(cv2.CAP_PROP_FRAME_HEIGHT)))
@@ -171,10 +212,25 @@ def render(clip: Clip) -> Path:
         if not ok:
             break
         pane = cv2.resize(bgr, pane_size)[..., ::-1].copy()
-        _draw_force_arrows(pane, anchor_cam[frame_index], forces_world[frame_index],
-                           transform["extrinsics"][frame_index],
-                           transform["intrinsics_px_orig"][frame_index], pane_scale)
-        _draw_caption(pane, caption)
+        extrinsic = transform["extrinsics"][frame_index]
+        intrinsic = transform["intrinsics_px_orig"][frame_index]
+        if clip.limbs_measured:
+            if valid[frame_index]:
+                # The model anchors live in the camera; the shared helpers want world.
+                rot, t = extrinsic[:3, :3], extrinsic[:3, 3]
+                anchors = (anchor_cam[frame_index, :4] - t) @ rot              # (4, 3) world
+                pixels = _project(anchors, extrinsic, intrinsic, pane_scale)
+                _draw_contact_discs(pane, pixels, limb_contact[frame_index], truth[frame_index])
+                _draw_limb_arrows(pane, anchors, measured_limb[frame_index],
+                                  [MEASURED_RGB] * 4, extrinsic, intrinsic, pane_scale,
+                                  thickness=2)
+                _draw_limb_arrows(pane, anchors, folded[frame_index], [SOLVE_RGB] * 4,
+                                  extrinsic, intrinsic, pane_scale)
+            _draw_legend(pane, legend)
+        else:
+            _draw_force_arrows(pane, anchor_cam[frame_index], forces_world[frame_index],
+                               extrinsic, intrinsic, pane_scale)
+            _draw_caption(pane, caption)
 
         cursor = panel.copy()
         column = np.clip(column_of(frame_index / fps), 1, panel.shape[1] - 2)
@@ -186,7 +242,7 @@ def render(clip: Clip) -> Path:
     return path
 
 
-TREES = [(CAMPUS_ROOT, campus_clip), (WALL_ROOT, wall_clip)]
+TREES = [(CAMPUS_ROOT, campus_clip), (WALL_ROOT, wall_clip), (WALL2_ROOT, wall2_clip)]
 
 
 def _targets(names: list[str]) -> list[Clip]:

@@ -29,8 +29,9 @@ Four terms:
   frames should move like the converter's did (suppresses per-frame jitter
   without fighting real motion).
 
-The refined bodies double as a starting point for the kinematic stage (not
-wired up yet). Everything runs in the VGGT camera frame, like the converter.
+The refined bodies double as the kinematic stage's starting pose
+(``geometry/prefit.npz``). Everything runs in the VGGT camera frame, like the
+converter.
 """
 from __future__ import annotations
 
@@ -75,12 +76,15 @@ def cloud_chamfer(
     *,
     gm_scale_m: float,
     chunk: int = 16,
+    frame_weights: torch.Tensor | None = None,   # (T,) per-frame depth-quality weight
 ) -> torch.Tensor:
     """One-sided Geman-McClure chamfer: each depth point → nearest visible vertex.
 
     Residuals below ``gm_scale_m`` pull ~quadratically; gross outliers saturate
     with vanishing gradient. Averaged over frames that have both a visible
     vertex and a depth point; frame-chunked ``cdist`` bounds memory.
+    ``frame_weights`` makes that average a weighted one (the depth-smear hook,
+    :mod:`tools.geometry.depth_smear`); ``None`` is the plain mean.
     """
     num_frames = vertices_sub.shape[0]
     if cloud.shape[1] == 0:
@@ -97,7 +101,10 @@ def cloud_chamfer(
         gm = geman_mcclure(d2v.square(), s2)
         parts.append((gm * cloud_valid[start:end]).sum(1) / n_pts[start:end].clamp_min(1))
     terms = torch.where(frame_ok, torch.cat(parts), vertices_sub.new_zeros(()))
-    return terms.sum() / frame_ok.sum().clamp_min(1)
+    if frame_weights is None:
+        return terms.sum() / frame_ok.sum().clamp_min(1)
+    fw = frame_weights * frame_ok
+    return (terms * fw).sum() / fw.sum().clamp_min(1e-6)
 
 
 def joint_velocity_loss(
@@ -123,6 +130,54 @@ def finger_freeze_mask(nq: int, device) -> torch.Tensor:
     mask = torch.ones(nq, device=device)
     mask[_FINGER_Q_START:] = 0.0
     return mask
+
+
+def _valid_spans(valid: np.ndarray) -> list[tuple[int, int]]:
+    """The contiguous ``[start, end)`` runs of True in a ``(T,)`` bool mask."""
+    edges = np.flatnonzero(np.diff(np.concatenate(([0], valid.astype(np.int8), [0]))))
+    return list(zip(edges[::2], edges[1::2]))
+
+
+def smooth_finger_quats(q: torch.Tensor, valid: np.ndarray, sigma_frames: float) -> torch.Tensor:
+    """Gaussian-smooth the finger quaternions of ``q (T, 211)`` along time, in place.
+
+    The converter's per-frame hand pose is reasonable but jittery, and the fingers are
+    frozen during the fit, so that jitter survives into the result unless it is removed
+    here. Quaternions are hemisphere-aligned first (``q`` and ``−q`` are the same
+    rotation, so a raw sign flip would average to nonsense), then each component is
+    Gaussian-filtered over time and renormalized — the standard cheap approximation,
+    accurate at the per-frame angles a hand actually moves through.
+
+    Each contiguous run of ``valid`` frames is filtered on its own: untracked frames
+    hold a copy of their nearest valid pose (:func:`~tools.human_optim.stages._fill_invalid_frames`),
+    and averaging that plateau into real frames would drag them. The span edges use a
+    replicated border, so the first and last frames keep their value instead of decaying.
+
+    :param q: pose ``(T, 211)``; the finger block ``q[:, 91:]`` is overwritten.
+    :param valid: ``(T,)`` bool — the frames the tracker actually saw.
+    :param sigma_frames: Gaussian sigma in frames; ``<= 0`` is a no-op.
+    """
+    if sigma_frames <= 0:
+        return q
+    for start, end in _valid_spans(valid):
+        num = end - start
+        if num < 3:
+            continue
+        radius = min(int(round(3.0 * sigma_frames)), num - 1)
+        offsets = torch.arange(-radius, radius + 1, device=q.device, dtype=q.dtype)
+        kernel = torch.exp(-0.5 * (offsets / sigma_frames).square())
+        track = q[start:end, _FINGER_Q_START:].reshape(num, -1, 4)
+        dots = (track[1:] * track[:-1]).sum(-1)                            # (num-1, J)
+        signs = torch.where(dots < 0, -1.0, 1.0).cumprod(0)                # sequential flip
+        aligned = torch.cat([track[:1], track[1:] * signs[..., None]], 0)
+        channels = aligned.reshape(num, -1).T[None]                        # (1, 4J, num)
+        padded = torch.nn.functional.pad(channels, (radius, radius), mode="replicate")
+        weights = (kernel / kernel.sum()).view(1, 1, -1).expand(channels.shape[1], 1, -1)
+        smoothed = torch.nn.functional.conv1d(padded, weights, groups=channels.shape[1])
+        out = smoothed[0].T.reshape(num, -1, 4)
+        out = out / out.norm(dim=-1, keepdim=True).clamp_min(1e-8)
+        q[start:end, _FINGER_Q_START:] = out.reshape(num, -1)
+    return q
 
 
 def _front_facing_sub(
@@ -165,6 +220,7 @@ def prefit_person_round(
     lr: float,
     chunk: int = 16,
     freeze_scale: bool = False,
+    cloud_frame_weights: torch.Tensor | None = None,   # (T,) depth-smear weights
 ) -> tuple[torch.Tensor, float]:
     """One body-alignment round; returns ``(refined q (T, 211), fitted scale)``.
 
@@ -216,7 +272,8 @@ def prefit_person_round(
         s = torch.exp(log_s)
         return cloud_chamfer(
             st["vertices"][:, sub] / s, front, cloud, cloud_valid,
-            gm_scale_m=weights.gm_chamfer_m / float(s.detach()), chunk=chunk)
+            gm_scale_m=weights.gm_chamfer_m / float(s.detach()), chunk=chunk,
+            frame_weights=cloud_frame_weights)
 
     problem.add_term("chamfer", _chamfer)
     problem.add_term("reproj", lambda st: sapiens_reprojection_gm(

@@ -1,5 +1,14 @@
 # Limb-length premise test — findings
 
+> **2026-08-02 addendum.** The E1–E3 argument below was judged unsound by the
+> adversarial review commissioned at the time (E1/E3 compare 2D projections as
+> if they were 3D lengths; E2's slope is endogenous; the "below chance"
+> arithmetic is wrong), so this document never validly closed the question.
+> It has since been closed properly — same conclusion, sound route: three
+> definition-free measurements show the limbs are the right length and the
+> "short forearm" was an MHR-vs-SMPL-X joint-convention offset. See
+> [`frames_contact_rate.md`](frames_contact_rate.md), Experiment B.
+
 **Question.** We were deciding whether to let **limb lengths change** when we fit the
 body to the depth cloud (today the body's shape is frozen). Before building that, one
 question had to be answered:

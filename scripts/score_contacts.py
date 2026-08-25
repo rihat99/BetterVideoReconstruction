@@ -42,7 +42,7 @@ from tools.geometry.normals import load_scene_cloud  # noqa: E402
 from tools.human_optim import (  # noqa: E402
     DEPTH_FIT_DEFAULTS, NO_DATA_TRUST,
     drift_gated_contact, joint_depth_fit, joint_drift, joint_guarded_min_sdf,
-    joint_occlusion_gap, merge_contact_spans, project,
+    DETECT_MIN_FRAMES, joint_occlusion_gap, merge_contact_spans, project,
     scene_sdf, transform_points, vertex_to_joint, world_from_cam,
 )
 from tools.human_optim import paths  # noqa: E402
@@ -229,7 +229,7 @@ def _load_contact_cfg(path: Path) -> tuple[dict, dict]:
     cc.setdefault("conf_drop_q", 0.1); cc.setdefault("normal_k", 16)
     cc.setdefault("prune_margin_m", 0.10)
     cc.setdefault("close_thresh_m", 0.02)   # standard-readout enter distance (funnel reads it; grid sweeps it)
-    cc.setdefault("exit_thresh_m", 0.035); cc.setdefault("min_frames", 3)
+    cc.setdefault("exit_thresh_m", 0.035); cc.setdefault("min_span_s", 0.1)
     cc.setdefault("merge_dist_m", 0.03); cc.setdefault("merge_max_gap_s", 2.0)
     cc.setdefault("merge_sdf_m", 0.08)   # span-merge knobs
     cg = cfg.get("contact_gate", {})
@@ -263,7 +263,7 @@ def run_one(pred_dir: str, config_path: Path, device: str, source=None,
 
     mid = load_smplx_mid(_DEFAULT_SMPLX_MODEL, device)
     mid_names = list(mid.joint_names)
-    exit_default = float(cc["exit_thresh_m"]); min_frames = int(cc["min_frames"])
+    exit_default = float(cc["exit_thresh_m"]); min_frames = DETECT_MIN_FRAMES
 
     ann_path = resolve_annotation_path(source or pred, None)
     ann_all = ann_names = ann_oids = None
@@ -511,7 +511,7 @@ def _funnel_one(pred_dir: str, config_path: Path, device: str, source=None,
     pred = Path(pred_dir)
     cc, cg = _load_contact_cfg(config_path)
     close = float(cc["close_thresh_m"]); still_m = float(cg["still_m"])
-    exit_below = max(float(cc["exit_thresh_m"]), close); min_frames = int(cc["min_frames"])
+    exit_below = max(float(cc["exit_thresh_m"]), close)
     bpath = Path(body_path) if body_path is not None else paths.body_path(pred, "kinematic_1")
     kin = dict(np.load(bpath, allow_pickle=True))
     if "auto_labels" not in kin:
@@ -555,7 +555,7 @@ def _funnel_one(pred_dir: str, config_path: Path, device: str, source=None,
         gt_t, gl_t, dr_t = _funnel_signals(mid, betas, q, scale, scene_pts, scene_normals,
                                            scene_conf, fps=fps, cc=cc, cg=cg)
         jc = drift_gated_contact(gt_t, dr_t, close_thresh_m=close, exit_thresh_m=exit_below,
-                                 min_frames=min_frames, still_m=still_m).cpu().numpy()
+                                 min_frames=DETECT_MIN_FRAMES, still_m=still_m).cpu().numpy()
         jc[~vmask] = False
         auto_lab = np.asarray(kin["auto_labels"][p], np.int8)
         ann = ann_all[ann_oids.index(oid)]
@@ -674,7 +674,7 @@ def _reliability_one(pred_dir: str, config_path: Path, device: str, source=None,
     mid_names = list(mid.joint_names)
     occ_group_t = torch.as_tensor(occlusion_group_ids(mid_names), device=device)
     faces_t = mid.faces.to(device).long()
-    exit_below = max(float(cc["exit_thresh_m"]), close); min_frames = int(cc["min_frames"])
+    exit_below = max(float(cc["exit_thresh_m"]), close); min_frames = DETECT_MIN_FRAMES
 
     ann_path = resolve_annotation_path(source or pred, None)
     if not ann_path.exists():

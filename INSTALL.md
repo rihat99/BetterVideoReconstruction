@@ -4,9 +4,8 @@
 
 - [uv](https://docs.astral.sh/uv/)
 - CUDA-compatible GPU with CUDA 12.6+
-- Sibling `BetterRobot/` and `better_human/` checkouts next to this repo
-  (the editable installs in `pyproject.toml` point at `../BetterRobot` and
-  `../better_human`).
+- Sibling `BetterRobot/` and `BetterHuman/` checkouts next to this repo
+  (they are installed editable from `../BetterRobot` and `../BetterHuman`).
 
 ## 1. Clone with submodules
 
@@ -30,14 +29,25 @@ repo is human-only).
 ```bash
 uv venv --python 3.12
 uv sync
+uv pip install -e ../BetterRobot -e ../BetterHuman --no-deps
 ```
 
-This installs:
+`uv sync` installs:
 
-- `better-robot` and `better-human` (editable, from sibling directories)
-- `sam3`, `mhr`, `sapiens`, and `vggt-omega` (editable, from `third_party/`)
+- `sam3`, `mhr`, `sapiens`, `vggt-omega`, and `geocalib` (editable, from `third_party/`)
 - `pymomentum-gpu` (built against torch cu129 — the uv lock pins the matching torch build)
 - All `sam-3d-body` dependencies (listed in `pyproject.toml`)
+
+The two sibling libraries are installed by hand (third line) because uv cannot
+resolve them: `BetterRobot` and `BetterHuman` pin torch to the **cu126** wheel
+index, while this repo must pin **cu129** (`pymomentum-gpu`'s ABI), and uv
+refuses a lock with two indexes for one package. So both are commented out of
+`pyproject.toml` and installed editable with `--no-deps` — their runtime deps
+(torch, numpy, scipy, yourdfpy, viser) are already in the lock.
+
+**Because of this, always run `uv run --no-sync`.** A plain `uv run` or
+`uv sync` re-syncs to the lock and silently uninstalls the two hand-installed
+libraries; if that happens, repeat the `uv pip install -e` line.
 
 Unlike the sibling repos, **VGGT-Omega is an editable submodule** here
 (not a git-pip dep), so `uv sync` installs it directly — no extra git step.

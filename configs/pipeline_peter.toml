@@ -15,7 +15,8 @@ device = "cuda"             # compute device shared by stages and the viewer
 
 [sam3]                      # SAM 3 video tracker → sam3/ (per-object masks + bboxes.npz)
 text = "person"             # grounding prompt for frame-0 detection
-top_k = 0                  # max detections per text prompt; 0 keeps all
+top_k = 1                  # keep ONLY the largest frame-0 person mask — climb_wall_2's cam_left
+                           # sees a second person in the background; the climber is the big mask
 confidence = 0.5           # grounding confidence threshold
 min_area_frac = 0.01       # minimum grounded-mask fraction of the image
 bbox = []                  # optional frame-0 xyxy prompt; empty uses text/manifest prompts

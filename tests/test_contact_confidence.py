@@ -9,7 +9,7 @@ from tools.human_optim.confidence import (
     joint_label_confidence,
     occlusion_group_ids,
 )
-from tools.human_optim.contacts import joint_occlusion_gap, lift_joint_min_distance
+from tools.human_optim.contacts import joint_occlusion_gap
 from tools.viewer.loading import _load_skeleton
 
 # One triangle spanning the +z axis at depth ``z``; the camera at the origin looking
@@ -147,13 +147,6 @@ def test_stationary_far_no_contact_is_also_zero_confidence():
     terms = _terms(labels=[[False]], sdf=[[1.0]], drift=[[0.0]])
     assert terms["motion"][0, 0] == pytest.approx(0.0)
     assert terms["label_confidence"][0, 0] == pytest.approx(0.0)
-
-
-def test_joint_clearance_lifts_true_euclidean_distance():
-    distances = torch.tensor([[0.30, 0.10, float("inf")]])
-    result = lift_joint_min_distance(distances, torch.tensor([0, 0, 1]), 2)
-    assert result[0, 0] == pytest.approx(0.10)
-    assert torch.isnan(result[0, 1])
 
 
 def test_implausibly_deep_contact_is_not_treated_as_certain():
@@ -389,27 +382,67 @@ def test_joint_drift_rejects_invalid_window_endpoints():
     assert torch.isfinite(drift[3:]).all()
 
 
-def test_viewer_ignores_legacy_confidence_but_keeps_contact_labels(tmp_path):
-    import hashlib
+_JOINT_NAMES = np.asarray(["pelvis", "left_wrist", "right_wrist"])
+_FRAME_NAMES = np.asarray(["palm_left", "palm_right"])
 
+
+def _viewer_clip(tmp_path, *, contacts: dict | None) -> None:
+    """A minimal ``out/<stem>/`` tree for the viewer loader: a body npz + contacts."""
     human = tmp_path / "human_optim"
     human.mkdir()
-    names = np.asarray(["pelvis", "left_wrist", "right_wrist"])
-    body = human / "kinematic_1.npz"
     np.savez(
-        body, parents=np.asarray([-1, 0, 0], np.int32), joint_names=names,
-        object_ids=np.asarray([0], np.int32), num_frames=np.int32(2),
+        human / "kinematic_1.npz", parents=np.asarray([-1, 0, 0], np.int32),
+        joint_names=_JOINT_NAMES, object_ids=np.asarray([0], np.int32),
+        num_frames=np.int32(2),
     )
-    body_hash = hashlib.sha256(body.read_bytes()).hexdigest()
-    shape = (1, 2, 3)
-    np.savez(
-        human / "contacts_1.npz",
-        joint_contact=np.zeros(shape, bool), label_confidence=np.ones(shape, np.float32),
-        confidence_schema=np.int32(2), confidence_method=np.str_("legacy"),
-        source_body_sha256=np.str_(body_hash), joint_names=names,
-        object_ids=np.asarray([0], np.int32),
-    )
-    with pytest.warns(RuntimeWarning, match="stale/invalid joint confidence"):
+    if contacts is not None:
+        np.savez(human / "contacts_1.npz", **contacts)
+
+
+def test_viewer_reads_contact_frame_labels(tmp_path):
+    contact = np.asarray([[[True, False], [False, False]]])          # (P=1, N=2, F=2)
+    _viewer_clip(tmp_path, contacts=dict(
+        contact_label_schema=np.int32(2), contact_label_method=np.str_("frames-v1"),
+        frame_contact=contact, contact_frame_names=_FRAME_NAMES,
+        frame_parent_joint=np.asarray([1, 2], np.int64),
+        joint_names=_JOINT_NAMES, object_ids=np.asarray([0], np.int32)))
+
+    loaded = _load_skeleton(tmp_path, frame_names=list(_FRAME_NAMES))
+    assert loaded["joint_names"] == list(_JOINT_NAMES)
+    assert np.array_equal(loaded["frame_contact"], contact)
+    assert loaded["frame_names"] == list(_FRAME_NAMES)
+    assert np.array_equal(loaded["frame_parent"], [1, 2])
+    assert np.array_equal(loaded["contact_oids"], [0])
+
+
+def test_viewer_drops_contact_labels_for_a_different_frame_set(tmp_path):
+    _viewer_clip(tmp_path, contacts=dict(
+        contact_label_schema=np.int32(2), contact_label_method=np.str_("frames-v1"),
+        frame_contact=np.zeros((1, 2, 2), bool), contact_frame_names=_FRAME_NAMES,
+        frame_parent_joint=np.asarray([1, 2], np.int64),
+        joint_names=_JOINT_NAMES, object_ids=np.asarray([0], np.int32)))
+
+    with pytest.warns(RuntimeWarning, match="incompatible contact artifact"):
+        loaded = _load_skeleton(tmp_path, frame_names=["heel_left", "heel_right"])
+    assert loaded["frame_contact"] is None
+    assert loaded["joint_names"] == list(_JOINT_NAMES)   # the skeleton still loads
+
+
+def test_viewer_ignores_legacy_per_joint_contact_file(tmp_path):
+    _viewer_clip(tmp_path, contacts=dict(
+        joint_contact=np.zeros((1, 2, 3), bool), label_confidence=np.ones((1, 2, 3), np.float32),
+        contact_label_schema=np.int32(1), joint_names=_JOINT_NAMES,
+        object_ids=np.asarray([0], np.int32)))
+
+    with pytest.warns(RuntimeWarning, match="label schema 1"):
         loaded = _load_skeleton(tmp_path)
-    assert loaded["contact"] is not None
-    assert loaded["confidence"] is None
+    assert loaded["frame_contact"] is None
+    assert loaded["joint_names"] == list(_JOINT_NAMES)   # the skeleton still loads
+
+
+def test_viewer_skeleton_without_a_contact_file(tmp_path):
+    _viewer_clip(tmp_path, contacts=None)
+
+    loaded = _load_skeleton(tmp_path)
+    assert loaded["frame_contact"] is None
+    assert np.array_equal(loaded["parents"], [-1, 0, 0])

@@ -1,7 +1,7 @@
 """Parse ``configs/human_optimization.toml`` into per-stage weights + shared knobs.
 
-The grouped ``[loss_weights.*]`` tables store each loss weight as a length-5 array
-``[root, kinematics_1, kinematics_2, dynamics, kindyn_1]`` — the single source of
+The grouped ``[loss_weights.*]`` tables store each loss weight as a length-4 array
+``[root, kinematics_1, kinematics_2, kindyn_1]`` — the single source of
 truth for every weight. :func:`load_config` flattens them into one ``{term: weight}``
 dict per stage (the shape the losses read), so the runner just picks a stage's dict
 per optimization phase. Per-stage ``iters`` and the shared operational knob sections
@@ -14,7 +14,38 @@ import tomllib
 from dataclasses import dataclass
 from pathlib import Path
 
-STAGE_ORDER = ("root", "kinematics_1", "kinematics_2", "dynamics", "kindyn_1")
+STAGE_ORDER = ("root", "kinematics_1", "kinematics_2", "kindyn_1")
+
+#: Reference frame rate the loss weights are tuned at.
+FPS_REF = 30.0
+
+#: Difference order k of every per-frame-difference loss term.
+_DIFF_ORDER = {
+    "velocity_root": 1, "velocity_joint": 1, "radial_velocity": 1, "ann_velocity": 1,
+    "force_smooth_mag": 1, "force_smooth_dir": 1, "torque_smooth": 1,
+    "accel_root": 2, "accel_joint": 2, "ann_acceleration": 2,
+    "jerk_root": 3, "jerk_joint": 3,
+    "snap_root": 4, "snap_joint": 4,
+}
+
+
+def fps_scaled_weights(weights: dict[str, float], fps: float) -> dict[str, float]:
+    """Scale the per-frame-difference weights by ``(fps/30)^2k`` above 30 fps.
+
+    Every difference term folds a constant ``fps^k`` into its weight (k = the
+    difference order), so a weight tuned at 30 fps restrains the k-th *physical*
+    derivative ``(fps/30)^2k`` times weaker on a higher-fps clip — while the
+    per-frame pose noise the terms exist to damp does not shrink at all (measured
+    as the kindyn shake on 60 fps scenes). Multiplying by ``(fps/FPS_REF)^2k``
+    keeps one weight meaning one thing at every frame rate. Clamped to identity at
+    ``fps <= 30`` so every clip at or below the tuning reference keeps its exact
+    shipped behaviour.
+    """
+    s = max(float(fps), FPS_REF) / FPS_REF
+    if s == 1.0:
+        return dict(weights)
+    return {term: w * s ** (2 * _DIFF_ORDER[term]) if term in _DIFF_ORDER else w
+            for term, w in weights.items()}
 
 
 @dataclass(frozen=True)
@@ -23,7 +54,7 @@ class HumanOptimConfig:
     weights: dict[str, dict[str, float]]    # stage -> {loss term: weight}
     iters: dict[str, dict[str, int]]        # stage -> {phase: iters}
     knobs: dict[str, dict]                  # shared sections: optimizer, chamfer, penetration, …
-    stage_opts: dict[str, dict]             # per-stage extras, e.g. {"dynamics": {"device": "cpu"}}
+    stage_opts: dict[str, dict]             # per-stage extras, e.g. {"kindyn_1": {"bodies": "kinematic_1"}}
     device: str                             # default device for the kinematic stages
 
     def weights_for(self, stage: str) -> dict[str, float]:
@@ -53,7 +84,7 @@ def load_config(path: str | Path) -> HumanOptimConfig:
                   for s in STAGE_ORDER}
 
     knob_sections = ("optimizer", "chamfer", "keypoints", "reproj_init", "penetration",
-                     "contact_gate", "auto_contact", "ann_attraction",
+                     "occlusion", "contact_gate", "auto_contact", "ann_attraction",
                      "ann_repulsion", "ann_velocity", "ann_acquisition", "ann_seating",
                      "contacts", "contact", "dynamics_optimizer", "friction")
     knobs = {name: dict(raw[name]) for name in knob_sections if name in raw}

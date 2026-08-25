@@ -393,7 +393,9 @@ def _force_panel(model_load: np.ndarray, wired: np.ndarray, video_fps: float,
 
 def _wall_panel(limb_size: np.ndarray, cell_size: np.ndarray, model_total: np.ndarray,
                 measured_total: np.ndarray, fps: float, model_label: str = "model",
-                floor: float = 50.0):
+                floor: float = 50.0, limbs_measured: bool = False,
+                measured_label: str | None = None, total_label: str = "wall total",
+                limb_angle: np.ndarray | None = None):
     """Render the climb_wall's five stacked size plots once, mirroring :func:`_force_panel`.
 
     Returns the panel image, a function from clip time to its pixel column, and the
@@ -407,11 +409,23 @@ def _wall_panel(limb_size: np.ndarray, cell_size: np.ndarray, model_total: np.nd
     same limb order. Everything is a plain size in newtons, because the wall's cells
     and a 3D prediction share no axis convention worth trusting sideways.
 
-    Only the top panel is a like-for-like comparison. The black line in a limb panel is
-    that corner's cell, which is dominated by the nearest limb but mixed across all
-    four — so it tracks *when* a limb loads up without being that limb's force. The
-    limb panels stay shaded to keep saying so. Because both totals are the length of a
-    vector sum, the top panel is not the four below it added up.
+    On the first wall only the top panel is a like-for-like comparison. The black line
+    in a limb panel is that corner's cell, which is dominated by the nearest limb but
+    mixed across all four — so it tracks *when* a limb loads up without being that
+    limb's force. The limb panels stay shaded to keep saying so. Because both totals
+    are the length of a vector sum, the top panel is not the four below it added up.
+
+    ``limbs_measured`` is for rigs where each limb has its own sensor and a channel
+    IS that limb's force (the ``climb_wall_2`` demonstrator, parkour): the limb
+    panels then compare directly, so nothing is shaded and the black line is
+    labelled as the limb's own sensor (``measured_label`` overrides the name;
+    ``total_label`` names the top panel's black line). Measured rows may hold NaN
+    where the rig recorded nothing — the black line simply gaps there.
+
+    ``limb_angle (N, 4)`` — when given, each limb panel also carries the angle between
+    the predicted and measured limb vectors as a dashed line in the limb's own colour,
+    on its own right-hand axis (fixed 0–180°, so the force curves keep their scale),
+    NaN where either side is too small to have a direction.
     """
     time = np.arange(len(model_total)) / fps
     fig, axes = plt.subplots(5, 1, figsize=(PANEL_SIZE[0] / 100, PANEL_SIZE[1] / 100),
@@ -419,32 +433,51 @@ def _wall_panel(limb_size: np.ndarray, cell_size: np.ndarray, model_total: np.nd
     rows = [(None, "total force size", SUM_RGB)] + \
            [(limb, LIMBS[limb].replace("_", " "), LIMB_RGB[limb]) for limb in range(4)]
 
+    angle_twin = None
     for axis, (limb, name, colour) in zip(axes, rows):
         measured = measured_total if limb is None else cell_size[:, limb]
         axis.plot(time, measured, color="black", lw=1.3, alpha=0.8,
-                  label="wall total" if limb is None else "corner cell")
-        if limb is not None:
-            axis.set_facecolor("0.94")  # the wall cannot measure one limb on its own
+                  label=total_label if limb is None else
+                  (measured_label or ("board" if limbs_measured else "corner cell")))
+        if limb is not None and not limbs_measured:
+            axis.set_facecolor("0.94")  # the first wall cannot measure one limb on its own
         curve = model_total if limb is None else limb_size[:, limb]
         axis.plot(time, curve, color=np.array(colour) / 255.0, lw=2.1, label=model_label)
+        if limb is not None and limb_angle is not None:
+            twin = axis.twinx()
+            # Same colour as the limb's force line; long dashes are what say "angle".
+            twin.plot(time, limb_angle[:, limb], color=np.array(colour) / 255.0,
+                      lw=1.8, ls=(0, (5, 3)), label="angle")
+            twin.set_ylim(0.0, 190.0)
+            twin.set_yticks([0, 90, 180])
+            twin.tick_params(labelsize=9, labelcolor="0.4")
+            if angle_twin is None:
+                angle_twin = twin
 
         span = np.concatenate([measured, curve])
-        low, high = min(0.0, float(span.min())), max(floor, float(span.max()))
+        low, high = min(0.0, float(np.nanmin(span))), max(floor, float(np.nanmax(span)))
         headroom = 0.26 if limb is None else 0.22  # room for the in-panel name and the legend
         axis.set_ylim(low - 0.06 * (high - low), high + headroom * (high - low))
-        shown = name if limb is None else f"{name}  (cell, not this limb)"
+        shown = name if limb is None or limbs_measured else f"{name}  (cell, not this limb)"
         axis.text(0.008, 0.96, shown, transform=axis.transAxes, fontsize=13, va="top", ha="left",
-                  color="0.15" if limb is None else "0.45")
+                  color="0.15" if limb is None or limbs_measured else "0.45")
         axis.tick_params(labelsize=11)
         axis.grid(alpha=0.25, lw=0.6)
 
     # The top panel's black line and a limb panel's black line are different quantities,
     # so the first of each gets its own legend rather than one shared key up top.
-    for axis in (axes[0], axes[1]):
-        axis.legend(loc="upper right", fontsize=11, ncol=2, framealpha=0.9,
-                    borderpad=0.3, handlelength=1.4)
+    axes[0].legend(loc="upper right", fontsize=11, ncol=2, framealpha=0.9,
+                   borderpad=0.3, handlelength=1.4)
+    handles, labels = axes[1].get_legend_handles_labels()
+    if angle_twin is not None:  # fold the twin's line in; draw on the twin so it sits on top
+        twin_handles, twin_labels = angle_twin.get_legend_handles_labels()
+        handles, labels = handles + twin_handles, labels + twin_labels
+    (axes[1] if angle_twin is None else angle_twin).legend(
+        handles, labels, loc="upper right", fontsize=11, ncol=3 if angle_twin is not None else 2,
+        framealpha=0.9, borderpad=0.3, handlelength=1.4)
     axes[-1].set_xlim(0.0, float(time[-1]))
-    fig.subplots_adjust(left=0.108, right=0.996, top=0.996, bottom=0.038, hspace=0.07)
+    fig.subplots_adjust(left=0.108, right=0.996 if limb_angle is None else 0.955,
+                        top=0.996, bottom=0.038, hspace=0.07)
     fig.canvas.draw()
     panel = np.asarray(fig.canvas.buffer_rgba())[..., :3].copy()
 

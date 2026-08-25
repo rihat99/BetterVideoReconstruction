@@ -20,7 +20,6 @@ import torch
 
 from .camera import project, transform_points
 from .keypoints import Correspondence
-from .motion import tangent_difference
 
 
 def geman_mcclure(r2: torch.Tensor, scale2: torch.Tensor) -> torch.Tensor:
@@ -48,6 +47,7 @@ def sapiens_reprojection_gm(
     *,
     score_thresh: float,
     gm_scale_px: float,
+    visibility: torch.Tensor | None = None,  # (T, 308) per-keypoint weight in [0,1]
 ) -> torch.Tensor:
     """Robust (Geman-McClure) reprojection to **Sapiens Goliath-308** keypoints.
 
@@ -56,6 +56,11 @@ def sapiens_reprojection_gm(
     and the **score** as the per-point weight (gated below ``score_thresh``).
     Returns the score-weighted mean GM cost ∈ [0, 1) — an independent cross-check
     on the init-projection anchor.
+
+    ``visibility`` (:func:`~tools.human_optim.keypoints.visibility_weights`) scales each
+    keypoint's contribution again, so a keypoint the body occludes pulls less. The
+    denominator stays the *unscaled* score sum, so down-weighting a subset genuinely
+    lowers the term instead of redistributing it onto the keypoints that stayed.
     """
     body = joints_world[:, corr.joint_model, :]                 # (T, Kb, 3)
     lm = vertices_world[:, frame_vertex_ids[corr.lm_frame], :]  # (T, Kl, 3)
@@ -68,7 +73,8 @@ def sapiens_reprojection_gm(
 
     r2 = ((pred_px - tgt) ** 2).sum(dim=-1)                    # (T, K) px²
     gm = geman_mcclure(r2, pred_px.new_tensor(gm_scale_px) ** 2)
-    return (w * gm).sum() / w.sum().clamp_min(1.0)
+    num = w * gm if visibility is None else w * visibility[:, corr.sap] * gm
+    return num.sum() / w.sum().clamp_min(1.0)
 
 
 def init_reprojection_gm(
@@ -80,6 +86,7 @@ def init_reprojection_gm(
     *,
     gm_scale_px: float,
     frame_mask: torch.Tensor | None = None,  # (T,) bool — average over only these (valid) frames
+    joint_weight: torch.Tensor | None = None,  # (T, Jb) per-joint weight in [0,1]
 ) -> torch.Tensor:
     """Robust (Geman-McClure) reprojection of the body joints to their own INITIAL
     (converter-pose) projection — a dense, self-consistent 2D anchor.
@@ -96,10 +103,17 @@ def init_reprojection_gm(
     mean GM cost ∈ [0, 1) (0 at init — the body starts at the pose that defined the
     target). ``frame_mask`` restricts the mean to the given (valid) frames, so
     untracked frames — whose held converter pose follows the camera — do not anchor.
+    ``joint_weight`` (:func:`~tools.human_optim.keypoints.visibility_weights`) scales each
+    joint's contribution, so an occluded joint — whose starting pose came from a converter
+    estimate the camera could not see either — is held less tightly. The denominator is
+    untouched, so the anchor as a whole weakens rather than shifting its pull onto the
+    joints that stayed visible.
     """
     pred_px = project(transform_points(joints_world[:, body_idx, :], extrinsics), K)  # (T, Jb, 2)
     r2 = ((pred_px - target_px) ** 2).sum(dim=-1)                                      # (T, Jb) px²
     gm = geman_mcclure(r2, pred_px.new_tensor(gm_scale_px) ** 2)                       # (T, Jb)
+    if joint_weight is not None:
+        gm = gm * joint_weight
     if frame_mask is None:
         return gm.mean()
     m = frame_mask.to(gm.dtype)                                                        # (T,) 1 = valid
@@ -140,6 +154,8 @@ def chamfer_loss(
     *,
     chunk: int = 16,
     vertex_weights: torch.Tensor | None = None,   # (Ns,) per-vertex body-part emphasis
+    frame_weights: torch.Tensor | None = None,    # (T,) per-frame depth-quality weight
+    sat_m: float = 0.0,                           # saturate per-point distances (m); 0 = off
 ) -> torch.Tensor:
     """Bidirectional chamfer between visible vertices and depth points.
 
@@ -151,10 +167,14 @@ def chamfer_loss(
     ``cdist`` over ``(chunk, Ns, Md)`` rather than ``chunk`` separate per-frame
     ``cdist`` calls — collapsing the launch-bound per-frame loop (the real cost on
     a long clip) into a handful of batched kernels, while keeping the distance
-    tensor small (bounded by ``chunk``). Padding columns / occluded vertices are
-    masked to ``+inf`` so they never win a min; frames with no visible vertex or no
-    depth point drop out of the average. Numerically identical to the per-frame
-    form (validated to fp tolerance).
+    tensor small (bounded by ``chunk``). The distance matrix is built under
+    ``no_grad`` and used only to pick nearest neighbours; the differentiable
+    distance is recomputed on the gathered NN *pairs* alone, so backward never
+    touches the ``(b, Ns, Md)`` matrix — same loss and gradient (the min is
+    achieved at the gathered pair), ~2.5× faster and ~10× less peak memory than
+    carrying the matrix through autograd. Padding columns / occluded vertices are
+    masked to ``+inf`` so they never win the argmin; frames with no visible vertex
+    or no depth point drop out of the average.
 
     ``vertex_weights`` ``(Ns,)`` reweights the **vertex→depth** term into a *weighted*
     mean over the visible vertices (the reverse depth→vertex term stays uniform — a
@@ -162,6 +182,19 @@ def chamfer_loss(
     (e.g. the extremities, whose metric depth VGGT most distorts) over the torso; a
     weight of ``None`` reproduces the plain uniform mean.
 
+    ``frame_weights`` ``(T,)`` turns the frame average into a weighted one — the
+    depth-quality hook (:mod:`tools.geometry.depth_smear`): a frame whose human
+    depth is smeared along the view ray should pull the body far less than a clean
+    one. ``None``, or all-equal weights, reproduce the plain mean exactly.
+
+    ``sat_m`` caps each per-point distance at ``sat_m * tanh(d / sat_m)`` before the
+    means. Near the body (``d ≪ sat_m``) this is the identity, so the shipped
+    calibration is untouched; far outliers — a depth tail smeared along the view
+    ray, a mismatched patch behind an occluder — saturate and their *gradient*
+    fades to zero instead of pulling with constant force forever. The plain mean
+    is L1-like (bounded pull per point, but it never lets go); this is its
+    outlier-proof version, the same lesson the prefit's Geman-McClure chamfer and
+    both reprojection terms already carry. ``0`` = off.
     """
     T = vertices_sub.shape[0]
     if depth_padded.shape[1] == 0:            # no depth in any frame (else the cdist→min(2) below crashes)
@@ -173,9 +206,16 @@ def chamfer_loss(
     parts = []
     for s in range(0, T, chunk):
         e = min(s + chunk, T)
-        d = torch.cdist(vertices_sub[s:e], depth_padded[s:e])              # (b, Ns, Md)
-        v2d = d.masked_fill(~depth_valid[s:e][:, None, :], INF).min(2).values  # (b, Ns)
-        d2v = d.masked_fill(~vismask[s:e][:, :, None], INF).min(1).values      # (b, Md)
+        v, p = vertices_sub[s:e], depth_padded[s:e]
+        with torch.no_grad():
+            d = torch.cdist(v, p)                                              # (b, Ns, Md)
+            jv = d.masked_fill(~depth_valid[s:e][:, None, :], INF).argmin(2)   # (b, Ns)
+            iv = d.masked_fill(~vismask[s:e][:, :, None], INF).argmin(1)       # (b, Md)
+        v2d = (v - p.gather(1, jv[..., None].expand(-1, -1, 3))).norm(dim=-1)  # (b, Ns)
+        d2v = (p - v.gather(1, iv[..., None].expand(-1, -1, 3))).norm(dim=-1)  # (b, Md)
+        if sat_m > 0.0:
+            v2d = sat_m * torch.tanh(v2d / sat_m)
+            d2v = sat_m * torch.tanh(d2v / sat_m)
         if vertex_weights is None:
             v2d_mean = (v2d * vismask[s:e]).sum(1) / nv[s:e].clamp_min(1)
         else:
@@ -184,7 +224,10 @@ def chamfer_loss(
         d2v_mean = (d2v * depth_valid[s:e]).sum(1) / nd[s:e].clamp_min(1)
         parts.append(v2d_mean + d2v_mean)                                 # (b,)
     terms = torch.where(fvalid, torch.cat(parts), vertices_sub.new_zeros(()))
-    return terms.sum() / fvalid.sum().clamp_min(1)
+    if frame_weights is None:
+        return terms.sum() / fvalid.sum().clamp_min(1)
+    fw = frame_weights * fvalid
+    return (terms * fw).sum() / fw.sum().clamp_min(1e-6)
 
 
 def scene_signed_distance(
@@ -261,7 +304,6 @@ def penetration_penalty(
     max_dist_m: float,
     max_pen_m: float,
     huber_m: float,
-    active_mask: torch.Tensor | None = None,  # (T, Ns) bool — restrict to these verts
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
     """Soft repulsion pushing the body mesh out of the scene (penalty head on the SDF).
 
@@ -272,20 +314,15 @@ def penetration_penalty(
     when its matched scene point is low confidence (``conf_thresh``), farther than
     ``max_dist_m`` (not near a surface / cloud hole), or "penetrating" deeper than
     ``max_pen_m`` (almost always a wrong correspondence behind an occluder).
-    ``active_mask`` further restricts which vertices repel (kinematics_2 uses it for a
-    stronger repulsion on no-contact joints). The gradient through ``s`` pushes the
-    vertex out along the surface normal. Returns ``(loss, mean_depth_cm,
-    n_penetrating)`` — ``loss`` the mean robust penalty over all active
-    vertex-instances jointly (Σ ÷ total active count), the latter two detached."""
+    The gradient through ``s`` pushes the vertex out along the surface normal.
+    Returns ``(loss, mean_depth_cm, n_penetrating)`` — ``loss`` the mean robust
+    penalty over all active vertex-instances jointly (Σ ÷ total active count),
+    the latter two detached. Zero active vertices reduce to zeros without a branch
+    (no per-iteration host sync)."""
     active = (conf > conf_thresh) & (dmin < max_dist_m) & (sgn.detach() > -max_pen_m) & has
-    if active_mask is not None:
-        active = active & active_mask
     rho = _huber(torch.relu(-sgn - margin_m), huber_m)               # dead-zone + Huber
     a = active.to(rho.dtype)
     n_active = a.sum()
-    if not bool(n_active > 0):
-        z = sgn.new_zeros(())
-        return z, z, sgn.new_zeros((), dtype=torch.long)
     loss = (rho * a).sum() / n_active.clamp_min(1)                   # joint mean over all active verts
     with torch.no_grad():
         pen = active & (sgn < 0)                                     # actually-penetrating verts
@@ -306,19 +343,17 @@ def scene_penetration(
     max_dist_m: float,
     max_pen_m: float,
     huber_m: float,
-    active_mask: torch.Tensor | None = None,  # (T, Ns) bool — restrict to these verts
     chunk: int = 16,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
     """Penetration loss = :func:`scene_signed_distance` + :func:`penetration_penalty`.
 
-    Kept as a standalone entry point (the diagnostics pass + external callers); the
-    per-iteration optimizer shares one :func:`scene_signed_distance` across the scene
-    penalties instead of calling this per loss."""
+    Kept as a standalone entry point for the optimizer's before/after metrics pass;
+    the per-iteration optimizer shares one :func:`scene_signed_distance` across the
+    scene penalties instead of calling this per loss."""
     sgn, dmin, conf, has = scene_signed_distance(
         vertices_sub, scene_padded, normal_padded, conf_padded, scene_valid, chunk=chunk)
     return penetration_penalty(sgn, dmin, conf, has, conf_thresh=conf_thresh, margin_m=margin_m,
-                               max_dist_m=max_dist_m, max_pen_m=max_pen_m, huber_m=huber_m,
-                               active_mask=active_mask)
+                               max_dist_m=max_dist_m, max_pen_m=max_pen_m, huber_m=huber_m)
 
 
 def clearance_penalty(
@@ -352,9 +387,6 @@ def clearance_penalty(
     rho = _huber(excess, huber_m)
     a = active.to(rho.dtype)
     n_active = a.sum()
-    if not bool(n_active > 0):
-        z = sgn.new_zeros(())
-        return z, z, sgn.new_zeros((), dtype=torch.long)
     loss = (rho * a).sum() / n_active.clamp_min(1)                   # joint mean over all active verts
     with torch.no_grad():
         pushed = active & (excess > 0)
@@ -373,7 +405,6 @@ def attraction_penalty(
     band_m: float,
     max_dist_m: float,
     active_mask: torch.Tensor | None = None,    # (T, Ns) bool — restrict to these verts
-    active_weight: torch.Tensor | None = None,  # (T, Ns) float in [0,1] — per-vertex weight
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
     """Soft attraction pulling near-wall vertices ONTO the scene (penalty head).
 
@@ -386,20 +417,14 @@ def attraction_penalty(
     never fight: attraction owns ``s∈(0, band)``, penetration ``s<−margin``).
     ``active_mask`` restricts which vertices are attracted — the kinematics_1
     auto-detected contact joints, or the kinematics_2 manually-annotated ones.
-    ``active_weight`` scales each attracted vertex's contribution by its
-    joint's label confidence, so an uncertain auto-contact pulls proportionally less
-    (``None`` ⇒ every active vertex weighted 1, the original behaviour). Returns
-    ``(loss, mean_gap_cm, n_attracted)`` — the latter two detached."""
+    Returns ``(loss, mean_gap_cm, n_attracted)`` — the latter two detached. Zero
+    attracted vertices reduce to zeros without a branch (no per-iteration host
+    sync)."""
     sd = sgn.detach()
     active = (conf > conf_thresh) & (dmin < max_dist_m) & (sd > 0.0) & (sd < band_m) & has
     if active_mask is not None:
         active = active & active_mask
-    if not bool(active.any()):
-        z = sgn.new_zeros(())
-        return z, z, sgn.new_zeros((), dtype=torch.long)
     a = active.to(sgn.dtype)
-    if active_weight is not None:
-        a = a * active_weight
     loss = (sgn * a).sum() / a.sum().clamp_min(1e-6)             # grad pulls each attracted v inward (−n)
     with torch.no_grad():
         gap_cm = ((sd * active.to(sd.dtype)).sum() / active.sum().clamp_min(1)) * 100.0
@@ -470,7 +495,6 @@ def joint_velocity_loss(
     contact_labels: torch.Tensor,  # (T, J) int8 tri-state: 1 = annotated in-contact this frame
     *,
     fps: float,
-    joint_weight: torch.Tensor | None = None,  # (T, J) float in [0,1] — per-joint confidence weight
     world_quats: torch.Tensor | None = None,   # (T, J, 4) scalar-last world joint orientation
     angular_weight: float = 0.0,               # angular term weight relative to the linear one
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
@@ -482,16 +506,12 @@ def joint_velocity_loss(
 
         L_lin = mean_{t, j : contact[t,j]==1 ∧ contact[t+1,j]==1} ‖p_{t+1,j} − p_{t,j}‖²
 
-    (the constant ``fps²`` folds into the weight, as in :func:`smoothness_loss`).
-    Gating on both frames matches the dynamics stage's ``fpair`` convention: the
-    release step (contact→free) is not damped, and any step touching an invalid
-    frame drops out for free (held frames carry label ``-1`` ≠ 1).
-    That displacement magnitude equals the joint's LOCAL-frame linear-velocity
-    magnitude — the BetterRobot-Jacobian quantity in
-    :mod:`tools.human_optim.velocity` — because the body-frame rotation preserves
-    norm; but the finite difference of the posed world joints is directly
-    differentiable through ``q`` (that Jacobian path is detached), so we use it as
-    the loss. Gradients flow through ``joints_world`` only.
+    (the constant ``fps²`` folds into the weight). Gating on both frames matches
+    kindyn's ``fpair`` convention: the release step (contact→free) is not
+    damped, and any step touching an invalid frame drops out for free (held frames
+    carry label ``-1`` ≠ 1). The finite difference of the posed world joints is
+    directly differentiable through ``q``, so gradients flow through
+    ``joints_world`` only.
 
     A joint that grips also should not *twist*: when ``world_quats`` is given and
     ``angular_weight > 0`` the same in-contact gate additionally damps the
@@ -511,8 +531,6 @@ def joint_velocity_loss(
     sp2 = (dp * dp).sum(dim=-1)                          # (T-1, J) squared per-step speed (×fps²→weight)
     pair = (contact_labels[:-1] == 1) & (contact_labels[1:] == 1)  # in contact at BOTH ends of the step
     gate = pair.to(sp2.dtype)
-    if joint_weight is not None:                         # down-weight uncertain contacts (min over the step)
-        gate = gate * torch.minimum(joint_weight[:-1], joint_weight[1:])
     n = gate.sum()
     loss = (sp2 * gate).sum() / n.clamp_min(1.0)
     ang_deg_s = joints_world.new_zeros(())
@@ -533,7 +551,6 @@ def joint_acceleration_loss(
     contact_labels: torch.Tensor,  # (T, J) int8 tri-state: 1 = annotated in-contact this frame
     *,
     fps: float,
-    joint_weight: torch.Tensor | None = None,  # (T, J) float in [0,1] — per-joint confidence weight
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
     """Damp the world (Cartesian) ACCELERATION of joints a human annotated as in contact.
 
@@ -547,8 +564,8 @@ def joint_acceleration_loss(
 
     That second difference is the joint origin's LOCAL_WORLD_ALIGNED linear
     acceleration (the world-axis 2nd time derivative of its position), with the
-    constant ``fps²`` folded into the weight as in :func:`smoothness_loss`. Gating on
-    all three frames drops the enter/exit steps and any stencil that touches an
+    constant ``fps²`` folded into the weight. Gating on all three frames drops the
+    enter/exit steps and any stencil that touches an
     invalid frame (held frames carry label ``-1`` ≠ 1). Gradients flow through
     ``joints_world`` only. Returns ``(loss, mean_accel_cm_s2, n_contact_stencils)`` —
     the latter two detached diagnostics."""
@@ -560,8 +577,6 @@ def joint_acceleration_loss(
     trip = ((contact_labels[:-2] == 1) & (contact_labels[1:-1] == 1)      # in contact at all 3 stencil frames
             & (contact_labels[2:] == 1))
     gate = trip.to(a2.dtype)
-    if joint_weight is not None:                        # down-weight uncertain contacts (min over the stencil)
-        gate = gate * torch.minimum(torch.minimum(joint_weight[:-2], joint_weight[1:-1]), joint_weight[2:])
     n = gate.sum()
     loss = (a2 * gate).sum() / n.clamp_min(1.0)
     with torch.no_grad():
@@ -574,18 +589,37 @@ def pose_prior_loss(
     q: torch.Tensor,        # (T, nq) normalized, bh order
     q_init: torch.Tensor,   # (T, nq) normalized, bh order
     num_joints: int,
+    *,
+    num_prior_joints: int | None = None,
+    joint_weight: torch.Tensor | None = None,  # (T, num_joints-1) per-joint weight in [0,1]
 ) -> torch.Tensor:
     """Smooth quaternion distance ``1 − (q·q_init)²`` over joints (not root).
 
     Excludes the root SE3 (``q[:7]``): the body / hand pose stays near the
     converter's per-frame estimate while root translation + orientation move
     freely.
+
+    ``num_prior_joints`` covers only the first N parent-local quaternions — the
+    body block, dropping the fingers. Used when the finger pose is being *fitted*
+    (``freeze_fingers`` off): the converter's hand pose is then the thing we
+    stopped trusting, so pulling the fingers back to it is incoherent. The
+    denominator stays the full joint count, so dropping the fingers does not
+    silently stiffen the prior on the joints it still covers.
+
+    ``joint_weight`` (:func:`~tools.human_optim.keypoints.visibility_weights`) scales each
+    joint's contribution, so a joint the camera could not see is pulled less toward a
+    starting pose the camera could not see either. Like ``num_prior_joints`` it holds the
+    denominator, so the prior *loosens* on those joints instead of stiffening on the rest.
     """
     shape = q.shape[:-1]
     qj = q[..., 7:].reshape(*shape, num_joints - 1, 4)
     qij = q_init[..., 7:].reshape(*shape, num_joints - 1, 4)
     vals = 1.0 - (qj * qij).sum(dim=-1).square()
-    return vals.mean()
+    if joint_weight is not None:
+        vals = vals * joint_weight
+    if num_prior_joints is None:
+        return vals.mean()
+    return vals[..., :num_prior_joints].sum() / vals.numel()
 
 
 def root_orient_prior_loss(
@@ -623,8 +657,8 @@ def radial_velocity_loss(
     ray is **detached**: the loss damps motion *along* the ray, it must never rotate
     the ray to cut the cost; using the camera *position* (never a camera derivative)
     makes the moving camera a non-issue. The constant ``fps²`` folds into the weight,
-    as in :func:`joint_velocity_loss` / :func:`smoothness_loss`. A step counts only if
-    ``frame_valid`` at BOTH ends (the fpair convention). ``T<2`` ⇒ 0.
+    as in :func:`joint_velocity_loss`. A step counts only if ``frame_valid`` at
+    BOTH ends (the fpair convention). ``T<2`` ⇒ 0.
     """
     if joints_world.shape[0] < 2:
         return joints_world.new_zeros(())
@@ -636,47 +670,3 @@ def radial_velocity_loss(
         return sq.mean()
     gate = (frame_valid[1:] & frame_valid[:-1]).to(sq.dtype)[:, None]  # (T-1, 1) step valid at both ends
     return (sq * gate).sum() / gate.expand_as(sq).sum().clamp_min(1.0)
-
-
-def smoothness_loss(
-    q: torch.Tensor,   # (T, nq) normalized, better_human order
-    num_joints: int,
-    *,
-    accel_root: float,
-    accel_joint: float,
-    jerk_root: float,
-    jerk_joint: float,
-    snap_root: float = 0.0,
-    snap_joint: float = 0.0,
-) -> torch.Tensor:
-    """Acceleration + jerk (+ optional snap) penalty via the exact batched Lie tangent.
-
-    Penalizes raw frame-to-frame tangent finite-differences (the constant
-    ``dt`` factors are folded into the weights — equivalent for a fixed-fps
-    clip and far better conditioned than ``/dt³`` jerk on a jittery init):
-    ``d1 = q_{t+1} ⊖ q_t`` (velocity, :func:`tangent_difference`),
-    ``accel = Δd1`` (2nd diff), ``jerk = Δaccel`` (3rd), ``snap = Δjerk`` (4th). Root
-    tangent is the first 6 components (se3), joints the remaining ``3·(num_joints-1)``
-    — weighted separately since the root carries the global trajectory and the joints
-    the articulation. Snap adds a heavier penalty on the highest-frequency jitter
-    (defaults 0 = the accel/jerk-only field). A clip too short for a difference (``T<3``
-    accel, ``T<4`` jerk, ``T<5`` snap) contributes 0 for that term, not NaN.
-    """
-    d1 = tangent_difference(q, num_joints)             # (T-1, nv) — velocity
-    accel = d1[1:] - d1[:-1]                            # (T-2, nv) — acceleration
-    jerk = accel[1:] - accel[:-1]                       # (T-3, nv) — jerk
-    snap = jerk[1:] - jerk[:-1]                         # (T-4, nv) — snap
-
-    ar, aj = accel[:, :6], accel[:, 6:]
-    jr, jj = jerk[:, :6], jerk[:, 6:]
-    sr, sj = snap[:, :6], snap[:, 6:]
-    z = q.new_zeros(())
-    msq = lambda x: x.square().mean() if x.numel() > 0 else z   # empty diff (short clip) → 0, not NaN
-    return (
-        accel_root * msq(ar)
-        + accel_joint * msq(aj)
-        + jerk_root * msq(jr)
-        + jerk_joint * msq(jj)
-        + snap_root * msq(sr)
-        + snap_joint * msq(sj)
-    )

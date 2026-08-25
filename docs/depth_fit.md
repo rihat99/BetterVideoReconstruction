@@ -63,12 +63,16 @@ erasing it.
 
 ## Where it is used
 
-- **Viewer**: the "depth trust (spaghetti)" layer colors each joint sphere from
-  calm green (trusted) to bright magenta (spaghettized); grey means no data.
-  The wrist shows the worst member of its hand.
-- **Confidence**: `joint_depth_trust` multiplies the no-contact motion evidence
-  (see [`contact_confidence.md`](contact_confidence.md)). It deliberately does
-  not gate contact evidence.
+**Currently unwired (contact-frames era).** The per-joint contact stage that
+consumed this metric was replaced by the contact-frame detector (see
+[`contacts.md`](contacts.md)), and the viewer's "depth trust" layer was retired
+with it. The module (`tools/human_optim/depth_fit.py`) remains for the frozen
+per-joint stages. Historical consumers:
+
+- **Viewer** (retired): the "depth trust (spaghetti)" layer colored each joint
+  sphere from calm green (trusted) to bright magenta (spaghettized).
+- **Confidence** (frozen): `joint_depth_trust` multiplied the no-contact motion
+  evidence (see [`contact_confidence.md`](contact_confidence.md)).
 
 Knobs live in `[depth_fit]` in `configs/human_optimization.toml`: `cell_px`,
 `min_points`, `trust_scale_log`.

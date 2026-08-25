@@ -18,15 +18,35 @@ direction from a single image. This stage:
      take a confidence-weighted spherical mean. The agreement of the surviving
      frames — recovered from *different* camera poses — validates the estimate.
 
+On top of GeoCalib, the stage tries to measure gravity **directly from the
+fused scene geometry**: it fits a plane to the lowest scene points
+(:func:`tools.geometry.ground.fit_ground_plane`) and, when the fit passes three
+acceptance gates, uses the floor's upward normal as world-down. The gates guard
+against scenes where the ground simply is not visible (a wall close-up): the fit
+must find a planar band at all (not a wall's bottom edge), keep at least
+``ground_min_points`` points, and land within ``ground_max_tilt_deg`` of the
+prior down direction (GeoCalib's estimate when reliable, else the fallback
+camera-down). Priority for ``gravity_world``: reliable GeoCalib → accepted
+ground plane → fallback down (outdoors — the only place GeoCalib validates —
+the visible ground is terrain that can genuinely slope, so the learned horizon
+wins; indoors the level floor replaces the camera-down fallback). ``source``
+records which one won.
+
 The output is a **unit** direction (magnitude 9.81 m/s² is applied by the
-dynamics stage).
+dynamics solves).
 
 Per-clip I/O (``--source`` frames + ``--predictions out/<stem>/``)::
 
     reads:  --source video / folder of frames
             geometry/transform.npz   (VGGT cam-from-world extrinsics + frame_indices;
                                        falls back to vggt/camera.npz — rotation is the same)
+            geometry/scene.npz       (fused scene points, for the ground-plane fit;
+                                       skipped with a note when missing)
     writes: geocalib/gravity.npz
+              ground_accepted    ()    bool whether the ground-plane fit won
+              ground_reject      ()    str  why not ("" when accepted)
+              ground_centroid/ground_normal (3,) f32, ground_extent/ground_angle_deg ()
+              ground_points      ()    i32  inlier count   [all 5 only when a fit exists]
               gravity_world      (3,)   f32  unit gravity (down), world frame  [PRIMARY]
               up_world           (3,)   f32  = -gravity_world (zenith)
               gravity_world_frames (S,3) f32 per-sampled-frame world gravity
@@ -63,6 +83,7 @@ import torch
 
 from tools.adapters.geocalib import DEFAULT_WEIGHTS, infer_gravity, load_geocalib
 from tools.config import load_toml, section
+from tools.geometry.ground import fit_ground_plane
 from tools.source import resolve_source
 
 
@@ -218,20 +239,65 @@ def estimate_gravity(args: argparse.Namespace) -> None:
         fail.append(f"camera-rotation-diversity {cam_div:.1f}° < {args.min_diversity_deg:g}°")
     reliable = not fail
 
-    # When GeoCalib is unreliable (it wasn't trained on climbing walls, and indoor
-    # floors are small / not visible), fall back to the standard world-down direction
-    # (+y — VGGT anchors its world to camera 0, whose opening shot is ~upright) rather
-    # than emit a confident-looking but wrong vector. The raw GeoCalib estimate is kept
-    # for inspection; `source` records which one `gravity_world` carries.
+    # Ground plane: when the floor shows up in the fused scene, its upward normal
+    # is direct geometric evidence of world-down — better than any camera-based
+    # estimate. The prior (GeoCalib when reliable, else the fallback camera-down)
+    # only seeds which points count as "lowest" and anchors the tilt gate; the
+    # gates reject scenes where the ground is not actually visible.
     grav_gc = grav.copy()
+    prior = grav_gc if reliable else fallback
+    ground, fit, ground_reject = None, None, "disabled"
+    if args.ground:
+        scene_f = pred / "geometry" / "scene.npz"
+        if not scene_f.exists():
+            ground_reject = "no geometry/scene.npz (run fuse_geometry first)"
+        else:
+            fit = fit_ground_plane(np.load(scene_f)["points"], prior,
+                                   max_tilt_deg=args.ground_max_tilt_deg)
+            if fit is None:
+                ground_reject = "no planar floor in the lowest band"
+            else:
+                centroid, up_n, extent, n_in = fit
+                tilt = float(np.degrees(np.arccos(np.clip(up_n @ (-prior), -1.0, 1.0))))
+                if n_in < args.ground_min_points:
+                    ground_reject = f"{n_in} inlier points < {args.ground_min_points}"
+                elif tilt > args.ground_max_tilt_deg:
+                    ground_reject = (f"normal {tilt:.1f}° from expected down "
+                                     f"(> {args.ground_max_tilt_deg:g}°)")
+                else:
+                    ground, ground_reject = {"centroid": centroid, "normal": up_n,
+                                             "extent": extent, "points": n_in,
+                                             "angle_deg": tilt}, ""
+
+    # Priority: reliable GeoCalib → accepted ground plane → fallback world-down
+    # (+y — VGGT anchors its world to camera 0, whose opening shot is ~upright).
+    # GeoCalib outranks the ground fit because it only survives its gates on
+    # outdoor scenes — exactly where the visible ground is terrain that can
+    # genuinely slope (sport_climb's crag base sits 25° off its validated
+    # gravity). Indoors GeoCalib essentially never validates and the level gym
+    # floor is the best evidence, so the ground plane replaces the camera-down
+    # fallback there. `source` records which one `gravity_world` carries.
     if reliable:
         grav, source = grav_gc, "geocalib"
+    elif ground is not None:
+        grav, source = -ground["normal"], "ground"
     else:
         grav, source = fallback.copy(), "fallback_down"
+
+    ground_fields = {"ground_accepted": np.bool_(ground is not None),
+                     "ground_reject": np.str_(ground_reject)}
+    if fit is not None:
+        ground_fields.update(
+            ground_centroid=centroid.astype(np.float32),
+            ground_normal=up_n.astype(np.float32),
+            ground_extent=np.float32(extent),
+            ground_points=np.int32(n_in),
+            ground_angle_deg=np.float32(tilt))
 
     out_npz.parent.mkdir(parents=True, exist_ok=True)
     np.savez(
         out_npz,
+        **ground_fields,
         gravity_world=grav.astype(np.float32),
         up_world=(-grav).astype(np.float32),
         source=source,
@@ -263,11 +329,18 @@ def estimate_gravity(args: argparse.Namespace) -> None:
         weights=args.weights,
         extrinsics_source=extr_src,
     )
-    if reliable:
+    if source == "ground":
+        print(f"  gravity_world = [{grav[0]:+.4f} {grav[1]:+.4f} {grav[2]:+.4f}]  [GROUND PLANE]  "
+              f"({ground['points']} floor pts, {ground['angle_deg']:.1f}° from prior down) "
+              f"-> {out_npz}")
+    elif source == "geocalib":
         print(f"  gravity_world = [{grav[0]:+.4f} {grav[1]:+.4f} {grav[2]:+.4f}]  [GeoCalib, RELIABLE]  "
               f"({int(selected.sum())}/{len(recs)} frames, spread med={spread_med:.2f}°, "
               f"cam-rot-div={cam_div:.1f}°, max-conf={max_conf:.4f}, {angle_to_y:.1f}° from world +y) "
               f"-> {out_npz}")
+        if ground is not None:
+            print(f"  ground plane: fitted ({ground['points']} pts, {ground['angle_deg']:.1f}° "
+                  f"from GeoCalib down) — kept for display; reliable GeoCalib outranks it")
     else:
         print(f"  gravity_world = [{grav[0]:+.4f} {grav[1]:+.4f} {grav[2]:+.4f}]  [FALLBACK world-down]  "
               f"-> {out_npz}")
@@ -275,6 +348,8 @@ def estimate_gravity(args: argparse.Namespace) -> None:
               f"walls; using the standard down direction. GeoCalib's raw guess was "
               f"[{grav_gc[0]:+.3f} {grav_gc[1]:+.3f} {grav_gc[2]:+.3f}] ({angle_to_y:.0f}° off, "
               f"kept as gravity_world_geocalib).")
+    if ground is None and args.ground:
+        print(f"  ground plane: rejected — {ground_reject}")
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -295,6 +370,9 @@ def main(argv: list[str] | None = None) -> int:
         "min_diversity_deg": 8.0,
         "max_spread_deg": 5.0,
         "fallback_gravity": "0,1,0",
+        "ground": True,
+        "ground_min_points": 500,
+        "ground_max_tilt_deg": 30.0,
         "weights": DEFAULT_WEIGHTS,
         "skip_existing": False,
     })

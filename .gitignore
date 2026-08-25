@@ -221,6 +221,13 @@ __marimo__/
 # Claude Code local session state
 .claude/
 
+# Corpus config variants generated at runtime by the corpus runner scripts
+# (sed derivatives of configs/corpus.toml — never edit by hand).
+configs/corpus_onepergpu.toml
+configs/corpus_contacts2.toml
+configs/corpus_contacts2_onepergpu.toml
+configs/corpus_retry.toml
+
 # Project outputs / data
 data/
 data_2/

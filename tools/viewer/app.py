@@ -19,15 +19,19 @@ from .loading import ClipData, load_clip_data
 from .scene import ClipScene, _SKEL_ALPHA
 
 _LAYER_LABELS = (("body", "SMPL-X body"), ("skeleton", "body skeleton"),
-                 ("confidence", "contact confidence"),
-                 ("depth_trust", "depth trust (spaghetti)"),
+                 ("contact_frames", "contact frames"),
+                 ("frame_normals", "frame normal arrows"),
                  ("human", "human points"), ("scene", "scene points"),
                  ("normals", "scene normals"),
-                 ("cameras", "cameras"), ("gravity", "gravity"))
+                 ("cameras", "cameras"), ("gravity", "gravity"),
+                 ("ground", "ground plane"))
 
 # Force/torque display toggles (their own sidebar folder; only bite while a force
 # body source — ``dynamics`` or ``kindyn_1`` — is active). Joints are always coloured
 # by contact (green free / red in-contact); these switch the extra overlays on and off.
+# The folder also holds the ``force display`` dropdown: "per-joint" accumulates each
+# joint's frame forces into one arrow at the joint, "per-frame" draws each contact
+# frame's own solved force where it acts (sources that store ``frame_forces`` only).
 _DYN_LAYER_LABELS = (("dyn_torque", "joint torques (sphere size)"),
                      ("dyn_fingers", "fingers / palm"),
                      ("dyn_forces", "contact forces"),
@@ -35,9 +39,9 @@ _DYN_LAYER_LABELS = (("dyn_torque", "joint torques (sphere size)"),
                      ("dyn_root_torque", "root torque"),
                      ("dyn_sensor", "sensor forces (measured)"))
 
-# Layer checkboxes that only colour the kinematic skeleton overlay — hidden unless the
-# active body source is one the overlay draws (see ``ClipScene.overlay_sources``).
-_OVERLAY_LAYER_KEYS = ("confidence", "depth_trust")
+# Layer checkboxes that only apply to the contact-frame overlay — hidden unless the
+# active body source has contact labels (see ``ClipScene.frame_sources``).
+_FRAME_LAYER_KEYS = ("contact_frames", "frame_normals")
 
 # World-frame up vector per ``--up`` axis, mirroring ``SceneApi.set_up_direction``.
 # ``set_up_direction`` rotates the scene root (it does NOT set the camera's
@@ -61,12 +65,13 @@ class Viewer:
         self.opts = dict(camera_stride=camera_stride, device=device,
                          show_smplx=show_smplx, human_max_points=human_max_points,
                          video=video, video_dir=video_dir)
-        self.layers = {"body": show_smplx, "skeleton": False, "confidence": True,
-                       "depth_trust": False,
+        self.layers = {"body": show_smplx, "skeleton": False, "contact_frames": True,
+                       "frame_normals": False,
                        "human": False, "scene": True, "normals": False,
-                       "cameras": True, "gravity": False,
+                       "cameras": True, "gravity": False, "ground": True,
                        # force/torque section (torque scaling + fingers off by default)
                        "dyn_torque": False, "dyn_fingers": False, "dyn_forces": True,
+                       "dyn_force_mode": "per-joint",
                        "dyn_root_force": True, "dyn_root_torque": True,
                        # measured wall-sensor arrows (climb_wall clips only) — off until
                        # asked for; the checkbox is hidden when the clip has no sensor npz
@@ -138,6 +143,10 @@ class Viewer:
         # the whole folder is hidden while a non-force source is active.
         self.dyn_folder = g.add_folder("dynamics", expand_by_default=False)
         with self.dyn_folder:
+            d = g.add_dropdown("force display", ("per-joint", "per-frame"),
+                               initial_value=self.layers["dyn_force_mode"])
+            d.on_update(self._make_layer_cb("dyn_force_mode"))
+            self.checkboxes["dyn_force_mode"] = d
             for key, label in _DYN_LAYER_LABELS:
                 c = g.add_checkbox(label, self.layers[key])
                 c.on_update(self._make_layer_cb(key))
@@ -189,9 +198,9 @@ class Viewer:
             with self._lock:
                 if self.scene is None:
                     return
-                if key in ("scene", "normals", "cameras", "gravity"):
+                if key in ("scene", "normals", "cameras", "gravity", "ground"):
                     self.scene.set_static_layer(key, self.layers[key])
-                else:  # body / skeleton / colour overlays / human are per-frame → re-apply
+                else:  # body / skeleton / contact frames / human are per-frame → re-apply
                     self.scene.apply_frame(self._cur())
         return cb
 
@@ -209,8 +218,8 @@ class Viewer:
         sc = self.scene
         if sc is None:
             return
-        for key in _OVERLAY_LAYER_KEYS:
-            self.checkboxes[key].visible = src in sc.overlay_sources
+        for key in _FRAME_LAYER_KEYS:
+            self.checkboxes[key].visible = src in sc.frame_sources
         self.dyn_folder.visible = src in sc.force_sources        # the whole dyn_* section
         self.checkboxes["dyn_sensor"].visible = sc.sensors is not None
         self.body_opacity.visible = src in sc.translucency_sources

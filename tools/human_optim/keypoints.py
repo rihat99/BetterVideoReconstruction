@@ -92,6 +92,72 @@ def build_correspondence(
     return Correspondence(joint_model=long(joint_model), lm_frame=long(lm_frame), sap=long(sap))
 
 
+def visibility_weights(
+    scores: torch.Tensor,        # (T, 308) Sapiens per-keypoint detection scores
+    corr: Correspondence,
+    parents: list[int],          # SMPL-X-mid parent joint index per joint (-1 at the root)
+    *,
+    strength: float,
+    window_s: float,
+    fps: float,
+    frame_valid: torch.Tensor | None = None,   # (T,) bool
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Per-keypoint and per-joint **visibility** weights in ``[0, 1]``.
+
+    Sapiens reports a detection *score* per keypoint, not a visibility flag — but a
+    joint the camera cannot see is hard to detect, so its score drops. Measured on four
+    scenes against an exact camera-ray body-occlusion cast: mean score **0.905 when the
+    joint is clear vs 0.614 when a body surface stands in front of it**.
+
+    The score is smoothed over time and divided by the keypoint's own 90th percentile
+    over the clip, capped at 1. That percentile is what makes the number mean *visibility*
+    rather than *detector calibration*: Sapiens scores hips at ~0.65 and wrists at ~0.95
+    even when both are in plain view, so a raw score would permanently distrust the hips.
+    Dividing by the keypoint's own clear-view level leaves only its **relative** drop,
+    which is the occlusion.
+
+    ``strength`` then scales that drop: ``weight = 1 − strength · (1 − ratio)``, clamped
+    to ``[0, 1]``. It is the one knob. ``0`` is off (every weight 1). ``1`` charges the
+    drop as measured. Above 1 the *shortfall* is amplified while a clearly-seen keypoint —
+    whose ratio is already near 1 — barely moves, so raising it separates the occluded
+    joints from the visible ones instead of quietly weakening every term at once.
+
+    A model joint takes the weight of its matched keypoint. The joints with no keypoint
+    (spine, neck, collars, head, feet, the 30 fingers) **inherit their parent's** weight;
+    SMPL-X-mid lists parents before children, so one forward pass resolves the chain and
+    the root starts at 1. So a foot follows its ankle and the fingers follow their wrist,
+    while the torso — which no keypoint watches directly — stays at 1.
+
+    Smoothing runs within runs of consecutive valid frames (:func:`smooth_tracks`). An
+    untracked frame carries no observation at all, so its weight stays 1: the priors are
+    the only thing holding those frames and must not be loosened there.
+
+    Returns ``(keypoint_weights (T, 308), joint_weights (T, J))``.
+    """
+    num_frames, num_keypoints = int(scores.shape[0]), int(scores.shape[1])
+    valid = (frame_valid if frame_valid is not None
+             else torch.ones(num_frames, dtype=torch.bool, device=scores.device))
+    valid_np = valid.detach().cpu().numpy()
+    smoothed = scores.detach().cpu().numpy()
+    if window_s > 0.0:
+        mask = np.broadcast_to(valid_np[:, None], smoothed.shape)
+        smoothed = smooth_tracks(smoothed[..., None], mask, window_s=window_s, fps=fps)[..., 0]
+    clear_level = (np.quantile(smoothed[valid_np], 0.9, axis=0) if valid_np.any()
+                   else np.ones(num_keypoints, smoothed.dtype))
+    ratio = torch.as_tensor(smoothed / np.maximum(clear_level, 1e-3)[None, :],
+                            dtype=scores.dtype, device=scores.device).clamp(max=1.0)
+    keypoint = (1.0 - strength * (1.0 - ratio)).clamp(0.0, 1.0)
+    keypoint = torch.where(valid[:, None], keypoint, torch.ones_like(keypoint))
+
+    joint = torch.ones((num_frames, len(parents)), dtype=scores.dtype, device=scores.device)
+    joint[:, corr.joint_model] = keypoint[:, corr.sap[:corr.joint_model.numel()]]
+    covered = set(int(j) for j in corr.joint_model.tolist())
+    for j, parent in enumerate(parents):
+        if j not in covered and parent >= 0:
+            joint[:, j] = joint[:, parent]
+    return keypoint, joint
+
+
 def smooth_tracks(x: np.ndarray, valid: np.ndarray, *, window_s: float, fps: float,
                   order: int = 2) -> np.ndarray:
     """Savitzky–Golay-smooth 2D tracks within runs of consecutive valid frames (round-4 §7).

@@ -2,15 +2,14 @@
 
 Every loader here reads one clip's ``out/<stem>/`` tree into plain numpy: the
 fused scene + human geometry, the per-frame cameras, the world-frame gravity, and
-each SMPL-X body source (raw / kinematic / dynamics). :func:`load_clip_data`
+each SMPL-X body source (raw / kinematic / kindyn). :func:`load_clip_data`
 orchestrates them into a :class:`ClipData`, which :mod:`tools.viewer.scene` then
 turns into viser nodes. ``torch`` / ``viser.transforms`` are imported lazily
 inside the loaders that need them, so importing this module stays light.
 """
 from __future__ import annotations
 
-import hashlib
-import sys
+import json
 import warnings
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -23,9 +22,13 @@ from .helpers import _camera_world_pose, _top4_skin_weights
 
 _REPO_ROOT = Path(__file__).resolve().parents[2]
 
-# SMPL-X hand joints — fingers, excluded from the body skeleton (wrists kept) and
-# OR-folded into the wrist for contact. Shared with :mod:`tools.viewer.scene`.
+# SMPL-X hand joints — the fingers. The body skeleton draws them small (see
+# ``_SKEL_FINGER_SCALE`` in :mod:`tools.viewer.scene`) and the force sources OR-fold
+# their per-joint contact into the wrist. Shared with :mod:`tools.viewer.scene`.
 _FINGER_TOKENS = ("index", "middle", "pinky", "ring", "thumb")
+# The contact-label schema this viewer reads: contact lives on the 12 body-mounted
+# contact frames (``frame_contact``), not on joints. An older artifact is ignored.
+_CONTACT_SCHEMA = 2
 # Confidence quantile dropped from the displayed scene cloud, so what you see is the
 # cloud the optimizer / estimate_contacts actually run their SDF against (mirrors
 # ``[penetration]/[contacts].conf_drop_q`` in configs/human_optimization.toml).
@@ -33,7 +36,13 @@ _SCENE_CONF_DROP_Q = 0.1
 
 
 def _load_gravity(pred: Path) -> dict | None:
-    """World-frame gravity from ``geocalib/gravity.npz`` (unit down + source flag)."""
+    """World-frame gravity from ``geocalib/gravity.npz`` (unit down + source flag).
+
+    When the gravity stage fitted and accepted a ground plane, ``ground`` carries
+    it (centroid / up-normal / draw extent / angle to the prior down) so the
+    viewer can draw the grid the pipeline actually used; a rejected fit leaves
+    ``ground`` ``None`` and puts the reason in ``ground_reject``.
+    """
     f = pred / "geocalib" / "gravity.npz"
     if not f.exists():
         return None
@@ -43,18 +52,25 @@ def _load_gravity(pred: Path) -> dict | None:
     source = str(gd["source"]) if "source" in gd.files else "geocalib"
     spread = (float(gd["inlier_spread_median_deg"])
               if "inlier_spread_median_deg" in gd.files else float("nan"))
-    return {"g": g, "is_fallback": source == "fallback_down", "spread": spread}
+    ground = None
+    if "ground_accepted" in gd.files and bool(gd["ground_accepted"]):
+        ground = {"centroid": np.asarray(gd["ground_centroid"], np.float64),
+                  "normal": np.asarray(gd["ground_normal"], np.float64),
+                  "extent": float(gd["ground_extent"]),
+                  "angle_deg": float(gd["ground_angle_deg"])}
+    reject = str(gd["ground_reject"]) if "ground_reject" in gd.files else ""
+    return {"g": g, "is_fallback": source == "fallback_down", "source": source,
+            "spread": spread, "ground": ground, "ground_reject": reject}
 
 
 def _load_force_data(pred: Path, filename: str) -> dict | None:
     """Numpy arrays for a force/torque body source (``human_optim/<filename>``).
 
-    Shared by every source that solves contact forces: ``dynamics.npz`` (force-only)
-    and the kinematics+dynamics bodies ``kindyn_1.npz`` / ``kindyn_manual.npz`` (the
-    manual-annotation reference chain). All store the same force fields, so the viewer
-    draws them the same way. ``joint_contact`` is optional — older kindyn npz omit
-    it, and the caller then reads which joints are in contact from where the solved
-    contact force is non-zero.
+    Shared by the kinematics+dynamics bodies ``kindyn_1.npz`` / ``kindyn_manual.npz``
+    (the manual-annotation reference chain). Both store the same force fields, so the
+    viewer draws them the same way. ``joint_contact`` is optional — older kindyn npz
+    omit it, and the caller then reads which joints are in contact from where the
+    solved contact force is non-zero.
     """
     f = pred / "human_optim" / filename
     if not f.exists():
@@ -86,8 +102,12 @@ def _load_force_data(pred: Path, filename: str) -> dict | None:
         "jw": dd["joints_world"].astype(np.float32),            # (P, N, J, 3)
         "tm": tm,
         "fw": dd["contact_forces_world"].astype(np.float32),    # (P, N, J, 3)
+        "ff": (dd["frame_forces"].astype(np.float32)            # (P, N, F, 3): the same forces
+               if "frame_forces" in dd.files else None),        # per contact FRAME, unfolded
         "bw": (dd["base_wrench"].astype(np.float32)             # (P, N, 6): root force | torque
-               if "base_wrench" in dd.files else None),
+               if "base_wrench" in dd.files else None),         #   in the ROOT-LOCAL frame
+        "rootq": (dd["q"][:, :, 3:7].astype(np.float32)         # (P, N, 4) scalar-last root quat
+                  if "q" in dd.files else None),                #   (rotates bw to world for drawing)
         "jc": jc,                                               # (P, N, J): per-joint in-contact (fingers folded to wrist)
         "joint_names": names,                                   # (J,) native names (finger toggle)
         "valid": valid,
@@ -121,16 +141,31 @@ def _load_sensor_forces(pred: Path) -> dict | None:
 
 
 def _load_skeleton(pred: Path, body_fn: str = "kinematic_1.npz",
-                   contacts_fn: str = "contacts_1.npz") -> dict | None:
-    """Body-skeleton topology + per-joint contact, confidence, and depth fit.
+                   contacts_fn: str | None = "contacts_1.npz",
+                   frame_names: list[str] | None = None) -> dict | None:
+    """Body-skeleton topology + per-contact-frame contact labels.
 
-    The joint tree (``parents`` / ``joint_names``, 52-joint ``SMPLXMid`` order) comes
-    from ``human_optim/<body_fn>`` so the skeleton can be drawn even without a
-    contact pass; the per-joint contact flags — and the schema-5/6/7 per-joint
-    ``label_confidence`` ∈ [0, 1] (both classes) that shades the sphere — come from
-    ``human_optim/<contacts_fn>`` when present (same joint order). Each refined body
-    pairs with the contact artifact measured ON it (kinematic_1 ↔ contacts_1,
-    kinematic_2 ↔ contacts_2). ``None`` when no such body exists.
+    The joint tree (``parents`` / ``joint_names``, 52 native joints) comes from
+    ``human_optim/<body_fn>``, so the skeleton draws even without a contact pass.
+    Contact itself lives on the **contact frames** — named points on the skin,
+    each rigidly attached to a joint — and is read from ``human_optim/<contacts_fn>``
+    when that file carries the current label schema
+    (``contact_label_schema == _CONTACT_SCHEMA``). Each refined body pairs with the
+    contact artifact measured ON it (kinematic_1 ↔ contacts_1, kinematic_2 ↔
+    contacts_2). ``contacts_fn=None`` means the body npz is **self-labeled** — the
+    kindyn stages write ``frame_contact`` next to ``q`` themselves — so the labels
+    come straight from ``body_fn`` with no schema check.
+
+    A missing, older, or mismatched contact file just leaves the contact fields
+    ``None``: the body and its skeleton still load, they only lose the contact
+    layer. ``None`` when no such body exists.
+
+    :param pred: the clip's ``out/<stem>/`` directory.
+    :param body_fn: refined-body npz under ``human_optim/``.
+    :param contacts_fn: contact npz measured on that body, or ``None`` (self-labeled).
+    :param frame_names: the contact-frame names the posed body actually reports
+        (from :func:`_smplx_kinematic_skinned`); the labels are dropped when the
+        file names a different frame set.
     """
     kin = pred / "human_optim" / body_fn
     if not kin.exists():
@@ -139,111 +174,79 @@ def _load_skeleton(pred: Path, body_fn: str = "kinematic_1.npz",
     out: dict = {
         "parents": np.asarray(kd["parents"], np.int32),          # (J,)
         "joint_names": [str(x) for x in kd["joint_names"]],      # (J,)
-        "contact": None,                                         # (P, N, J) bool or None
-        "confidence": None,                                      # (P, N, J) float or None
-        "joint_depth_gap_cm": None,                              # (P, N, J) float or None
-        "joint_depth_trust": None,                               # (P, N, J) float or None
+        "frame_contact": None,                                   # (P, N, F) bool or None
+        "frame_names": None,                                     # (F,) contact-frame names
+        "frame_parent": None,                                    # (F,) parent joint per frame
         "contact_oids": None,                                    # (P,) or None
     }
-    cf = pred / "human_optim" / contacts_fn
-    if cf.exists():
-        cd = np.load(cf, allow_pickle=True)
-        expected = (
-            len(np.asarray(kd["object_ids"])), int(np.asarray(kd["num_frames"]).item()),
-            len(out["joint_names"]),
-        )
-        contact = np.asarray(cd["joint_contact"], bool)
-        contact_names = ([str(x) for x in np.asarray(cd["joint_names"]).tolist()]
-                         if "joint_names" in cd.files else [])
-        contact_oids = (np.asarray(cd["object_ids"], np.int32)
-                        if "object_ids" in cd.files else np.empty(0, np.int32))
-        body_oids = np.asarray(kd["object_ids"], np.int32)
-        if (contact.shape != expected or contact_names != out["joint_names"]
-                or contact_oids.shape != (expected[0],)
-                or not np.array_equal(contact_oids, body_oids)):
-            warnings.warn(
-                f"ignoring incompatible contact artifact {cf}; regenerate estimate_contacts",
-                RuntimeWarning, stacklevel=2)
+    if contacts_fn is None:
+        if "frame_contact" not in kd.files:
             return out
-        contact = contact.copy()                              # folding below must not mutate the npz
-        depth = {}
-        for key in ("joint_depth_gap_cm", "joint_depth_trust"):
-            if key not in cd.files:
-                continue
-            candidate = np.asarray(cd[key], np.float32)
-            if candidate.shape == expected:
-                depth[key] = candidate.copy()
-            else:
-                warnings.warn(
-                    f"ignoring incompatible {key} in {cf}; regenerate estimate_contacts",
-                    RuntimeWarning, stacklevel=2)
-        conf = None
-        try:
-            schema = int(np.asarray(cd["confidence_schema"]).item())
-            method = str(np.asarray(cd["confidence_method"]).item())
-            candidate = np.asarray(cd["label_confidence"], np.float32)
-            saved_body_hash = str(np.asarray(cd["source_body_sha256"]).item())
-            with kin.open("rb") as body_file:
-                current_body_hash = hashlib.file_digest(body_file, "sha256").hexdigest()
-            valid_confidence = (
-                (schema, method) in (
-                    (5, "depth-trust-motion-v1"), (6, "ray-occlusion-motion-v1"),
-                    (7, "source-conditional-v1"), (8, "source-conditional-v1"),
-                    (8, "scene_free_pred_still_v1"))
-                and candidate.shape == expected and np.isfinite(candidate).all()
-                and not bool(((candidate < 0.0) | (candidate > 1.0)).any())
-                and saved_body_hash == current_body_hash
-            )
-        except (KeyError, TypeError, ValueError):
-            valid_confidence = False
-        if valid_confidence:
-            conf = candidate.copy()
-        else:
-            warnings.warn(
-                f"ignoring stale/invalid joint confidence in {cf}; regenerate estimate_contacts",
-                RuntimeWarning, stacklevel=2)
-        # OR-fold each hand's finger contact into its wrist: the skeleton draws only
-        # the wrist (fingers are excluded), and a hand on the wall touches through the
-        # fingers — the same "resolve hand contact at the wrist" convention the dynamics
-        # stage uses. Fold the confidence to match the OR: when the folded label is
-        # contact, take the strongest touching vote (max over in-contact members); when
-        # free, take the weakest member because the free label is an AND across all
-        # members. Depth fit takes the worst member: largest absolute gap and lowest
-        # trust. Mutates the copies; the npz is untouched.
-        names = out["joint_names"]
-        for side in ("left", "right"):
-            wrist = names.index(f"{side}_wrist")
-            fingers = [j for j, nm in enumerate(names)
-                       if nm.startswith(f"{side}_") and any(t in nm for t in _FINGER_TOKENS)]
-            if not fingers:
-                continue
-            members = [wrist] + fingers                       # incl. the wrist's own state
-            mcon = contact[..., members]                      # (P, N, M) — read before the wrist write
-            folded = mcon.any(-1)                             # (P, N)
-            if conf is not None:
-                mconf = conf[..., members]                    # (P, N, M)
-                c_hit = np.where(mcon, mconf, -np.inf).max(-1)  # strongest touching vote
-                conf[..., wrist] = np.where(folded, c_hit, mconf.min(-1))
-            gap = depth.get("joint_depth_gap_cm")
-            if gap is not None:
-                # worst member by magnitude, but keep its SIGNED value (sign
-                # distinguishes cloud-beyond-mesh stretch from cloud-in-front).
-                mgap = gap[..., members]
-                mag = np.where(np.isfinite(mgap), np.abs(mgap), -np.inf)
-                signed = np.take_along_axis(mgap, mag.argmax(-1)[..., None], -1)[..., 0]
-                gap[..., wrist] = np.where(np.isfinite(mag.max(-1)), signed, np.nan)
-            trust = depth.get("joint_depth_trust")
-            if trust is not None:
-                trust[..., wrist] = trust[..., members].min(-1)
-            contact[..., wrist] = folded
-        out["contact"] = contact
-        out["confidence"] = conf
-        out.update(depth)
-        out["contact_oids"] = contact_oids
+        names = [str(x) for x in np.asarray(kd["contact_frame_names"]).tolist()]
+        if frame_names is not None and names != frame_names:
+            return out
+        out["frame_contact"] = np.asarray(kd["frame_contact"], bool)
+        out["frame_names"] = names
+        out["frame_parent"] = np.asarray(kd["contact_frame_parents"], np.int32)
+        out["contact_oids"] = np.asarray(kd["object_ids"], np.int32)
+        return out
+    cf = pred / "human_optim" / contacts_fn
+    if not cf.exists():
+        return out
+    cd = np.load(cf, allow_pickle=True)
+    schema = (int(np.asarray(cd["contact_label_schema"]).item())
+              if "contact_label_schema" in cd.files else -1)
+    if schema != _CONTACT_SCHEMA:
+        warnings.warn(
+            f"ignoring contact artifact {cf} written for label schema {schema} "
+            f"(viewer reads {_CONTACT_SCHEMA}); rerun estimate_contacts",
+            RuntimeWarning, stacklevel=2)
+        return out
+    names = [str(x) for x in np.asarray(cd["contact_frame_names"]).tolist()]
+    contact = np.asarray(cd["frame_contact"], bool)
+    contact_oids = np.asarray(cd["object_ids"], np.int32)
+    body_oids = np.asarray(kd["object_ids"], np.int32)
+    expected = (len(body_oids), int(np.asarray(kd["num_frames"]).item()), len(names))
+    if (contact.shape != expected or not np.array_equal(contact_oids, body_oids)
+            or (frame_names is not None and names != frame_names)):
+        warnings.warn(
+            f"ignoring incompatible contact artifact {cf}; regenerate estimate_contacts",
+            RuntimeWarning, stacklevel=2)
+        return out
+    out["frame_contact"] = contact
+    out["frame_names"] = names
+    out["frame_parent"] = np.asarray(cd["frame_parent_joint"], np.int32)
+    out["contact_oids"] = contact_oids
     return out
 
 
 _VIDEO_EXTS = (".mp4", ".mov", ".avi", ".mkv", ".webm")
+
+
+def _manifest_video(pred: Path) -> Path | None:
+    """Source video the batch pipeline recorded for this clip, if it still exists.
+
+    ``scripts/pipeline.py`` appends one row per processed clip to
+    ``_batch_manifest.jsonl`` next to the clip's output tree, including the
+    absolute ``source`` path — so a batch stored away from the repo still knows
+    where its footage lives. The last row wins (reruns append).
+    """
+    manifest = pred.parent / "_batch_manifest.jsonl"
+    if not manifest.exists():
+        return None
+    found = None
+    for line in manifest.read_text().splitlines():
+        try:
+            row = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        named = (row.get("stem") == pred.name
+                 or Path(row.get("out_dir", "")).name == pred.name)
+        if named and row.get("source"):
+            found = Path(row["source"])
+    if found is not None and found.is_file() and found.suffix.lower() in _VIDEO_EXTS:
+        return found
+    return None
 
 
 def _load_video_frames(pred: Path, n_frames: int, *, video_dir: Path | None,
@@ -251,7 +254,9 @@ def _load_video_frames(pred: Path, n_frames: int, *, video_dir: Path | None,
     """Load the clip's original footage + its playback fps, aligned to the frame index.
 
     Finds ``<video_dir>/<clip-stem>.<ext>`` (``video_dir`` defaults to the repo's
-    ``data/``) and decodes it the **same way the pipeline did** — cv2 sequential —
+    ``data/``), falling back to the ``source`` path in the batch manifest next to
+    the clip (see :func:`_manifest_video`), and decodes it the **same way the
+    pipeline did** — cv2 sequential —
     so the RGB lines up with the geometry frame-for-frame. VGGT records the
     original index of each processed frame in ``vggt/camera.npz``
     (``frame_indices``); those pick the frames matching the ``n_frames`` extrinsics
@@ -274,6 +279,8 @@ def _load_video_frames(pred: Path, n_frames: int, *, video_dir: Path | None,
     vdir = video_dir if video_dir is not None else _REPO_ROOT / "data"
     video = next((vdir / f"{pred.name}{ext}" for ext in _VIDEO_EXTS
                   if (vdir / f"{pred.name}{ext}").exists()), None)
+    if video is None:
+        video = _manifest_video(pred)
     if video is None:
         return None, None
 
@@ -350,12 +357,20 @@ def _smplx_kinematic_skinned(npz_path: Path, *, device: str = "cuda"):
     ``betas`` identity, so one constant rest mesh + skin weights is exact and only
     the per-frame skeleton moves — viser does LBS in the browser.
 
+    The same forward pass also reports the body's 12 **contact frames** — the skin
+    points contact is detected on — so the viewer draws them exactly where the
+    stages measured them: ``frame_pos``/``frame_normal`` per frame, in
+    ``frame_names`` order.
+
     Returns ``(faces (F, 3), object_ids (P,), people)`` where ``people[p]`` is
     ``None`` (no valid frames) or a dict with ``v_shaped (V, 3)``, ``j_rest
     (J, 3)``, ``weights (V, J)``, per-frame ``bone_wxyz (N, J, 4)`` /
-    ``bone_pos (N, J, 3)`` (NaN where invalid) and ``valid (N,)``.
+    ``bone_pos (N, J, 3)`` / ``frame_pos (N, F, 3)`` / ``frame_normal (N, F, 3)``
+    (NaN where invalid), ``frame_names`` and ``valid (N,)``.
     """
     import torch
+
+    from tools.body import frame_normals
 
     mid, dev = _load_smplx_mid(device)
     d = np.load(npz_path, allow_pickle=True)
@@ -369,6 +384,8 @@ def _smplx_kinematic_skinned(npz_path: Path, *, device: str = "cuda"):
     faces = mid.faces.cpu().numpy().astype(np.int32)
     weights = _top4_skin_weights(mid.lbs_weights.cpu().numpy())
     J = weights.shape[1]
+    frame_names = list(mid.contact_frame_names)
+    F = len(frame_names)
 
     people: list[dict | None] = []
     with torch.no_grad():
@@ -381,27 +398,39 @@ def _smplx_kinematic_skinned(npz_path: Path, *, device: str = "cuda"):
             v_shaped, j_rest = mid.forward_shape(betas)
             B = idx.size
             q = torch.as_tensor(q_all[p][idx], dtype=torch.float32, device=dev)
-            jw = mid.forward(betas.expand(B, -1), q).joints_world.tensor()  # (B, 52, 7) world
+            posed = mid.forward(betas.expand(B, -1), q)
+            jw = posed.joints_world.tensor()                               # (B, 52, 7) world
+            fw = posed.frames_world                                        # (B, F, 7) contact frames
             # Global scale about the pelvis (rest geometry about rest pelvis, world
-            # bones about world pelvis) — no-op at s=1, kept for consumer compat.
+            # bones and contact frames about the world pelvis) — no-op at s=1, kept
+            # for consumer compat. A uniform scale moves points but not directions,
+            # so the frame rotations (and their normals) need no correction.
             s = float(scales[p])
             if s != 1.0:
                 root_rest = j_rest[:, :1, :].clone()
                 v_shaped = root_rest + s * (v_shaped - root_rest)
                 j_rest = root_rest + s * (j_rest - root_rest)
                 root_w = jw[..., :1, :3]
+                fw = torch.cat([root_w + s * (fw[..., :3] - root_w), fw[..., 3:]], dim=-1)
                 jw = torch.cat([root_w + s * (jw[..., :3] - root_w), jw[..., 3:]], dim=-1)
             quat = jw[..., 3:7].cpu().numpy()                              # xyzw
             bone_wxyz = np.full((N, J, 4), np.nan, np.float32)
             bone_pos = np.full((N, J, 3), np.nan, np.float32)
             bone_wxyz[idx] = quat[..., [3, 0, 1, 2]].astype(np.float32)    # → wxyz
             bone_pos[idx] = jw[..., :3].cpu().numpy().astype(np.float32)
+            frame_pos = np.full((N, F, 3), np.nan, np.float32)
+            frame_normal = np.full((N, F, 3), np.nan, np.float32)
+            frame_pos[idx] = fw[..., :3].cpu().numpy().astype(np.float32)
+            frame_normal[idx] = frame_normals(fw).cpu().numpy().astype(np.float32)
             people.append({
                 "v_shaped": v_shaped[0].cpu().numpy().astype(np.float32),
                 "j_rest": j_rest[0].cpu().numpy().astype(np.float32),
                 "weights": weights,
                 "bone_wxyz": bone_wxyz,
                 "bone_pos": bone_pos,
+                "frame_pos": frame_pos,
+                "frame_normal": frame_normal,
+                "frame_names": frame_names,
                 "valid": valid[p],
             })
     return faces, object_ids, people
@@ -516,9 +545,9 @@ class ClipData:
     fov_y: np.ndarray
     gravity: dict | None
     skinned: dict          # name -> (faces, object_ids, people); "original" first
-    forces: dict           # force source name ("dynamics"/"kindyn_1"/"kindyn_manual") -> force dict
+    forces: dict           # force source name ("kindyn_1"/"kindyn_manual") -> force dict
     sensors: dict | None   # measured wall-sensor forces (climb_wall), see _load_sensor_forces
-    skeletons: dict        # body source name -> skeleton topology + per-joint contact dict
+    skeletons: dict        # body source name -> joint tree + contact-frame labels (_load_skeleton)
     n_frames: int
     # scene-surface meshes, built lazily and cached per method ("bpa"/"poisson");
     # a present key maps to (verts, faces, vertex_colors, vertex_normals) or None.
@@ -599,17 +628,43 @@ def load_clip_data(pred: Path, *, device: str, show_smplx: bool,
             if pf is not None:
                 skinned["prefit"] = pf
 
-    # Force/torque sources, in display order — the force-only dynamics stage and the
-    # kinematics+dynamics stage, whichever exist. Same fields, drawn the same way.
+    # Force/torque sources, in display order — the kinematics+dynamics bodies,
+    # whichever exist.
     forces: dict = {}
-    for name, fn in (("dynamics", "dynamics.npz"), ("kindyn_1", "kindyn_1.npz"),
+    for name, fn in (("kindyn_1", "kindyn_1.npz"),
                      ("kindyn_manual", "kindyn_manual.npz")):
         fd = _load_force_data(pred, fn)
         if fd is not None:
             forces[name] = fd
 
+    # Body skeletons + their contact-frame labels. The posed body names the contact
+    # frames it reports, so a contact artifact for a different frame set is dropped.
+    # The kindyn bodies are self-labeled (contacts_fn=None): their npz carries
+    # frame_contact next to q, which feeds the contact-frames layer; their skeleton
+    # stays the force-source torque skeleton (ClipScene skips their 22-joint overlay).
+    skeletons: dict = {}
+    if show_smplx:
+        for name, body_fn, contacts_fn in (("kinematics", "kinematic_1.npz", "contacts_1.npz"),
+                                           ("kinematics_2", "kinematic_2.npz", "contacts_2.npz"),
+                                           ("kindyn_1", "kindyn_1.npz", None),
+                                           ("kindyn_manual", "kindyn_manual.npz", None)):
+            body = skinned.get(name)
+            person = next((p for p in body[2] if p is not None), None) if body else None
+            sk = _load_skeleton(pred, body_fn, contacts_fn,
+                                frame_names=None if person is None else person["frame_names"])
+            if sk is not None:
+                skeletons[name] = sk
+
     video_frames, play_fps = (_load_video_frames(pred, len(extr), video_dir=video_dir)
                               if video else (None, None))
+    if play_fps is None and "fps" in transform.files:
+        # No decodable source video (video pane off, or --scenes farm without the
+        # clip) — fall back to the container fps the pipeline recorded, scaled for
+        # any uniform frame subsample exactly like the video path above.
+        fi = transform["frame_indices"] if "frame_indices" in transform.files else None
+        span = float(fi[-1] - fi[0]) if fi is not None and len(fi) > 1 else 0.0
+        raw = float(transform["fps"])
+        play_fps = (raw * (len(fi) - 1) / span if span > 0.0 else raw) or None
     return ClipData(
         path=pred, name=pred.name,
         scene_points=sp, scene_colors=sco,
@@ -621,11 +676,7 @@ def load_clip_data(pred: Path, *, device: str, show_smplx: bool,
         skinned=skinned,
         forces=forces,
         sensors=_load_sensor_forces(pred),
-        skeletons=({name: sk for name, body_fn, contacts_fn in
-                    (("kinematics", "kinematic_1.npz", "contacts_1.npz"),
-                     ("kinematics_2", "kinematic_2.npz", "contacts_2.npz"))
-                    if (sk := _load_skeleton(pred, body_fn, contacts_fn)) is not None}
-                   if show_smplx else {}),
+        skeletons=skeletons,
         n_frames=len(extr),
         scene_normals=sn,
         scene_voxel=float(scene["voxel_size"]) if "voxel_size" in scene.files else 0.0,
