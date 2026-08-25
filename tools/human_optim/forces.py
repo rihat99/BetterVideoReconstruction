@@ -96,6 +96,10 @@ class ForceSolution:
     #: patch of skin faces straight into the wall, so its cone pushes the way the wall
     #: pushes. ``−1`` where there is no scene evidence (see :data:`NO_SCENE_M`).
     normal_dot: np.ndarray
+    #: ``(T, 12)`` Euclidean distance to the nearest scene point (m), as the solve saw it
+    #: (:data:`SEARCH_MARGIN_M` search box); the :data:`NO_SCENE_M` sentinel and above =
+    #: no scene evidence. The stage's force-label distance gate reads this.
+    dist_m: np.ndarray
     #: ``(T,)`` root residual force / torque norms with no contact forces.
     residual_force_before_n: np.ndarray
     residual_torque_before_nm: np.ndarray
@@ -294,6 +298,7 @@ def solve_frame_forces(dyn: FrameDynamics, *, valid: np.ndarray, drift_m: torch.
         magnitude=to_numpy(force.norm(dim=-1)),
         candidate=candidate.cpu().numpy(),
         normal_dot=to_numpy(normal_dot),
+        dist_m=to_numpy(dist_m),
         residual_force_before_n=to_numpy(before[:, :3].norm(dim=-1)),
         residual_torque_before_nm=to_numpy(before[:, 3:6].norm(dim=-1)),
         residual_force_after_n=to_numpy(after[:, :3].norm(dim=-1)),
@@ -335,18 +340,43 @@ def solve_person_forces(body, betas: torch.Tensor, q: torch.Tensor, valid: np.nd
         dist_m=dist_m, normal_dot=normal_dot, knobs=knobs)
 
 
+def far_still_veto(dist_m: np.ndarray, drift_m: np.ndarray, *, near_m: float,
+                   still_m: float, far_still_x: float) -> np.ndarray:
+    """``(T, F)`` bool — steps whose force LABEL is vetoed: far from the scene AND moving.
+
+    Within ``near_m`` (the detector's trust radius) load alone labels — a fast foot
+    plant that carries weight is a contact. Beyond it geometry is blind, and the load
+    claim needs the stillness witness: drift over the gate window at most
+    ``far_still_x * still_m`` (looser than the detector's own bar, because a badly
+    reconstructed body jitters). Real far support holds still — a misregistered
+    climber gripping the wall, a beam stance whose beam cloud sits half a metre off —
+    while the scraps a bad-depth flight parks on flying limbs move fast. NaN distance
+    is "no scene evidence" = far; NaN drift is no stillness evidence = fast.
+    """
+    far = ~(np.nan_to_num(dist_m, nan=np.inf) <= near_m)
+    fast = ~(np.nan_to_num(drift_m, nan=np.inf) <= far_still_x * still_m)
+    return far & fast
+
+
 def _runs(column: np.ndarray) -> list[tuple[int, int]]:
     """Contiguous ``True`` runs of a 1-D bool array as half-open ``(start, stop)`` pairs."""
     edges = np.flatnonzero(np.diff(np.concatenate([[0], column.view(np.int8), [0]])))
     return list(zip(edges[::2], edges[1::2]))
 
 
-def min_span(mask: np.ndarray, min_frames: int) -> np.ndarray:
-    """Drop ``True`` runs shorter than ``min_frames`` in each column of an ``(T, C)`` bool array."""
+def min_span(mask: np.ndarray, min_frames: int,
+             keep: np.ndarray | None = None) -> np.ndarray:
+    """Drop ``True`` runs shorter than ``min_frames`` in each column of an ``(T, C)`` bool array.
+
+    A run containing a ``keep`` step (same-shape bool) survives regardless of length —
+    the penetration exception: a step pressing into the scene is evidence, not flicker
+    (see ``contacts.drift_gate``).
+    """
     out = np.array(mask, dtype=bool, copy=True)
     for column in range(out.shape[1]):
         for start, stop in _runs(out[:, column]):
-            if stop - start < min_frames:
+            if stop - start < min_frames and (
+                    keep is None or not keep[start:stop, column].any()):
                 out[start:stop, column] = False
     return out
 
@@ -386,7 +416,8 @@ def hysteresis(series: np.ndarray, *, enter_above: float, hold_above: float) -> 
 
 
 def resolve_toe_conflicts(labels: np.ndarray, magnitude: np.ndarray, *, frame_names,
-                          min_frames: int = 3) -> np.ndarray:
+                          min_frames: int = 3,
+                          keep: np.ndarray | None = None) -> np.ndarray:
     """Give each foot ONE toe side per contact — the side the solved force loaded.
 
     A foot's contact frames come in two sides facing opposite ways through the foot:
@@ -427,8 +458,10 @@ def resolve_toe_conflicts(labels: np.ndarray, magnitude: np.ndarray, *, frame_na
       hold, and a standing toe-top naturally faces the wall. It is only trustworthy on
       large volumes the cloud actually resolved — where it agrees with the load anyway.
 
-    Runs shorter than ``min_frames`` are dropped at the end. Sides are resolved by NAME
-    (:func:`toe_side_slots`): the stored frame order is not the obvious one.
+    Runs shorter than ``min_frames`` are dropped at the end (a run overlapping a
+    ``keep`` step survives — the penetration exception, see :func:`min_span`). Sides
+    are resolved by NAME (:func:`toe_side_slots`): the stored frame order is not the
+    obvious one.
     """
     from .contacts import toe_side_slots
 
@@ -446,7 +479,8 @@ def resolve_toe_conflicts(labels: np.ndarray, magnitude: np.ndarray, *, frame_na
                 dominant = win[int(np.argmax(magnitude[start:stop, win].sum(axis=0)))]
                 out[start:stop, dominant] |= gap
     toe_columns = sorted({c for sole, top in sides for c in (*sole, *top)})
-    out[:, toe_columns] = min_span(out[:, toe_columns], min_frames)
+    out[:, toe_columns] = min_span(out[:, toe_columns], min_frames,
+                                   None if keep is None else keep[:, toe_columns])
     return out
 
 

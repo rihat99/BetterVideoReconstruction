@@ -249,6 +249,27 @@ def test_nan_drift_cannot_hold_a_contact():
     assert not contact[4:8].any()
 
 
+def test_still_override_lets_a_pressing_frame_through_the_stillness_gate():
+    """A fast foot plant presses into the floor — closeness outranks stillness."""
+    scene = _plane()
+    pressing, normals = _hover(10, -0.005, _DOWN)     # 5 mm INSIDE the floor
+    hovering, _ = _hover(10, 0.02, _DOWN)             # near, but not pressing
+    moving = torch.full((10, 1), 0.50)                # a sprinting foot
+    assert not _detect(pressing, normals, moving, scene).contact.any()   # default: off
+    on = dict(still_override_m=0.01)
+    assert _detect(pressing, normals, moving, scene, **on).contact.all()
+    assert not _detect(hovering, normals, moving, scene, **on).contact.any()
+
+
+def test_still_override_never_passes_a_nan_drift_step():
+    """The override needs a real motion measurement — untracked steps stay out."""
+    scene = _plane()
+    points, normals = _hover(10, -0.005, _DOWN)
+    drift = torch.full((10, 1), float("nan"))
+    assert not _detect(points, normals, drift, scene,
+                       still_override_m=0.01).contact.any()
+
+
 # ── hysteresis + minimum duration ────────────────────────────────────────────
 
 def test_hysteresis_holds_a_span_between_enter_and_exit():
@@ -280,6 +301,30 @@ def test_min_frames_drops_a_flicker_span():
     drift = torch.zeros(12, 1)
     assert not _detect(points, normals, drift, scene, min_frames=3).contact.any()
     assert _detect(points, normals, drift, scene, min_frames=2).contact[5:7, 0].all()
+
+
+def test_penetration_exempts_a_one_frame_span_from_the_blip_killer():
+    """A one-frame plant pressing into the floor is evidence, not flicker."""
+    scene = _plane()
+    points = torch.full((12, 1, 3), 0.0)
+    points[:, 0, 2] = 0.50                            # airborne all clip long
+    points[6, 0, 2] = -0.005                          # …except one frame 5 mm INSIDE
+    normals = _DOWN.expand(12, 1, 3).clone()
+    drift = torch.full((12, 1), 0.50)                 # sprinting throughout
+    assert not _detect(points, normals, drift, scene).contact.any()   # default: off
+    contact = _detect(points, normals, drift, scene, still_override_m=0.01).contact
+    assert contact[6, 0] and contact.sum() == 1
+
+
+def test_a_one_frame_hover_is_still_flicker_even_with_the_override():
+    """The exemption needs pressing — a brief near pass without penetration stays out."""
+    scene = _plane()
+    points = torch.full((12, 1, 3), 0.0)
+    points[:, 0, 2] = 0.50
+    points[6, 0, 2] = 0.020                           # near (2 cm), never pressing
+    normals = _DOWN.expand(12, 1, 3).clone()
+    assert not _detect(points, normals, torch.zeros(12, 1), scene,
+                       still_override_m=0.01).contact.any()
 
 
 def test_drift_is_measured_the_same_way_on_frames_as_on_joints():

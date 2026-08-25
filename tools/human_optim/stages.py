@@ -470,6 +470,8 @@ def run_kinematic(source, pred: Path, cfg: HumanOptimConfig, stages_to_run,
         # a detector that is stricter than the readout only hides labels from the attraction.
         ac.setdefault("window_s", float(knobs["contact_gate"]["window_s"]))
         ac.setdefault("still_m", float(knobs["contact_gate"]["still_m"]))
+        ac.setdefault("still_override_m",
+                      float(knobs["contact_gate"].get("still_override_m", -1.0)))
         auto_cfg = ac
 
     if labels_mode != "auto":

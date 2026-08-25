@@ -352,6 +352,7 @@ def hysteresis_spans(
     enter_below: float,
     exit_below: float,
     min_frames: int,
+    keep: torch.Tensor | None = None,
 ) -> torch.Tensor:
     """Temporal hysteresis + min-duration on a per-joint scalar series → ``(T, J)`` bool.
 
@@ -364,8 +365,11 @@ def hysteresis_spans(
       * close the span otherwise. A ``+inf`` / NaN frame (no guarded vertex) fails
         both tests and breaks the span.
 
-    Then any span shorter than ``min_frames`` is dropped (1–2-frame flicker). Returns
-    the boolean contact mask. Pure temporal post-process, no gradients.
+    Then any span shorter than ``min_frames`` is dropped (1–2-frame flicker) — unless
+    it contains a ``keep`` step (``(T, J)`` bool): a step that *presses into* the
+    surface is evidence, not flicker, however brief (see :func:`drift_gate` — the
+    penetration exception). Returns the boolean contact mask. Pure temporal
+    post-process, no gradients.
     """
     T, J = series.shape
     enter = series < enter_below                       # (T, J) — start condition (⊆ stay)
@@ -377,6 +381,7 @@ def hysteresis_spans(
         out[t] = active
     if min_frames > 1 and T > 0:
         oc = out.cpu().numpy()
+        kc = keep.cpu().numpy() if keep is not None else None
         for j in range(J):
             col = oc[:, j]
             t = 0
@@ -385,7 +390,7 @@ def hysteresis_spans(
                     s = t
                     while t < T and col[t]:
                         t += 1
-                    if t - s < min_frames:
+                    if t - s < min_frames and (kc is None or not kc[s:t, j].any()):
                         col[s:t] = False
                 else:
                     t += 1
@@ -464,17 +469,26 @@ def stillness_weight(drift: torch.Tensor, *, still_m: float) -> torch.Tensor:
 
 
 def drift_gate(guarded_min_sdf: torch.Tensor, drift: torch.Tensor, *,
-               still_m: float) -> torch.Tensor:
+               still_m: float, still_override_m: float = -1.0) -> torch.Tensor:
     """``guarded_min_sdf (T, K)`` with every step that failed the stillness gate at ``+inf``.
 
     A step counts as still while :func:`stillness_weight` is above zero (drift below
     ``2·still_m``). Forcing the rest to the sentinel — rather than masking — is what lets
     :func:`hysteresis_spans` run unchanged: a moving step simply looks infinitely far from
     the wall, so it can neither start nor hold a span.
+
+    ``still_override_m`` makes strong closeness outrank stillness: a step whose guarded
+    signed distance is below it keeps its signal even while moving fast. A sprinting foot
+    plant or a cartwheel hand is a real contact that no drift window can ever call still —
+    the window straddles the swing — but it *presses into the floor*, and that penetration
+    is evidence stillness cannot veto. The default (−1 m, below any reachable signed
+    distance) disables the override; the drift must still be a real measurement (an
+    untracked NaN step never passes).
     """
     weight = stillness_weight(drift, still_m=still_m)
+    pressed = (guarded_min_sdf < still_override_m) & torch.isfinite(drift)
     infinity = torch.finfo(guarded_min_sdf.dtype).max
-    return torch.where(weight > 0.0, guarded_min_sdf,
+    return torch.where((weight > 0.0) | pressed, guarded_min_sdf,
                        torch.full_like(guarded_min_sdf, infinity))
 
 
@@ -486,6 +500,7 @@ def drift_gated_contact(
     exit_thresh_m: float,
     min_frames: int,
     still_m: float,
+    still_override_m: float = -1.0,
 ) -> torch.Tensor:
     """The contact readout ``(T, J)`` bool: drift-gate, then temporal hysteresis.
 
@@ -496,11 +511,15 @@ def drift_gated_contact(
     :func:`hysteresis_spans` breaks the span there — exactly how the old hard speed
     veto plugged in, but with the windowed-drift signal that actually separates a
     grip from a slow pass. Shared by ``estimate_contacts`` and the offline scorer so
-    both score the identical readout.
+    both score the identical readout. ``still_override_m``: see :func:`drift_gate` —
+    a step pressing below it also exempts its span from the ``min_frames`` rule
+    (the same evidence outranks stillness *and* duration).
     """
-    gated = drift_gate(guarded_min_sdf, drift, still_m=still_m)
+    gated = drift_gate(guarded_min_sdf, drift, still_m=still_m,
+                       still_override_m=still_override_m)
     return hysteresis_spans(gated, enter_below=close_thresh_m,
-                            exit_below=exit_thresh_m, min_frames=min_frames)
+                            exit_below=exit_thresh_m, min_frames=min_frames,
+                            keep=gated < still_override_m)
 
 
 def _bool_spans(col) -> list[tuple[int, int]]:
@@ -777,6 +796,7 @@ def detect_frame_contacts(
     exit_thresh_m: float,
     min_frames: int,
     still_m: float,
+    still_override_m: float = -1.0,
     max_dist_m: float,
     conf_thresh: float,
     prune_margin_m: float,
@@ -790,7 +810,11 @@ def detect_frame_contacts(
     (:func:`hysteresis_spans`) — a frame enters a contact span below ``close_thresh_m``,
     holds it below the looser ``exit_thresh_m``, and spans shorter than ``min_frames`` are
     dropped. ``frame_names`` names the ``F`` columns and is only used to find the toe sides
-    by name.
+    by name. ``still_override_m`` lets strong closeness outrank the stillness gate — a
+    fast foot plant pressing into the floor is a contact no drift window can call still
+    (see :func:`drift_gate`) — and the ``min_frames`` rule: a span pressing below it
+    survives however brief (a one-frame bounce is 1–2 frames at 25 fps, and penetration
+    is not flicker). The default disables both.
 
     ``drift`` is supplied by the CALLER, never measured here, because *which*
     motion measurement is honest depends on the stage: the kinematic fit passes
@@ -805,8 +829,10 @@ def detect_frame_contacts(
     guarded_sdf = frame_guarded_sdf(
         sdf, dmin, conf, max_dist_m=max_dist_m, conf_thresh=conf_thresh)
     gated, toe_suppressed = suppress_toe_sides(
-        drift_gate(guarded_sdf, drift, still_m=still_m), normal_dot,
+        drift_gate(guarded_sdf, drift, still_m=still_m,
+                   still_override_m=still_override_m), normal_dot,
         toe_side_slots(frame_names), exit_thresh_m=exit_thresh_m)
     contact = hysteresis_spans(gated, enter_below=close_thresh_m,
-                               exit_below=exit_thresh_m, min_frames=min_frames)
+                               exit_below=exit_thresh_m, min_frames=min_frames,
+                               keep=gated < still_override_m)
     return FrameContacts(contact, guarded_sdf, sdf, dmin, conf, normal_dot, toe_suppressed)

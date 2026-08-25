@@ -179,6 +179,30 @@ and retaken that fast. One number, both directions.
 stillness label; force only ever adds. Knee frames are excluded from the force
 side — measured, their force labels are almost all wrong.
 
+**Far labels need stillness.** The relative gap price above is what lets force
+label a body that is consistently misregistered — the climbing floater rescue,
+where the real labels sit a median 44 cm from the wall. The same mechanism can
+fail on sports with flight phases and bad depth: whenever the kinematics carry
+unexplained acceleration, the solve *must* park the residual somewhere, and
+small force scraps can label contacts on limbs flying through the air. What
+separates the two cases is not distance — a real beam stance whose beam cloud
+sits half a metre off looks exactly as far as a fake mid-air scrap (an absolute
+distance gate was tried in 2026-08 and, measured later on the annotated scenes,
+killed the floater and beam-routine rescues wholesale) — it is **stillness**. A
+really supported limb holds still however badly the scene around it is
+registered; a flying limb does not. So the rule
+(`[contact_force].far_still_x`, one value for every sport): within the
+detector's own trust radius (`[contacts].max_dist_m`) a loaded frame labels no
+matter how fast it moves — a sprint plant that carries weight is a contact.
+Beyond it, the label also needs the frame's drift to stay under
+`far_still_x × still_m`. The bar is 4× looser than the detector's own stillness
+bar because a badly reconstructed body jitters even while gripping. The solve
+itself is untouched — every candidate still participates, the residuals and the
+toe rule still see the full allocation — only far, fast frames are refused a
+label. Measured 2026-08-25: the high_jump / 1FGkg mid-air floods drop to zero,
+the gtIGgs floater and both balance-beam clips keep their far labels, and
+climbing F1 pays .007 against no rule at all (vs .13 for the absolute gate).
+
 The only place the force can *remove* a geometric label is the toe pair, next.
 
 ## Step 8: the toe rule — which side did the load go through?

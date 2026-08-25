@@ -83,6 +83,33 @@ them fails. A blocked step then simply looks infinitely far from the wall, so
 everything downstream — hysteresis, minimum duration, span merging — works
 without knowing the gates exist.
 
+**When closeness outranks stillness.** The stillness rule assumes quasi-static
+support — a climber holds every contact for a while. Fast sports break it: a
+sprinting foot plant lasts ~0.1 s, and the ~0.35 s drift window inevitably
+straddles the swing before and after, so the plant can *never* look still — no
+`still_m` setting fixes that. But the plant presses into the floor, and that is
+evidence stillness should not be allowed to veto. `[contact_gate].still_override_m`
+does exactly that: a frame whose guarded signed distance is below it (penetrating,
+or within a centimetre) stays contact evidence even while moving fast. Measured on
+high_jump: 354 penetrating foot steps, 100 % of them killed by the stillness gate
+before the override existed. Short plants also need short spans to survive, so
+`[contacts].min_span_s` is 0.06 s. Both started as athletics-only knobs on the
+theory that climbing's quasi-static support wanted the stricter gate as a
+precision guard; the 13-scene climbing A/B (2026-08-25) refuted that — pooled F1
+went .729 → .768, and sport_climb, whose fast rope-climbing steps the stillness
+gate had been killing exactly like sprint plants, went .27 → .62. Since then one
+value (`0.01` / `0.06 s`) serves every sport; `-1` turns the override off.
+
+The same evidence outranks **duration** too. The detector drops spans shorter
+than 3 frames as flicker, and the stage repeats an fps-aware version of that
+rule after gap-welding — but a one-frame bounce at 25 fps *is* one frame, and
+no duration rule can tell it from jitter by length alone. Penetration can: a
+span with at least one step pressing below `still_override_m` is exempt from
+every duration rule (the detector's blip killer, the post-weld `min_span`, and
+the toe rule's cleanup). Measured before the exception: 1FGkg had 117 one-frame
+sub-3 cm foot dips, 79 of them ending up with no contact at all. With the
+override off (`-1`) the exemption never fires.
+
 ## Why the frame's own normal is not a gate
 
 Every contact frame knows which way its skin looks, and we used to require that it

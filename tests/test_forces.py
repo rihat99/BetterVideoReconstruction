@@ -9,7 +9,7 @@ import pytest
 import torch
 
 from tools.human_optim.forces import (
-    NO_SCENE_M, ForceKnobs, close_gaps, force_labels, hysteresis, min_span,
+    NO_SCENE_M, ForceKnobs, close_gaps, far_still_veto, force_labels, hysteresis, min_span,
     resolve_toe_conflicts,
 )
 from tools.human_optim.friction import cone_generators
@@ -209,6 +209,17 @@ def test_min_span_is_per_column_and_leaves_long_runs_alone() -> None:
     assert kept[:, 1].tolist() == [False, False, True, True, True]
 
 
+def test_min_span_keeps_a_short_run_that_overlaps_a_keep_step() -> None:
+    """The penetration exception: a pressing step exempts its run from the duration rule."""
+    mask = np.zeros((6, 2), bool)
+    mask[2, 0] = True                # one-frame run, pressed → survives
+    mask[2, 1] = True                # one-frame run, not pressed → dropped
+    keep = np.zeros((6, 2), bool)
+    keep[2, 0] = True
+    kept = min_span(mask, 3, keep)
+    assert kept[2, 0] and not kept[:, 1].any()
+
+
 def test_close_gaps_fills_short_holes_but_not_real_releases() -> None:
     """A one-frame blink is flicker; a long gap is the limb genuinely letting go."""
     mask = np.zeros((12, 2), bool)
@@ -277,3 +288,25 @@ def test_the_solve_has_five_knobs_and_they_are_the_documented_recipe() -> None:
     assert knobs.stillness_vstar_mps == pytest.approx(0.2)
     assert knobs.gap_dstar_m == pytest.approx(0.05)
     assert knobs.iters == 2000
+
+
+# ── the far-still label veto ──────────────────────────────────────────────────
+
+def test_far_force_labels_need_stillness_and_near_ones_do_not() -> None:
+    """Near + fast (a loaded sprint plant) labels; far + still (a misregistered but
+    gripping body) labels; far + fast (a bad-depth flight scrap) is vetoed."""
+    dist = np.array([[0.05, 0.40, 0.40]])
+    drift = np.array([[0.50, 0.10, 0.50]])
+    veto = far_still_veto(dist, drift, near_m=0.10, still_m=0.04, far_still_x=4.0)
+    assert veto.tolist() == [[False, False, True]]
+
+
+def test_missing_evidence_reads_far_and_fast_in_the_veto() -> None:
+    """NaN distance = no scene evidence = far; NaN drift = no stillness evidence = fast.
+    Unknown never manufactures a label."""
+    dist = np.array([[np.nan, np.nan, 0.05]])
+    drift = np.array([[0.01, np.nan, np.nan]])
+    veto = far_still_veto(dist, drift, near_m=0.10, still_m=0.04, far_still_x=4.0)
+    assert veto.tolist() == [[False, True, False]], (
+        "NaN dist + still stays (far but still); NaN dist + NaN drift is vetoed; "
+        "near needs no stillness at all")
