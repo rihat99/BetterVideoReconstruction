@@ -17,6 +17,7 @@ import tempfile
 import time
 import tomllib
 import traceback
+import zipfile
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Literal
@@ -34,19 +35,22 @@ from scene_db import ScenePaths, select_targets  # noqa: E402
 _STAGES_DIR = _REPO_ROOT / "scripts" / "stages"
 _DEFAULT_CONFIG = _REPO_ROOT / "configs" / "corpus.toml"
 _CONTACTS_CLI = _STAGES_DIR / "estimate_contacts.py"
-# Pinned copy of tools/human_optim/confidence.py's schema/method (kept literal
-# so the driver stays torch-free); update together with that module.
-_CONFIDENCE_SCHEMA = 8
-_CONFIDENCE_METHOD = "source-conditional-v1"
+# Pinned copy of scripts/stages/estimate_contacts.py's schema/method (kept literal
+# so the driver stays torch-free); update together with that stage.
+_CONTACT_LABEL_SCHEMA = 2
+_CONTACT_LABEL_METHOD = "frames-v4"
+# The modules the contacts stage actually executes: a code fix in any of them must
+# invalidate --skip-existing even when the artifact schema is unchanged.
 _IMPLEMENTATION_INPUTS = (
     _CONTACTS_CLI,
-    _REPO_ROOT / "tools" / "human_optim" / "confidence.py",
     _REPO_ROOT / "tools" / "human_optim" / "contacts.py",
-    _REPO_ROOT / "tools" / "human_optim" / "depth_fit.py",
-    _REPO_ROOT / "tools" / "human_optim" / "completion.py",
-    _REPO_ROOT / "tools" / "human_optim" / "fusion.py",
-    _REPO_ROOT / "tools" / "human_optim" / "dynamics.py",
+    _REPO_ROOT / "tools" / "human_optim" / "forces.py",
     _REPO_ROOT / "tools" / "human_optim" / "friction.py",
+    _REPO_ROOT / "tools" / "human_optim" / "qmath.py",
+    _REPO_ROOT / "tools" / "body.py",
+    _REPO_ROOT / "tools" / "geometry" / "normals.py",
+    _REPO_ROOT / "tools" / "geometry" / "quality.py",
+    _REPO_ROOT / "tools" / "geometry" / "depth_smear.py",
 )
 
 InvocationMode = Literal[
@@ -147,7 +151,10 @@ STAGES: dict[str, StageSpec] = {
         cli=None,
         out_stage="human_optim",
         out_check="kindyn_1.npz",
-        farm_inputs=("sapiens", "geometry"),  # kinematic_2 + contacts_2 come via the human_optim out link
+        # kinematic_* + contacts_* come via the human_optim out link; geocalib is the
+        # optional gravity input (a dangling link falls back to world-down, like the
+        # contacts farm).
+        farm_inputs=("sapiens", "geometry", "geocalib"),
         config_sections=("human_optimization",),
     ),
     "contacts": StageSpec(
@@ -156,7 +163,6 @@ STAGES: dict[str, StageSpec] = {
         out_stage="human_optim",
         out_check="contacts_{tag}.npz",
         farm_inputs=("human_optim", "geometry"),
-        config_sections=("contacts",),
         capture_and_move=True,
     ),
 }
@@ -355,10 +361,10 @@ def _sha256(path: Path) -> str:
 def _is_fresh(out: Path, body: Path, geom: Path, config: Path) -> bool:
     """A resumable output is reusable only when its complete provenance matches."""
     scene, transform = geom / "scene.npz", geom / "transform.npz"
+    inputs = [body, scene, transform, config, *_IMPLEMENTATION_INPUTS]
     human = geom / "human.npz"
-    # Include the implementation itself: a code-only occlusion/confidence fix
-    # must invalidate --skip-existing even when the artifact schema is unchanged.
-    inputs = (body, scene, transform, human, config, *_IMPLEMENTATION_INPUTS)
+    if human.is_file():  # optional for the stage (its smear reads NaN when absent)
+        inputs.append(human)
     if not out.is_file() or any(not path.is_file() for path in inputs):
         return False
     if out.stat().st_mtime < max(path.stat().st_mtime for path in inputs):
@@ -366,15 +372,14 @@ def _is_fresh(out: Path, body: Path, geom: Path, config: Path) -> bool:
     try:
         with np.load(out, allow_pickle=False) as saved:
             return (
-                int(saved["confidence_schema"]) == _CONFIDENCE_SCHEMA
-                and str(saved["confidence_method"]) == _CONFIDENCE_METHOD
+                int(saved["contact_label_schema"]) == _CONTACT_LABEL_SCHEMA
+                and str(saved["contact_label_method"]) == _CONTACT_LABEL_METHOD
                 and str(saved["source_body"]) == body.name
                 and str(saved["source_body_sha256"]) == _sha256(body)
                 and str(saved["source_scene_sha256"]) == _sha256(scene)
                 and str(saved["source_transform_sha256"]) == _sha256(transform)
-                and str(saved["source_human_sha256"]) == _sha256(human)
             )
-    except (KeyError, OSError, TypeError, ValueError):
+    except (KeyError, OSError, TypeError, ValueError, zipfile.BadZipFile):
         return False
 
 
@@ -407,18 +412,24 @@ def _contacts_inputs(paths: ScenePaths, scene_id: str, bodies: str) -> tuple[Pat
 
 
 def _geometry_metric(geom_dir: Path) -> bool:
-    """True when the fused world has been metricized (a re-fuse resets the flag)."""
+    """True when the fused world has been metricized (a re-fuse resets the flag).
+
+    A truncated npz (a sweep killed mid-write) reads as *not done*, so the next
+    sweep regenerates it instead of crashing the shard at the same scene forever."""
     tr_path = geom_dir / "transform.npz"
     if not tr_path.is_file():
         return False
-    with np.load(tr_path) as tr:
-        if "metric" in tr.files and not bool(tr["metric"]):
-            return False
-    scale_path = geom_dir / "scale.npz"
-    if scale_path.is_file():  # the pre-fit ran → its bodies must exist too
-        with np.load(scale_path) as sc:
-            if "method" in sc.files and str(sc["method"]) == "prefit-dual":
-                return (geom_dir / "prefit.npz").is_file()
+    try:
+        with np.load(tr_path) as tr:
+            if "metric" in tr.files and not bool(tr["metric"]):
+                return False
+        scale_path = geom_dir / "scale.npz"
+        if scale_path.is_file():  # the pre-fit ran → its bodies must exist too
+            with np.load(scale_path) as sc:
+                if "method" in sc.files and str(sc["method"]) == "prefit-dual":
+                    return (geom_dir / "prefit.npz").is_file()
+    except (KeyError, OSError, ValueError, zipfile.BadZipFile):
+        return False
     return True
 
 
@@ -509,7 +520,6 @@ def _contacts_entry(
         "body": str(body),
         "geometry": str(geom),
         "geocalib": str(paths.feature_dir("geocalib", sid)),  # optional gravity input
-        "predictions": str(paths.feature_dir("predictions", sid)),  # optional external contact model
         "output": str(_out_path(paths, out_paths, STAGES["contacts"], sid, tag)),
     }
 
@@ -741,7 +751,10 @@ def _run_farm_worker(
                 ok += 1
             print(f"[{index}/{len(entries)}] {sid}: done in {time.monotonic() - started:.1f}s",
                   flush=True)
-        except Exception:  # noqa: BLE001 — a bad scene must not abort its shard
+        # SystemExit included: the in-process stage entry points raise it for exactly
+        # the per-scene failures a sweep must survive (missing/stale inputs, non-metric
+        # geometry) — it must not kill the shard and strand every scene behind it.
+        except (Exception, SystemExit):  # noqa: BLE001 — a bad scene must not abort its shard
             print(f"[{index}/{len(entries)}] {sid}: FAILED after "
                   f"{time.monotonic() - started:.1f}s", flush=True)
             traceback.print_exc()
@@ -790,9 +803,6 @@ def _run_contacts_worker(
                 geocalib = Path(entry["geocalib"]) if "geocalib" in entry else None
                 if geocalib is not None and geocalib.is_dir():  # optional gravity input
                     (farm / "geocalib").symlink_to(geocalib.resolve())
-                preds = Path(entry["predictions"]) if "predictions" in entry else None
-                if preds is not None and (preds / "contacts.npz").is_file():
-                    (farm / "predictions").symlink_to(preds.resolve())  # enables fusion
                 cmd = [
                     sys.executable,
                     str(_CONTACTS_CLI),

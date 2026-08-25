@@ -85,6 +85,7 @@ from tools.geometry.intrinsics import denormalize_K
 from tools.geometry.normals import estimate_point_normals
 from tools.geometry.voxel import group_reduce, large_component_mask, voxel_downsample
 from tools.mask_io import read_binary_mask
+from tools.npz_io import atomic_savez
 from tools.source import resolve_source
 
 
@@ -174,8 +175,8 @@ def _human_masks(sam3_dir: Path, idx: int, objs: list[int], hv: int, wv: int):
 
 
 def _save_cloud(path: Path, points: torch.Tensor, **arrays) -> None:
-    np.savez(path, points=points.detach().cpu().numpy().astype(np.float32),
-             **{k: (v.detach().cpu().numpy() if torch.is_tensor(v) else v) for k, v in arrays.items()})
+    atomic_savez(path, points=points.detach().cpu().numpy().astype(np.float32),
+                 **{k: (v.detach().cpu().numpy() if torch.is_tensor(v) else v) for k, v in arrays.items()})
 
 
 def _merge_scene(points: torch.Tensor, conf: torch.Tensor, color: torch.Tensor,
@@ -421,7 +422,7 @@ def fuse(args: argparse.Namespace) -> None:
     rows0 = np.flatnonzero(view_ids == 0)
     K_orig = np.stack([denormalize_K(K_norm[k], ho, wo) for k in rows0])
     fps = float(built["src_fps"]) if built["src_fps"] else 30.0
-    np.savez(
+    atomic_savez(
         out_dir / "transform.npz",
         scale=np.float32(1.0), metric=np.bool_(False),
         extrinsics=extr[rows0].astype(np.float32),
