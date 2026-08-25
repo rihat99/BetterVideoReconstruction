@@ -45,6 +45,7 @@ from tools.smplx_robot.dynamics import velocity_acceleration_from_trajectory
 from . import paths
 from .camera import world_from_cam
 from .config import FPS_REF, HumanOptimConfig, fps_scaled_weights
+from .force_confidence import force_confidence
 from .forces import cone_generators
 from .optimizer import PhaseSpec, optimize_person
 from .qmath import normalize_q
@@ -567,6 +568,7 @@ def run_kindyn(source, pred: Path, cfg: HumanOptimConfig, device: str, *,
     force_world_p, torque_p, base_wrench_p = [], [], []
     joints_world_p, joint_torque_p, frame_force_p = [], [], []
     total_mass_p, joint_contact_p, frame_contact_p, diag_p = [], [], [], []
+    fconf_p, fconf_clip_p = [], []
     for p in range(P):
         oid = int(object_ids[p])
         vmask = np.asarray(kin["valid_mask"][p], dtype=bool)
@@ -626,6 +628,15 @@ def run_kindyn(source, pred: Path, cfg: HumanOptimConfig, device: str, *,
         total_mass_p.append(dyn["total_mass"])
         diag_p.append([dyn[k] for k in ("base_wrench_before", "base_wrench_warm",
                                         "base_wrench_after", "cone_violation_max_n")])
+        # Whole-body force confidence: the trustworthiness of THIS person's solved forces,
+        # per frame, from the physics alone (residuals + overload). See force_confidence.py.
+        fc = force_confidence(dyn["base_wrench"], dyn["frame_forces"], vmask,
+                              float(dyn["total_mass"]) * _GRAVITY_MAG)
+        fconf_p.append(fc["confidence"])
+        fconf_clip_p.append(fc["clip"])
+        print(f"    [kindyn dynamics] force confidence {fc['clip']:.2f} "
+              f"(lin res med {np.nanmedian(fc['lin_residual_bw'][vmask]):.2f} BW, "
+              f"load med {np.nanmedian(fc['load_bw'][vmask]):.2f} BW)")
         # Per-joint contact for the viewer: a joint is in contact where any of its frames is.
         jc = np.zeros((N, mid.num_joints), bool)
         for c, jb in enumerate(spec.parent_body):
@@ -648,6 +659,8 @@ def run_kindyn(source, pred: Path, cfg: HumanOptimConfig, device: str, *,
         total_mass=np.stack(total_mass_p, 0),
         gravity_world=gravity_world.astype(np.float32),
         base_wrench_diagnostics=np.asarray(diag_p, np.float32),   # (P, 4) before/warm/after/coneviol
+        force_confidence=np.stack(fconf_p, 0),                    # (P, N) whole-body, per frame
+        force_confidence_clip=np.asarray(fconf_clip_p, np.float32),  # (P,) mean over valid frames
         cones=np.bool_(cones), cone_half_angle_deg=np.float32(half_angle),
         source_bodies=np.array(bodies, dtype="U16"),
         source_labels=np.array(labels_mode, dtype="U8"),
