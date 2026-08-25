@@ -241,16 +241,10 @@ contact. The stillness measured *before* the attraction acted (`drift_pre`) is s
 into the output, because the readout later must not be gamed by the very damping this
 stage applied — that circularity was observed and is the reason for the rule.
 
-There is a second label source: `[stages.kinematics_1] labels = "predicted"` swaps the
-geometric detector for the external image model's per-limb contact predictions
-(`predictions/contacts.npz`, see [contact_fusion.md](contact_fusion.md)). Everything
-else is identical — same binding point, same freeze, same `drift_pre` honesty. This is
-the peter force-plate configuration (`configs/human_optimization_peter.toml`): static
-cameras give VGGT no parallax, so its confidence is uniformly low at the limbs and the
-geometric detector has nothing to detect against — but the un-gated clouds (the peter
-configs set `conf_drop_q = 0` at fuse/scale/chamfer) do contain the board and the
-hands, so chamfer stays on to anchor depth, the predicted labels drive the velocity
-damper, and kinematics_2 seats the labeled limbs on the recovered geometry.
+The geometric detector is the only label source (`labels = "auto"`; anything else is
+an error). An earlier per-joint-era recipe could swap in an external image model's
+predictions (`labels = "predicted"`, see [contact_fusion.md](contact_fusion.md)) —
+that wiring was retired with the per-joint machinery and lives in git history.
 
 ## The phase plan
 

@@ -18,7 +18,7 @@ optimization — keep them current when the code changes:
 - [`docs/human_optimization.md`](docs/human_optimization.md) — the 4 stages, every loss term
 - [`docs/contacts.md`](docs/contacts.md) + [`docs/contact_confidence.md`](docs/contact_confidence.md) — contact labels + confidence
 - [`docs/force_contacts.md`](docs/force_contacts.md) — the force witness: contact detection by inverse dynamics, end to end
-- [`docs/contact_fusion.md`](docs/contact_fusion.md) — folding the external model's predicted contacts into the labels
+- [`docs/contact_fusion.md`](docs/contact_fusion.md) — retired per-joint-era mechanism (kept as a design record)
 - [`docs/depth_fit.md`](docs/depth_fit.md) — per-joint depth-fit metric (the "spaghettization" detector)
 - [`docs/quality.md`](docs/quality.md) — depth-smear downweighting, the scene-quality table, whole-body force confidence
 - [`docs/contact_points.md`](docs/contact_points.md) — investigation (not implemented): contact on mesh points instead of joints

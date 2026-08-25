@@ -1,5 +1,9 @@
 # Contact fusion: combining detected and predicted contacts
 
+> **Retired.** This describes the per-joint-era mechanism; `fusion.py`, the
+> `labels = "predicted"` wiring and the peter configs that used them are deleted
+> from the code and live in git history. Kept as a design record.
+
 The pipeline has two independent opinions about whether a limb touches the wall.
 
 - The **geometric labels** from the contact stage ([contacts.md](contacts.md)):

@@ -28,7 +28,7 @@ board's force vectors — as a dashed line in the limb's own colour on its own
 near-zero vector has no direction). Per-limb contact
 truth comes from the measured force the same way the campus plates' labels did —
 bigger than 50 N. The climb_wall_2 recipe restricts contact to hand and foot
-frames (``configs/human_optimization_climb_wall.toml``), so every newton the solve
+frames (``configs/human_optimization_peter.toml``), so every newton the solve
 applies is inside one of the four limb panels — yet the top panel is still not the
 four below it added up, because both totals are the length of a *vector sum* and
 limb forces pointing against each other partially cancel in it.

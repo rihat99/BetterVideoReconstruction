@@ -50,8 +50,8 @@ simply follow the wrist and carry their frame along.
 A recipe can restrict the set: `[contacts].frames` in the human-optimization TOML
 is an allowlist of frame names (empty = all), applied where the body is built —
 so detection, labels and forces all see the smaller set, with no per-stage gates.
-`configs/human_optimization_climb_wall.toml` uses it to keep hands + feet only:
-the demonstrator rig instruments one board per limb, and contact detected on a
+`configs/human_optimization_peter.toml` uses it to keep hands + feet only:
+the peter rigs instrument one board per limb, and contact detected on a
 knee or elbow would route force where nothing measures it.
 
 ## The two gates

@@ -284,9 +284,9 @@ still_override_m = 0.01
 [contacts]
 frames = []            # contact-frame allowlist by NAME; empty = every frame the body carries.
                        # Read wherever the chain builds the body (kin1 / kin2 / kindyn + this
-                       # stage), so a recipe that restricts it (climb_wall: hands + feet only)
+                       # stage), so a recipe that restricts it (peter: hands + feet only)
                        # restricts detection, labels and forces in one move.
-overlay = true         # render the contact overlay
+overlay = false        # render the contact overlay
 close_thresh_m = 0.03  # enter: "just outside" distance counted as contact
 exit_thresh_m = 0.035  # stay: looser hysteresis exit (holds a span, kills 1-frame boundary flicker)
 min_span_s = 0.06      # min contact/release span (seconds; frames = ceil(s·fps)) — applied to the fused labels AFTER gap-welding; raw detection keeps a fixed 3-frame blip killer (DETECT_MIN_FRAMES). 0.06 (a sprint stance is ~0.1 s) unified for both sports 2026-08-25 — see still_override_m

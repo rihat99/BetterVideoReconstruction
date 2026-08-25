@@ -135,4 +135,4 @@ limit = ""                 # optional first-N limit; empty disables limiting
 seed = 0                   # random-sampling seed
 
 [human_optimization]        # four-stage SMPL-X refinement → human_optim/ (default chain: root, kinematics_1)
-config = "configs/human_optimization_data2.toml"   # data_2 variant: [contacts].overlay = false
+config = "configs/human_optimization.toml"
