@@ -193,7 +193,7 @@ class Body:
 
         The returned :class:`better_human.ParametricBody` carries the BetterRobot
         model (``.robot``), baked inertias (``.values.body_inertias``) and FK
-        (``.fk``) the dynamics stage needs; a future MHR body implements the same
+        (``.fk``) the dynamics solves need; a future MHR body implements the same
         contract. Shape baking (``blend_shapes`` + joint regression + inertia) is
         the expensive part, so a single-slot cache reuses the shaped body while
         ``betas`` is unchanged — the common case across one person's optimization.

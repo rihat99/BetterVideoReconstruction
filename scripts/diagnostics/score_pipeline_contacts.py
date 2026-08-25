@@ -65,7 +65,7 @@ _FINGER = ("index", "middle", "pinky", "ring", "thumb")
 def _limb_members(joint_names: list[str]) -> list[list[int]]:
     """Joint columns per limb, in ``LIMBS`` order — hand = wrist + fingers, foot = foot + ankle.
 
-    Mirrors the contact stage's own fold (``tools.human_optim.dynamics._contact_catalog``)
+    Mirrors the retired dynamics stage's hand fold (wrist + fingers -> wrist)
     by name rather than by index, and without pulling torch into a CPU script. A name the
     list does not hold is simply skipped, so the same rule folds the body's 52 joints and
     the much shorter list of joints the force solve puts a contact on.

@@ -33,7 +33,7 @@ wins; indoors the level floor replaces the camera-down fallback). ``source``
 records which one won.
 
 The output is a **unit** direction (magnitude 9.81 m/s² is applied by the
-dynamics stage).
+dynamics solves).
 
 Per-clip I/O (``--source`` frames + ``--predictions out/<stem>/``)::
 

@@ -6,18 +6,17 @@
 # reconstruct), with a wider attraction band; and kindyn_1 starts from kinematic_1 because this
 # chain skips kinematics_2. Every other knob is identical.
 #
-# human_optimization — one config, five stages.
-# Loss-weight rows are per-stage arrays, columns = [root, kinematics_1, kinematics_2, dynamics, kindyn_1].
+# human_optimization — one config, four stages.
+# Loss-weight rows are per-stage arrays, columns = [root, kinematics_1, kinematics_2, kindyn_1].
 # Scene/annotation terms apply from a stage's refine phase (the body seats first) — except
 # kinematics_2, which runs them from its root phase so the contact-patch repair (ann_acquisition
 # + ann_seating) acts from the start and the rigid root phase pushes the body toward the wall.
 # kindyn_1 = joint kinematics + dynamics: its kinematic columns copy kinematics_2, and it
 # turns on the dynamics terms too. kindyn_1 weights are LINEAR (0.5·Σresidual² times the
-# weight, like every engine term); the dynamics stage puts base_wrench/force_magnitude INSIDE
-# the square, so for those two a kindyn weight w matches a dynamics weight √w.
+# weight, like every engine term).
 
 [stages]
-run = ["root", "kinematics_1"]   # default chain; kinematics_2 (needs annotations) + dynamics are opt-in
+run = ["root", "kinematics_1"]   # default chain; kinematics_2 (needs annotations) + kindyn_1 are opt-in
 
 [stages.root]
 iters = { root = 150 }
@@ -42,10 +41,6 @@ iters = { root = 100, full = 200, refine = 250, lbfgs = 0 }
 overlay = false          # debug overlay → human_optim/kinematic_2_overlay.mp4
 labels = "auto"          # contact labels: "auto" (contacts_1 — the pipeline default; manual annotations are metrics-only) | "manual" (data/<stem>.npz)
 
-[stages.dynamics]
-device = "cuda"          # GPU: the new BetterRobot batched-adjoint torch RNEA is fast (warp measured slower for this fwd+bwd solve)
-bodies = "kinematic_1"   # which refined body the force solve reads (kinematic_1 | kinematic_2)
-
 [stages.kindyn_1]
 # Joint kinematics + dynamics. Starts from a converged body + its contact labels and optimizes
 # pose AND per-contact-group forces together, so the RNEA base wrench can reshape the motion
@@ -68,32 +63,32 @@ overlay = false          # reprojected-keypoint debug overlay → human_optim/ki
 
 #                       root  kin1  kin2   dyn  kindyn1
 [loss_weights.kinematic]
-reproj_sapiens      = [   8,    8,    8,    0,    8 ]
-reproj_init         = [  30,   30,   30,    0,   30 ]
-chamfer             = [   0,    0,    0,    0,    0 ]   # PETER: OFF everywhere (user, 2026-07-26) — the static-camera depth is bad enough to corrupt even the scale, and chamfer sits the human at the wrong depth (unrealistic motion). The 2026-07-25 chamfer-on recipe is refuted; peter rework pending.
-pose_prior          = [ 300,  300,  300,    0,  300 ]
-orient_prior        = [  50,   50,   50,    0,   50 ]
+reproj_sapiens      = [8, 8, 8, 8]
+reproj_init         = [30, 30, 30, 30]
+chamfer             = [0, 0, 0, 0]   # PETER: OFF everywhere (user, 2026-07-26) — the static-camera depth is bad enough to corrupt even the scale, and chamfer sits the human at the wrong depth (unrealistic motion). The 2026-07-25 chamfer-on recipe is refuted; peter rework pending.
+pose_prior          = [300, 300, 300, 300]
+orient_prior        = [50, 50, 50, 50]
 
 [loss_weights.motion]
-accel_root          = [  24,   24,   24,    0,   24 ]
-accel_joint         = [  48,   48,   48,    0,   48 ]
-jerk_root           = [ 300,  300,  300,    0,  300 ]
-jerk_joint          = [ 500,  500,  500,    0,  500 ]
-snap_root           = [ 300,  300,  300,    0,  300 ]   # 4th-diff snap on top of accel/jerk — highest-freq root jitter
-snap_joint          = [ 500,  500,  500,    0,  500 ]
-radial_velocity     = [   0,  100,  100,    0,  100 ]   # damp joint velocity along the viewing ray (worst-constrained axis); kin1 + kin2 + kindyn_1
+accel_root          = [24, 24, 24, 24]
+accel_joint         = [48, 48, 48, 48]
+jerk_root           = [300, 300, 300, 300]
+jerk_joint          = [500, 500, 500, 500]
+snap_root           = [300, 300, 300, 300]   # 4th-diff snap on top of accel/jerk — highest-freq root jitter
+snap_joint          = [500, 500, 500, 500]
+radial_velocity     = [0, 100, 100, 100]   # damp joint velocity along the viewing ray (worst-constrained axis); kin1 + kin2 + kindyn_1
 
 [loss_weights.scene]
-penetration         = [   0, 4000, 4000,    0, 4000 ]   # push posed verts out of geometry/scene.npz (reported, not a fit gate)
+penetration         = [0, 4000, 4000, 4000]   # push posed verts out of geometry/scene.npz (reported, not a fit gate)
 
 [loss_weights.annotation]
 # Label-driven; labels are AUTO-detected in kinematics_1 (frozen), MANUAL in kinematics_2 + kindyn_1.
-ann_attraction      = [   0,    0,    0,    0,   20 ]   # OFF in kin1 for peter: attraction pulls predicted-labeled hands onto the same untrustworthy static-camera geometry chamfer was disabled for (measured on 01_hanging: attraction 10 → R-wrist std 29.6 cm vs 16.4 with 0; velocity damping alone halves the drift). The predicted labels drive ann_velocity only.
-ann_acquisition     = [   0,    0, 1000,    0,    0 ]   # kinematics_2: per positive (frame, annotation-group) instance, long-range bounded pull of the group's ONE closest vertex toward a target patch of wall points. 1000 chosen by sweep: seats floaters (gtIGgs euclid med 40.8→5.4 cm) at reproj_sap 9.3→28.8 px; 300 under-seats, 3000 buys little for +6 px.
-ann_seating         = [   0,    0,    0,    0,    0 ]   # OFF (2026-07-26, matching the main config): the −5 mm target was itself the burial mechanism on the boulder A/B; acquisition + the penetration term seat on their own.
-ann_repulsion       = [   0,    0, 4000,    0, 4000 ]   # push no-contact verts off — MANUAL only (auto labels carry no negatives)
-ann_velocity        = [   0,  500, 4000,    0, 4000 ]   # damp in-contact joints' linear + angular velocity (readout reads pre-enforcement drift_pre)
-ann_acceleration    = [   0,    0,    0,    0,    0 ]   # OFF — near-redundant with a strong ann_velocity (a still joint is already low-accel); wired + ready, raise to damp in-contact joints' Cartesian (LOCAL_WORLD_ALIGNED) acceleration if ann_velocity is lowered to allow slow sliding contacts
+ann_attraction      = [0, 0, 0, 20]   # OFF in kin1 for peter: attraction pulls predicted-labeled hands onto the same untrustworthy static-camera geometry chamfer was disabled for (measured on 01_hanging: attraction 10 → R-wrist std 29.6 cm vs 16.4 with 0; velocity damping alone halves the drift). The predicted labels drive ann_velocity only.
+ann_acquisition     = [0, 0, 1000, 0]   # kinematics_2: per positive (frame, annotation-group) instance, long-range bounded pull of the group's ONE closest vertex toward a target patch of wall points. 1000 chosen by sweep: seats floaters (gtIGgs euclid med 40.8→5.4 cm) at reproj_sap 9.3→28.8 px; 300 under-seats, 3000 buys little for +6 px.
+ann_seating         = [0, 0, 0, 0]   # OFF (2026-07-26, matching the main config): the −5 mm target was itself the burial mechanism on the boulder A/B; acquisition + the penetration term seat on their own.
+ann_repulsion       = [0, 0, 4000, 4000]   # push no-contact verts off — MANUAL only (auto labels carry no negatives)
+ann_velocity        = [0, 500, 4000, 4000]   # damp in-contact joints' linear + angular velocity (readout reads pre-enforcement drift_pre)
+ann_acceleration    = [0, 0, 0, 0]   # OFF — near-redundant with a strong ann_velocity (a still joint is already low-accel); wired + ready, raise to damp in-contact joints' Cartesian (LOCAL_WORLD_ALIGNED) acceleration if ann_velocity is lowered to allow slow sliding contacts
 
 # dynamics column = the standalone frozen-q force stage (base_wrench + force_magnitude INSIDE
 # the square, smoothness linear). kindyn_1 column = all-LINEAR weights for the same terms in
@@ -103,11 +98,11 @@ ann_acceleration    = [   0,    0,    0,    0,    0 ]   # OFF — near-redundant
 # the dynamics stage's effective 0.01² — it only shapes the force warm-start, and the tuned
 # result met its targets, so it stays.
 [loss_weights.dynamics]
-base_wrench         = [   0,    0,    0,  1.0,  1e-5 ]
-force_magnitude     = [   0,    0,    0, 0.01,  1e-7 ]
-force_smooth_mag    = [   0,    0,    0, 0.20,  2e-6 ]   # smooth the force MAGNITUDE across persisting contacts (harder than direction)
-force_smooth_dir    = [   0,    0,    0, 0.05,  5e-7 ]   # smooth the force DIRECTION (may adapt faster than magnitude)
-torque_smooth       = [   0,    0,    0, 0.10,  1e-6 ]
+base_wrench         = [0, 0, 0, 1e-5]
+force_magnitude     = [0, 0, 0, 1e-7]
+force_smooth_mag    = [0, 0, 0, 2e-6]   # smooth the force MAGNITUDE across persisting contacts (harder than direction)
+force_smooth_dir    = [0, 0, 0, 5e-7]   # smooth the force DIRECTION (may adapt faster than magnitude)
+torque_smooth       = [0, 0, 0, 1e-6]
 
 [optimizer]
 lr = 0.01
@@ -268,27 +263,8 @@ force_share_scale = 0.25 # |f|/body-weight scale of the force ramp (evidence and
 nodata_cap = 1.00        # no-contact label with an absent local depth witness
 nodata_force_cap = 1.00  # no-contact, absent depth, but the static solve allocates ~no force here
 
-# Force application points for the dynamics stage: two hands (wrist + fingers folded
-# onto the wrist) and two feet — four joints. PETER: no ankle force points (user,
-# 2026-07-26); the main config keeps six. A joint carries a force only on frames it
-# is labelled in contact. Body mass + inertia come baked from BetterHuman.
-[contact]
-groups = ["left_hand", "right_hand", "left_foot", "right_foot"]
-
-# Friction cone for the non-hand contact groups (feet + ankles). A foot/ankle contact can
-# only PUSH along the surface normal and its sideways (tangential) force is capped at μ·(normal
-# force), μ = tan(half_angle_deg). Enforced BY CONSTRUCTION, not by a loss: the force is built
-# as a nonnegative combination of the cone's four pyramid edge directions, so it cannot leave
-# the cone and there is no weight to tune. The normal is read from the fused scene cloud:
-# average the stored normals of the normal_k nearest scene points to the joint (they point out
-# of the wall toward the climber). A joint whose nearest scene point is beyond max_dist_m — or
-# whose neighboring normals disagree (they average to ~nothing on thin holds / concave
-# corners) — gets a free bilateral force instead, like a hand. Ankle centers sit a few cm
-# inside the leg, so keep max_dist_m generous. Comment out this section to run without cones.
 [friction]
 half_angle_deg = 45.0   # μ = tan(45°) = 1
-normal_k = 16
-max_dist_m = 0.30
 
 [dynamics_optimizer]
 max_iter = 200

@@ -34,11 +34,6 @@ part_length = 200           # Frames per SAM3 propagation part.
 [contacts_run]
 bodies = "kinematic_1"      # Body artifact to score; produces contacts_1.npz (or use kinematic_2).
 
-[export]
-jobs = 8                    # Parallel scene-export processes.
-quality = 95                # Frame JPEG quality, 1..100.
-skip_existing = false       # Resume/validate existing exported frames and masks when true.
-
 [score]
 device = "cuda"             # Torch device for offline scoring.
 ref_close = 0.02            # Per-joint reference close-threshold cell, metres.

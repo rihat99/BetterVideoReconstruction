@@ -21,9 +21,10 @@ Run from CLI::
         --source video.mp4 --predictions out/video/ [--stages root,kinematics_1] [--overlay]
 
 Reads:  sam3d/smplx_params.npz, sapiens/pose.npz, geometry/{human,transform,scene}.npz;
-        (kinematics_2) human_optim/kinematic_1.npz + data/<stem>.npz;
-        (dynamics) human_optim/kinematic_2.npz + human_optim/contacts_2.npz + geocalib/gravity.npz
-Writes: human_optim/{root,kinematic_1,kinematic_2,dynamics}.npz (+ *_overlay.mp4)
+        (kinematics_2) human_optim/kinematic_1.npz + its contact labels;
+        (kindyn_1)     the [stages.kindyn_1].bodies body + its contacts_<tag>.npz
+                       (+ geocalib/gravity.npz when present)
+Writes: human_optim/{root,kinematic_1,kinematic_2,kindyn_1}.npz (+ *_overlay.mp4)
 """
 
 from __future__ import annotations
@@ -40,7 +41,6 @@ for _p in (str(_BETTER_HUMAN_SRC), str(_REPO_ROOT)):
 import argparse  # noqa: E402
 
 from tools.human_optim.config import STAGE_ORDER, load_config  # noqa: E402
-from tools.human_optim.dynamics import run_dynamics  # noqa: E402
 from tools.human_optim.kindyn import run_kindyn  # noqa: E402
 from tools.human_optim.stages import run_kinematic, run_kinematics_2  # noqa: E402
 
@@ -73,10 +73,6 @@ def run(source, predictions_dir, config_path, *, stages=None, annotations=None) 
         run_kinematics_2(source, pred, cfg, cfg.device, annotations=annotations,
                          overlay=bool(k2.get("overlay", False)),
                          labels_mode=str(k2.get("labels", "auto")))
-    if "dynamics" in requested:
-        dyn = opts.get("dynamics", {})
-        run_dynamics(pred, cfg, dyn.get("device", "cuda"),
-                     bodies=str(dyn.get("bodies", "kinematic_1")))
     if "kindyn_1" in requested:
         kd = opts.get("kindyn_1", {})
         run_kindyn(source, pred, cfg, cfg.device, annotations=annotations,
@@ -90,7 +86,7 @@ def main(argv=None) -> int:
     ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     ap.add_argument("--source", default=None,
                     help="original video / frames — needed for overlays and kinematics_2 "
-                         "annotation auto-resolution; not needed for dynamics")
+                         "annotation auto-resolution")
     ap.add_argument("--predictions", required=True)
     ap.add_argument("--stages", default=None,
                     help="comma-separated subset of root,kinematics_1,kinematics_2,dynamics,kindyn_1 "
