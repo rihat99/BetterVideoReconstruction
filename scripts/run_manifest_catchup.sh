@@ -10,7 +10,9 @@ cd "$(dirname "$0")/.."
 
 MAIN=configs/corpus.toml
 ONE=configs/corpus_onepergpu.toml
-sed 's/^devices = .*/devices = [4, 7]                    # one shard per GPU/' "$MAIN" > "$ONE"
+# GPU 7 only: the 7 remaining vggt scenes are 448-488-frame forwards (~42 GiB)
+# and neighbour processes currently hold ~9 GiB on GPU 4 — only 7 has room.
+sed 's/^devices = .*/devices = [7]                       # single shard, emptiest GPU/' "$MAIN" > "$ONE"
 
 run() {
     echo

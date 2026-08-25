@@ -226,6 +226,7 @@ __marimo__/
 configs/corpus_onepergpu.toml
 configs/corpus_contacts2.toml
 configs/corpus_contacts2_onepergpu.toml
+configs/corpus_retry.toml
 
 # Project outputs / data
 data/
