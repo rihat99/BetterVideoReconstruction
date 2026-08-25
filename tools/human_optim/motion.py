@@ -22,12 +22,10 @@ value and gradient, but batched over frames *and* joints in a handful of ops
 instead of a per-joint Python loop — several-fold faster (≈4–10× on CPU here),
 and needing no BetterRobot model build/remap just to difference.
 
-Two *other* trajectory-derivative paths are kept deliberately separate because
-they answer different questions: the dynamics stage differences ``q`` through the
+One *other* trajectory-derivative path is kept deliberately separate because it
+answers a different question: kindyn and the force witness difference ``q`` through the
 BetterRobot model in DFS order with a physical ``dt`` and zero-padded endpoints
-(:func:`tools.smplx_robot.dynamics.velocity_acceleration_from_trajectory`), and
-the velocity-gated contact term needs each joint's local *linear* speed from FK
-Jacobians (:mod:`tools.human_optim.velocity`).
+(:func:`tools.smplx_robot.dynamics.velocity_acceleration_from_trajectory`).
 """
 
 from __future__ import annotations
@@ -42,9 +40,8 @@ def tangent_difference(q: torch.Tensor, num_joints: int) -> torch.Tensor:
     Root SE3 (``q[:7]``) via ``se3.log(q0⁻¹∘q1)``; each parent-local joint
     quaternion (``q[7:]``, stride-4) via ``so3.log(q0⁻¹∘q1)``, vectorized over
     frames and joints. The joint block stays in ``better_human`` order (not the
-    model's DFS order) — irrelevant to
-    :func:`~tools.human_optim.losses.smoothness_loss`, which weights every joint
-    tangent identically.
+    model's DFS order) — irrelevant to the smoothness terms, which weight every
+    joint tangent identically.
     """
     q0, q1 = q[:-1], q[1:]
     root = se3.log(se3.compose(se3.inverse(q0[..., :7]), q1[..., :7]))   # (T-1, 6)

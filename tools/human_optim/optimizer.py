@@ -162,24 +162,33 @@ def _padded_scene_candidates(box_points_det: torch.Tensor, scene_pts: torch.Tens
     body point's nearest neighbour, so this is near-lossless but bounds the padded
     width, hence the per-iter ``cdist`` cost). Built once from the post-placement
     body and reused across a scene phase's iterations. Returns the four padded
-    tensors ``(points, normals, confidence, valid)``."""
-    pts, nrm, cnf = [], [], []
-    for t in range(box_points_det.shape[0]):
-        lo = box_points_det[t].amin(0) - margin
-        hi = box_points_det[t].amax(0) + margin
-        m = ((scene_pts >= lo) & (scene_pts <= hi)).all(dim=-1)
-        cp, cn, cc = scene_pts[m], scene_normals[m], scene_conf[m]
-        if cp.shape[0] > max_candidates:
-            center = (0.5 * (lo + hi))[None]
-            keep = torch.cdist(center, cp)[0].topk(max_candidates, largest=False).indices
-            cp, cn, cc = cp[keep], cn[keep], cc[keep]
-        pts.append(cp)
-        nrm.append(cn)
-        cnf.append(cc)
-    dev, dt = box_points_det.device, box_points_det.dtype
-    pad_p, valid = pad_frames(pts, channels=3, device=dev, dtype=dt)
-    pad_n, _ = pad_frames(nrm, channels=3, device=dev, dtype=dt)
-    pad_c, _ = pad_frames(cnf, channels=None, device=dev, dtype=scene_conf.dtype)
+    tensors ``(points, normals, confidence, valid)``.
+
+    Batched over frame chunks (out-of-box points score ``+inf`` and one ``topk``
+    picks the keepers): a per-frame boolean index would cost one host sync per
+    frame, ~5·T syncs per person per stage across the phase starts and metric
+    passes."""
+    lo = box_points_det.amin(1) - margin                              # (T, 3)
+    hi = box_points_det.amax(1) + margin
+    center = 0.5 * (lo + hi)
+    num_scene = scene_pts.shape[0]
+    k = min(int(max_candidates), num_scene)
+    chunk = max(1, 4_000_000 // max(num_scene, 1))                    # ~4M pair scores per chunk
+    idx_c, valid_c = [], []
+    for s in range(0, box_points_det.shape[0], chunk):
+        e = min(s + chunk, box_points_det.shape[0])
+        inbox = ((scene_pts[None] >= lo[s:e, None])
+                 & (scene_pts[None] <= hi[s:e, None])).all(-1)        # (C, S)
+        d2 = (scene_pts[None] - center[s:e, None]).square().sum(-1)   # (C, S)
+        d2 = torch.where(inbox, d2, torch.full_like(d2, float("inf")))
+        vals, idx = d2.topk(k, dim=1, largest=False)                  # (C, k)
+        idx_c.append(idx)
+        valid_c.append(torch.isfinite(vals))
+    idx = torch.cat(idx_c, 0) if idx_c else box_points_det.new_zeros((0, k), dtype=torch.long)
+    valid = torch.cat(valid_c, 0) if valid_c else box_points_det.new_zeros((0, k), dtype=torch.bool)
+    pad_p = torch.where(valid[..., None], scene_pts[idx], torch.zeros(()).to(scene_pts))
+    pad_n = torch.where(valid[..., None], scene_normals[idx], torch.zeros(()).to(scene_normals))
+    pad_c = torch.where(valid, scene_conf[idx], torch.zeros(()).to(scene_conf))
     return pad_p, pad_n, pad_c, valid
 
 
@@ -218,7 +227,7 @@ def _build_contact_patches(
     run in sync latency alone). Every per-instance guard stays on-device: a failed
     guard empties the footprint, the patch row comes out all-invalid, and one
     boolean-index per group filters those rows into the unresolved count."""
-    T, G = vw_sub.shape[0], len(group_vert_ids)
+    G = len(group_vert_ids)
     dev, dt = vw_sub.device, vw_sub.dtype
     INF = torch.finfo(dt).max
     conf_ok = scene_conf > conf_thresh
@@ -443,7 +452,7 @@ def optimize_person(
     makes occluded limbs jitter — so the visual evidence yields there and the contact
     terms get the freedom. Every one of the three holds its denominator, so the terms
     weaken on the occluded joints instead of stiffening on the visible ones. ``None``
-    (the default, and what ``[occlusion].floor = 1`` produces) leaves them untouched.
+    (the default, ``[occlusion].strength = 0``) leaves them untouched.
 
     ``frame_valid`` (optional ``(T,)`` bool) excludes untracked frames — whose
     converter pose was held from the nearest valid frame and so is glued to the

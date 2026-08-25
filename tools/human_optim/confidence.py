@@ -61,17 +61,11 @@ import numpy as np
 import torch
 
 
-# Artifact version of the confidence written to contacts_<tag>.npz. Bump both
-# together. Light-weight consumers keep literal copies pinned to these values:
-# scripts/corpus.py, scripts/export_contact_dataset.py, tools/viewer/loading.py.
-# 8: labels the predicted-contact fusion changed carry ITS confidence (the fused
-#    two-witness agreement, tools/human_optim/fusion.py), not the terms below.
+# Artifact version of the per-joint-era confidence (written by the frozen
+# scripts/score_contacts.py path only; the frames-era stage writes
+# contact_label_schema instead).
 CONTACT_CONFIDENCE_SCHEMA = 8
 CONTACT_CONFIDENCE_METHOD = "source-conditional-v1"
-# The contact stage's scene-free mode (use_scene = false): confidence is the model's
-# contact probability × stillness (no scene witnesses). A legitimate current method,
-# not a stale artifact — consumers accept either.
-SCENE_FREE_CONFIDENCE_METHOD = "scene_free_pred_still_v1"
 
 CONTACT_CONFIDENCE_DEFAULTS: dict[str, float] = {
     # Plausible signed-distance band for a contact.  Soft sigmoids avoid hard

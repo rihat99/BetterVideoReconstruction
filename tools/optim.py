@@ -142,7 +142,6 @@ def run_phases(
     lr_decay: float | None = None,
     lr_lbfgs: float = 1.0,
     lbfgs_history: int = 10,
-    log_prefix: str = "    ",
 ) -> None:
     """Run ``phases`` in order, mutating the problem's leaves in place.
 
@@ -171,7 +170,7 @@ def run_phases(
                 _apply_grad_mask(problem, ph.grad_mask)
                 step[0] += 1
                 if step[0] == 1 or step[0] % 5 == 0:
-                    _log(log_prefix, ph.name, step[0], loss, report)
+                    _log("    ", ph.name, step[0], loss, report)
                 return loss
 
             opt.step(closure)
@@ -191,4 +190,4 @@ def run_phases(
             if sched is not None:
                 sched.step()
             if it % max(1, iters // 4) == 0 or it == iters - 1:
-                _log(log_prefix, ph.name, it, loss, report)
+                _log("    ", ph.name, it, loss, report)

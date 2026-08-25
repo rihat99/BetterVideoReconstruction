@@ -9,7 +9,7 @@ from tools.human_optim.confidence import (
     joint_label_confidence,
     occlusion_group_ids,
 )
-from tools.human_optim.contacts import joint_occlusion_gap, lift_joint_min_distance
+from tools.human_optim.contacts import joint_occlusion_gap
 from tools.viewer.loading import _load_skeleton
 
 # One triangle spanning the +z axis at depth ``z``; the camera at the origin looking
@@ -147,13 +147,6 @@ def test_stationary_far_no_contact_is_also_zero_confidence():
     terms = _terms(labels=[[False]], sdf=[[1.0]], drift=[[0.0]])
     assert terms["motion"][0, 0] == pytest.approx(0.0)
     assert terms["label_confidence"][0, 0] == pytest.approx(0.0)
-
-
-def test_joint_clearance_lifts_true_euclidean_distance():
-    distances = torch.tensor([[0.30, 0.10, float("inf")]])
-    result = lift_joint_min_distance(distances, torch.tensor([0, 0, 1]), 2)
-    assert result[0, 0] == pytest.approx(0.10)
-    assert torch.isnan(result[0, 1])
 
 
 def test_implausibly_deep_contact_is_not_treated_as_certain():

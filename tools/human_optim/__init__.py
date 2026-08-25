@@ -14,15 +14,9 @@ from .camera import (
     transform_points,
     world_from_cam,
 )
-from .completion import (
-    COMPLETION_DEFAULTS,
-    complete_person,
-    load_dynamics_context,
-)
 from .contacts import (
     DETECT_MIN_FRAMES,
     FrameContacts,
-    contact_from_sdf,
     detect_frame_contacts,
     drift_gate,
     drift_gated_contact,
@@ -31,9 +25,7 @@ from .contacts import (
     hysteresis_spans,
     joint_drift,
     joint_guarded_min_sdf,
-    lift_joint_min_distance,
     joint_occlusion_gap,
-    lift_joint_contact,
     min_span_frames,
     merge_contact_spans,
     suppress_toe_sides,
@@ -53,7 +45,6 @@ from .losses import (
     pose_prior_loss,
     sapiens_reprojection_gm,
     scene_penetration,
-    smoothness_loss,
 )
 from .motion import tangent_difference
 from .qmath import normalize_q
@@ -65,12 +56,8 @@ __all__ = [
     "project",
     "transform_points",
     "world_from_cam",
-    "COMPLETION_DEFAULTS",
-    "complete_person",
-    "load_dynamics_context",
     "DETECT_MIN_FRAMES",
     "FrameContacts",
-    "contact_from_sdf",
     "detect_frame_contacts",
     "drift_gate",
     "drift_gated_contact",
@@ -79,10 +66,8 @@ __all__ = [
     "hysteresis_spans",
     "joint_drift",
     "joint_guarded_min_sdf",
-    "lift_joint_min_distance",
     "joint_occlusion_gap",
     "min_span_frames",
-    "lift_joint_contact",
     "merge_contact_spans",
     "suppress_toe_sides",
     "toe_side_slots",
@@ -102,7 +87,6 @@ __all__ = [
     "pose_prior_loss",
     "sapiens_reprojection_gm",
     "scene_penetration",
-    "smoothness_loss",
     "tangent_difference",
     "normalize_q",
     "front_facing_mask",

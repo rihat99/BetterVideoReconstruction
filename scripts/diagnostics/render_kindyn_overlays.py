@@ -103,7 +103,7 @@ if str(_DIAGNOSTICS) not in sys.path:
     sys.path.insert(0, str(_DIAGNOSTICS))
 
 from render_prediction_overlays import (  # noqa: E402
-    CAMPUS_ROOT, LIMB_RGB, LIMBS, PANEL_SIZE, PETER, PLATE_ROOT, WALL_ROOT, WALL_SOURCE,
+    CAMPUS_ROOT, LIMBS, PANEL_SIZE, PETER, PLATE_ROOT, WALL_ROOT, WALL_SOURCE,
     _draw_contact_discs, _fit, _force_panel, _wall_panel, _wired,
 )
 from score_pipeline_contacts import _limb_load, _limb_members  # noqa: E402

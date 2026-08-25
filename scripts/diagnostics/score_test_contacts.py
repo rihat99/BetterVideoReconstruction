@@ -13,7 +13,7 @@ manual labels:
 - **Learned model** — ``features/predictions/<scene>/contacts.npz``, the
   image-conditioned network (``climb4_t5mid_v2``), thresholded at its own 0.5.
 - **Optim + model** — ``contacts_1.npz`` as saved: the two witnesses above
-  combined by adding their log-odds (see :mod:`tools.human_optim.fusion`).
+  combined by adding their log-odds (the retired per-joint fusion step).
 - **Second optim + model** — ``contacts_2.npz``: the body is refined again with
   the fused labels (``kinematics_2``), and the same readout + fusion runs on
   that better body.

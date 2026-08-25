@@ -8,8 +8,8 @@ detector both the kinematic stage's frozen auto-labels and the standalone
 this module is the generic span/drift machinery it is built from
 (:func:`joint_drift`, :func:`stillness_weight`, :func:`hysteresis_spans`,
 :func:`drift_gated_contact`, :func:`merge_contact_spans` — all agnostic to what
-the ``K`` axis means) plus the older per-joint pieces the out-of-scope stages
-still import.
+the ``K`` axis means) plus the older per-joint pieces the frozen offline scorer
+(``scripts/score_contacts.py``) still imports.
 
 The older per-joint model, kept for those stages:
 Given a posed (world-frame, scaled) SMPL-X mesh and the static scene point cloud,
@@ -111,28 +111,6 @@ def scene_sdf(
         dmin[t] = dm
         conf[t] = cc[idx]
     return sdf, dmin, conf
-
-
-def contact_from_sdf(
-    sdf: torch.Tensor,      # (T, V) signed Euclidean SDF (m)
-    dmin: torch.Tensor,     # (T, V) Euclidean NN distance (m)
-    conf: torch.Tensor,     # (T, V) NN-point confidence
-    *,
-    close_thresh_m: float,
-    max_dist_m: float,
-    conf_thresh: float,
-) -> torch.Tensor:
-    """Boolean per-vertex contact ``(T, V)``.
-
-    A vertex is in contact when it is **inside** the scene (``sdf < 0``) or
-    **just outside** it (``0 ≤ sdf < close_thresh_m``) — i.e. ``sdf <
-    close_thresh_m`` — provided it is genuinely near a confident surface. Two
-    guards (mirroring the penetration loss) keep strays from false-flagging:
-    ``dmin < max_dist_m`` rejects a vertex whose only "penetration" is a deep,
-    almost-always-spurious correspondence behind an occluder, and ``conf >
-    conf_thresh`` trusts only well-observed scene points.
-    """
-    return (sdf < close_thresh_m) & (dmin < max_dist_m) & (conf > conf_thresh)
 
 
 _MT_EPS = 1e-8
@@ -265,54 +243,6 @@ def vertex_to_joint(vertices: torch.Tensor, joints: torch.Tensor) -> torch.Tenso
     return torch.cdist(vertices[None], joints[None])[0].argmin(dim=1)
 
 
-def lift_joint_contact(
-    vcontact: torch.Tensor,         # (T, V) bool per-vertex contact
-    sdf: torch.Tensor,              # (T, V) signed SDF (m) — for the diagnostic
-    v2j: torch.Tensor,              # (V,) long vertex→joint
-    num_joints: int,
-) -> tuple[torch.Tensor, torch.Tensor]:
-    """Lift per-vertex contacts to per-joint ``(T, J)``.
-
-    A joint is in contact when **any** vertex assigned to it is in contact (a
-    ``scatter`` max over the joint's vertices). Also returns ``joint_sdf_cm
-    (T, J)`` — the *minimum* signed distance (cm) over each joint's vertices, the
-    continuous quantity behind the boolean (handy for thresholding / diagnosis).
-    A joint with no near-surface vertex this frame gets ``nan``.
-    """
-    T = vcontact.shape[0]
-    dev = vcontact.device
-    INF = torch.finfo(sdf.dtype).max
-    idx = v2j[None].expand(T, -1)                               # (T, V)
-    jc = torch.zeros((T, num_joints), device=dev)
-    jc.scatter_reduce_(1, idx, vcontact.to(jc.dtype), reduce="amax", include_self=True)
-    jsdf = torch.full((T, num_joints), INF, device=dev, dtype=sdf.dtype)
-    jsdf.scatter_reduce_(1, idx, sdf, reduce="amin", include_self=True)
-    jsdf_cm = torch.where(jsdf < INF * 0.5, jsdf * 100.0, torch.full_like(jsdf, float("nan")))
-    return jc > 0.5, jsdf_cm
-
-
-def lift_joint_min_distance(
-    distance_m: torch.Tensor,       # (T, V) nonnegative per-vertex distance (m)
-    v2j: torch.Tensor,              # (V,) long vertex→joint
-    num_joints: int,
-) -> torch.Tensor:
-    """Minimum Euclidean scene distance for each joint's owned surface ``(T,J)``.
-
-    Unlike signed wall-normal SDF, this is a true clearance magnitude and cannot
-    read near zero merely because a far-away correspondence lies tangent to a bad
-    scene normal. A joint with no finite scene candidate is returned as ``NaN``.
-    """
-    T = distance_m.shape[0]
-    INF = torch.finfo(distance_m.dtype).max
-    idx = v2j[None].expand(T, -1)
-    finite_distance = torch.where(
-        torch.isfinite(distance_m), distance_m, torch.full_like(distance_m, INF))
-    out = torch.full(
-        (T, num_joints), INF, device=distance_m.device, dtype=distance_m.dtype)
-    out.scatter_reduce_(1, idx, finite_distance, reduce="amin", include_self=True)
-    return torch.where(out < INF * 0.5, out, torch.full_like(out, float("nan")))
-
-
 def joint_guarded_min_sdf(
     sdf: torch.Tensor,      # (T, V) signed SDF (m)
     dmin: torch.Tensor,     # (T, V) Euclidean NN distance (m)
@@ -325,16 +255,13 @@ def joint_guarded_min_sdf(
 ) -> torch.Tensor:
     """Per-joint minimum signed distance over each joint's GUARDED vertices ``(T, J)``.
 
-    A vertex contributes only if it passes the same far / confidence guards as
-    :func:`contact_from_sdf` (``dmin < max_dist_m`` and ``conf > conf_thresh``);
-    guarded-out vertices are set to ``+inf`` so they never win the per-joint min, and
-    a joint with no guarded vertex this frame is ``+inf``. This is the continuous
-    per-joint signal the temporal hysteresis (:func:`hysteresis_spans`) thresholds —
-    the guarded counterpart of :func:`lift_joint_contact`'s raw ``joint_sdf`` (which
-    stays unguarded as the diagnostic channel). Feeding hysteresis the guarded min
-    keeps its ``enter`` threshold exactly equivalent to the old per-vertex boolean
-    (``∃`` guarded vertex with ``sdf < enter``) while letting a looser ``exit`` hold
-    the span.
+    A vertex contributes only if it passes the far / confidence guards
+    (``dmin < max_dist_m`` and ``conf > conf_thresh``); guarded-out vertices are set
+    to ``+inf`` so they never win the per-joint min, and a joint with no guarded
+    vertex this frame is ``+inf``. This is the continuous per-joint signal the
+    temporal hysteresis (:func:`hysteresis_spans`) thresholds: its ``enter``
+    threshold is exactly "∃ guarded vertex with ``sdf < enter``" while a looser
+    ``exit`` holds the span.
     """
     guard = (dmin < max_dist_m) & (conf > conf_thresh)
     INF = torch.finfo(sdf.dtype).max
