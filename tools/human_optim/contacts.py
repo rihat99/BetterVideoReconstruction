@@ -150,39 +150,51 @@ def _moller_trumbore(
 @torch.no_grad()
 def joint_occlusion_gap(
     vertices: torch.Tensor,        # (T, V, 3) posed world-frame vertices
-    joints: torch.Tensor,          # (T, J, 3) posed world-frame joint centres
+    joints: torch.Tensor,          # (T, J, 3) posed world-frame target points
     cam_centers: torch.Tensor,     # (T, 3) world camera centres
     faces: torch.Tensor,           # (F, 3) long SMPL-X triangles (shared topology)
     v2j: torch.Tensor,             # (V,) long vertex→joint
-    occlusion_group: torch.Tensor, # (J,) nonnegative local-surface group id per joint
+    occlusion_group: torch.Tensor, # (Jmodel,) nonnegative local-surface group id per joint
     *,
     other_vertices: torch.Tensor | None = None,  # (T,V,3) or (T,Pother,V,3)
+    target_group: torch.Tensor | None = None,    # (J,) own-skin group per TARGET; None = occlusion_group
 ) -> torch.Tensor:
-    """Per-(frame, joint) in-front body-occlusion gap along the camera→joint ray ``(T, J)``.
+    """Per-(frame, target) in-front body-occlusion gap along the camera→target ray ``(T, J)``.
 
-    Casts one ray from the camera centre through each joint centre and intersects it
+    Casts one ray from the camera centre through each target point and intersects it
     (Möller–Trumbore) with the **full-resolution** triangles of the target person and
     of every other tracked person. The gap, in metres, is::
 
-        gap = joint_depth − nearest_hit_depth   (hits strictly in front of the joint)
+        gap = target_depth − nearest_hit_depth   (hits strictly in front of the target)
 
-    the thickness of body surface standing in front of the joint. Only intersections
-    nearer than the joint centre count, so a positive gap always means a surface sits
-    between the camera and the joint (occluded). A surface at or behind the joint is not
-    an occluder: with nothing in front the gap is ``NaN`` (clear) — the same value the
-    joint gets when no triangle is hit at all.
+    the thickness of body surface standing in front of the target. Only intersections
+    nearer than the target count, so a positive gap always means a surface sits
+    between the camera and the target (occluded). A surface at or behind the target is
+    not an occluder: with nothing in front the gap is ``NaN`` (clear) — the same value
+    the target gets when no triangle is hit at all.
 
-    A triangle is the joint's **own** skin (never an occluder) when any of its three
-    vertices is owned — via ``v2j`` — by a joint in the target joint's
-    ``occlusion_group``. Other people's triangles are never own, so another tracked
-    person can occlude the joint. ``other_vertices`` shares the target's ``faces``
-    topology (the same ``V`` vertices per person); a triangle with a non-finite vertex
-    (an invalid frame, or a missing other-person mesh) never registers a hit.
+    The targets are the model's joint centres (the per-joint era) or any other body
+    points — the contact frames pass their world positions with ``target_group``
+    naming each point's own-skin group. A triangle is the target's **own** skin
+    (never an occluder) when any of its three vertices is owned — via ``v2j`` and
+    ``occlusion_group`` — by a joint in the target's group. When ``target_group`` is
+    ``None`` the targets ARE the model joints and ``occlusion_group`` plays both
+    roles, exactly the per-joint behaviour. Other people's triangles are never own,
+    so another tracked person can occlude the target. ``other_vertices`` shares the
+    target's ``faces`` topology (the same ``V`` vertices per person); a triangle with
+    a non-finite vertex (an invalid frame, or a missing other-person mesh) never
+    registers a hit.
     """
     T, V, _ = vertices.shape
     J = joints.shape[1]
-    if occlusion_group.shape != (J,) or bool((occlusion_group < 0).any()):
+    if occlusion_group.ndim != 1 or bool((occlusion_group < 0).any()):
         raise ValueError("occlusion_group must contain one nonnegative group ID per joint")
+    if target_group is None:
+        if occlusion_group.shape != (J,):
+            raise ValueError("occlusion_group must contain one nonnegative group ID per joint")
+        target_group = occlusion_group
+    elif target_group.shape != (J,) or bool((target_group < 0).any()):
+        raise ValueError("target_group must contain one nonnegative group ID per target")
     device = vertices.device
     faces = faces.long()
     num_faces = faces.shape[0]
@@ -203,7 +215,7 @@ def joint_occlusion_gap(
     # people's faces carry a sentinel group that matches no joint, so are never own.
     face_group = torch.full((faces_all.shape[0], 3), -1, dtype=torch.long, device=device)
     face_group[:num_faces] = occlusion_group[v2j][faces]                  # (F,3)
-    own_mask = (occlusion_group[:, None, None] == face_group[None]).any(dim=-1)  # (J,Ftot)
+    own_mask = (target_group[:, None, None] == face_group[None]).any(dim=-1)  # (J,Ftot)
 
     inf = torch.tensor(float("inf"), device=device, dtype=vertices.dtype)
     gap = torch.empty((T, J), device=device, dtype=vertices.dtype)

@@ -6,6 +6,8 @@ import torch
 
 from tools.human_optim.confidence import (
     confidence_config,
+    fold_to_joints,
+    frame_report_joints,
     joint_label_confidence,
     occlusion_group_ids,
 )
@@ -21,7 +23,8 @@ def _tri(z: float) -> torch.Tensor:
     return torch.tensor([[[-0.5, -0.5, z], [0.5, -0.5, z], [0.0, 0.6, z]]])
 
 
-def _gap(vertices, joints, faces, v2j, groups, *, camera=None, other_vertices=None):
+def _gap(vertices, joints, faces, v2j, groups, *, camera=None, other_vertices=None,
+         target_group=None):
     vertices = torch.as_tensor(vertices, dtype=torch.float32)
     if camera is None:
         camera = torch.zeros((vertices.shape[0], 3))
@@ -30,7 +33,7 @@ def _gap(vertices, joints, faces, v2j, groups, *, camera=None, other_vertices=No
         vertices, torch.as_tensor(joints, dtype=torch.float32),
         torch.as_tensor(camera, dtype=torch.float32), torch.as_tensor(faces, dtype=torch.long),
         torch.as_tensor(v2j, dtype=torch.long), torch.as_tensor(groups, dtype=torch.long),
-        other_vertices=other)
+        other_vertices=other, target_group=target_group)
 
 
 _MIN_DEPTH_POINTS = 5
@@ -446,3 +449,41 @@ def test_viewer_skeleton_without_a_contact_file(tmp_path):
     loaded = _load_skeleton(tmp_path)
     assert loaded["frame_contact"] is None
     assert np.array_equal(loaded["parents"], [-1, 0, 0])
+
+
+# ── frames-era confidence: surface-point targets + the frame → joint fold ──
+
+
+def test_target_group_lets_a_frame_target_keep_its_own_skin():
+    # The target is a contact FRAME on joint 1's skin, not a model joint: its
+    # target_group is joint 1's group, so joint-1 skin is its own and never occludes
+    # it — while a target with a different group is occluded by the same triangle.
+    targets = torch.tensor([[[0.0, 0.0, 2.0]]])
+    v2j = torch.tensor([1, 1, 1])                                 # triangle owned by joint 1
+    groups = torch.tensor([0, 1])                                 # per-JOINT groups
+    own = _gap(_tri(1.0), targets, _FACES, v2j, groups, target_group=torch.tensor([1]))
+    assert torch.isnan(own[0, 0])                                 # its own skin ⇒ clear
+    other = _gap(_tri(1.0), targets, _FACES, v2j, groups, target_group=torch.tensor([0]))
+    assert other[0, 0] == pytest.approx(1.0, abs=1e-4)            # foreign skin ⇒ occluded
+
+
+def test_frame_report_joints_folds_hand_frames_to_the_wrist():
+    names = ["pelvis", "left_elbow", "left_wrist", "left_index1", "left_index2", "left_foot"]
+    parents = np.array([-1, 0, 1, 2, 3, 0])
+    frame_parents = [4, 2, 5, 1]      # fingertip, palm (parent = wrist), foot, elbow frame
+    report = frame_report_joints(frame_parents, names, parents)
+    assert report.tolist() == [2, 2, 5, 1]   # both hand frames land on the wrist
+
+
+def test_fold_to_joints_uses_the_label_algebra():
+    report = np.array([0, 0, 1])
+    contact = np.zeros((2, 3), bool)
+    confidence = np.zeros((2, 3), np.float32)
+    contact[0, 0] = True
+    confidence[0] = [0.6, 0.9, 0.4]   # joint 0 in contact: one touching (0.6), one free (0.9)
+    confidence[1] = [0.8, 0.3, 0.5]   # joint 0 free: least sure member is 0.3
+    joint_contact, joint_conf = fold_to_joints(contact, confidence, report, 3)
+    assert joint_contact[0, 0] and not joint_contact[1, 0]
+    assert joint_conf[0, 0] == pytest.approx(0.6)   # surest TOUCHING frame, not the free 0.9
+    assert joint_conf[1, 0] == pytest.approx(0.3)   # weakest link of the AND
+    assert np.isnan(joint_conf[:, 2]).all() and not joint_contact[:, 2].any()  # owns no frame

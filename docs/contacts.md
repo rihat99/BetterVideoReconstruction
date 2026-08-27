@@ -292,14 +292,14 @@ The frame model removes the reason they were needed:
   and a heel on a hold landed on the ankle or the foot depending on rest-pose
   geometry. Twelve named points need no lifting at all.
 
-Dropped with the old model, on this branch: completion, prediction fusion,
-per-label confidence, the ray-cast occlusion witness, and the depth-fit
-wiring. `completion.py` and `fusion.py` are deleted;
-`tools/human_optim/{confidence,depth_fit}.py` survive only for the frozen
-per-joint scorer (`scripts/score_contacts.py`), nothing in the contact path
-calls them, and `docs/contact_confidence.md` /
-`docs/contact_fusion.md` / `docs/depth_fit.md` describe the retired per-joint
-era. Consumers pinned to a schema (the offline scorer, `kinematics_2`, `kindyn_1`)
+Dropped with the old model, on this branch: completion and prediction fusion
+(`completion.py` and `fusion.py` are deleted; `docs/contact_fusion.md` is the
+design record). The per-label **confidence** — with its ray-cast occlusion
+witness and depth-fit trust — came back in 2026-08: the same source-conditional
+algebra now runs on the contact-frame axis inside `estimate_contacts`, and the
+frame labels fold onto report joints (hands at the wrist) for downstream
+per-joint consumers. See [contact_confidence.md](contact_confidence.md).
+Consumers pinned to a schema (the offline scorer, `kinematics_2`, `kindyn_1`)
 fail loudly on a mismatched `contact_label_schema` rather than misreading it.
 
 ### Rules that keep it honest
