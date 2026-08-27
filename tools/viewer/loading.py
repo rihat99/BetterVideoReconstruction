@@ -23,8 +23,8 @@ from .helpers import _camera_world_pose, _top4_skin_weights
 _REPO_ROOT = Path(__file__).resolve().parents[2]
 
 # SMPL-X hand joints — the fingers. The body skeleton draws them small (see
-# ``_SKEL_FINGER_SCALE`` in :mod:`tools.viewer.scene`) and the force sources OR-fold
-# their per-joint contact into the wrist. Shared with :mod:`tools.viewer.scene`.
+# ``_SKEL_FINGER_SCALE`` in :mod:`tools.viewer.scene`) and the force sources sum
+# their per-joint forces into the wrist. Shared with :mod:`tools.viewer.scene`.
 _FINGER_TOKENS = ("index", "middle", "pinky", "ring", "thumb")
 # The contact-label schema this viewer reads: contact lives on the 12 body-mounted
 # contact frames (``frame_contact``), not on joints. An older artifact is ignored.
@@ -68,9 +68,8 @@ def _load_force_data(pred: Path, filename: str) -> dict | None:
 
     Shared by the kinematics+dynamics bodies ``kindyn_1.npz`` / ``kindyn_manual.npz``
     (the manual-annotation reference chain). Both store the same force fields, so the
-    viewer draws them the same way. ``joint_contact`` is optional — older kindyn npz
-    omit it, and the caller then reads which joints are in contact from where the
-    solved contact force is non-zero.
+    viewer draws them the same way. Hand forces are folded to the wrists here, once,
+    so the per-joint display never draws arrows on individual finger joints.
     """
     f = pred / "human_optim" / filename
     if not f.exists():
@@ -85,11 +84,11 @@ def _load_force_data(pred: Path, filename: str) -> dict | None:
     if ref <= 1e-6:
         ref = float(tmv.max()) if tmv.size and tmv.max() > 0 else 1.0
     names = [str(n) for n in dd["joint_names"]] if "joint_names" in dd.files else None
-    jc = dd["joint_contact"].astype(bool) if "joint_contact" in dd.files else None
-    if jc is not None and names is not None:
-        # Fold each hand's finger contacts onto its wrist so the wrist sphere (the
-        # hand's single force point) turns red whenever the hand grips — the contact
-        # sits on the fingers/palm, so the wrist's own label alone misses most grips.
+    fw = dd["contact_forces_world"].astype(np.float32)          # (P, N, J, 3)
+    if names is not None:
+        # Sum each hand's finger forces onto its wrist (the joint we call "the hand")
+        # and zero the finger columns, so the per-joint display draws ONE arrow per
+        # gripping hand instead of one per loaded finger joint.
         for side in ("left", "right"):
             wrist = f"{side}_wrist"
             if wrist in names:
@@ -97,18 +96,18 @@ def _load_force_data(pred: Path, filename: str) -> dict | None:
                 fingers = [i for i, n in enumerate(names)
                            if n.startswith(f"{side}_") and any(t in n for t in _FINGER_TOKENS)]
                 if fingers:
-                    jc[:, :, w] |= jc[:, :, fingers].any(axis=2)
+                    fw[:, :, w] += fw[:, :, fingers].sum(axis=2)
+                    fw[:, :, fingers] = 0.0
     return {
         "jw": dd["joints_world"].astype(np.float32),            # (P, N, J, 3)
         "tm": tm,
-        "fw": dd["contact_forces_world"].astype(np.float32),    # (P, N, J, 3)
+        "fw": fw,                                               # (P, N, J, 3), hands at wrists
         "ff": (dd["frame_forces"].astype(np.float32)            # (P, N, F, 3): the same forces
                if "frame_forces" in dd.files else None),        # per contact FRAME, unfolded
         "bw": (dd["base_wrench"].astype(np.float32)             # (P, N, 6): root force | torque
                if "base_wrench" in dd.files else None),         #   in the ROOT-LOCAL frame
         "rootq": (dd["q"][:, :, 3:7].astype(np.float32)         # (P, N, 4) scalar-last root quat
                   if "q" in dd.files else None),                #   (rotates bw to world for drawing)
-        "jc": jc,                                               # (P, N, J): per-joint in-contact (fingers folded to wrist)
         "joint_names": names,                                   # (J,) native names (finger toggle)
         "valid": valid,
         "parents": np.asarray(dd["parents"], np.int32),         # (J,)

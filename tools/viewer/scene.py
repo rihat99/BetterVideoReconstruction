@@ -23,12 +23,15 @@ from .loading import _FINGER_TOKENS, ClipData, ensure_scene_mesh
 
 # dynamics sphere-floor / bone radius / max torque grow factor / metres-per-newton for
 # the contact-force arrows
-_DYN_R0, _DYN_RB, _DYN_MAXS, _DYN_FSCALE = 0.022, 0.012, 3.0, 1.2e-3
+_DYN_R0, _DYN_RB, _DYN_MAXS, _DYN_FSCALE = 0.022, 0.012, 2.0, 1.2e-3
+# joint-sphere colour while the ``joint torques`` toggle is on (torque-sized spheres);
+# off, the spheres stay the neutral skeleton grey like the kinematic overlay.
+_DYN_TORQUE_RGB = (245, 200, 40)
 # root residual-wrench arrows: metres per newton-metre for the torque part (the force
 # part reuses _DYN_FSCALE so it is directly comparable to the contact-force arrows)
 _DYN_TSCALE = 4.8e-3
 # contact-force arrow colour — a saturated blue that reads against the grey scene
-# cloud and the red skeleton
+# cloud and the grey skeleton
 _DYN_FORCE_RGB = (50, 120, 255)
 # measured wall-sensor arrows (climb_wall GT): orange, one per channel; below the
 # floor a channel is not drawn (the sensors never read exactly zero, and the fixed
@@ -296,7 +299,7 @@ class ClipScene:
             for p in range(dyn["P"]):
                 oid = int(dyn["oids"][p])
                 spheres = [ss.add_icosphere(f"/clip/{source}/p{oid:02d}/sphere_{j:02d}",
-                                            radius=_DYN_R0, color=(235, 45, 45),
+                                            radius=_DYN_R0, color=_SKEL_RGB,
                                             position=(0.0, 0.0, 0.0), visible=False)
                            for j in range(Jd)]
                 bones = []
@@ -761,21 +764,20 @@ class ClipScene:
             valid = active and f < dyn["valid"].shape[1] and bool(dyn["valid"][p, f])
             skel_live = valid and skel_on                # torque skeleton follows the skeleton layer
             jw, tm = dyn["jw"][p, f], dyn["tm"][p, f]
-            fw = dyn["fw"][p, f]                          # (J, 3) solved contact force
+            fw = dyn["fw"][p, f]                          # (J, 3) solved contact force (hands at wrists)
             fmag = np.linalg.norm(fw, axis=-1)           # (J,)
-            jc = dyn.get("jc")                           # (P, N, J) contact labels or None
-            con = jc[p, f] if jc is not None and f < jc.shape[1] else None
             for j, sp in enumerate(nd["spheres"]):
                 if skel_live and (show_fingers or not finger[j]):
                     sp.position = (float(jw[j, 0]), float(jw[j, 1]), float(jw[j, 2]))
-                    # scale by joint torque, but not the root (j==0): its wrench is the arrows
+                    # scale + yellow by joint torque, but not the root (j==0): its
+                    # wrench is the arrows. Off, the spheres match the kinematic
+                    # skeleton — neutral grey, uniform size (contact lives on the
+                    # contact frames, not joints).
+                    torqued = scale_torque and j != 0
                     s = (1.0 + min(float(tm[j]) / dyn["ref"], 1.0) * (_DYN_MAXS - 1.0)
-                         if scale_torque and j != 0 else 1.0)
+                         if torqued else 1.0)
                     sp.scale = (s, s, s)
-                    # red only where the joint is in contact: from the contact labels when
-                    # present (dynamics), else where a force was solved (kindyn_1 has none).
-                    hot = bool(con[j]) if con is not None else bool(fmag[j] > 1e-3)
-                    sp.color = _CONTACT_RGB if hot else _FREE_RGB
+                    sp.color = _DYN_TORQUE_RGB if torqued else _SKEL_RGB
                     sp.visible = True
                 else:
                     sp.visible = False
@@ -814,14 +816,10 @@ class ClipScene:
                     idx = np.flatnonzero(fmag > 1e-3)
                 if idx.size:
                     seg = np.stack([anchor[idx], anchor[idx] + vec[idx] * _DYN_FSCALE], axis=1)
-                    # Per-frame arrows are several per limb, so draw them thinner than
-                    # the single accumulated per-joint arrow.
-                    shaft, head_r, head_l = ((0.006, 0.016, 0.032) if per_frame
-                                             else (0.012, 0.028, 0.05))
                     nd["forces"] = self.server.scene.add_arrows(
                         f"/clip/{source}/p{nd['oid']:02d}/forces", points=seg.astype(np.float32),
-                        colors=_DYN_FORCE_RGB, shaft_radius=shaft,
-                        head_radius=head_r, head_length=head_l)
+                        colors=_DYN_FORCE_RGB, shaft_radius=0.012,
+                        head_radius=0.028, head_length=0.05)
             # Root residual wrench: force (green) and torque (magenta) at the pelvis,
             # each on its own toggle. A physically-consistent solve drives these toward
             # zero, so short arrows are good — they show what the contact forces failed
