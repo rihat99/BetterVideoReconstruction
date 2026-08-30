@@ -431,6 +431,47 @@ def drift_gate(guarded_min_sdf: torch.Tensor, drift: torch.Tensor, *,
                        torch.full_like(guarded_min_sdf, infinity))
 
 
+def load_gate(guarded_min_sdf: torch.Tensor, drift: torch.Tensor,
+              load_bw: torch.Tensor, *, still_m: float, still_override_m: float,
+              min_load_bw: float,
+              mute: torch.Tensor | None = None) -> tuple[torch.Tensor, torch.Tensor]:
+    """Penetration outranks stillness — but load outranks penetration.
+
+    The stillness gate has one exception (``still_override_m``, :func:`drift_gate`): a
+    step pressing within a centimetre of the surface counts however fast it moves. A
+    sprint plant or a cartwheel hand is a real contact no drift window can call still.
+    The trouble is that a hand sweeping ALONG the wall presses just as close — the
+    exception cannot tell a plant from a sweep, and on the annotated corpus it alone
+    costs the geometric arm four points of precision.
+
+    The force solve can tell them apart: a plant carries weight, a sweep carries none.
+    So wherever the solve was heard, a pressing step keeps its exception only if the
+    solve routes at least ``min_load_bw`` of body weight through it. Where the solve
+    was **muted** — ``mute (T,)`` from :func:`tools.human_optim.forces.solve_mute`, a
+    rope or a belay carrying the body, a trajectory too broken to explain — physics
+    said nothing and the exception stands as it always did: missing evidence reads as
+    *unknown*, never as a negative. Still steps are never touched; stillness needs no
+    second witness. (Making load REPLACE stillness outright was measured 2026-08-30
+    and refuted: −56% false positives but −6 points of recall — a heel sharing a hold
+    with its own forefoot carries no solvable load of its own.)
+
+    Returns ``(gated, pressed)``: the gated signal for the hysteresis, and the steps
+    whose surviving press exempts their span from the duration rules downstream.
+    ``min_load_bw <= 0`` keeps every press — the plain ``still_override_m`` rule.
+    """
+    still_only = drift_gate(guarded_min_sdf, drift, still_m=still_m,
+                            still_override_m=-1.0)
+    if still_override_m <= 0.0:
+        return still_only, torch.zeros_like(guarded_min_sdf, dtype=torch.bool)
+    pressed = (guarded_min_sdf < still_override_m) & torch.isfinite(drift)
+    if min_load_bw > 0.0:
+        confirmed = load_bw >= min_load_bw
+        if mute is not None:
+            confirmed = confirmed | mute[:, None]
+        pressed = pressed & confirmed
+    return torch.where(pressed, guarded_min_sdf, still_only), pressed
+
+
 def drift_gated_contact(
     guarded_min_sdf: torch.Tensor,   # (T, J) guarded per-joint min signed distance (m)
     drift: torch.Tensor,             # (T, J) per-joint net window drift (m)
@@ -529,7 +570,13 @@ def merge_contact_spans(
 # (tools/body.py). TWO things must agree before it counts as touching:
 #   surface  — a confident scene point is close, and the frame sits at/just
 #              inside it (signed distance below the hysteresis thresholds);
-#   stillness — the frame barely drifted over a short window.
+#   stillness — the frame barely drifted over a short window (with one exception,
+#              the penetration override still_override_m: a step pressing into the
+#              surface counts however fast it moves).
+# The readout stage, which has solved the forces by then, holds the EXCEPTION to a
+# second witness: a pressing-but-moving step keeps it only where the solve routes
+# real load through the frame, or was muted (see load_gate). Still steps never need
+# the solve's blessing.
 # The frame's own normal is deliberately NOT a gate. Both inputs it would need are
 # too noisy to veto on: the scene normals come from a reconstructed point cloud, and
 # the frame's normal comes from the fitted pose. Gating on "does the skin face the
@@ -720,6 +767,9 @@ class FrameContacts(NamedTuple):
     normal_dot: torch.Tensor
     #: ``(T, F)`` bool — steps :func:`suppress_toe_sides` forced out (diagnostic).
     toe_suppressed: torch.Tensor
+    #: ``(T, F)`` bool — the surviving penetration exception (see :func:`load_gate`);
+    #: the readout exempts these steps' spans from its duration rules.
+    pressed: torch.Tensor
 
 
 def detect_frame_contacts(
@@ -739,6 +789,9 @@ def detect_frame_contacts(
     max_dist_m: float,
     conf_thresh: float,
     prune_margin_m: float,
+    load_bw: torch.Tensor | None = None,
+    min_load_bw: float = 0.0,
+    load_mute: torch.Tensor | None = None,
 ) -> FrameContacts:
     """Detect contact on the contact frames — the single detector for the whole pipeline.
 
@@ -755,6 +808,14 @@ def detect_frame_contacts(
     survives however brief (a one-frame bounce is 1–2 frames at 25 fps, and penetration
     is not flicker). The default disables both.
 
+    ``load_bw (T, F)`` is the solved contact load in body weights. When it is given with
+    ``min_load_bw > 0``, the penetration exception needs the solve's blessing
+    (:func:`load_gate`): a pressing-but-moving step counts only where the solve routes
+    at least ``min_load_bw`` through it, or was muted (``load_mute``). Still steps are
+    untouched. Only the readout stage can supply it — the kinematic stage detects its
+    auto-labels before any force is solved — so the default leaves the two-gate
+    behaviour untouched.
+
     ``drift`` is supplied by the CALLER, never measured here, because *which*
     motion measurement is honest depends on the stage: the kinematic fit passes
     the drift of its starting pose (before any contact attraction acted), and the
@@ -767,11 +828,18 @@ def detect_frame_contacts(
         prune_margin_m=prune_margin_m)
     guarded_sdf = frame_guarded_sdf(
         sdf, dmin, conf, max_dist_m=max_dist_m, conf_thresh=conf_thresh)
+    if load_bw is not None:
+        gated, pressed = load_gate(guarded_sdf, drift, load_bw, still_m=still_m,
+                                   still_override_m=still_override_m,
+                                   min_load_bw=min_load_bw, mute=load_mute)
+    else:
+        gated = drift_gate(guarded_sdf, drift, still_m=still_m,
+                           still_override_m=still_override_m)
+        pressed = gated < still_override_m
     gated, toe_suppressed = suppress_toe_sides(
-        drift_gate(guarded_sdf, drift, still_m=still_m,
-                   still_override_m=still_override_m), normal_dot,
-        toe_side_slots(frame_names), exit_thresh_m=exit_thresh_m)
+        gated, normal_dot, toe_side_slots(frame_names), exit_thresh_m=exit_thresh_m)
     contact = hysteresis_spans(gated, enter_below=close_thresh_m,
                                exit_below=exit_thresh_m, min_frames=min_frames,
-                               keep=gated < still_override_m)
-    return FrameContacts(contact, guarded_sdf, sdf, dmin, conf, normal_dot, toe_suppressed)
+                               keep=pressed)
+    return FrameContacts(contact, guarded_sdf, sdf, dmin, conf, normal_dot,
+                         toe_suppressed, pressed)

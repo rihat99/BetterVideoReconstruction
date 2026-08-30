@@ -12,8 +12,12 @@ Two readouts answer it, and the stage unions them.
 the pelvis) and read the contact-frame world poses straight out of forward kinematics;
 for each one find the nearest scene point; then run the shared detector
 (:func:`~tools.human_optim.contacts.detect_frame_contacts`): near the wall AND still,
-with hysteresis, a minimum duration and a span merge behind a re-grip guard (bridged
-frames flagged in ``merged``).
+with one exception — a step pressing into the surface counts however fast it moves,
+*if* the force solve confirms it carries load (``[contact_force].confirm_bw``) or was
+muted there (``mute_res_bw``) — with hysteresis, a minimum duration and a span merge
+behind a re-grip guard (bridged frames flagged in ``merged``). Knee frames are dropped
+from this arm: a knee rides near the wall for most of a climb, and its geometric
+labels measured ~15% precise on the annotated corpus.
 
 **Force** — freeze the pose and ask what force is unexplained, then solve which of the
 contact frames could have supplied it (:mod:`tools.human_optim.forces`). A frame that has
@@ -91,7 +95,7 @@ from tools.human_optim.depth_fit import (  # noqa: E402
 from tools.human_optim.forces import (  # noqa: E402
     NO_SCENE_M,
     ForceKnobs, close_gaps, far_still_veto, force_labels, min_span, resolve_toe_conflicts,
-    solve_person_forces,
+    solve_mute, solve_person_forces,
 )
 from tools.human_optim.qmath import normalize_q  # noqa: E402
 
@@ -128,11 +132,13 @@ def _load_config(path: Path) -> dict:
         raise SystemExit("[estimate_contacts] use_scene=false is not supported by the contact-frame "
                          "detector — contact is measured against the scene cloud only")
     f = cfg.setdefault("contact_force", {})
-    f.setdefault("theta_bw", 0.05)          # a frame carrying this fraction of body weight is loaded
-    f.setdefault("theta_hold_bw", 0.03)     # …and stays loaded until it drops below this (hysteresis)
+    f.setdefault("theta_bw", 0.02)          # a frame carrying this fraction of body weight is loaded
+    f.setdefault("theta_hold_bw", 0.01)     # …and stays loaded until it drops below this (hysteresis)
     f.setdefault("gap_dstar_m", 0.05)       # gap price: force this far from the scene is expensive
     f.setdefault("stillness_vstar_mps", 0.2)  # stillness price: force on a limb this fast is expensive
     f.setdefault("far_still_x", 4.0)        # far force labels need stillness at this multiple of still_m; 0 = off
+    f.setdefault("confirm_bw", 0.02)        # load the PENETRATION EXCEPTION must carry where the solve spoke; 0 = off
+    f.setdefault("mute_res_bw", 0.5)        # …unless the solve left this much residual unexplained
     g = cfg.setdefault("contact_gate", {})
     g.setdefault("window_s", 0.35)         # drift window (s) for the stillness gate
     g.setdefault("still_m", 0.03)          # net drift (m) at which stillness = 0.5
@@ -271,6 +277,7 @@ def run(source: str | Path, predictions_dir: str | Path, config_path: str | Path
     frame_names = list(body.contact_frame_names)
     num_contact_frames = len(frame_names)
     knee_columns = [i for i, n in enumerate(frame_names) if n.startswith("knee")]
+    heel_columns = [i for i, n in enumerate(frame_names) if n.startswith("heel")]
     cf = cfg["contact_force"]
     force_knobs = ForceKnobs(gap_dstar_m=float(cf["gap_dstar_m"]),
                              stillness_vstar_mps=float(cf["stillness_vstar_mps"]))
@@ -351,6 +358,26 @@ def run(source: str | Path, predictions_dir: str | Path, config_path: str | Path
         # evidence and every consumer treats them as "not still".
         drift = _drift_pre(kin, p, (num_frames, num_contact_frames), device)
 
+        # ── the force witness ────────────────────────────────────────────────────
+        # Solved first, because the detector below reads it too. Physics answers two
+        # different questions here: what the body's motion needs carried (the labels
+        # further down, which ADD contacts geometry could not see) and whether a
+        # pressing-but-moving step is a plant or a sweep (the load gate, which holds
+        # the penetration exception to a load check).
+        force_solution = solve_person_forces(
+            body, betas, q, valid_mask[p], drift_pre=drift,
+            drift_window_s=float(cg["window_s"]), gravity_world=gravity_world, fps=fps,
+            scene_pts=scene_pts, scene_normals=scene_normals, scene_conf=scene_conf,
+            knobs=force_knobs)
+        load_bw = torch.as_tensor(
+            force_solution.magnitude / max(force_solution.body_weight_n, 1e-9),
+            device=device)
+        # …except where the solve balanced nothing at all (a rope carrying the climber,
+        # a trajectory too broken to explain). There its silence is not evidence.
+        load_mute = torch.as_tensor(
+            solve_mute(force_solution.residual_force_after_n, force_solution.body_weight_n,
+                       mute_res_bw=float(cf["mute_res_bw"])), device=device)
+
         detected = detect_frame_contacts(
             points, normals, drift, scene_pts, scene_normals, scene_conf,
             frame_names=frame_names,
@@ -358,7 +385,8 @@ def run(source: str | Path, predictions_dir: str | Path, config_path: str | Path
             min_frames=DETECT_MIN_FRAMES, still_m=float(cg["still_m"]),
             still_override_m=float(cg["still_override_m"]),
             max_dist_m=float(cc["max_dist_m"]), conf_thresh=float(cc["conf_thresh"]),
-            prune_margin_m=float(cc["prune_margin_m"]))
+            prune_margin_m=float(cc["prune_margin_m"]),
+            load_bw=load_bw, min_load_bw=float(cf["confirm_bw"]), load_mute=load_mute)
 
         # Bridge short same-frame gaps the point barely moved across AND stayed near the
         # wall throughout (flicker / brief re-settle); the re-grip guard blocks a genuine
@@ -370,23 +398,23 @@ def run(source: str | Path, predictions_dir: str | Path, config_path: str | Path
             detected.contact, points, detected.guarded_sdf,
             merge_dist_m=float(cc["merge_dist_m"]), max_gap_s=float(cc["merge_max_gap_s"]),
             gap_sdf_m=float(cc["merge_sdf_m"]), fps=fps) & ~detected.toe_suppressed
+        # A knee rides near the wall (and still) for most of a climb without touching:
+        # measured on the annotated corpus, geometric knee labels are ~15% precise —
+        # actively harmful. The force arm already refuses knees (below), so the stage
+        # simply never labels a knee. A real kneebar is the known cost.
+        contact[:, knee_columns] = False
         merged = contact & ~detected.contact
 
         points_cam = transform_points(points, extrinsics)                      # (N, F, 3)
         pixels = project(points_cam, intrinsics)                               # (N, F, 2)
 
-        # ── the force witness ────────────────────────────────────────────────────
+        # ── the force LABELS ─────────────────────────────────────────────────────
         # The geometric detector above needs the frame to be NEAR the scene. When the
         # reconstruction puts the body in the wrong place that never happens and a real
-        # contact is simply lost. So ask physics as well: solve the world forces at the 12
-        # frames that explain the body's leftover root wrench, and call a frame in contact
-        # when it has to carry real load. Add-only, with exactly one exception: the toe
-        # pair (see below), where "at most one toe per foot" outranks add-only.
-        force_solution = solve_person_forces(
-            body, betas, q, valid_mask[p], drift_pre=drift,
-            drift_window_s=float(cg["window_s"]), gravity_world=gravity_world, fps=fps,
-            scene_pts=scene_pts, scene_normals=scene_normals, scene_conf=scene_conf,
-            knobs=force_knobs)
+        # contact is simply lost. So ask the same solve for the other direction: call a
+        # frame in contact when it has to carry real load, wherever it sits. Add-only,
+        # with exactly one exception: the toe pair (see below), where "at most one toe
+        # per foot" outranks add-only.
         # A FAR force label needs stillness ([contact_force].far_still_x). Within the
         # detector's own trust radius ([contacts].max_dist_m) load alone suffices — a fast
         # foot plant that carries weight is a contact. Beyond it geometry is blind, and the
@@ -398,7 +426,13 @@ def run(source: str | Path, predictions_dir: str | Path, config_path: str | Path
         # at 4x, climbing F1 pays .007 while the high_jump/1FGkg far floods drop to zero.
         # The solve itself is untouched — residuals, load allocation and the toe rule see
         # every candidate. NaN distance = no scene evidence = far.
-        label_magnitude = force_solution.magnitude
+        # Heels never take a force label: within one foot the solve's load split is
+        # indeterminate (a flat foot can carry its weight entirely through the ball),
+        # so small solved heel loads say nothing — measured ~25% precise at the shipped
+        # threshold. The heel's geometric arm is untouched; the raw magnitudes still
+        # feed the residuals and the toe rule below.
+        label_magnitude = force_solution.magnitude.copy()
+        label_magnitude[:, heel_columns] = 0.0
         if float(cf["far_still_x"]) > 0.0:
             veto = far_still_veto(
                 force_solution.dist_m, drift.cpu().numpy(),
@@ -414,12 +448,12 @@ def run(source: str | Path, predictions_dir: str | Path, config_path: str | Path
         contact_np = contact.cpu().numpy() | force_label
         contact_np[~valid_mask[p]] = False
 
-        # The penetration exception, carried through to the union rules: a step pressing
-        # below [contact_gate].still_override_m already survived the detector's blip
-        # killer however brief, and the post-weld duration rule must not take it back.
-        # All-False when the override is off (climbing unchanged).
-        pressed = ((detected.guarded_sdf < float(cg["still_override_m"]))
-                   & torch.isfinite(drift) & ~detected.toe_suppressed).cpu().numpy()
+        # The evidence exception, carried through to the union rules: a surviving press
+        # (pressing into the surface, and load-confirmed where the solve was heard)
+        # outranks the duration rules the same way it outranks stillness. A one-frame
+        # bounce that presses in and carries weight is a contact, not flicker, and the
+        # post-weld duration rule must not take it back.
+        pressed = (detected.pressed & ~detected.toe_suppressed).cpu().numpy()
 
         # One debounce over the union. Each readout already drops its own too-short spans,
         # but the union puts two of them end to end and can leave a one- or two-frame hole
@@ -498,9 +532,10 @@ def run(source: str | Path, predictions_dir: str | Path, config_path: str | Path
                 trust_scale_log=float(df["trust_scale_log"]))
             depth_trust_t = trust_j[:, owner_joint]      # a frame trusts its owner joint's fit
             depth_points_t = points_j[:, owner_joint]
-        # Source bitmask on the final labels: 2 = the geometric arm (near-and-still —
-        # the old "gate"; span-merge and union-weld fills included), 4 = the force
-        # witness. The frames era has no external detector, so bit 1 never appears.
+        # Source bitmask on the final labels: 2 = the geometric arm (near AND still —
+        # or pressing with the solve's load confirmation; span-merge and union-weld
+        # fills included); 4 = the force witness. The frames era has no external
+        # detector, so bit 1 never appears.
         src = ((contact_np & (frame_contact_geom[p] | merged_np)) * 2
                + (contact_np & force_label) * 4).astype(np.int8)
         src[contact_np & (src == 0)] = 2
@@ -601,6 +636,8 @@ def run(source: str | Path, predictions_dir: str | Path, config_path: str | Path
         force_gap_dstar_m=np.float32(cf["gap_dstar_m"]),
         force_stillness_vstar_mps=np.float32(cf["stillness_vstar_mps"]),
         force_far_still_x=np.float32(cf["far_still_x"]),
+        force_confirm_bw=np.float32(cf["confirm_bw"]),
+        force_mute_res_bw=np.float32(cf["mute_res_bw"]),
         still_override_m=np.float32(cg["still_override_m"]),
         frame_sdf_cm=frame_sdf_cm,
         frame_distance_cm=frame_distance_cm,

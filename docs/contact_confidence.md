@@ -35,32 +35,35 @@ The stage's union has two arms, and each is one source bit in `contact_source`:
 
 | bit | source | what created the label |
 |---|---|---|
-| 2 | geometric arm | "near the wall AND still" (plus the span merge and the union's gap-welding) |
+| 2 | geometric arm | "near the wall AND still" — or pressing, with the solve's load confirmation (plus the span merge and the union's gap-welding) |
 | 4 | force witness | the support solve had to route real load through this frame |
 
 The per-joint era also had an external image-model detector (bit 1) and a
 prediction-fusion path (bit 8); neither exists in the frames era, so those bits
 never appear.
 
-Why the caps: a geometric label was *created* because the frame was near and
-still, so nearness and stillness would endorse it in a circle — and the known
-false positives (a hand hovering 3 cm beside a hold) are exactly near-and-still.
-The solved contact force is the one signal that is semi-independent of that
-geometry, so it, and only it, lifts the geometric ceiling. A force-only label is
-the opposite case: an honest rescue on a misregistered body, real but
-positionally uncertain, so it tops out mid-scale.
+Why the caps: a label must not be certified by the signal that created it. A
+geometric label was created because the frame was near and still, so nearness and
+stillness would endorse it in a circle — and the known false positives (a hand
+hovering 3 cm beside a hold) are exactly near-and-still.
+
+The 2026-08-30 rework kept the arms' roles — a one-day experiment that made the
+force witness the deciding arm was refuted (see [`contacts.md`](contacts.md),
+gate 3) — so the ceilings keep their original ordering: both arms agreeing is
+trusted most (0.85), a lone force rescue is positionally uncertain by
+construction (0.70), and a lone geometric label is merely unconfirmed (0.50).
 
 With `share` the solved force at the frame as a fraction of body weight and
 `force_ramp = 1 − exp(−share / 0.25)`:
 
 | source | evidence | ceiling |
 |---|---|---|
-| geometric (bit 2) | `min(surface, 0.50 + 0.35·force_ramp)` | 0.50, lifted to 0.85 by real load |
-| force only (bit 4, no bit 2) | `min(0.70, max(surface, 0.70·force_ramp))` | 0.70 |
+| geometric (bit 2) | `min(surface, 0.40 + 0.50·force_ramp)` | 0.40, lifted to 0.90 by real load |
+| force only (bit 4, no bit 2) | `min(0.85, max(surface, 0.85·force_ramp))` | 0.85 |
 
-So the red spheres come in tiers: a loaded on-the-wall contact reaches ~0.85, a
-merely near-and-still one stops at 0.50, a force rescue far off the wall at
-0.70.
+So the red spheres come in tiers: a loaded on-the-wall contact reaches ~0.90, a
+force decision off the wall ~0.85, and a geometric label physics never saw stops
+at 0.40.
 
 ## Evidence for a contact label
 

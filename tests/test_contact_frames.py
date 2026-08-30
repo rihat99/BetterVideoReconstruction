@@ -270,6 +270,61 @@ def test_still_override_never_passes_a_nan_drift_step():
                        still_override_m=0.01).contact.any()
 
 
+# ── the load check on the penetration exception ──────────────────────────────
+
+def test_still_frames_never_need_the_solves_blessing():
+    """Near and still IS the geometric contact — zero solved load changes nothing."""
+    scene = _plane()
+    points, normals = _hover(10, 0.01, _DOWN)
+    still = torch.zeros(10, 1)
+    weightless = torch.zeros(10, 1)
+    assert _detect(points, normals, still, scene,
+                   load_bw=weightless, min_load_bw=0.02).contact.all()
+    # …and a zero bar keeps every press (the plain still_override_m behaviour).
+    assert _detect(points, normals, still, scene,
+                   load_bw=weightless, min_load_bw=0.0).contact.all()
+
+
+def test_load_confirms_a_pressing_but_moving_frame():
+    """The press exception with the solve heard: a plant carries weight, a sweep none."""
+    scene = _plane()
+    pressing, normals = _hover(10, -0.005, _DOWN)     # 5 mm INSIDE the floor
+    moving = torch.full((10, 1), 0.50)                # a sprinting foot
+    carrying = torch.full((10, 1), 0.30)              # 30 % of body weight
+    weightless = torch.zeros(10, 1)
+    on = dict(still_override_m=0.01, min_load_bw=0.02)
+    assert _detect(pressing, normals, moving, scene, load_bw=carrying, **on).contact.all()
+    assert not _detect(pressing, normals, moving, scene,
+                       load_bw=weightless, **on).contact.any()
+
+
+def test_load_alone_is_not_an_override():
+    """A moving frame merely hovering near the wall is not rescued by its load — the
+    force witness labels those through its own thresholds, never through this gate
+    (a load override was measured 2026-08-30 and found fully redundant with theta_bw)."""
+    scene = _plane()
+    hovering, normals = _hover(10, 0.02, _DOWN)       # near, but not pressing
+    moving = torch.full((10, 1), 0.50)
+    carrying = torch.full((10, 1), 0.30)
+    assert not _detect(hovering, normals, moving, scene, load_bw=carrying,
+                       still_override_m=0.01, min_load_bw=0.02).contact.any()
+
+
+def test_a_muted_step_keeps_its_press_exception():
+    """Where the solve explained nothing its silence is not evidence — the press stands."""
+    scene = _plane()
+    pressing, normals = _hover(10, -0.005, _DOWN)
+    moving = torch.full((10, 1), 0.50)
+    weightless = torch.zeros(10, 1)
+    mute = torch.zeros(10, dtype=torch.bool)
+    mute[3:8] = True
+    contact = _detect(pressing, normals, moving, scene, load_bw=weightless,
+                      still_override_m=0.01, min_load_bw=0.02, load_mute=mute,
+                      min_frames=1).contact[:, 0]
+    assert contact[3:8].all()
+    assert not contact[:3].any() and not contact[8:].any()
+
+
 # ── hysteresis + minimum duration ────────────────────────────────────────────
 
 def test_hysteresis_holds_a_span_between_enter_and_exit():

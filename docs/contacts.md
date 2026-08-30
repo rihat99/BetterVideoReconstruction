@@ -57,7 +57,10 @@ knee or elbow would route force where nothing measures it.
 ## The two gates
 
 For every person, every video frame and every contact frame, two things must
-agree before we call it a touch: the point is **at the wall**, and it is **still**.
+agree before we call it a touch: the point is **at the wall**, and it is
+**still** — with one exception, whose evidence the standalone readout checks
+against a third witness, **load** (the only place a force has been solved by
+then).
 
 **1. Surface.** Find the nearest point of the fused scene cloud. That point has
 an outward normal (estimated by local PCA at fuse time, oriented toward the
@@ -77,6 +80,51 @@ drift used is `drift_pre`, saved by the kinematic stage: the motion measured
 *before* any contact attraction or damping acted on the body. That matters,
 because the optimizer's own damping holds labelled contacts still — stillness
 re-measured afterwards would be evidence we manufactured ourselves.
+
+**3. Load — which, in the readout, checks the one exception stillness allows.**
+The stillness gate has one exception, `still_override_m` (below): a step pressing
+*into* the surface counts however fast it moves. It exists for the contacts no
+drift window can ever call still — a sprint plant, a cartwheel hand, a fast rope
+step. The trouble is that a hand sweeping *along* the wall presses just as close:
+false-positive hands drift a median of **37 cm** over the window against 2 cm for
+true ones, and they get in anyway because they are 1 cm from the wall. Measured,
+the exception alone costs the geometric arm four points of precision.
+
+The force solve can tell a plant from a sweep — a plant carries weight, a sweep
+carries none. So in the standalone readout a pressing-but-moving step keeps its
+exception only where the solve routes at least `[contact_force].confirm_bw` of
+body weight through it. A **still** frame never needs the solve's blessing:
+near-and-still *is* the geometric contact.
+
+Where the solve balanced nothing at all, its silence proves nothing. A climber on
+a rope is held up by something the model does not know about, so the solve loads
+no contact anywhere and this check would veto every real press in the clip. A
+step whose leftover root residual is still above `mute_res_bw` body weights is
+therefore **muted** — there the exception stands untouched. It is the rule the
+rest of this pipeline already follows: missing evidence reads as *unknown*, never
+as a negative.
+
+Two stronger designs were measured first and refuted (2026-08-30, 118 annotated
+ClimbingVideos scenes). Making load *replace* stillness outright buys precision
+but starves recall — test split .900 → .950 precise at .803 → .743 recall —
+because a heel sharing a hold with its own forefoot carries no solvable load of
+its own: within one foot the solve's load split is indeterminate, and still true
+contacts die with the false ones. And letting load *override* stillness (any
+loaded moving frame passes, pressing or not) turned out fully redundant: the
+force witness's own `theta_bw` already labels exactly those frames.
+
+Two frame groups get no benefit of the doubt at all, for the same measured
+reason. **Knees are never labelled** — their force labels were excluded from the
+start (untrustworthy cones), and their geometric labels are ~15 % precise: a knee
+rides near-and-still past the wall for most of a climb. A real kneebar is the
+known cost. **Heels take no force label** — small solved heel loads say nothing
+(a flat foot can route its whole weight through the ball), and at the shipped
+threshold they flooded at ~25 % precision. The heel's geometric arm is untouched.
+
+All of it together, against the pre-2026-08-30 labels on the same 118 scenes,
+with the force thresholds dropped to `theta_bw = 0.02` / `theta_hold_bw = 0.01`
+and the span rule back at `min_span_s = 0.1`: precision **.880 → .922**, recall
+**.808 → .861** (test split .900/.803 → .944/.856) — both directions at once.
 
 The gates are applied by pushing the signed distance to `+inf` wherever either of
 them fails. A blocked step then simply looks infinitely far from the wall, so
@@ -100,15 +148,24 @@ went .729 → .768, and sport_climb, whose fast rope-climbing steps the stillnes
 gate had been killing exactly like sprint plants, went .27 → .62. Since then one
 value (`0.01` / `0.06 s`) serves every sport; `-1` turns the override off.
 
+**Checked in the readout (2026-08-30).** The override buys those plants at a
+price: "within a centimetre of the surface" is true of every hand sweeping past a
+wall, and it hands them a label no motion rule can take back. So the readout asks
+the force solve to arbitrate (gate 3 above): a pressing-but-moving step keeps its
+override only if the solve says it carries weight — a plant does, a sweep does
+not. The override stands unchecked in two places: inside `kinematics_1`, which
+detects its auto-labels before any force exists, and on the readout's *muted*
+steps, where physics could not speak and geometry is on its own.
+
 The same evidence outranks **duration** too. The detector drops spans shorter
 than 3 frames as flicker, and the stage repeats an fps-aware version of that
 rule after gap-welding — but a one-frame bounce at 25 fps *is* one frame, and
-no duration rule can tell it from jitter by length alone. Penetration can: a
-span with at least one step pressing below `still_override_m` is exempt from
-every duration rule (the detector's blip killer, the post-weld `min_span`, and
-the toe rule's cleanup). Measured before the exception: 1FGkg had 117 one-frame
-sub-3 cm foot dips, 79 of them ending up with no contact at all. With the
-override off (`-1`) the exemption never fires.
+no duration rule can tell it from jitter by length alone. Evidence can: a span
+carrying real load (before 2026-08-30, a span pressing below `still_override_m`)
+is exempt from every duration rule — the detector's blip killer, the post-weld
+`min_span`, and the toe rule's cleanup. Measured before the exception existed:
+1FGkg had 117 one-frame sub-3 cm foot dips, 79 of them ending up with no contact
+at all.
 
 ## Why the frame's own normal is not a gate
 
@@ -144,9 +201,12 @@ bit-identical whether this per-step tiebreak runs or not.
 
 ## From a signal to a label
 
-**Hysteresis.** A contact starts when the signed distance drops below 3 cm and
+**Hysteresis.** A contact starts when the signed distance drops below 2 cm and
 survives while it stays below 3.5 cm. The looser exit threshold is what stops
-labels blinking on and off at the boundary.
+labels blinking on and off at the boundary — and it is why the entry threshold can
+afford to be strict: tightening it from 3 cm to 2 cm removed 425 false positives
+from the test split for 96 false negatives, because a real contact that entered
+once is still held by the 3.5 cm exit.
 
 **Minimum duration.** Spans shorter than 3 frames are dropped as flicker.
 
@@ -207,8 +267,10 @@ gates are implemented, and both users call it:
 
 The two use different *distance* thresholds on purpose — `[auto_contact]` is
 looser, because inside the fit a label is a target to pull toward, not a claim.
-Stillness is **one** notion shared by both. The *code* is shared too, so the two
-can never drift apart.
+Stillness is **one** notion shared by both. The load check on the penetration
+exception runs only in the readout: no force has been solved when `kinematics_1`
+detects its labels, and it must not be, because that solve reads the pose the fit
+is still changing. The *code* is shared too, so the two can never drift apart.
 
 ## Knobs
 
@@ -221,13 +283,16 @@ surface guards), `conf_drop_q` and `normal_k` (scene-cloud loading),
 union debounce, in both directions.
 
 `[contact_force]` — the force witness: `theta_bw` / `theta_hold_bw` (the load
-thresholds a label enters and holds at), `gap_dstar_m` and `stillness_vstar_mps`
-(the two prices). Four knobs; everything else about the solve is fixed in code.
+thresholds a label enters and holds at — `theta_bw` is the **recall** knob),
+`gap_dstar_m` and `stillness_vstar_mps` (the two prices), plus `confirm_bw` /
+`mute_res_bw` for the load check on the penetration exception above. Everything
+else about the solve is fixed in code.
 See [`force_contacts.md`](force_contacts.md#the-knobs).
 
-`[contact_gate]` — `window_s` and `still_m`, the stillness gate. `still_m` is the
-recall knob: raise it and more marginal contacts survive. It is the *only* knob
-that moves both the kin1 detector and the readout at once.
+`[contact_gate]` — `window_s` and `still_m`, the stillness gate, plus
+`still_override_m`, the penetration exception. These govern the `kinematics_1`
+detector and the readout alike; the readout additionally holds the exception to
+the load check. `still_m` is the other recall knob for both.
 
 `[auto_contact]` — the detector inside `kinematics_1`: its own looser
 `detect_thresh_m` / `detect_exit_m`, plus the attraction `band_m`. It does not set

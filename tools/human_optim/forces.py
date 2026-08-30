@@ -346,6 +346,26 @@ def far_still_veto(dist_m: np.ndarray, drift_m: np.ndarray, *, near_m: float,
     return far & fast
 
 
+def solve_mute(residual_after_n: np.ndarray, body_weight_n: float, *,
+               mute_res_bw: float) -> np.ndarray:
+    """``(T,)`` bool — steps where the solve explained nothing, so it may not veto.
+
+    The load witness checks the penetration exception (``contacts.load_gate``): a
+    pressing-but-moving frame that carries no solved load is a sweep, not a plant. That
+    reasoning holds only where the solve actually balanced the body. When something
+    outside the model carries the weight — a rope, a belay, a spotter — or the
+    trajectory is too broken to explain, the solve loads nothing anywhere and its
+    silence would veto every real press in the clip. So a step whose leftover root
+    residual is still above ``mute_res_bw`` body weights is muted: the load check
+    stands down there, and the exception holds on its own. Same rule as everywhere else
+    in this pipeline — missing evidence reads as *unknown*, never as a negative.
+    ``mute_res_bw <= 0`` mutes nothing.
+    """
+    if mute_res_bw <= 0.0:
+        return np.zeros(np.shape(residual_after_n), bool)
+    return residual_after_n / max(float(body_weight_n), 1e-9) > mute_res_bw
+
+
 def _runs(column: np.ndarray) -> list[tuple[int, int]]:
     """Contiguous ``True`` runs of a 1-D bool array as half-open ``(start, stop)`` pairs."""
     edges = np.flatnonzero(np.diff(np.concatenate([[0], column.view(np.int8), [0]])))

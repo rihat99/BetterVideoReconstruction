@@ -10,7 +10,7 @@ import torch
 
 from tools.human_optim.forces import (
     NO_SCENE_M, ForceKnobs, close_gaps, far_still_veto, force_labels, hysteresis, min_span,
-    resolve_toe_conflicts,
+    resolve_toe_conflicts, solve_mute,
 )
 from tools.human_optim.friction import cone_generators
 
@@ -310,6 +310,21 @@ def test_missing_evidence_reads_far_and_fast_in_the_veto() -> None:
     assert veto.tolist() == [[False, True, False]], (
         "NaN dist + still stays (far but still); NaN dist + NaN drift is vetoed; "
         "near needs no stillness at all")
+
+
+# ── muting the solve where it explained nothing ───────────────────────────────
+
+def test_the_solve_is_muted_only_where_it_balanced_nothing() -> None:
+    """A rope carries the climber: the solve loads nothing, so it may not veto either."""
+    residual = np.array([70.0, 350.0, 700.0])          # newtons left over at the root
+    mute = solve_mute(residual, body_weight_n=700.0, mute_res_bw=0.5)
+    assert mute.tolist() == [False, False, True]
+
+
+def test_muting_is_off_at_zero_and_keeps_the_input_shape() -> None:
+    residual = np.zeros((4, 3)) + 1e6
+    assert not solve_mute(residual, 700.0, mute_res_bw=0.0).any()
+    assert solve_mute(residual, 700.0, mute_res_bw=0.0).shape == (4, 3)
 
 
 # ───────────────────────── the solve's NaN-drift policy ─────────────────────────

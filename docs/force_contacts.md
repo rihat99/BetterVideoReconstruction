@@ -206,7 +206,72 @@ label. Measured 2026-08-25: the high_jump / 1FGkg mid-air floods drop to zero,
 the gtIGgs floater and both balance-beam clips keep their far labels, and
 climbing F1 pays .007 against no rule at all (vs .13 for the absolute gate).
 
-The only place the force can *remove* a geometric label is the toe pair, next.
+## Step 7b: the same solve, read backwards — deciding what geometry claims
+
+Everything above is the solve *adding* contacts. Read the other way round it is
+the pipeline's best **precision** signal, and that is where the false positives
+turned out to be.
+
+It is worth being precise about which arm was the problem, because the intuition
+runs the other way. Splitting the pre-2026-08-30 labels by the arm that asserted
+them, on the test split: labels the force witness asserted are **.959** precise,
+labels the geometric arm asserted are **.890**, and labels both arms agreed on are
+**.983**. Tightening the witness is therefore the *worst* available lever —
+raising `theta_bw` from 0.05 to 0.12 removes 610 false positives and adds 3892
+false negatives; dropping `far_still_x` from 4 to 1 removes 402 and adds 3620. Six
+to nine false negatives bought per false positive removed.
+
+The geometric arm's weakness is stillness. "Near the wall and still" is easy to
+satisfy without touching anything: a hand sweeping along the wall is a centimetre
+from it, a knee brushing past a volume is two, a heel hangs in the air behind the
+foothold its own forefoot stands on. Its false-positive hands drift a median of
+**37 cm** over the 0.35 s window, against 2 cm for true ones — and they are labelled
+anyway, because `still_override_m` ("a frame within a centimetre of the surface
+counts however fast it moves", added so sprint plants survive) waves them through.
+
+Load tells those apart — a plant carries weight, a sweep carries none. So the
+readout holds the override to a load check: **a pressing-but-moving step keeps its
+override only where the solve routes at least `[contact_force].confirm_bw` of body
+weight through it.** A still frame is never asked — near-and-still is the
+geometric contact, and the solve has no standing to veto it (that stronger rule
+was shipped for one day and refuted, below).
+
+Except where the solve balanced nothing. If something outside the model carries
+the body — a rope, a belay, a spotter — the solve loads nothing anywhere and its
+silence would veto every real press in the clip. So a step whose leftover root
+residual is still above `mute_res_bw` body weights (default 0.5) is **muted**:
+there the override stands unchecked. Same policy as
+[step 5](#step-5-no-data-is-not-the-same-as-far-away) — missing evidence is
+*unknown*, never a negative. Across the 123 evaluated scenes the per-scene median
+leftover residual runs 0.02–0.45 body weights; the one roped lead-climbing clip
+sits at 0.81.
+
+Two frame groups are refused outright, in code. **Knee force labels** have been
+excluded since the witness shipped (untrustworthy cones), and since 2026-08-30
+the readout drops geometric knee labels too (~15 % precise — a knee rides
+near-and-still past the wall all climb), so a knee is never labelled. **Heel
+force labels** are excluded because the solve's load split *within one foot* is
+indeterminate — a flat foot can route its whole weight through the ball, so a
+small solved heel load says nothing; at `theta_bw = 0.02` heels flooded at ~25 %
+precision. The heel's geometric arm is untouched, and heel magnitudes still feed
+the residuals and the toe rule.
+
+Refuted designs, all measured on the same 118 annotated ClimbingVideos scenes.
+**Load replacing stillness outright** (shipped 2026-08-30 for a day): test-split
+precision .900 → .950 but recall .803 → .743 — the heel behind its own forefoot
+carries no solvable load, so still true contacts died with the false ones. **A
+load override** (any loaded moving frame passes, pressing or not): fully
+redundant — `theta_bw` already labels those frames through the force arm. A
+**span**-level load bar: a strictly worse frontier at every operating point. A
+**Euclidean-distance** entry rule: removes false positives at 11.5 true ones
+each — the lateral offset of a false claim (1.73 cm median) is indistinguishable
+from a true one's (1.79 cm). The shipped combination — the press check, the two
+exclusions, `theta_bw` 0.05 → 0.02 / `theta_hold_bw` 0.03 → 0.01,
+`min_span_s` back to 0.1 — takes the corpus from .880 precision / .808 recall to
+**.922 / .861**.
+
+The only other place the force can *remove* a geometric label is the toe pair,
+next.
 
 ## Step 8: the toe rule — which side did the load go through?
 
@@ -323,13 +388,16 @@ contact got 52% longer (17.1 → 26.0 frames). Twelve of thirteen scenes improve
 
 ## The knobs
 
-All in `[contact_force]` of `configs/human_optimization.toml`. There are four,
-and only the first two are worth touching.
+All in `[contact_force]` of `configs/human_optimization.toml`. The one to reach
+for is `theta_bw` — the witness's recall knob.
 
 | knob | default | what it does |
 |---|---|---|
-| `theta_bw` | 0.05 | fraction of body weight at which a frame counts as loaded. **The recall knob.** |
-| `theta_hold_bw` | 0.03 | the label holds until the load falls below this. Set equal to `theta_bw` for a single threshold. |
+| `theta_bw` | 0.02 | fraction of body weight at which a frame counts as loaded. **The recall knob.** (0.05 → 0.02 on 2026-08-30: with heels excluded the lower bar bought 7.6 points of corpus recall for half a point of precision.) |
+| `theta_hold_bw` | 0.01 | the label holds until the load falls below this. Set equal to `theta_bw` for a single threshold. |
+| `confirm_bw` | 0.02 | load the penetration exception (`still_override_m`) must carry where the solve was heard (step 7b). 0 = the exception stands unchecked everywhere. |
+| `mute_res_bw` | 0.5 | leftover root residual above which the solve is muted and the exception stands unchecked. 0 = never mute. |
+| `far_still_x` | 4.0 | a far force label also needs drift under `far_still_x × still_m`. 0 = off. |
 | `gap_dstar_m` | 0.05 | how quickly the gap price bites, in metres |
 | `stillness_vstar_mps` | 0.2 | how quickly the stillness price bites, in m/s |
 
