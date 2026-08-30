@@ -272,3 +272,57 @@ def test_cones_off_leaves_the_force_free():
     spec = _spec([0], num_steps=1)
     free = torch.tensor([[[1.0, -2.0, 3.0]]])
     assert torch.allclose(spec.compose_forces(free, None), free)
+
+
+def test_force_split_order_one_matches_the_original_decomposition():
+    force = torch.randn(6, 2, 3)
+    d_par, d_perp = DynamicsSpec.force_split(force)
+    diff = force[1:] - force[:-1]
+    mean_dir = force[1:] + force[:-1]
+    mean_dir = mean_dir / mean_dir.norm(dim=-1, keepdim=True).clamp_min(1e-9)
+    assert torch.allclose(d_par + d_perp, diff, atol=1e-6)
+    assert torch.allclose(d_par, (diff * mean_dir).sum(-1, keepdim=True) * mean_dir, atol=1e-6)
+
+
+def test_higher_order_split_vanishes_on_a_linearly_ramping_force():
+    steps = torch.arange(8, dtype=torch.float32)
+    direction = torch.tensor([0.0, 0.0, 1.0])
+    force = (10.0 + 3.0 * steps)[:, None, None] * direction    # (8, 1, 3) linear magnitude ramp
+    par1, perp1 = DynamicsSpec.force_split(force, 1)
+    par2, perp2 = DynamicsSpec.force_split(force, 2)
+    par3, perp3 = DynamicsSpec.force_split(force, 3)
+    assert par1.norm(dim=-1).allclose(torch.full((7, 1), 3.0))   # constant slope
+    assert float(perp1.abs().max()) < 1e-5                       # direction never changes
+    assert float(par2.abs().max()) < 1e-4 and float(perp2.abs().max()) < 1e-4
+    assert float(par3.abs().max()) < 1e-4 and float(perp3.abs().max()) < 1e-4
+
+
+def test_direction_jitter_lands_in_the_perp_part_at_every_order():
+    signs = torch.tensor([1.0, -1.0, 1.0, -1.0, 1.0, -1.0])     # alternating small swing
+    angles = 0.05 * signs
+    force = 100.0 * torch.stack([angles.cos(), angles.sin(), torch.zeros(6)], dim=-1)[:, None, :]
+    for order in (1, 2, 3):
+        d_par, d_perp = DynamicsSpec.force_split(force, order)
+        assert float(d_perp.norm(dim=-1).max()) > 10.0 * float(d_par.norm(dim=-1).max())
+
+
+def test_persisting_masks_require_the_whole_window():
+    mask = torch.tensor([[1.0], [1.0], [0.0], [1.0], [1.0], [1.0], [1.0]])
+    spec = _spec([0], num_steps=7)
+    spec.mask = mask
+    spec.fpair = mask[1:] * mask[:-1]
+    spec.__post_init__()
+    assert spec.fpair[:, 0].tolist() == [1.0, 0.0, 0.0, 1.0, 1.0, 1.0]
+    assert spec.ftrip[:, 0].tolist() == [0.0, 0.0, 0.0, 1.0, 1.0]
+    assert spec.fquad[:, 0].tolist() == [0.0, 0.0, 0.0, 1.0]
+
+
+def test_fps_scaling_treats_force_accel_and_jerk_as_orders_two_and_three():
+    from tools.human_optim.config import fps_scaled_weights
+
+    scaled = fps_scaled_weights({"force_smooth_mag": 1.0, "force_accel_dir": 1.0,
+                                 "force_jerk_mag": 1.0, "base_wrench_ang": 1.0}, 60.0)
+    assert scaled["force_smooth_mag"] == pytest.approx(4.0)
+    assert scaled["force_accel_dir"] == pytest.approx(16.0)
+    assert scaled["force_jerk_mag"] == pytest.approx(64.0)
+    assert scaled["base_wrench_ang"] == pytest.approx(1.0)     # not a difference term

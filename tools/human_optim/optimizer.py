@@ -468,7 +468,7 @@ def optimize_person(
     contact group per frame is added (plus a friction-pyramid activation leaf where
     the spec froze a cone), the RNEA base wrench / torques are threaded
     through the shared forward (recomputed from the *current* ``q`` so the physics
-    residual pulls on the pose), the five dynamics terms are registered, and the
+    residual pulls on the pose), the dynamics terms are registered, and the
     forces are warm-started at the initial pose before the phases run. The solved
     forces + diagnostics are returned in ``aux['dynamics']``. ``None`` keeps the
     pure kinematic behaviour.
@@ -697,7 +697,7 @@ def optimize_person(
     nq = q.shape[1]
     # kindyn_1: a free world-force leaf per contact group per frame — plus, where a
     # friction cone is frozen (feet/ankles), a second leaf of four pyramid-generator
-    # activations that replaces it — and the five dynamics terms (registered here,
+    # activations that replaces it — and the dynamics terms (registered here,
     # active only where their kindyn column weight is > 0).
     f_free = gen_u = None
     if dynamics is not None:
