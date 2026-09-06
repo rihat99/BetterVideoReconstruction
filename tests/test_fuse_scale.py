@@ -11,6 +11,7 @@ import torch
 
 from scripts.stages.estimate_scale import _metricize_geometry
 from scripts.stages.fuse_geometry import _build_geometry, _merge_scene, _View, _visible_mask
+from tools.geometry.camera_motion import image_motion, is_static
 from tools.geometry.voxel import voxel_downsample
 from tools.human_optim.prefit import (
     cloud_chamfer, finger_freeze_mask, joint_velocity_loss, smooth_finger_quats)
@@ -345,3 +346,72 @@ def test_metricize_heals_a_partial_rescale(tmp_path):
     np.testing.assert_allclose(hu["points"], 6.0)  # lagging file brought to the shared world
     assert float(hu["world_scale"]) == pytest.approx(3.0)
     np.testing.assert_allclose(np.load(geo / "scene.npz")["points"], 3.0)  # NOT double-scaled
+
+
+# --- is the shot locked off? -------------------------------------------------
+
+_K = np.array([[1000.0, 0.0, 640.0], [0.0, 1000.0, 360.0], [0.0, 0.0, 1.0]], np.float32)
+_W, _H = 1280, 720
+
+
+def _wall(scale: float = 1.0) -> np.ndarray:
+    """A patch of scene 5 units in front of a camera at the origin looking down +z."""
+    xy = np.stack(np.meshgrid(np.linspace(-2, 2, 12), np.linspace(-1, 1, 12)), -1).reshape(-1, 2)
+    return (np.concatenate([xy, np.full((len(xy), 1), 5.0)], 1) * scale).astype(np.float32)
+
+
+def _track(rotations: np.ndarray, centres: np.ndarray) -> np.ndarray:
+    """Cam-from-world matrices for a camera with these orientations and centres."""
+    extr = np.zeros((len(rotations), 4, 4), np.float32)
+    extr[:, :3, :3] = rotations
+    extr[:, :3, 3] = -np.einsum("fij,fj->fi", rotations, centres)
+    extr[:, 3, 3] = 1.0
+    return extr
+
+
+def _yaw(angles_deg: np.ndarray) -> np.ndarray:
+    a = np.radians(angles_deg)
+    c, s = np.cos(a), np.sin(a)
+    z, o = np.zeros_like(a), np.ones_like(a)
+    return np.stack([c, z, s, z, o, z, -s, z, c], -1).reshape(-1, 3, 3).astype(np.float32)
+
+
+def test_a_locked_camera_does_not_move_the_picture():
+    extr = _track(_yaw(np.zeros(40)), np.zeros((40, 3), np.float32))
+    K = np.repeat(_K[None], 40, 0)
+
+    motion = image_motion(extr, K, _W, _H, _wall())
+
+    assert motion == pytest.approx(0.0, abs=1e-9)
+    assert is_static(motion)
+
+
+def test_a_pan_counts_as_moving_even_though_the_camera_never_travels():
+    # The centre is nailed to the origin the whole time — a test on the camera
+    # position alone would call this static. The picture still slides.
+    angles = np.linspace(0.0, 4.0, 40)
+    extr = _track(_yaw(angles), np.zeros((40, 3), np.float32))
+    K = np.repeat(_K[None], 40, 0)
+
+    motion = image_motion(extr, K, _W, _H, _wall())
+
+    centres = -np.einsum("fji,fj->fi", extr[:, :3, :3], extr[:, :3, 3])
+    np.testing.assert_allclose(centres, 0.0, atol=1e-6)
+    assert not is_static(motion)
+    # The reading is the swing away from the MIDDLE of the sweep, not its full
+    # width: the 90th-percentile frame sits ~1.6 deg off the median one, which at
+    # f = 1000 px slides the picture ~30 px, i.e. ~2.5% of the width.
+    assert motion == pytest.approx(0.026, rel=0.2)
+
+
+def test_the_answer_survives_metricization():
+    # The fused world is up-to-scale until estimate_scale rescales the cloud and
+    # the camera translations together. The same clip must not change verdict.
+    centres = np.stack([np.linspace(0.0, 0.3, 40), np.zeros(40), np.zeros(40)], -1).astype(np.float32)
+    K = np.repeat(_K[None], 40, 0)
+    unscaled = image_motion(_track(_yaw(np.zeros(40)), centres), K, _W, _H, _wall())
+
+    metric = image_motion(_track(_yaw(np.zeros(40)), centres * 7.0), K, _W, _H, _wall(7.0))
+
+    assert unscaled > 0
+    assert metric == pytest.approx(unscaled, rel=1e-6)

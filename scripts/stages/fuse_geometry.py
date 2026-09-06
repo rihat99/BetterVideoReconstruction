@@ -50,7 +50,8 @@ Per-clip I/O (``--source`` frames + ``--predictions out/<stem>/``)::
             vggt/camera.npz, vggt/depth/[<view>/]frame_*.npz  ([vggt] save_depth)
             sam3/<obj>/frame_*.png                     (view 0)
             sam3/<view>/<obj>/frame_*.png              (the other views)
-    writes: geometry/transform.npz   extrinsics + original-res K (scale=1, metric=False)
+    writes: geometry/transform.npz   extrinsics + original-res K (scale=1, metric=False,
+                                      static_camera + the image motion it came from)
             geometry/scene.npz        merged background points (+ colour + normals)
             geometry/human.npz        per-frame human points (frame_id, obj_id, colour)
 
@@ -80,6 +81,7 @@ import torch
 
 from tools.config import load_toml, section
 from tools.geometry.backproject import backproject
+from tools.geometry.camera_motion import image_motion, is_static
 from tools.geometry.clean import clean_depth
 from tools.geometry.intrinsics import denormalize_K
 from tools.geometry.normals import estimate_point_normals
@@ -422,9 +424,13 @@ def fuse(args: argparse.Namespace) -> None:
     rows0 = np.flatnonzero(view_ids == 0)
     K_orig = np.stack([denormalize_K(K_norm[k], ho, wo) for k in rows0])
     fps = float(built["src_fps"]) if built["src_fps"] else 30.0
+    # Locked-off shot? — how far the fused scene slides across the picture.
+    motion = image_motion(extr[rows0], K_orig, wo, ho, built["scene_points"].cpu().numpy())
+    static = is_static(motion, args.static_motion_max)
     atomic_savez(
         out_dir / "transform.npz",
         scale=np.float32(1.0), metric=np.bool_(False),
+        static_camera=np.bool_(static), camera_motion=np.float32(motion),
         extrinsics=extr[rows0].astype(np.float32),
         intrinsics_px_orig=K_orig.astype(np.float32), intrinsics=K_norm[rows0],
         fov_x_deg=cam["fov_x_deg"][rows0], fov_y_deg=cam["fov_y_deg"][rows0],
@@ -448,7 +454,9 @@ def fuse(args: argparse.Namespace) -> None:
     print(f"  scene {built['scene_points'].shape[0]} pts from {len(views)} view(s) "
           f"(voxel={built['voxel']:.4f}, {built['n_hidden']} hidden pruned, "
           f"{built['n_dropped']} dropped: small clusters) "
-          f"| human {built['n_human']} pts (climbers {views[0].climber_ids}) -> {out_dir}\n"
+          f"| human {built['n_human']} pts (climbers {views[0].climber_ids}) "
+          f"| camera {'STATIC' if static else 'moving'} (slides {motion * 100:.2f}% of "
+          f"the width) -> {out_dir}\n"
           f"  world is UP-TO-SCALE — run estimate_scale next to make it metric")
 
 
@@ -469,6 +477,7 @@ def main(argv: list[str] | None = None) -> int:
         "human_dilate": 8,
         "min_scene_voxels": 25,
         "person_obj_ids": "",
+        "static_motion_max": 0.02,
         "skip_existing": False,
     })
     args.device = section(cfg, "runtime", {"device": "cuda"}).device
