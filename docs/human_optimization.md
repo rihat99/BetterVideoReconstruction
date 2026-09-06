@@ -388,7 +388,8 @@ reprojection, priors, motion smoothness, scene penetration, the annotation
 terms — **plus** the physics terms (`base_wrench` + `base_wrench_ang`,
 `force_magnitude`, the force smoothness family at three difference orders
 (`force_smooth_*`, `force_accel_*`, `force_jerk_*`, each split into a magnitude
-and a direction part), `torque_smooth`), with one world-force vector per
+and a direction part), and the joint-torque family `torque_magnitude`,
+`torque_smooth`, `torque_accel`), with one world-force vector per
 **contact frame** per video frame added as extra optimization variables, masked
 to the steps the labels say that frame touches. Chamfer stays off, for the same
 reason as in `kinematics_2`: kindyn starts from the repaired body, and chamfer
@@ -496,6 +497,21 @@ by construction, and the weights scale with `(fps/30)^2k` like every difference
 term. The 2026-08-30 sweep behind the shipped values is in the config comments;
 the headline is first/second/third-order jitter down 39 / 70 / 83 % with
 reprojection flat and load peaks intact.
+
+**Joint torques, weighted by strength.** The physics only pins the *sum* of the
+contact forces; how four contacts share a load is statically indeterminate, and
+with only `force_magnitude` to break the tie the solve chose the split with the
+least internal squeeze — which on the demonstrator wall put too much on the hands
+and starved the feet. Three terms now read the joint torques RNEA computes
+(everything past the six root rows, in body-weight units): `torque_magnitude`,
+the effort cost, plus `torque_smooth` and `torque_accel`, its first and second
+differences over the counted frames. Each DOF's torque is multiplied by its
+joint's entry in `[torque.multipliers]`, keyed by joint group (the joint name
+without side and index), so a torque costs more the weaker the joint. The shipped
+table is 200 N·m divided by each joint's published maximum voluntary torque —
+legs and trunk 1, shoulder 2.5, elbow 3.3, wrist 17, fingers 25 — so a load the
+body could carry with either an arm or a leg lands on the leg. Set every entry to
+1 to get the plain torque terms back.
 
 ## What is deliberately absent
 

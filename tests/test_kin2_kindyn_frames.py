@@ -326,3 +326,63 @@ def test_fps_scaling_treats_force_accel_and_jerk_as_orders_two_and_three():
     assert scaled["force_accel_dir"] == pytest.approx(16.0)
     assert scaled["force_jerk_mag"] == pytest.approx(64.0)
     assert scaled["base_wrench_ang"] == pytest.approx(1.0)     # not a difference term
+
+
+# ───────────────────────── per-joint torque multipliers ─────────────────────────
+
+def test_joint_group_strips_side_and_index():
+    from tools.human_optim.kindyn import joint_group
+
+    assert joint_group("left_hip") == "hip"
+    assert joint_group("spine2") == "spine"
+    assert joint_group("right_index3") == "index"
+    assert joint_group("pelvis") == "pelvis"
+
+
+def test_torque_multipliers_land_on_each_joints_dof_rows():
+    from tools.body import load_body
+    from tools.human_optim.kindyn import joint_group, torque_multipliers
+
+    body = load_body(device="cpu")
+    model = body.shaped(torch.zeros(10)).robot
+    table = {"wrist": 17.0, "index": 25.0}
+    groups = {joint_group(n) for n in body.joint_names[1:]}
+    table.update({g: 1.0 for g in groups if g not in table})
+    weight = torque_multipliers(model, body.joint_names, table)
+
+    assert weight.shape == (int(model.nv) - 6,)
+    idx_vs = [int(x) for x in model.idx_vs]
+    for name, expect in (("left_wrist", 17.0), ("right_index2", 25.0), ("left_knee", 1.0)):
+        start = idx_vs[int(model.body_name_to_id[name])] - 6
+        assert weight[start:start + 3].tolist() == [expect] * 3
+    assert float((weight == 1.0).float().mean()) > 0.5      # most joints are unweighted
+
+
+def test_torque_multipliers_reject_an_uncovered_joint():
+    from tools.body import load_body
+    from tools.human_optim.kindyn import torque_multipliers
+
+    body = load_body(device="cpu")
+    model = body.shaped(torch.zeros(10)).robot
+    with pytest.raises(KeyError):
+        torque_multipliers(model, body.joint_names, {"hip": 1.0})
+
+
+def test_torque_terms_read_the_weighted_square():
+    spec = _spec([0], num_steps=4)
+    spec.tau_weight = torch.tensor([1.0, 4.0])
+    tau = torch.tensor([[1.0, 1.0], [2.0, 3.0]])
+    assert spec.torque_sq(tau).tolist() == [[1.0, 4.0], [4.0, 36.0]]
+    spec.tau_weight = None
+    assert spec.torque_sq(tau).tolist() == [[1.0, 1.0], [4.0, 9.0]]
+    assert spec.dyn_trip.tolist() == [1.0, 1.0]
+
+
+def test_fps_scaling_treats_torque_accel_as_order_two():
+    from tools.human_optim.config import fps_scaled_weights
+
+    scaled = fps_scaled_weights({"torque_magnitude": 1.0, "torque_smooth": 1.0,
+                                 "torque_accel": 1.0}, 60.0)
+    assert scaled["torque_magnitude"] == pytest.approx(1.0)
+    assert scaled["torque_smooth"] == pytest.approx(4.0)
+    assert scaled["torque_accel"] == pytest.approx(16.0)

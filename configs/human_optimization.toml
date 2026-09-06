@@ -156,7 +156,45 @@ force_accel_mag     = [0, 0, 0, 160]
 force_accel_dir     = [0, 0, 0, 80]
 force_jerk_mag      = [0, 0, 0, 80]
 force_jerk_dir      = [0, 0, 0, 40]
-torque_smooth       = [0, 0, 0, 10]
+# Joint-torque terms (2026-09-06), all weighted per joint by [torque.multipliers] and read
+# in body-weight units at a 1 m lever (τ / body weight). torque_magnitude is the effort
+# cost that resolves the statically indeterminate hands-vs-feet split — a load the body
+# could carry with either limb goes where the weighted torque is cheapest. climb_wall_2
+# sweep (7 trials vs the per-limb boards, pose unchanged in every run): hands/feet mean
+# force 1.36 (boards 0.90) at 0 -> 1.19 at 1 -> 1.12 at 3 -> 1.03 at 10 -> 0.94 at 30;
+# MAE 84.6 -> 76.7 N and the load-share error 5.1 -> 1.7 pp at 10, where the leftover
+# root force is 6 % of body weight (2 % before; 9 % at 30, which also overshoots). It
+# rebalances partly by lowering the hands, not only by loading the feet. torque_smooth /
+# torque_accel are the 1st / 2nd differences of the same weighted torque; 40 / 160 cut
+# torque jitter 26 / 25 -> 16 / 11 N·m for ~2 % BW of root residual (the old
+# torque_smooth = 10 was unweighted and well below where it bites). 15 / 40 / 160 shipped.
+torque_magnitude    = [0, 0, 0, 15]
+torque_smooth       = [0, 0, 0, 40]
+torque_accel        = [0, 0, 0, 160]
+
+# Per-joint multipliers of the three torque terms, keyed by joint group (the joint name
+# without its side and index: left_hip -> hip, spine2 -> spine, right_index3 -> index).
+# Proposal B: 200 N·m divided by the joint's published maximum voluntary torque (young
+# adults; Anderson 2007 for hip/knee/ankle, standing-flexion data for shoulder/elbow,
+# wrist-moment and finger-flexor studies for the hand), so a torque costs more the weaker
+# the joint. Legs and trunk = 1; the hand chain is where strength falls off a cliff.
+[torque.multipliers]
+hip = 1.0
+knee = 1.0
+ankle = 1.7
+foot = 1.7
+spine = 1.0
+neck = 6.0
+head = 6.0
+collar = 2.5
+shoulder = 2.5
+elbow = 3.3
+wrist = 17.0
+index = 25.0
+middle = 25.0
+ring = 25.0
+pinky = 25.0
+thumb = 25.0
 
 [optimizer]
 lr = 0.01
