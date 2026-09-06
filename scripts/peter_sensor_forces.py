@@ -59,19 +59,22 @@ NOTE = ("channels are support-cell reactions of one shared structure, not per-li
         "contact forces; only total_world is a clean physical force")
 
 # climb_wall_2 (the 2026-08 demonstrator rig): channels ARE per-limb forces, in
-# the datasheet's board frame (+x up along the wall, +y right, +z out toward the
-# climber; wall inclined 16 deg). One rotation to world (cam_left), built from
-# the datasheet (scratch/cw2_wall_datasheet.py, 2026-08-20): up = -gravity from
-# the 3-view floor fit (scratch/cw2_gravity_fit.py), tilt pinned to the spec's
-# EXACT 16 deg overhang (z = cos16*h - sin16*up, x = sin16*h + cos16*up), and
-# only the wall's horizontal facing direction h read from the fused-scene
-# normal (0.38 deg from the scene-measured tilt). Zero force fitting; the
-# measured-vs-kindyn total-force angle is 4.1-6.3 deg per clip — an honest,
-# independent match.
+# the datasheet's board frame (+x up along the wall, +y the climber's right, +z out
+# toward the climber; wall inclined 16 deg). That frame is LEFT-handed (the author
+# confirmed it), so this is a reflection (det -1), not a rotation. Built from the
+# datasheet (scratch/cw2_wall_datasheet.py, 2026-08-20): up = -gravity from the
+# 3-view floor fit (scratch/cw2_gravity_fit.py), tilt pinned to the spec's EXACT
+# 16 deg overhang (z = cos16*h - sin16*up, x = sin16*h + cos16*up), y = x cross z
+# (the climber's right; the camera sees the climber's back, so that is image right),
+# and only the wall's horizontal facing direction h read from the fused-scene
+# normal. Zero force fitting. 2026-09-06: the y column was MIRRORED until now
+# (built right-handed as z cross x = the climber's left); the fix halves the
+# per-limb measured-vs-kindyn angles (25/26/17/21 -> 11/10/8/11 deg) and turns the
+# solve-free check corr(lateral CoM accel, summed lateral force) from -0.30 to +0.65.
 R_CW2_WALL_TO_WORLD = np.array([
-    [+0.0934, -0.9280, +0.3608],
-    [-0.8488, +0.1152, +0.5160],
-    [-0.5204, -0.3544, -0.7769],
+    [+0.0934, +0.9280, +0.3608],
+    [-0.8488, -0.1152, +0.5160],
+    [-0.5204, +0.3544, -0.7769],
 ], dtype=np.float32)
 NOTE_CW2 = ("channels are TRUE per-limb contact forces (one board per limb; "
             "verified: only the touched channel responds at the sync tap, a "
