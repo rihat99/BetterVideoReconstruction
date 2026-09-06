@@ -158,7 +158,10 @@ Everything is solved in units of body weight: forces are fractions of it and the
 objective is divided by its square. That is a pure rescaling and moves no
 optimum, but it turns numbers that ran to 10⁵ into numbers around 1, which is the
 difference between the solver converging and its line search giving up on the
-first step. It did, silently, before this was done.
+first step. It did, silently, before this was done. Body weight itself is the
+SMPL-X mesh volume at the person's fitted shape, each segment weighed at
+Dempster's tissue density, times g — see "The body's mass" in
+[`human_optimization.md`](human_optimization.md).
 
 The whole solve takes a few seconds per scene.
 

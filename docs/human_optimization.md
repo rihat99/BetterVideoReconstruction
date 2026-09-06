@@ -394,6 +394,17 @@ to the steps the labels say that frame touches. Chamfer stays off, for the same
 reason as in `kinematics_2`: kindyn starts from the repaired body, and chamfer
 would pull it back toward the spaghetti-prone depth the repair just left.
 
+**The body's mass.** Nothing is measured or assumed about the person's weight.
+The body is the SMPL-X mesh at the person's fitted shape, cut into its 52 skinning
+parts, and each part's mass, centre of mass and moment of inertia are integrated
+from that closed part mesh (BetterHuman bakes them when the shape is set). Each
+part is weighed at its own tissue density from Dempster's segment table
+(`body_densities.json` in BetterHuman: 920 kg/m³ for the chest, 1010 for the
+pelvis and feet, 1110 for the head, 1160 for hands and fingers, and so on), so
+the RNEA model has the right mass distribution and not just the right total.
+`total_mass` in `kindyn_1.npz` is the sum. Other tables (Clauser, Chandler) or a
+single uniform density are one word away in `tools/body.py` (`load_body`).
+
 **Where the forces are applied.** At the 12 contact frames, not at joints — the
 same points the labels and the contact readout's force witness use. A world
 force `f` at a contact frame reaches RNEA as an external wrench on that frame's
