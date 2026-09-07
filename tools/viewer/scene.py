@@ -288,6 +288,16 @@ class ClipScene:
             body = data.skinned.get(source)
             if dyn.get("ff") is not None and body is not None:
                 _fcs, _oids, people = body
+                # A [contacts].frames restriction (the peter rigs run hands+feet only)
+                # sizes the force array to a SUBSET of the body's contact frames —
+                # expand it by name so the arrows align with the posed frame positions.
+                body_names = next((p["frame_names"] for p in people if p is not None), None)
+                names = dyn.get("ff_names")
+                if (names is not None and body_names is not None and names != body_names
+                        and set(names) <= set(body_names)):
+                    full = np.zeros(dyn["ff"].shape[:2] + (len(body_names), 3), np.float32)
+                    full[:, :, [body_names.index(n) for n in names]] = dyn["ff"]
+                    dyn["ff"] = full
                 counts = {person["frame_pos"].shape[1] for person in people if person is not None}
                 if len(people) == dyn["P"] and counts == {dyn["ff"].shape[2]}:
                     self._force_frame_pos[source] = [

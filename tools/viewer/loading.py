@@ -33,6 +33,14 @@ _CONTACT_SCHEMA = 2
 # cloud the optimizer / estimate_contacts actually run their SDF against (mirrors
 # ``[penetration]/[contacts].conf_drop_q`` in configs/human_optimization.toml).
 _SCENE_CONF_DROP_Q = 0.1
+# The MHR body the ``mhr_1_sup`` source poses: BetterHuman's converted LOD1 archive
+# (18 439 vertices, 127 bones) — the LOD the corpus MHR fit was made on. Given
+# explicitly, like the SMPL-X path in ``tools/body.py``, so no env var is needed.
+_MHR_MODEL, _MHR_LOD = Path(
+    "/data3/rikhat.akizhanov/better/BetterHuman/models/MHR/converted/mhr_lod1.npz"), 1
+# Loaded MHR bodies by device — reading the archive costs ~4 s, and every clip with
+# an ``mhr_1.npz`` needs the same one.
+_MHR_CACHE: dict = {}
 
 
 def _load_gravity(pred: Path) -> dict | None:
@@ -104,6 +112,8 @@ def _load_force_data(pred: Path, filename: str) -> dict | None:
         "fw": fw,                                               # (P, N, J, 3), hands at wrists
         "ff": (dd["frame_forces"].astype(np.float32)            # (P, N, F, 3): the same forces
                if "frame_forces" in dd.files else None),        # per contact FRAME, unfolded
+        "ff_names": ([str(x) for x in dd["contact_frame_names"]]  # (F,) which frames those are
+                     if "contact_frame_names" in dd.files else None),
         "bw": (dd["base_wrench"].astype(np.float32)             # (P, N, 6): root force | torque
                if "base_wrench" in dd.files else None),         #   in the ROOT-LOCAL frame
         "rootq": (dd["q"][:, :, 3:7].astype(np.float32)         # (P, N, 4) scalar-last root quat
@@ -139,9 +149,27 @@ def _load_sensor_forces(pred: Path) -> dict | None:
     }
 
 
+def _expand_frame_columns(arr: np.ndarray, names: list[str],
+                          body_names: list[str]) -> np.ndarray | None:
+    """Scatter per-contact-frame columns ``arr (P, N, F_sub, …)`` into body order.
+
+    Stage configs may restrict detection to a subset of the body's contact
+    frames (``[contacts].frames`` — the peter rigs run hands+feet only); the
+    viewer poses the FULL set, so a subset artifact is expanded here by name,
+    uncovered frames zero/False. ``None`` if a name is unknown to the body.
+    """
+    pos = {n: i for i, n in enumerate(body_names)}
+    if any(n not in pos for n in names):
+        return None
+    full = np.zeros(arr.shape[:2] + (len(body_names),) + arr.shape[3:], arr.dtype)
+    full[:, :, [pos[n] for n in names]] = arr
+    return full
+
+
 def _load_skeleton(pred: Path, body_fn: str = "kinematic_1.npz",
                    contacts_fn: str | None = "contacts_1.npz",
-                   frame_names: list[str] | None = None) -> dict | None:
+                   frame_names: list[str] | None = None,
+                   frame_parents: np.ndarray | None = None) -> dict | None:
     """Body-skeleton topology + per-contact-frame contact labels.
 
     The joint tree (``parents`` / ``joint_names``, 52 native joints) comes from
@@ -182,11 +210,16 @@ def _load_skeleton(pred: Path, body_fn: str = "kinematic_1.npz",
         if "frame_contact" not in kd.files:
             return out
         names = [str(x) for x in np.asarray(kd["contact_frame_names"]).tolist()]
+        contact = np.asarray(kd["frame_contact"], bool)
+        parent = np.asarray(kd["contact_frame_parents"], np.int32)
         if frame_names is not None and names != frame_names:
-            return out
-        out["frame_contact"] = np.asarray(kd["frame_contact"], bool)
+            contact = _expand_frame_columns(contact, names, frame_names)
+            if contact is None or frame_parents is None:
+                return out
+            names, parent = list(frame_names), frame_parents
+        out["frame_contact"] = contact
         out["frame_names"] = names
-        out["frame_parent"] = np.asarray(kd["contact_frame_parents"], np.int32)
+        out["frame_parent"] = parent
         out["contact_oids"] = np.asarray(kd["object_ids"], np.int32)
         return out
     cf = pred / "human_optim" / contacts_fn
@@ -203,18 +236,25 @@ def _load_skeleton(pred: Path, body_fn: str = "kinematic_1.npz",
         return out
     names = [str(x) for x in np.asarray(cd["contact_frame_names"]).tolist()]
     contact = np.asarray(cd["frame_contact"], bool)
+    parent = np.asarray(cd["frame_parent_joint"], np.int32)
     contact_oids = np.asarray(cd["object_ids"], np.int32)
     body_oids = np.asarray(kd["object_ids"], np.int32)
     expected = (len(body_oids), int(np.asarray(kd["num_frames"]).item()), len(names))
-    if (contact.shape != expected or not np.array_equal(contact_oids, body_oids)
-            or (frame_names is not None and names != frame_names)):
+    mismatch = frame_names is not None and names != frame_names
+    if contact.shape == expected and mismatch:
+        expanded = _expand_frame_columns(contact, names, frame_names)
+        if expanded is not None and frame_parents is not None:
+            contact, names, parent = expanded, list(frame_names), frame_parents
+            expected = expected[:2] + (len(names),)
+            mismatch = False
+    if contact.shape != expected or mismatch or not np.array_equal(contact_oids, body_oids):
         warnings.warn(
             f"ignoring incompatible contact artifact {cf}; regenerate estimate_contacts",
             RuntimeWarning, stacklevel=2)
         return out
     out["frame_contact"] = contact
     out["frame_names"] = names
-    out["frame_parent"] = np.asarray(cd["frame_parent_joint"], np.int32)
+    out["frame_parent"] = parent
     out["contact_oids"] = contact_oids
     return out
 
@@ -384,6 +424,7 @@ def _smplx_kinematic_skinned(npz_path: Path, *, device: str = "cuda"):
     weights = _top4_skin_weights(mid.lbs_weights.cpu().numpy())
     J = weights.shape[1]
     frame_names = list(mid.contact_frame_names)
+    frame_parent = np.asarray([int(x) for x in mid.contact_frame_parents], np.int32)
     F = len(frame_names)
 
     people: list[dict | None] = []
@@ -430,6 +471,7 @@ def _smplx_kinematic_skinned(npz_path: Path, *, device: str = "cuda"):
                 "frame_pos": frame_pos,
                 "frame_normal": frame_normal,
                 "frame_names": frame_names,
+                "frame_parent": frame_parent,
                 "valid": valid[p],
             })
     return faces, object_ids, people
@@ -519,6 +561,99 @@ def _smplx_params_skinned(path: Path, extr: np.ndarray, *, device: str = "cuda")
                 "v_shaped": v_shaped[0].cpu().numpy().astype(np.float32),
                 "j_rest": j_rest[0].cpu().numpy().astype(np.float32),
                 "weights": weights,
+                "bone_wxyz": bone_wxyz,
+                "bone_pos": bone_pos,
+                "valid": vmask,
+            })
+    return faces, object_ids, people
+
+
+def _load_mhr(device: str):
+    """Load the MHR LOD1 body once per process (``body, torch device``)."""
+    import torch
+
+    import better_human as bh
+
+    dev = torch.device(device if torch.cuda.is_available() else "cpu")
+    key = str(dev)
+    if key not in _MHR_CACHE:
+        _MHR_CACHE[key] = bh.MHR(_MHR_MODEL, lod=_MHR_LOD, use_expression=False,
+                                 use_correctives=False, compute_mass=False, device=dev)
+    return _MHR_CACHE[key], dev
+
+
+def _mhr_skinned(npz_path: Path, *, device: str = "cuda"):
+    """Skinning data for the MHR fit of the refined body (``human_optim/mhr_1.npz``).
+
+    ``mhr_1.npz`` is the kindyn body re-expressed on Meta's MHR rig: one identity
+    per person, the full native ``lbs_params (204)`` per frame, and a world-frame
+    ``q (132)`` per frame. Posing it here shows that fit as a moving mesh — the same
+    fit ``mhr_sup_1.npz`` replays into keypoint / vertex training targets, which
+    carry no topology of their own. Body only: no contact labels, no forces.
+
+    **Every parameter has to be read per frame.** MHR has two kinds of size knob:
+    fixed ``scale_*`` ones, and six "flexible" ones — spine, neck and arm and leg
+    length, shoulder and hip width — that the MHR fitter may re-estimate on every
+    frame, and does. Over one clip the fitted rest skeleton's legs swing by 10 cm
+    and its spine by 9 cm, all hanging off a pelvis that never moves; identity, the
+    other 67 size knobs and the rest mesh stay put. Shaping once and posing every
+    frame off that one skeleton is wrong by 2.4 cm (median) to 8.6 cm, and wrong
+    differently each frame — which reads as a mis-shaped body that moves oddly. So
+    the per-frame skinning transform
+    ``world_pose ∘ inverse_bind(frame)`` is folded into the bone pose here, and the
+    mesh is uploaded with ONE rest skeleton and identity bind rotations (the same
+    convention as the SMPL-X sources). The browser's LBS then reproduces
+    BetterHuman's own posing to ~0.3 cm — all that is dropped are the per-joint
+    scales (≥ 0.95, applied about each joint) and the pose correctives, which are
+    per-vertex per-frame and cannot ride on a fixed rest mesh.
+
+    Same ``(faces, object_ids, people)`` contract as :func:`_smplx_kinematic_skinned`.
+    """
+    import torch
+    from better_robot.lie import se3, so3
+
+    from better_human.bodies.mhr.body import MHRClassic
+
+    mhr, dev = _load_mhr(device)
+    d = np.load(npz_path)
+    q_all = d["q_world"]                       # (P, N, 132), world frame
+    valid = d["valid_mask"].astype(bool)       # (P, N)
+    P, N = q_all.shape[:2]
+    object_ids = np.asarray(d["object_ids"], np.int32)
+    faces = mhr.structure.faces.cpu().numpy().astype(np.int32)
+
+    people: list[dict | None] = []
+    with torch.no_grad():
+        for p in range(P):
+            idx = np.flatnonzero(valid[p])
+            if idx.size == 0:
+                people.append(None)
+                continue
+            lbs = torch.as_tensor(d["lbs_params"][p][idx], device=dev)         # (B, 204)
+            shaped, _q = mhr.from_classic(MHRClassic(
+                identity_coeffs=torch.as_tensor(d["identity"][p], device=dev)[None]
+                .expand(len(lbs), -1),
+                model_parameters=lbs))                       # a body per frame
+            q = torch.as_tensor(q_all[p][idx], dtype=torch.float32, device=dev)
+            poses = shaped.native_joint_poses(shaped.fk(q))                    # (B, J, 7) xyzw
+            skin = se3.compose(poses, shaped.values.inverse_bind_poses)        # (B, J, 7)
+            # One rest skeleton for the upload (the identity fixes the rest mesh, so
+            # only the skeleton re-proportions); the bone pose carries the rest.
+            j_rest = shaped.values.rest_joints[0]                              # (J, 3)
+            rot = so3.to_matrix(skin[..., 3:7])                                # (B, J, 3, 3)
+            pos = (rot @ j_rest.unsqueeze(-1)).squeeze(-1) + skin[..., :3]
+            J = j_rest.shape[0]
+            bone_wxyz = np.full((N, J, 4), np.nan, np.float32)
+            bone_pos = np.full((N, J, 3), np.nan, np.float32)
+            bone_wxyz[idx] = skin[..., [6, 3, 4, 5]].cpu().numpy()             # → wxyz
+            bone_pos[idx] = pos.cpu().numpy()
+            vmask = np.zeros(N, bool)
+            vmask[idx] = True
+            people.append({
+                "v_shaped": shaped.values.v_shaped[0].cpu().numpy().astype(np.float32),
+                "j_rest": j_rest.cpu().numpy().astype(np.float32),
+                "weights": _top4_skin_weights(
+                    shaped.values.skinning_weight_matrix.cpu().numpy()),
                 "bone_wxyz": bone_wxyz,
                 "bone_pos": bone_pos,
                 "valid": vmask,
@@ -621,6 +756,11 @@ def load_clip_data(pred: Path, *, device: str, show_smplx: bool,
                          ("kindyn_1", "kindyn_1.npz"), ("kindyn_manual", "kindyn_manual.npz")):
             if (pred / "human_optim" / fn).exists():
                 skinned[name] = _smplx_kinematic_skinned(pred / "human_optim" / fn, device=device)
+        # mhr_1_sup: the kindyn body re-fitted onto the MHR rig — a mesh and nothing
+        # else (its contacts and forces live on the SMPL-X sources it came from).
+        if (pred / "human_optim" / "mhr_1.npz").exists():
+            skinned["mhr_1_sup"] = _mhr_skinned(pred / "human_optim" / "mhr_1.npz",
+                                                device=device)
         # prefit: the scale stage's dual scale+body alignment (camera frame, like original).
         if (pred / "geometry" / "prefit.npz").exists():
             pf = _smplx_params_skinned(pred / "geometry" / "prefit.npz", extr, device=device)
@@ -637,7 +777,8 @@ def load_clip_data(pred: Path, *, device: str, show_smplx: bool,
             forces[name] = fd
 
     # Body skeletons + their contact-frame labels. The posed body names the contact
-    # frames it reports, so a contact artifact for a different frame set is dropped.
+    # frames it reports; an artifact for a SUBSET of them (a [contacts].frames
+    # restriction, e.g. the peter rigs) is expanded into body order, anything else dropped.
     # The kindyn bodies are self-labeled (contacts_fn=None): their npz carries
     # frame_contact next to q, which feeds the contact-frames layer; their skeleton
     # stays the force-source torque skeleton (ClipScene skips their 22-joint overlay).
@@ -650,7 +791,8 @@ def load_clip_data(pred: Path, *, device: str, show_smplx: bool,
             body = skinned.get(name)
             person = next((p for p in body[2] if p is not None), None) if body else None
             sk = _load_skeleton(pred, body_fn, contacts_fn,
-                                frame_names=None if person is None else person["frame_names"])
+                                frame_names=None if person is None else person["frame_names"],
+                                frame_parents=None if person is None else person["frame_parent"])
             if sk is not None:
                 skeletons[name] = sk
 

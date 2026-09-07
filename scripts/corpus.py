@@ -130,6 +130,14 @@ STAGES: dict[str, StageSpec] = {
         farm_inputs=("vggt", "sam3d", "sam3", "sapiens"),  # sapiens: the scale pre-fit reads it
         config_sections=("scale", "fuse"),
     ),
+    "gravity": StageSpec(
+        mode="farm_inprocess",
+        cli=None,
+        out_stage="geocalib",
+        out_check="gravity.npz",
+        farm_inputs=("geometry",),  # transform.npz extrinsics + scene.npz floor fit
+        config_sections=("gravity",),
+    ),
     "human_optim": StageSpec(
         mode="farm_inprocess",
         cli=None,
@@ -699,6 +707,8 @@ def _run_farm_worker(
     if stage == "geometry":
         import estimate_scale as scale_stage  # noqa: E402
         import fuse_geometry as fuse_stage  # noqa: E402
+    elif stage == "gravity":
+        import estimate_gravity_geocalib as gravity_stage  # noqa: E402
     else:
         import human_optimization as human_stage  # noqa: E402
 
@@ -734,6 +744,19 @@ def _run_farm_worker(
                 )
                 if fuse_rc or scale_rc:
                     raise RuntimeError(f"stage return codes: fuse={fuse_rc}, scale={scale_rc}")
+            elif stage == "gravity":
+                rc = gravity_stage.main(
+                    [
+                        "--source",
+                        entry["clip"],
+                        "--predictions",
+                        str(farm),
+                        "--config",
+                        str(config_path),
+                    ]
+                )
+                if rc:
+                    raise RuntimeError(f"gravity return code: {rc}")
             else:
                 rc = human_stage.main(
                     [

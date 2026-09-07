@@ -34,7 +34,10 @@ For each clip it shows, in the metric world frame:
 * ``kindyn_1`` / ``kindyn_manual`` — the joint kinematics+dynamics bodies
   (``human_optim/kindyn_{1,manual}.npz``; ``kindyn_manual`` is the
   manual-annotation reference chain), skinned meshes that also carry
-  force/torque data.
+  force/torque data;
+* ``mhr_1_sup`` — the kindyn body re-fitted onto Meta's MHR rig
+  (``human_optim/mhr_1.npz``, the pose supervision the contact model trains on).
+  Mesh only: no contact frames and no forces are drawn on it.
 
 The dynamics folder's **force display** dropdown picks the arrow regime:
 ``per-joint`` accumulates each joint's frame forces into one arrow at the joint —
