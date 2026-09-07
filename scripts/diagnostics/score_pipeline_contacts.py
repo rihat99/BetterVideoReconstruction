@@ -85,13 +85,20 @@ def _limb_load(kindyn: np.lib.npyio.NpzFile, person: int) -> np.ndarray:
 
     A limb's load is the sum over whichever contact points the solve gave it. Which
     points those are is read from the file rather than assumed, because it has changed:
-    the solve used to push through six joints (the wrists, the feet and the ankles) and
-    now uses four (the wrists and the feet).
+    the solve used to push through six joints (the wrists, the feet and the ankles),
+    then four (the wrists and the feet), and the frame-level solve pushes through
+    contact frames whose forces reach the file already folded onto their parent
+    joints — so there the groups are the 52 body joints.
     """
     gravity = np.asarray(kindyn["gravity_world"], float)
     down = gravity / np.linalg.norm(gravity)
-    groups = [str(name) for name in np.asarray(kindyn["contact_force_joints"]).reshape(-1)]
-    load = -(np.asarray(kindyn["contact_forces"][person], float) @ down)  # (N, groups)
+    if "contact_force_joints" in kindyn.files:
+        groups = [str(name) for name in np.asarray(kindyn["contact_force_joints"]).reshape(-1)]
+        forces = np.asarray(kindyn["contact_forces"][person], float)
+    else:
+        groups = [str(name) for name in kindyn["joint_names"]]
+        forces = np.asarray(kindyn["contact_forces_world"][person], float)
+    load = -(forces @ down)  # (N, groups)
     members = _limb_members(groups)
     if not all(members):  # a limb with no contact point would silently read as zero load
         raise ValueError(f"no solved contact point for {LIMBS[members.index([])]} among {groups}")

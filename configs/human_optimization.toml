@@ -120,38 +120,81 @@ ann_repulsion       = [0, 0, 4000, 4000]   # push no-contact points off — iner
 ann_velocity        = [0, 500, 4000, 4000]   # damp the labelled points' linear + angular velocity — the contact readout gates on pre-enforcement drift_pre, so this cannot vote for its own labels
 ann_acceleration    = [0, 0, 0, 0]   # OFF — near-redundant with a strong ann_velocity (a still joint is already low-accel); wired + ready, raise to damp in-contact joints' Cartesian (LOCAL_WORLD_ALIGNED) acceleration if ann_velocity is lowered to allow slow sliding contacts
 
-# The five physics terms of kindyn_1's joint engine. All-LINEAR weights; every residual is
+# The physics terms of kindyn_1's joint engine. All-LINEAR weights; every residual is
 # first divided by BODY WEIGHT and averaged over the counted frames — so these numbers are
-# dimensionless and mean the same thing on a 60-frame clip and a 900-frame one. The
-# smoothness ratios were retuned 2026-08-25 (see the sweep note below).
+# dimensionless and mean the same thing on a 60-frame clip and a 900-frame one.
 #
-# base_wrench is THE trade knob: it buys physics with pose. Ladder on boulder_1 + the
-# repaired gtIGgs floater (2026-08-12), root residual as N per frame RMS — the frozen-pose
-# force warm-start already takes boulder_1 632 -> 140 and gtIGgs 1005 -> 243, so these are
-# what the JOINT phase adds on top, and what it costs:
-#          boulder_1 wrench / reproj px / ‖snap‖      gtIGgs wrench / reproj px / ‖snap‖
-#     25      121.8  /  5.60  / 0.88                     100.3  / 26.71 / 2.49
-#    100      114.8  /  5.84  / 1.01                      83.8  / 26.80 / 2.32
-#    400      101.7  /  7.44  / 1.88                      81.6  / 27.04 / 2.61
-#   1600       92.5  / 11.25  / 2.91                      81.2  / 27.23 / 2.94
-# (1600 is what the old un-normalised 1e-5 amounted to on a 445-frame clip — it doubles
-# boulder_1's reprojection error for the last 20 N.) 100 is shipped: gtIGgs keeps ~all of
-# the joint-phase gain and boulder_1 pays 0.35 px. gtIGgs's ‖snap‖ rise is there at every
-# rung, so it is the joint L-BFGS on a heavily repaired body, not this weight.
+# 2026-08-30 smoothness update (13-clip ./data sweep, 12 settings; jitter = mean par/perp
+# force difference at orders 1/2/3 over persisting contacts, residual RMS in body-weight
+# units with the angular rows on a 0.2 m lever). Two changes, tuned together:
+#
+#  - Root residual split lin/ang and tilted 50/300. The friction cones block moment
+#    authority, so the angular rows were the dominant residual (0.47 vs 0.11 BW) at the
+#    old equal weighting. The tilt buys ang 0.47 -> 0.22 for lin 0.11 -> 0.17 — the
+#    sanctioned trade (more linear residual for less angular). ang=600 keeps falling
+#    (0.14) but jitter worsens and lin hits 0.18 — 300 is the knee.
+#  - 2nd/3rd-order force smoothness. With 1st differences only, order-2 jitter ~= order-1
+#    (pure frame-to-frame alternation the pair term cannot kill without flattening real
+#    load changes). At (160,80)+(80,40) with the tilt: j1 -39%, j2 -70%, j3 -83% for
+#    +0.002 residual; reprojection flat (13.19 -> 13.03 px mean), best-of-sweep snap, and
+#    load peaks NOT flattened (per-frame totals stay 1.1-1.5 BW mean, maxima survive).
+#    60 fps clips win the most — the (fps/30)^2k weight scaling puts the effective orders
+#    at x4/x16/x64 there, which is exactly what 2nwG's shake needed.
+#
+# The pre-split base_wrench=100 ladder (2026-08-12) and the 40/20 first-order sweep note
+# (2026-08-25) live in git history; both fed the values below.
 [loss_weights.dynamics]
-base_wrench         = [0, 0, 0, 100]
+base_wrench         = [0, 0, 0, 50]   # LINEAR rows of the root residual (N)
+base_wrench_ang     = [0, 0, 0, 300]  # ANGULAR rows (N·m) — the moment residual, weighted on its own
 force_magnitude     = [0, 0, 0, 1]
-# mag x2 / dir x4 by the 2026-08-25 sweep (6 clips, 5 settings; smoothness pairs are masked
-# to persisting contacts, so 1-frame forces are untouchable by construction — verified):
-# at (40,20) direction jitter median falls 16-19% and magnitude jitter 8-35% on 5/6 clips
-# for <=0.005 BW extra root residual; (80,20) smooths magnitude hardest but barely helps
-# direction, and (20,20) helps direction while WORSENING magnitude 4-20%. Known caveat:
-# 2nwG (60 fps -> fps-scaling puts the effective pair at 160/80) pays +13% magnitude jitter
-# and +8% relative residual at this point — every other clip, including the other 60 fps
-# one, wins.
 force_smooth_mag    = [0, 0, 0, 40]   # smooth the force MAGNITUDE across persisting contacts (harder than direction)
 force_smooth_dir    = [0, 0, 0, 20]   # smooth the force DIRECTION (may adapt faster than magnitude)
-torque_smooth       = [0, 0, 0, 10]
+# 2nd/3rd-order force smoothness: the same magnitude/direction split on the 2nd and 3rd
+# finite differences (force acceleration and jerk), masked to contacts that persist over
+# the whole 3-/4-frame window.
+force_accel_mag     = [0, 0, 0, 160]
+force_accel_dir     = [0, 0, 0, 80]
+force_jerk_mag      = [0, 0, 0, 80]
+force_jerk_dir      = [0, 0, 0, 40]
+# Joint-torque terms (2026-09-06), all weighted per joint by [torque.multipliers] and read
+# in body-weight units at a 1 m lever (τ / body weight). torque_magnitude is the effort
+# cost that resolves the statically indeterminate hands-vs-feet split — a load the body
+# could carry with either limb goes where the weighted torque is cheapest. climb_wall_2
+# sweep (7 trials vs the per-limb boards, pose unchanged in every run): hands/feet mean
+# force 1.36 (boards 0.90) at 0 -> 1.19 at 1 -> 1.12 at 3 -> 1.03 at 10 -> 0.94 at 30;
+# MAE 84.6 -> 76.7 N and the load-share error 5.1 -> 1.7 pp at 10, where the leftover
+# root force is 6 % of body weight (2 % before; 9 % at 30, which also overshoots). It
+# rebalances partly by lowering the hands, not only by loading the feet. torque_smooth /
+# torque_accel are the 1st / 2nd differences of the same weighted torque; 40 / 160 cut
+# torque jitter 26 / 25 -> 16 / 11 N·m for ~2 % BW of root residual (the old
+# torque_smooth = 10 was unweighted and well below where it bites). 15 / 40 / 160 shipped.
+torque_magnitude    = [0, 0, 0, 15]
+torque_smooth       = [0, 0, 0, 40]
+torque_accel        = [0, 0, 0, 160]
+
+# Per-joint multipliers of the three torque terms, keyed by joint group (the joint name
+# without its side and index: left_hip -> hip, spine2 -> spine, right_index3 -> index).
+# Proposal B: 200 N·m divided by the joint's published maximum voluntary torque (young
+# adults; Anderson 2007 for hip/knee/ankle, standing-flexion data for shoulder/elbow,
+# wrist-moment and finger-flexor studies for the hand), so a torque costs more the weaker
+# the joint. Legs and trunk = 1; the hand chain is where strength falls off a cliff.
+[torque.multipliers]
+hip = 1.0
+knee = 1.0
+ankle = 1.7
+foot = 1.7
+spine = 1.0
+neck = 6.0
+head = 6.0
+collar = 2.5
+shoulder = 2.5
+elbow = 3.3
+wrist = 17.0
+index = 25.0
+middle = 25.0
+ring = 25.0
+pinky = 25.0
+thumb = 25.0
 
 [optimizer]
 lr = 0.01
@@ -279,6 +322,10 @@ still_m  = 0.04        # THE recall knob (raise → more recall), shared by the 
 # sports since 2026-08-25: the 13-scene climbing A/B (with min_span_s 0.06) took pooled F1
 # .729 -> .768 — sport_climb's fast rope-climbing steps alone went .27 -> .62; the stillness
 # gate had been killing real presses there too. -1 = off.
+# In the READOUT stage this exception is additionally held to a load check
+# ([contact_force].confirm_bw): a pressing-but-moving step keeps it only where the force
+# solve confirms it carries weight, or was muted. The kin1 auto-label detector runs before
+# any solve exists, so there the exception stands on its own, as always.
 still_override_m = 0.01
 
 [contacts]
@@ -287,9 +334,16 @@ frames = []            # contact-frame allowlist by NAME; empty = every frame th
                        # stage), so a recipe that restricts it (peter: hands + feet only)
                        # restricts detection, labels and forces in one move.
 overlay = false        # render the contact overlay
-close_thresh_m = 0.03  # enter: "just outside" distance counted as contact
+close_thresh_m = 0.03  # enter: "just outside" distance counted as contact (the 0.02 tried
+                       # 2026-08-30 became a wash once the load check took over the precision
+                       # work: +.002 precision for -.002 recall on the annotated corpus)
 exit_thresh_m = 0.035  # stay: looser hysteresis exit (holds a span, kills 1-frame boundary flicker)
-min_span_s = 0.06      # min contact/release span (seconds; frames = ceil(s·fps)) — applied to the fused labels AFTER gap-welding; raw detection keeps a fixed 3-frame blip killer (DETECT_MIN_FRAMES). 0.06 (a sprint stance is ~0.1 s) unified for both sports 2026-08-25 — see still_override_m
+min_span_s = 0.1       # min contact/release span (seconds; frames = ceil(s·fps)) — applied to
+                       # the fused labels AFTER gap-welding; raw detection keeps a fixed 3-frame
+                       # blip killer (DETECT_MIN_FRAMES). Back to 0.1 from the 0.06 athletics
+                       # unification (2026-08-30: 0.06 was strictly worse on the annotated
+                       # corpus, and a surviving press is exempt from the rule anyway — the
+                       # sprint stance the 0.06 existed for is a loaded press)
 max_dist_m = 0.10
 conf_thresh = 0.1      # residual absolute floor (VGGT conf ≥~1 ⇒ non-binding)
 conf_drop_q = 0.1      # quantile gate at scene load: drop the lowest-confidence scene voxels
@@ -313,10 +367,24 @@ merge_sdf_m = 0.08     # re-grip guard: it stayed within this signed distance of
 # to a 45 degree friction cone about that patch of skin, so a frame can only explain what it
 # is oriented to explain. A frame that has to carry theta_bw of the body's weight is called
 # in contact, and that label is UNIONED onto the geometric one (add-only, never removes).
-# Everything else about the solve is a fixed, measured choice in the code, not a knob.
+# The SAME solve is also read the other way round (confirm_bw): the geometric arm's
+# penetration exception — a pressing-but-MOVING frame — must carry load where the solve was
+# heard. Everything else about the solve is a fixed, measured choice in the code, not a knob.
+#
+# Two frame groups are excluded from force labels in code (no knob): KNEES (their cones
+# cannot be trusted; ~all false positives, excluded since the witness shipped) and HEELS
+# (2026-08-30: within one foot the solve's load split is indeterminate — a flat foot can
+# route its whole weight through the ball — so small solved heel loads say nothing; at
+# theta 0.02 heels flooded, ~25% precise, and excluding them took corpus precision
+# .883 -> .921). Knees also lose their GEOMETRIC arm in the readout (~15% precise — a knee
+# rides near-and-still past the wall all climb), so a knee is never labelled; a real
+# kneebar is the known cost.
 [contact_force]
-theta_bw = 0.05            # fraction of body weight at which a frame counts as loaded
-theta_hold_bw = 0.03       # …and keeps the label until the load drops below this (hysteresis;
+theta_bw = 0.02            # fraction of body weight at which a frame counts as loaded
+                           # (0.05 -> 0.02 2026-08-30: with heels excluded the lower bar is
+                           # nearly free — corpus recall .785 -> .861 for half a point of
+                           # precision; at 0.05 the witness left most of what it sees unused)
+theta_hold_bw = 0.01       # …and keeps the label until the load drops below this (hysteresis;
                            # set equal to theta_bw for a single threshold)
 gap_dstar_m = 0.05         # gap price: force this far from the scene is already expensive
 stillness_vstar_mps = 0.2  # stillness price: force on a frame drifting this fast is expensive
@@ -333,6 +401,27 @@ stillness_vstar_mps = 0.2  # stillness price: force on a frame drifting this fas
 # .603 with the old 0.20 m gate. One rule, both sports. 0 = off.
 far_still_x = 4.0
 
+# THE LOAD CHECK on the penetration exception (2026-08-30). The exception
+# ([contact_gate].still_override_m, "a frame pressing into the surface counts however
+# fast it moves") exists for the contacts no drift window can call still — a sprint
+# plant, a cartwheel hand. But a hand sweeping ALONG the wall presses just as close, and
+# the exception cannot tell a plant from a sweep: measured, it costs the geometric arm
+# four points of precision on its own. Load can tell them apart — a plant carries
+# weight, a sweep carries none — so wherever the solve was heard, a pressing-but-moving
+# step keeps its exception only if the solve routes confirm_bw of body weight through
+# it. Where the solve explained nothing (mute_res_bw of root residual left — a rope or
+# belay carrying the body, a broken trajectory) its silence is not evidence and the
+# exception stands untouched. STILL frames never need the solve's blessing.
+#
+# Two designs measured and refuted on the 118-scene annotated corpus before this one:
+# load REPLACING stillness outright (test precision .900 -> .950 but recall .803 -> .743
+# — a heel sharing a hold with its own forefoot carries no solvable load of its own),
+# and a load override that lets any loaded moving frame in (redundant: theta_bw already
+# labels those). The shipped combination: corpus precision .880 -> .922, recall
+# .808 -> .860.
+confirm_bw = 0.02
+mute_res_bw = 0.5
+
 # Per-clip reconstruction-quality FLAGS, computed and saved by estimate_contacts (the
 # earliest stage where all three signals exist — the residual comes from its force
 # witness) into contacts_<tag>.npz as quality_flag + the raw metrics. Calibrated
@@ -347,6 +436,42 @@ cam_depth_max = 0.4        # camera-translation spread / median scene depth abov
 res_before_bw_max = 2.5    # ... AND median pre-force root residual above this = "camera" flag
 smear_med_max = 2.0        # median along-ray human-cloud smear above this = "depth" flag
                            # (same 2.0 as the chamfer smear weight's dead zone — one meaning)
+
+# Label confidence — a trust weight in [0, 1] estimate_contacts saves with every
+# contact / no-contact label (frame_label_confidence + the joint_contact fold): the
+# per-joint era's source-conditional algebra on the frame axis — visibility ×
+# evidence, the evidence capped by the label's source (docs/contact_confidence.md).
+# It never changes the binary label.
+[contact_confidence]
+surface_inner_m = -0.02       # contact band: burial deeper than this is suspect geometry
+surface_outer_m = 0.05        # ... and further outside than this is not on the wall
+surface_soft_m = 0.01         # softness of both band edges
+penetration_floor = 0.40      # deep burial keeps at least this fraction of surface evidence
+motion_scale_mps = 0.10       # no-contact: net speed where motion evidence saturates (far)
+motion_near_scale_mps = 0.15  # ... inflated near the wall (suppresses slow drift)
+motion_near_power = 3.0       # ... with a steeper (cubic) response there
+image_margin_px = 10.0        # soft image border of the visibility term
+occ_margin_m = 0.05           # body-occlusion gap where visibility halves
+occ_soft_m = 0.01             # ... and its softness
+# The three ceilings. The two arms kept their original roles after the 2026-08-30
+# rework (geometry = near-and-still decides, the force witness adds rescues and checks
+# the penetration exception), so the caps keep their original ordering: a corroborated
+# label is trusted most, a lone force rescue is positionally uncertain, a lone
+# geometric label is merely unconfirmed.
+gate_only_cap = 0.50          # geometry alone
+gate_force_cap = 0.85         # ... lifted to this when the solved load agrees
+force_only_cap = 0.70         # the force witness alone: a misregistration rescue
+force_share_scale = 0.25      # |f|/body-weight where the force ramp saturates
+nodata_cap = 1.0              # no-contact cap with an absent depth witness — OFF (premise refuted)
+nodata_force_cap = 1.0        # ... lifted where the solve allocates ~no force — OFF
+
+# Depth-fit trust — how well the local body fit agrees with the human depth cloud;
+# scales the motion (no-contact) evidence so a stretched limb cannot fake a
+# trustworthy "it moved".
+[depth_fit]
+cell_px = 8                # z-buffer cell size (px) for cloud↔mesh ray matching
+min_points = 5             # fewer matched cloud points than this = no depth witness
+trust_scale_log = 0.05     # log-depth-ratio scale of the trust falloff
 
 [friction]
 half_angle_deg = 45.0   # μ = tan(45°) = 1

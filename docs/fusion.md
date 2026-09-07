@@ -24,7 +24,9 @@ Three files under `geometry/`:
   cam-from-world matrices, `intrinsics_px_orig (F,3,3)` the pixel intrinsics at the
   original video resolution, plus the normalized intrinsics, FOVs, frame indices,
   image sizes and fps. Fields `scale=1.0` and `metric=False` say the world is still
-  unscaled; the scale stage flips them. Every later stage reads its cameras from here.
+  unscaled; the scale stage flips them. `static_camera` says whether the shot was
+  locked off, and `camera_motion` is the number it was decided from (see below).
+  Every later stage reads its cameras from here.
 - `scene.npz` — one static, merged point cloud of everything that is not a person:
   the wall, the holds, the ground. Per point: position, colour, VGGT depth
   confidence (max over the merged points), how many raw points merged into it
@@ -209,6 +211,49 @@ genuine surfaces view 0 could not see — which is the whole point of the second
 camera — and some are the ghost slab the prune exists to remove. The two are not
 currently told apart.
 
+## Was the shot locked off?
+
+Fuse also answers one small question about the clip: did the camera sit still?
+The useful definition is **the world lands on the same pixels in every frame**,
+because that single question already covers every way a camera can move —
+travelling gives parallax, a pan slides the whole picture sideways, a zoom pushes
+it outwards.
+
+So instead of thresholding position, rotation and focal length separately, fuse
+measures the one thing they all do. It takes the scene cloud it just built,
+projects every point through every frame's camera, and asks how far each point
+wanders from the pixel it usually sits on. The answer is reported as a fraction
+of the image width, which keeps it independent of resolution, of how far away the
+scene is, and of the world's unknown scale — the same clip has to get the same
+answer before and after `estimate_scale` makes it metric. A few bad frames or a
+few stray points cannot decide it: the number is the 90th percentile over frames
+of the median over points.
+
+Under `static_motion_max` (2% of the width) the clip is marked `static_camera`.
+Where 2% comes from, measured against optical flow on the raw video:
+
+| what | slides | reads |
+|---|---|---|
+| a tripod (campus_board, climb_wall) | flow 0.01% | 0.03% |
+| a locked YouTube shot | flow 0.00% | up to **0.7%** — the measure's own noise |
+| a camera that gets nudged | flow 1.1–1.4% | 0.9–1.3% |
+| a slow creep across the clip | flow 2.1% | 2.1% |
+| the quietest shot anyone would call *moving* | flow 4.6% | **4.2%** |
+| a broadcast pan | flow 10.5% | 13.2% |
+
+2% sits nearly 3× above the noise the measure makes on a provably frozen picture
+and 2× below the first clip that genuinely moves, so nothing near the line is a
+camera that actually travels. On the 972-scene ClimbingVideos corpus it marks
+about 14% of scenes static.
+
+Results fused before this existed do not need re-fusing —
+`scripts/backfill_static_camera.py` measures them from the files already on disk
+and writes the flag back into the same npz (and, for a corpus, into
+`scenes.static_camera` in the scene DB). Scenes the fuse stage has not reached
+yet are measured from `vggt/camera.npz` with one frame's depth map backprojected
+in place of the scene cloud; on clips where both probes exist they agree to
+within a few percent, and at the threshold to three digits.
+
 ## What fuse does not do
 
 - **It does not fix "floaters".** When VGGT places the person's depth at a
@@ -229,3 +274,4 @@ currently told apart.
 | `human_dilate` | 8 | px the person mask grows before being subtracted from the scene |
 | `min_scene_voxels` | 25 | smallest connected voxel cluster the scene keeps |
 | `person_obj_ids` | all | restrict which SAM3 ids count as people |
+| `static_motion_max` | 0.02 | shot counts as locked while the scene slides less than this fraction of the image width |

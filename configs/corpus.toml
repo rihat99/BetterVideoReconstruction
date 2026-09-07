@@ -6,8 +6,8 @@ data_root = "../data/ClimbingVideos" # Scene DB + read-mostly feature tree (old 
 categories = [1, 2]                  # Curated VLM categories: indoor boulder + indoor rope.
 rope_supported = 0                  # Require no rope support; -1 removes this filter.
 seed = 0                            # Deterministic RNG seed used by --sample.
-devices = [4, 4, 7, 7]              # CUDA device ids; one stride-sharded worker per entry (repeat an id for two shards on one GPU).
-skip_existing = true                # Resume: only scenes missing the stage output run (corpus growth sweep).
+devices = [0, 0, 1, 1, 5]           # CUDA device ids; one stride-sharded worker per entry (GPU 5: single shard — it has a ~6 GiB neighbour).
+skip_existing = false               # Full-chain refresh 2026-08-26: overwrite old results so every scene gets one consistent chain.
 out_root = ""                       # Contacts-only output-tree redirect; empty writes beside inputs.
 debug_overlay_dir = ""              # Gather overlays here; empty uses features/<stage>/_debug_overlays.
 pipeline_config = "configs/pipeline.toml" # Model-stage algorithm knobs (read, never modified).
@@ -30,6 +30,11 @@ iou_thresh = 0.2            # Minimum grounded-mask/YOLO-box IoU for prompt sele
 ground_min_area_frac = 0.002 # Reject smaller grounded masks before IoU matching.
 confidence = 0.5            # SAM3 text-grounding confidence.
 part_length = 200           # Frames per SAM3 propagation part.
+
+[split]
+test_frames_frac = 0.10       # Target fraction of curated-corpus FRAMES in test.
+max_test_video_scenes = 4     # Only videos this small can be drawn into test (big videos are too self-similar).
+seed = 0                      # Deterministic draw among the small new videos.
 
 [contacts_run]
 bodies = "kinematic_1"      # Body artifact to score; produces contacts_1.npz (or use kinematic_2).

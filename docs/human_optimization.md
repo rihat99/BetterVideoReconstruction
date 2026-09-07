@@ -234,7 +234,10 @@ mesh vertices instead.
 
 Where do the labels come from in `kinematics_1`? **Auto-contact**: at the start of the
 refine phase, the contact readout (same machinery as `estimate_contacts`) runs once on
-the current body — a joint that is close to the wall and still gets labeled. The labels
+the current body — a joint that is close to the wall and still gets labeled. Close-and-
+still is the *whole* rule here: the standalone readout also asks the force solve to
+confirm the penetration exception (see `docs/contacts.md`), but no force has been
+solved this early, so this stage keeps the plain two-gate detector. The labels
 are then **frozen** for the rest of the fit, and only positive labels are ever created.
 Detection is one-shot and gradient-free, so the fit cannot talk itself into more
 contact. The stillness measured *before* the attraction acted (`drift_pre`) is saved
@@ -382,12 +385,26 @@ whose coarse joints are spread onto the contact frames each one covers;
 `bodies = "kinematic_1"` starts from `kinematic_1` + `contacts_1` for chains
 that skip `kinematics_2`.) The objective is the full `kinematics_2` objective —
 reprojection, priors, motion smoothness, scene penetration, the annotation
-terms — **plus** the physics terms (`base_wrench`, `force_magnitude`,
-`force_smooth_mag`/`_dir`, `torque_smooth`), with one world-force vector per
+terms — **plus** the physics terms (`base_wrench` + `base_wrench_ang`,
+`force_magnitude`, the force smoothness family at three difference orders
+(`force_smooth_*`, `force_accel_*`, `force_jerk_*`, each split into a magnitude
+and a direction part), and the joint-torque family `torque_magnitude`,
+`torque_smooth`, `torque_accel`), with one world-force vector per
 **contact frame** per video frame added as extra optimization variables, masked
 to the steps the labels say that frame touches. Chamfer stays off, for the same
 reason as in `kinematics_2`: kindyn starts from the repaired body, and chamfer
 would pull it back toward the spaghetti-prone depth the repair just left.
+
+**The body's mass.** Nothing is measured or assumed about the person's weight.
+The body is the SMPL-X mesh at the person's fitted shape, cut into its 52 skinning
+parts, and each part's mass, centre of mass and moment of inertia are integrated
+from that closed part mesh (BetterHuman bakes them when the shape is set). Each
+part is weighed at its own tissue density from Dempster's segment table
+(`body_densities.json` in BetterHuman: 920 kg/m³ for the chest, 1010 for the
+pelvis and feet, 1110 for the head, 1160 for hands and fingers, and so on), so
+the RNEA model has the right mass distribution and not just the right total.
+`total_mass` in `kindyn_1.npz` is the sum. Other tables (Clauser, Chandler) or a
+single uniform density are one word away in `tools/body.py` (`load_body`).
 
 **Where the forces are applied.** At the 12 contact frames, not at joints — the
 same points the labels and the contact readout's force witness use. A world
@@ -445,7 +462,7 @@ solved at the *starting* pose; re-solving them at the final pose would give a
 slightly different, self-consistent pair — a possible future alternation step.)
 
 **The weights.** The kinematic columns of `kindyn_1` are copied straight from
-`kinematics_2`, so the visual fit is asked for exactly as before. The five
+`kinematics_2`, so the visual fit is asked for exactly as before. The
 dynamics weights are **linear** — the term is `0.5 · mean over valid frames of
 Σ residual²` and the weight multiplies it, like every other engine term.
 
@@ -456,17 +473,45 @@ across the held jump would read as a huge phantom acceleration that the solve
 would spend its budget bending the pose to explain. Without that the terms are a *sum* of newtons squared, so the
 same weight pulls hard on a 900-frame clip and barely registers on a 60-frame
 one, and harder on a heavy climber than a light one — while every kinematic term
-stays a per-frame mean. In body-weight units all five are O(1) and one number
+stays a per-frame mean. In body-weight units all terms are O(1) and one number
 means one thing everywhere. (The force witness solves in the same units for the
 same reason.)
 
-`base_wrench` is the trade knob — it buys physics with pose — and the ladder
-behind the shipped 100 is in the config comments. The headline: on `boulder_1`
-the frozen-pose warm-start alone takes the root residual 632 → 140 N per frame
-RMS, and the joint phase then buys 140 → 115 for +0.35 px of reprojection at
-weight 100, or 140 → 93 for **+5.8 px** at weight 1600 (which is what the old
-un-normalised `1e-5` amounted to on that clip). Most of the win is the warm
-start; the pose's contribution is real but expensive, so it is bought cheaply.
+The root residual is weighted in two halves: `base_wrench` for its linear rows
+(a leftover net force, in newtons) and `base_wrench_ang` for its angular rows
+(a leftover net moment, in newton-metres). They are split because the friction
+cones block moment authority — a force stuck inside its cone often cannot cancel
+a moment — so at equal weights the angular rows were the residual that actually
+stayed large. The shipped 50/300 tilt deliberately accepts more linear residual
+to push the angular residual down: on the 13 `./data` clips it buys the angular
+RMS 0.47 → 0.22 (body-weight units on a 0.2 m lever) for a linear rise of
+0.11 → 0.17 BW.
+
+Force smoothness runs at three difference orders, each split into a magnitude
+part and a direction part about the local mean force direction. The first
+difference damps frame-to-frame change; the second and third (the force's
+acceleration and jerk) damp the alternating flicker a first difference cannot
+remove without also flattening real load changes. Every order is masked to
+contacts that persist over its whole window, so a 1-frame contact is untouchable
+by construction, and the weights scale with `(fps/30)^2k` like every difference
+term. The 2026-08-30 sweep behind the shipped values is in the config comments;
+the headline is first/second/third-order jitter down 39 / 70 / 83 % with
+reprojection flat and load peaks intact.
+
+**Joint torques, weighted by strength.** The physics only pins the *sum* of the
+contact forces; how four contacts share a load is statically indeterminate, and
+with only `force_magnitude` to break the tie the solve chose the split with the
+least internal squeeze — which on the demonstrator wall put too much on the hands
+and starved the feet. Three terms now read the joint torques RNEA computes
+(everything past the six root rows, in body-weight units): `torque_magnitude`,
+the effort cost, plus `torque_smooth` and `torque_accel`, its first and second
+differences over the counted frames. Each DOF's torque is multiplied by its
+joint's entry in `[torque.multipliers]`, keyed by joint group (the joint name
+without side and index), so a torque costs more the weaker the joint. The shipped
+table is 200 N·m divided by each joint's published maximum voluntary torque —
+legs and trunk 1, shoulder 2.5, elbow 3.3, wrist 17, fingers 25 — so a load the
+body could carry with either an arm or a leg lands on the leg. Set every entry to
+1 to get the plain torque terms back.
 
 ## What is deliberately absent
 

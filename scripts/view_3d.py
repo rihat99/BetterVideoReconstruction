@@ -34,12 +34,18 @@ For each clip it shows, in the metric world frame:
 * ``kindyn_1`` / ``kindyn_manual`` — the joint kinematics+dynamics bodies
   (``human_optim/kindyn_{1,manual}.npz``; ``kindyn_manual`` is the
   manual-annotation reference chain), skinned meshes that also carry
-  force/torque data.
+  force/torque data;
+* ``mhr_1_sup`` — the kindyn body re-fitted onto Meta's MHR rig
+  (``human_optim/mhr_1.npz``, the pose supervision the contact model trains on).
+  Mesh only: no contact frames and no forces are drawn on it.
 
 The dynamics folder's **force display** dropdown picks the arrow regime:
-``per-joint`` accumulates each joint's frame forces into one arrow at the joint
-(the classic view), ``per-frame`` draws every contact frame's own solved force
-where it acts on the skin (kindyn sources, which store ``frame_forces``).
+``per-joint`` accumulates each joint's frame forces into one arrow at the joint —
+each hand's forces summed at its wrist, never on individual finger joints —
+``per-frame`` draws every contact frame's own solved force where it acts on the
+skin (kindyn sources, which store ``frame_forces``). Joint spheres stay the
+neutral skeleton grey; the ``joint torques`` toggle turns them yellow, sized by
+torque magnitude.
 
 The three mesh sources are each one skinned mesh per person, posed per frame (LBS
 in the browser, one upload) over a single averaged ``betas`` identity.
@@ -100,7 +106,7 @@ from tools.viewer import view_3d
 
 # The stage feature dirs the viewer's loaders read (sapiens is stage-only, so it is
 # not linked). Each is aliased as ``<farm>/<stage>`` → the scene's feature tree.
-_FARM_STAGES = ("geometry", "sam3d", "vggt", "human_optim")
+_FARM_STAGES = ("geometry", "sam3d", "vggt", "human_optim", "geocalib")
 
 
 def _link_scene_farm(paths, row, farm_root: Path) -> bool:

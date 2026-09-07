@@ -28,16 +28,19 @@ ankles — carry gate/force bits; every other joint is detector-only):
     is precise (held-out precision 0.983).
 
 ``gate-only`` (bit 2, no detector)
-    Surface evidence hard-capped below the top tier — this is where the
-    near-and-still hovering false positives live.  Solved contact force is
-    semi-independent of the distance/stillness that created the gate, so force
-    corroboration continuously lifts the cap toward a mid-high value.
+    Surface evidence, hard-capped LOWEST.  Since the load gate (2026-08-30) this
+    class means something narrower than it used to: geometry decided, and it was
+    allowed to only because the force solve could not explain the body at all
+    there.  Nothing checked it, so it is the least trustworthy class — measured
+    .88 precise against .91 for force alone and .94 for the two agreeing.  Force
+    corroboration still lifts its cap continuously.
 
 ``force-only`` (bit 4, no detector, no gate)
-    The misregistration rescues: honest contacts a limb 10-30 cm off the wall
-    made, where surface evidence is ~0.  Their evidence is the solved force
-    share ``|f| / body-weight`` (already suppressed on a fast-moving limb by the
-    solve's work penalty), capped mid.
+    Since the load gate, the PRIMARY decision rather than a rescue: it is about
+    half of all contact labels, and the most precise single arm.  Its evidence is
+    the solved force share ``|f| / body-weight`` (already suppressed on a
+    fast-moving limb by the solve's work penalty) or the surface evidence,
+    whichever is larger, capped just under the two-arm tier.
 
 No-contact evidence is depth-trusted ``motion`` (net joint speed over the readout
 window, scaled by how well the local body fit agrees with the human depth cloud).
@@ -57,13 +60,16 @@ distance while its no-contact label is still wrong.
 """
 from __future__ import annotations
 
+from collections.abc import Sequence
+
 import numpy as np
 import torch
 
 
-# Artifact version of the per-joint-era confidence (written by the frozen
-# scripts/score_contacts.py path only; the frames-era stage writes
-# contact_label_schema instead).
+# Artifact version of the source-conditional confidence. Born in the per-joint era;
+# ``estimate_contacts`` now runs the same algebra on the contact-frame axis (the (N,K)
+# shapes here are axis-agnostic) and folds the result onto report joints
+# (:func:`frame_report_joints` / :func:`fold_to_joints`).
 CONTACT_CONFIDENCE_SCHEMA = 8
 CONTACT_CONFIDENCE_METHOD = "source-conditional-v1"
 
@@ -84,11 +90,16 @@ CONTACT_CONFIDENCE_DEFAULTS: dict[str, float] = {
     "image_margin_px": 10.0,
     "occ_margin_m": 0.05,
     "occ_soft_m": 0.01,
-    # Source-conditional caps (v6).  Each caps how far a label of a given source
-    # can be trusted; only a semi-independent witness lifts it.
-    "gate_only_cap": 0.50,      # gate-added contact, no force corroboration (the FP floor)
-    "gate_force_cap": 0.85,     # gate contact fully corroborated by solved force
-    "force_only_cap": 0.70,     # force-added contact (misregistration rescue, positionally uncertain)
+    # Source-conditional caps.  Each caps how far a label of a given source can be
+    # trusted; only a semi-independent witness lifts it.  The two arms keep their
+    # original roles (geometry = near-and-still decides; the force witness adds
+    # rescues and checks the penetration exception), so the caps keep their original
+    # ordering: corroborated > lone force rescue > lone geometric label.  They are
+    # trust ceilings, not calibrated probabilities.
+    "gate_only_cap": 0.50,      # geometry alone
+    "gate_force_cap": 0.85,     # both arms agree
+    "force_only_cap": 0.70,     # the force witness alone — a misregistration rescue,
+                                # positionally uncertain by construction
     "force_share_scale": 0.25,  # |f|/body-weight scale of the force ramp (evidence and corroboration)
     # No-contact missing-depth caps default OFF (1.0 = no cap): the premise that a
     # missing depth witness marks an unreliable no-contact was refuted on the ground
@@ -175,6 +186,65 @@ def occlusion_group_ids(joint_names: list[str]) -> np.ndarray:
             out[present] = next_group
             next_group += 1
     return out
+
+
+def frame_report_joints(
+    frame_parents: Sequence[int],
+    joint_names: Sequence[str],
+    parents: np.ndarray,
+) -> np.ndarray:
+    """Map each contact frame to the joint that reports it ``(F,)``.
+
+    A frame reports at its parent joint, with one exception: every frame on a hand
+    (palms, fingertips, thumbs — anything whose parent chain passes through a wrist)
+    reports at that wrist, the joint we usually call "the hand". Downstream a hand is
+    one coarse contact state, so its many frames must land on one joint. Implemented
+    as an ancestor walk up the kinematic ``parents`` tree, so no name list of hand
+    frames is needed.
+    """
+    names = [str(n) for n in joint_names]
+    wrists = {i for i, n in enumerate(names) if n in ("left_wrist", "right_wrist")}
+    out = []
+    for parent in frame_parents:
+        k = int(parent)
+        while k >= 0 and k not in wrists:
+            k = int(parents[k])
+        out.append(k if k in wrists else int(parent))
+    return np.asarray(out, dtype=np.int64)
+
+
+def fold_to_joints(
+    frame_contact: np.ndarray,     # (..., F) bool — final frame labels
+    frame_confidence: np.ndarray,  # (..., F) — per-frame label confidence
+    report_joint: np.ndarray,      # (F,) — from :func:`frame_report_joints`
+    num_joints: int,
+) -> tuple[np.ndarray, np.ndarray]:
+    """Fold frame labels and confidences onto their report joints.
+
+    A joint is in contact when ANY of its frames is (the OR the per-joint era's export
+    used for fingers→wrist), so the confidences fold with the label's own algebra:
+
+      * a **contact** joint is as sure as its surest touching frame — the OR only
+        needs one true member;
+      * a **no-contact** joint is only as sure as its least sure frame — the claim
+        needs every member to be honestly free.
+
+    Returns ``(joint_contact, joint_confidence)`` with a trailing ``num_joints`` axis.
+    A joint that owns no contact frame stays ``False`` with ``NaN`` confidence — the
+    stage makes no statement there.
+    """
+    report_joint = np.asarray(report_joint)
+    contact = np.zeros((*frame_contact.shape[:-1], num_joints), dtype=bool)
+    confidence = np.full(contact.shape, np.nan, dtype=np.float32)
+    for j in np.unique(report_joint):
+        cols = np.flatnonzero(report_joint == j)
+        sub = frame_contact[..., cols]
+        conf = frame_confidence[..., cols]
+        touching = sub.any(axis=-1)
+        surest_touch = np.where(sub, conf, -np.inf).max(axis=-1)
+        contact[..., j] = touching
+        confidence[..., j] = np.where(touching, surest_touch, conf.min(axis=-1))
+    return contact, confidence
 
 
 def _smoothstep01(x: torch.Tensor) -> torch.Tensor:

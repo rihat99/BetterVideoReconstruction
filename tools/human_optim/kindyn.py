@@ -24,7 +24,7 @@ whole point of solving pose and force together. Two frames sharing a parent join
 The physics half of the objective is packaged as a :class:`DynamicsSpec`, built
 once per person. :func:`~tools.human_optim.optimizer.optimize_person` owns the
 shared kinematic Problem and simply adds the force leaf, threads the RNEA forward
-through its per-iteration state and registers the five dynamics terms. The stage
+through its per-iteration state and registers the dynamics terms. The stage
 entry point is :func:`run_kindyn`, driven by
 ``scripts/stages/human_optimization.py --stages kindyn_1``.
 """
@@ -57,6 +57,9 @@ from .stages import (
 
 _GRAVITY_MAG = 9.81  # m/s²
 
+#: Binomial stencil of the k-th finite difference, over k+1 consecutive frames.
+_DIFF_COEFFS = {1: (-1.0, 1.0), 2: (1.0, -2.0, 1.0), 3: (-1.0, 3.0, -3.0, 1.0)}
+
 
 # ─────────────────────────── the physics half ────────────────────────────
 
@@ -69,10 +72,10 @@ class DynamicsSpec:
     joint rows the 12 contact frames occupy, the per-frame contact ``mask``, and the
     frozen friction pyramids. Its methods run the RNEA forward (recomputing
     ``v``/``a``, the contact points and their lever arms from the *current* ``q`` so
-    gradient flows into the pose), define the five dynamics loss terms, warm-start
+    gradient flows into the pose), define the dynamics loss terms, warm-start
     the forces at the initial pose, and package the result for the output npz.
 
-    All five loss weights are **linear** — the term value is ``0.5·mean_t Σ residual²``
+    All dynamics loss weights are **linear** — the term value is ``0.5·mean_t Σ residual²``
     and the engine multiplies by the (kindyn-column) weight, exactly like every kinematic
     term.
 
@@ -80,7 +83,7 @@ class DynamicsSpec:
     (:attr:`res_scale`). Without that the physics terms are a *sum* of newtons squared,
     so their pull on ``q`` grows with clip length and body size while every kinematic
     term stays a per-frame mean — the same objective would dominate a 900-frame clip and
-    barely register on a 60-frame one. In body-weight units all five terms are O(1) and
+    barely register on a 60-frame one. In body-weight units all terms are O(1) and
     one weight means one thing everywhere (the force witness solves in the same units,
     for the same reason).
     """
@@ -102,6 +105,7 @@ class DynamicsSpec:
     res_scale: float = 1.0        #: 1 / (counted frames × body weight²) — see the class docstring
     spacing: int = 1              #: v/a stencil step (frames) — round(fps/30), keeps the accel noise at the 30 fps reference
     dyn_row: torch.Tensor | None = None  #: (T,) float 0/1 — frames whose ±spacing stencil is fully tracked; only these rows carry the base-wrench residual (defaults to ``valid``)
+    tau_weight: torch.Tensor | None = None  #: (nv-6,) per-DOF multiplier of the joint-torque terms (``[torque.multipliers]`` of the DOF's joint); None = 1 everywhere
     cone_axis: torch.Tensor | None = None   #: (T, 12, 3) frozen contact normal per frame
     cone_gen: torch.Tensor | None = None    #: (T, 12, 4, 3) frozen pyramid edge directions
     mu: float = 1.0                         #: tan(cone half-angle) — the friction coefficient
@@ -116,6 +120,11 @@ class DynamicsSpec:
             self.dyn_row = torch.as_tensor(np.asarray(self.valid, bool),
                                            dtype=self.mask.dtype, device=self.mask.device)
         self.dyn_pair = self.dyn_row[1:] * self.dyn_row[:-1]   # (T-1,) both-rows-counted steps
+        self.dyn_trip = self.dyn_pair[1:] * self.dyn_pair[:-1]  # (T-2,) all-three-rows-counted
+        # Persisting-contact masks for the higher-order force differences: an order-k
+        # term may act only where the contact holds over its whole (k+1)-frame window.
+        self.ftrip = self.fpair[1:] * self.fpair[:-1]          # (T-2, 12)
+        self.fquad = self.ftrip[1:] * self.ftrip[:-1]          # (T-3, 12)
 
     def wrench_rms(self, tau: torch.Tensor) -> float:
         """Per-counted-frame RMS of the 6-row root residual — the stage's headline number.
@@ -213,18 +222,23 @@ class DynamicsSpec:
         return rnea(self.model, qn, v, a, fext=fext), f_eff
 
     @staticmethod
-    def force_split(f_world: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
-        """Split adjacent-frame force change into magnitude vs direction parts.
+    def force_split(f_world: torch.Tensor, order: int = 1) -> tuple[torch.Tensor, torch.Tensor]:
+        """Split the ``order``-th force difference into magnitude vs direction parts.
 
-        About the mean direction ``u`` of the two forces, ``df_par`` is the
-        ‖f‖-change part and ``df_perp`` the direction-change part — the same
-        orthogonal decomposition the dynamics stage uses. Each ``(T-1, 12, 3)``.
+        The k-th finite difference (binomial stencil over ``k+1`` consecutive
+        frames) is decomposed about the mean direction ``u`` of the forces in its
+        window: ``d_par`` is the ‖f‖-change part and ``d_perp`` the
+        direction-change part. Order 1 is the adjacent-frame decomposition the
+        stage always had; orders 2 and 3 restrain the force's acceleration and
+        jerk the same way. Each ``(T-k, 12, 3)``.
         """
-        df = f_world[1:] - f_world[:-1]
-        u = f_world[1:] + f_world[:-1]
+        num_frames = f_world.shape[0]
+        window = [f_world[i:num_frames - order + i] for i in range(order + 1)]
+        d = sum(c * w for c, w in zip(_DIFF_COEFFS[order], window))
+        u = sum(window)
         u = u / u.norm(dim=-1, keepdim=True).clamp_min(1e-9)
-        df_par = (df * u).sum(-1, keepdim=True) * u
-        return df_par, df - df_par
+        d_par = (d * u).sum(-1, keepdim=True) * u
+        return d_par, d - d_par
 
     def populate(self, st, f_free: torch.Tensor, gen_u: torch.Tensor | None) -> None:
         """Add the per-iteration lazy RNEA products to the shared :class:`State`.
@@ -235,9 +249,11 @@ class DynamicsSpec:
         st.put_lazy("f_world", lambda: self.compose_forces(f_free, gen_u))
         st.put_lazy("dyn", lambda: self.forward(st["qn"], st["f_world"]))
         st.put_lazy("dyn_split", lambda: self.force_split(st["f_world"]))
+        st.put_lazy("dyn_split2", lambda: self.force_split(st["f_world"], 2))
+        st.put_lazy("dyn_split3", lambda: self.force_split(st["f_world"], 3))
 
     def register(self, problem) -> None:
-        """Register the five dynamics terms (active only where their weight is).
+        """Register the dynamics terms (active only where their weight is).
 
         A person with no contact labels registers nothing: with zero force capacity
         the base-wrench term's only descent direction is accelerating the body at
@@ -249,31 +265,55 @@ class DynamicsSpec:
 
         def _base(st):
             tau = st["dyn"][0]
-            sq = (self.dyn_row[:, None] * tau[:, :6].pow(2)).sum()
+            sq = (self.dyn_row[:, None] * tau[:, :3].pow(2)).sum()
             return half * sq, {"bwN": sq.sqrt()}
+
+        def _base_ang(st):
+            tau = st["dyn"][0]
+            sq = (self.dyn_row[:, None] * tau[:, 3:6].pow(2)).sum()
+            return half * sq, {"bwNm": sq.sqrt()}
 
         def _fmag(st):
             f_eff = st["dyn"][1]
             return half * f_eff.pow(2).sum()
 
-        def _fs_mag(st):
-            df_par = st["dyn_split"][0]
-            return half * (self.fpair[..., None] * df_par.pow(2)).sum()
+        def _smooth(split_key: str, part: int, mask: torch.Tensor):
+            def term(st):
+                return half * (mask[..., None] * st[split_key][part].pow(2)).sum()
+            return term
 
-        def _fs_dir(st):
-            df_perp = st["dyn_split"][1]
-            return half * (self.fpair[..., None] * df_perp.pow(2)).sum()
+        def _tmag(st):
+            tau = st["dyn"][0]
+            return half * (self.dyn_row[:, None] * self.torque_sq(tau[:, 6:])).sum()
 
         def _tsmooth(st):
             tau = st["dyn"][0]
             dtau = tau[1:, 6:] - tau[:-1, 6:]
-            return half * (self.dyn_pair[:, None] * dtau.pow(2)).sum()
+            return half * (self.dyn_pair[:, None] * self.torque_sq(dtau)).sum()
+
+        def _taccel(st):
+            tau = st["dyn"][0]
+            d2tau = tau[2:, 6:] - 2.0 * tau[1:-1, 6:] + tau[:-2, 6:]
+            return half * (self.dyn_trip[:, None] * self.torque_sq(d2tau)).sum()
 
         problem.add_term("base_wrench", _base)
+        problem.add_term("base_wrench_ang", _base_ang)
         problem.add_term("force_magnitude", _fmag)
-        problem.add_term("force_smooth_mag", _fs_mag)
-        problem.add_term("force_smooth_dir", _fs_dir)
+        problem.add_term("force_smooth_mag", _smooth("dyn_split", 0, self.fpair))
+        problem.add_term("force_smooth_dir", _smooth("dyn_split", 1, self.fpair))
+        problem.add_term("force_accel_mag", _smooth("dyn_split2", 0, self.ftrip))
+        problem.add_term("force_accel_dir", _smooth("dyn_split2", 1, self.ftrip))
+        problem.add_term("force_jerk_mag", _smooth("dyn_split3", 0, self.fquad))
+        problem.add_term("force_jerk_dir", _smooth("dyn_split3", 1, self.fquad))
+        problem.add_term("torque_magnitude", _tmag)
         problem.add_term("torque_smooth", _tsmooth)
+        problem.add_term("torque_accel", _taccel)
+
+    def torque_sq(self, tau_joint: torch.Tensor) -> torch.Tensor:
+        """``(T, nv-6)`` squared joint torques (or torque differences), each DOF times its
+        :attr:`tau_weight` — the strength-weighted torque every torque term reads."""
+        sq = tau_joint.pow(2)
+        return sq if self.tau_weight is None else sq * self.tau_weight
 
     def warmstart(self, qn_init: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor | None]:
         """Solve the forces at the fixed initial pose (the sequential dynamics solve).
@@ -311,19 +351,34 @@ class DynamicsSpec:
 
         half = 0.5 * self.res_scale
 
+        smooth_orders = ((1, "force_smooth_mag", "force_smooth_dir", self.fpair),
+                         (2, "force_accel_mag", "force_accel_dir", self.ftrip),
+                         (3, "force_jerk_mag", "force_jerk_dir", self.fquad))
+
         def closure():
             opt.zero_grad()
             f_world = self.compose_forces(f, gen_u)
             fext, f_eff = self.build_fext(f_world, oMi, frames7)
             tau = rnea(self.model, qn, v, a, fext=fext)
-            loss = (w["base_wrench"] * half * (self.dyn_row[:, None] * tau[:, :6].pow(2)).sum()
+            loss = (w["base_wrench"] * half * (self.dyn_row[:, None] * tau[:, :3].pow(2)).sum()
+                    + w.get("base_wrench_ang", 0.0) * half
+                    * (self.dyn_row[:, None] * tau[:, 3:6].pow(2)).sum()
                     + w["force_magnitude"] * half * f_eff.pow(2).sum())
+            for order, key_mag, key_dir, mask in smooth_orders:
+                if f.shape[0] > order and (w.get(key_mag, 0.0) or w.get(key_dir, 0.0)):
+                    d_par, d_perp = self.force_split(f_world, order)
+                    loss = loss + w.get(key_mag, 0.0) * half * (mask[..., None] * d_par.pow(2)).sum()
+                    loss = loss + w.get(key_dir, 0.0) * half * (mask[..., None] * d_perp.pow(2)).sum()
+            loss = loss + w.get("torque_magnitude", 0.0) * half * (
+                self.dyn_row[:, None] * self.torque_sq(tau[:, 6:])).sum()
             if f.shape[0] > 1:
-                df_par, df_perp = self.force_split(f_world)
-                loss = loss + w["force_smooth_mag"] * half * (self.fpair[..., None] * df_par.pow(2)).sum()
-                loss = loss + w["force_smooth_dir"] * half * (self.fpair[..., None] * df_perp.pow(2)).sum()
                 dtau = tau[1:, 6:] - tau[:-1, 6:]
-                loss = loss + w["torque_smooth"] * half * (self.dyn_pair[:, None] * dtau.pow(2)).sum()
+                loss = loss + w["torque_smooth"] * half * (
+                    self.dyn_pair[:, None] * self.torque_sq(dtau)).sum()
+            if f.shape[0] > 2:
+                d2tau = tau[2:, 6:] - 2.0 * tau[1:-1, 6:] + tau[:-2, 6:]
+                loss = loss + w.get("torque_accel", 0.0) * half * (
+                    self.dyn_trip[:, None] * self.torque_sq(d2tau)).sum()
             loss.backward()
             return loss
 
@@ -398,6 +453,16 @@ class DynamicsSpec:
                 dtq = (tau[1:, 6:] - tau[:-1, 6:]).norm(dim=-1)
                 vp = self.dyn_pair.bool()
                 tjit = float(dtq[vp].mean()) if bool(vp.any()) else 0.0
+            fjit2_mag = fjit2_dir = 0.0
+            if N > 2:
+                d2_par, d2_perp = self.force_split(f_final, 2)
+                fp2 = self.ftrip.bool()
+                if bool(fp2.any()):
+                    fjit2_mag = float(d2_par.norm(dim=-1)[fp2].mean())
+                    fjit2_dir = float(d2_perp.norm(dim=-1)[fp2].mean())
+            cnt = max(int(self.dyn_row.sum()), 1)
+            lin_rms = float((self.dyn_row[:, None] * tau[:, :3].pow(2)).sum().div(cnt).sqrt())
+            ang_rms = float((self.dyn_row[:, None] * tau[:, 3:6].pow(2)).sum().div(cnt).sqrt())
             # Cone violation of the solved forces vs the TRUE cone (N). Generator forces live
             # in the inscribed pyramid, so this must read ~0; nonzero means a broken invariant.
             cone_str, cone_viol_max = "  cone OFF", float("nan")
@@ -408,9 +473,11 @@ class DynamicsSpec:
                 cone_str = (f"  cone[{int(viol.numel())}] viol μ={float(viol.mean()):.2e} "
                             f"max={cone_viol_max:.2e} N" if viol.numel() else "  cone[0]")
 
-        print(f"    [kindyn dynamics] base wrench {base1:.2f} N/frame RMS  mean|f|={mean_f:.0f} N "
+        print(f"    [kindyn dynamics] base wrench {base1:.2f} N/frame RMS "
+              f"(lin {lin_rms:.1f} N  ang {ang_rms:.2f} N·m)  mean|f|={mean_f:.0f} N "
               f"(weight≈{self.total_mass * _GRAVITY_MAG:.0f} N)  jitter |Δ|f||={fjit_mag:.1f} "
-              f"|Δf⊥|={fjit_dir:.1f} N |Δτ|={tjit:.2f}{cone_str}")
+              f"|Δf⊥|={fjit_dir:.1f} |Δ²f∥|={fjit2_mag:.1f} |Δ²f⊥|={fjit2_dir:.1f} N "
+              f"|Δτ|={tjit:.2f}{cone_str}")
         return dict(
             joints_world=joints_world, torque_mag=torque_mag, force_world=force_world,
             joint_torques=tau.cpu().numpy().astype(np.float32),
@@ -424,17 +491,47 @@ class DynamicsSpec:
         )
 
 
+def joint_group(joint_name: str) -> str:
+    """The ``[torque.multipliers]`` key of a joint: its name without side and index.
+
+    ``left_hip`` → ``hip``, ``spine2`` → ``spine``, ``right_index3`` → ``index``.
+    """
+    return joint_name.removeprefix("left_").removeprefix("right_").rstrip("0123456789")
+
+
+def torque_multipliers(model, joint_names, table: dict[str, float]) -> torch.Tensor:
+    """``(nv-6,)`` per-DOF multiplier of the joint-torque terms from a per-group table.
+
+    Each joint's DOF rows (``model.idx_vs`` / ``nvs``, minus the 6 root rows) get the
+    ``table`` value of its :func:`joint_group`. The table is the strength-ratio idea:
+    a joint's torque costs more the weaker the joint, so a load the solve can put on
+    either arm or leg lands on the leg. Every joint must be covered.
+    """
+    idx_vs = [int(x) for x in model.idx_vs]
+    nvs = [int(x) for x in model.nvs]
+    weight = torch.ones(int(model.nv) - 6)
+    for name in joint_names:
+        mb = int(model.body_name_to_id[name])
+        if idx_vs[mb] < 6:
+            continue                                   # the free-flyer root
+        weight[idx_vs[mb] - 6: idx_vs[mb] - 6 + nvs[mb]] = float(table[joint_group(name)])
+    return weight
+
+
 def build_dynamics_spec(body, betas: torch.Tensor, frame_labels: torch.Tensor,
                         valid: np.ndarray, gravity_world: np.ndarray, *,
                         weights: dict, dyn_opt: dict, fps: float, device: str,
                         q_world: torch.Tensor, cones: bool,
-                        half_angle_deg: float = 45.0) -> DynamicsSpec:
+                        half_angle_deg: float = 45.0,
+                        torque_table: dict[str, float] | None = None) -> DynamicsSpec:
     """Assemble one person's :class:`DynamicsSpec` from the frozen-at-init pieces.
 
     The RNEA model comes baked from BetterHuman at ``betas`` (real per-part inertia,
     native ``q`` order); only gravity is overridden to the scene's world-down. The
     contact mask marks, per contact frame and video frame, whether the labels say that
     frame touches on a valid frame — exactly the steps it may carry a force.
+    ``torque_table`` (``[torque.multipliers]``) weights the joint-torque terms per
+    joint group; ``None`` weights every joint the same.
 
     The friction pyramids are frozen here, once, at the warm-start pose ``q_world``:
     forward kinematics gives every contact frame its outward skin normal, the contact
@@ -486,7 +583,9 @@ def build_dynamics_spec(body, betas: torch.Tensor, frame_labels: torch.Tensor,
         gravity_world=np.asarray(gravity_world, np.float32), valid=vb,
         total_mass=total_mass, mu=math.tan(math.radians(float(half_angle_deg))),
         res_scale=1.0 / (max(int(ok.sum()), 1) * body_weight_n ** 2),
-        spacing=spacing, dyn_row=torch.as_tensor(ok, dtype=dtype, device=dev))
+        spacing=spacing, dyn_row=torch.as_tensor(ok, dtype=dtype, device=dev),
+        tau_weight=None if torque_table is None else
+        torque_multipliers(model, body.joint_names, torque_table).to(dev))
     if cones:
         with torch.no_grad():
             _, frames7 = spec.placements(normalize_q(q_world.to(dev), body.num_joints))
@@ -633,7 +732,8 @@ def run_kindyn(source, pred: Path, cfg: HumanOptimConfig, device: str, *,
         spec = build_dynamics_spec(
             mid, betas_mean, contact_labels, vmask, gravity_world,
             weights=weights, dyn_opt=dyn_opt, fps=fps, device=device,
-            q_world=q_world, cones=cones, half_angle_deg=half_angle)
+            q_world=q_world, cones=cones, half_angle_deg=half_angle,
+            torque_table=knobs["torque"]["multipliers"])
 
         print(f"[{tag}] person obj_id={oid} ({int(vmask.sum())}/{N} valid) …")
         # Fingers stay UNfrozen (like kinematics_2): a fingertip contact frame must be

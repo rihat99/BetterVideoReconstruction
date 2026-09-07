@@ -150,39 +150,51 @@ def _moller_trumbore(
 @torch.no_grad()
 def joint_occlusion_gap(
     vertices: torch.Tensor,        # (T, V, 3) posed world-frame vertices
-    joints: torch.Tensor,          # (T, J, 3) posed world-frame joint centres
+    joints: torch.Tensor,          # (T, J, 3) posed world-frame target points
     cam_centers: torch.Tensor,     # (T, 3) world camera centres
     faces: torch.Tensor,           # (F, 3) long SMPL-X triangles (shared topology)
     v2j: torch.Tensor,             # (V,) long vertex→joint
-    occlusion_group: torch.Tensor, # (J,) nonnegative local-surface group id per joint
+    occlusion_group: torch.Tensor, # (Jmodel,) nonnegative local-surface group id per joint
     *,
     other_vertices: torch.Tensor | None = None,  # (T,V,3) or (T,Pother,V,3)
+    target_group: torch.Tensor | None = None,    # (J,) own-skin group per TARGET; None = occlusion_group
 ) -> torch.Tensor:
-    """Per-(frame, joint) in-front body-occlusion gap along the camera→joint ray ``(T, J)``.
+    """Per-(frame, target) in-front body-occlusion gap along the camera→target ray ``(T, J)``.
 
-    Casts one ray from the camera centre through each joint centre and intersects it
+    Casts one ray from the camera centre through each target point and intersects it
     (Möller–Trumbore) with the **full-resolution** triangles of the target person and
     of every other tracked person. The gap, in metres, is::
 
-        gap = joint_depth − nearest_hit_depth   (hits strictly in front of the joint)
+        gap = target_depth − nearest_hit_depth   (hits strictly in front of the target)
 
-    the thickness of body surface standing in front of the joint. Only intersections
-    nearer than the joint centre count, so a positive gap always means a surface sits
-    between the camera and the joint (occluded). A surface at or behind the joint is not
-    an occluder: with nothing in front the gap is ``NaN`` (clear) — the same value the
-    joint gets when no triangle is hit at all.
+    the thickness of body surface standing in front of the target. Only intersections
+    nearer than the target count, so a positive gap always means a surface sits
+    between the camera and the target (occluded). A surface at or behind the target is
+    not an occluder: with nothing in front the gap is ``NaN`` (clear) — the same value
+    the target gets when no triangle is hit at all.
 
-    A triangle is the joint's **own** skin (never an occluder) when any of its three
-    vertices is owned — via ``v2j`` — by a joint in the target joint's
-    ``occlusion_group``. Other people's triangles are never own, so another tracked
-    person can occlude the joint. ``other_vertices`` shares the target's ``faces``
-    topology (the same ``V`` vertices per person); a triangle with a non-finite vertex
-    (an invalid frame, or a missing other-person mesh) never registers a hit.
+    The targets are the model's joint centres (the per-joint era) or any other body
+    points — the contact frames pass their world positions with ``target_group``
+    naming each point's own-skin group. A triangle is the target's **own** skin
+    (never an occluder) when any of its three vertices is owned — via ``v2j`` and
+    ``occlusion_group`` — by a joint in the target's group. When ``target_group`` is
+    ``None`` the targets ARE the model joints and ``occlusion_group`` plays both
+    roles, exactly the per-joint behaviour. Other people's triangles are never own,
+    so another tracked person can occlude the target. ``other_vertices`` shares the
+    target's ``faces`` topology (the same ``V`` vertices per person); a triangle with
+    a non-finite vertex (an invalid frame, or a missing other-person mesh) never
+    registers a hit.
     """
     T, V, _ = vertices.shape
     J = joints.shape[1]
-    if occlusion_group.shape != (J,) or bool((occlusion_group < 0).any()):
+    if occlusion_group.ndim != 1 or bool((occlusion_group < 0).any()):
         raise ValueError("occlusion_group must contain one nonnegative group ID per joint")
+    if target_group is None:
+        if occlusion_group.shape != (J,):
+            raise ValueError("occlusion_group must contain one nonnegative group ID per joint")
+        target_group = occlusion_group
+    elif target_group.shape != (J,) or bool((target_group < 0).any()):
+        raise ValueError("target_group must contain one nonnegative group ID per target")
     device = vertices.device
     faces = faces.long()
     num_faces = faces.shape[0]
@@ -203,7 +215,7 @@ def joint_occlusion_gap(
     # people's faces carry a sentinel group that matches no joint, so are never own.
     face_group = torch.full((faces_all.shape[0], 3), -1, dtype=torch.long, device=device)
     face_group[:num_faces] = occlusion_group[v2j][faces]                  # (F,3)
-    own_mask = (occlusion_group[:, None, None] == face_group[None]).any(dim=-1)  # (J,Ftot)
+    own_mask = (target_group[:, None, None] == face_group[None]).any(dim=-1)  # (J,Ftot)
 
     inf = torch.tensor(float("inf"), device=device, dtype=vertices.dtype)
     gap = torch.empty((T, J), device=device, dtype=vertices.dtype)
@@ -419,6 +431,47 @@ def drift_gate(guarded_min_sdf: torch.Tensor, drift: torch.Tensor, *,
                        torch.full_like(guarded_min_sdf, infinity))
 
 
+def load_gate(guarded_min_sdf: torch.Tensor, drift: torch.Tensor,
+              load_bw: torch.Tensor, *, still_m: float, still_override_m: float,
+              min_load_bw: float,
+              mute: torch.Tensor | None = None) -> tuple[torch.Tensor, torch.Tensor]:
+    """Penetration outranks stillness — but load outranks penetration.
+
+    The stillness gate has one exception (``still_override_m``, :func:`drift_gate`): a
+    step pressing within a centimetre of the surface counts however fast it moves. A
+    sprint plant or a cartwheel hand is a real contact no drift window can call still.
+    The trouble is that a hand sweeping ALONG the wall presses just as close — the
+    exception cannot tell a plant from a sweep, and on the annotated corpus it alone
+    costs the geometric arm four points of precision.
+
+    The force solve can tell them apart: a plant carries weight, a sweep carries none.
+    So wherever the solve was heard, a pressing step keeps its exception only if the
+    solve routes at least ``min_load_bw`` of body weight through it. Where the solve
+    was **muted** — ``mute (T,)`` from :func:`tools.human_optim.forces.solve_mute`, a
+    rope or a belay carrying the body, a trajectory too broken to explain — physics
+    said nothing and the exception stands as it always did: missing evidence reads as
+    *unknown*, never as a negative. Still steps are never touched; stillness needs no
+    second witness. (Making load REPLACE stillness outright was measured 2026-08-30
+    and refuted: −56% false positives but −6 points of recall — a heel sharing a hold
+    with its own forefoot carries no solvable load of its own.)
+
+    Returns ``(gated, pressed)``: the gated signal for the hysteresis, and the steps
+    whose surviving press exempts their span from the duration rules downstream.
+    ``min_load_bw <= 0`` keeps every press — the plain ``still_override_m`` rule.
+    """
+    still_only = drift_gate(guarded_min_sdf, drift, still_m=still_m,
+                            still_override_m=-1.0)
+    if still_override_m <= 0.0:
+        return still_only, torch.zeros_like(guarded_min_sdf, dtype=torch.bool)
+    pressed = (guarded_min_sdf < still_override_m) & torch.isfinite(drift)
+    if min_load_bw > 0.0:
+        confirmed = load_bw >= min_load_bw
+        if mute is not None:
+            confirmed = confirmed | mute[:, None]
+        pressed = pressed & confirmed
+    return torch.where(pressed, guarded_min_sdf, still_only), pressed
+
+
 def drift_gated_contact(
     guarded_min_sdf: torch.Tensor,   # (T, J) guarded per-joint min signed distance (m)
     drift: torch.Tensor,             # (T, J) per-joint net window drift (m)
@@ -517,7 +570,13 @@ def merge_contact_spans(
 # (tools/body.py). TWO things must agree before it counts as touching:
 #   surface  — a confident scene point is close, and the frame sits at/just
 #              inside it (signed distance below the hysteresis thresholds);
-#   stillness — the frame barely drifted over a short window.
+#   stillness — the frame barely drifted over a short window (with one exception,
+#              the penetration override still_override_m: a step pressing into the
+#              surface counts however fast it moves).
+# The readout stage, which has solved the forces by then, holds the EXCEPTION to a
+# second witness: a pressing-but-moving step keeps it only where the solve routes
+# real load through the frame, or was muted (see load_gate). Still steps never need
+# the solve's blessing.
 # The frame's own normal is deliberately NOT a gate. Both inputs it would need are
 # too noisy to veto on: the scene normals come from a reconstructed point cloud, and
 # the frame's normal comes from the fitted pose. Gating on "does the skin face the
@@ -708,6 +767,9 @@ class FrameContacts(NamedTuple):
     normal_dot: torch.Tensor
     #: ``(T, F)`` bool — steps :func:`suppress_toe_sides` forced out (diagnostic).
     toe_suppressed: torch.Tensor
+    #: ``(T, F)`` bool — the surviving penetration exception (see :func:`load_gate`);
+    #: the readout exempts these steps' spans from its duration rules.
+    pressed: torch.Tensor
 
 
 def detect_frame_contacts(
@@ -727,6 +789,9 @@ def detect_frame_contacts(
     max_dist_m: float,
     conf_thresh: float,
     prune_margin_m: float,
+    load_bw: torch.Tensor | None = None,
+    min_load_bw: float = 0.0,
+    load_mute: torch.Tensor | None = None,
 ) -> FrameContacts:
     """Detect contact on the contact frames — the single detector for the whole pipeline.
 
@@ -743,6 +808,14 @@ def detect_frame_contacts(
     survives however brief (a one-frame bounce is 1–2 frames at 25 fps, and penetration
     is not flicker). The default disables both.
 
+    ``load_bw (T, F)`` is the solved contact load in body weights. When it is given with
+    ``min_load_bw > 0``, the penetration exception needs the solve's blessing
+    (:func:`load_gate`): a pressing-but-moving step counts only where the solve routes
+    at least ``min_load_bw`` through it, or was muted (``load_mute``). Still steps are
+    untouched. Only the readout stage can supply it — the kinematic stage detects its
+    auto-labels before any force is solved — so the default leaves the two-gate
+    behaviour untouched.
+
     ``drift`` is supplied by the CALLER, never measured here, because *which*
     motion measurement is honest depends on the stage: the kinematic fit passes
     the drift of its starting pose (before any contact attraction acted), and the
@@ -755,11 +828,18 @@ def detect_frame_contacts(
         prune_margin_m=prune_margin_m)
     guarded_sdf = frame_guarded_sdf(
         sdf, dmin, conf, max_dist_m=max_dist_m, conf_thresh=conf_thresh)
+    if load_bw is not None:
+        gated, pressed = load_gate(guarded_sdf, drift, load_bw, still_m=still_m,
+                                   still_override_m=still_override_m,
+                                   min_load_bw=min_load_bw, mute=load_mute)
+    else:
+        gated = drift_gate(guarded_sdf, drift, still_m=still_m,
+                           still_override_m=still_override_m)
+        pressed = gated < still_override_m
     gated, toe_suppressed = suppress_toe_sides(
-        drift_gate(guarded_sdf, drift, still_m=still_m,
-                   still_override_m=still_override_m), normal_dot,
-        toe_side_slots(frame_names), exit_thresh_m=exit_thresh_m)
+        gated, normal_dot, toe_side_slots(frame_names), exit_thresh_m=exit_thresh_m)
     contact = hysteresis_spans(gated, enter_below=close_thresh_m,
                                exit_below=exit_thresh_m, min_frames=min_frames,
-                               keep=gated < still_override_m)
-    return FrameContacts(contact, guarded_sdf, sdf, dmin, conf, normal_dot, toe_suppressed)
+                               keep=pressed)
+    return FrameContacts(contact, guarded_sdf, sdf, dmin, conf, normal_dot,
+                         toe_suppressed, pressed)

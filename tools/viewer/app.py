@@ -27,10 +27,12 @@ _LAYER_LABELS = (("body", "SMPL-X body"), ("skeleton", "body skeleton"),
                  ("ground", "ground plane"))
 
 # Force/torque display toggles (their own sidebar folder; only bite while a force
-# body source — ``dynamics`` or ``kindyn_1`` — is active). Joints are always coloured
-# by contact (green free / red in-contact); these switch the extra overlays on and off.
+# body source — ``dynamics`` or ``kindyn_1`` — is active). Joint spheres stay the
+# neutral skeleton grey; the ``joint torques`` toggle turns them yellow and sizes
+# them by torque magnitude.
 # The folder also holds the ``force display`` dropdown: "per-joint" accumulates each
-# joint's frame forces into one arrow at the joint, "per-frame" draws each contact
+# joint's frame forces into one arrow at the joint (hand forces summed at the
+# wrist), "per-frame" draws each contact
 # frame's own solved force where it acts (sources that store ``frame_forces`` only).
 _DYN_LAYER_LABELS = (("dyn_torque", "joint torques (sphere size)"),
                      ("dyn_fingers", "fingers / palm"),
@@ -65,10 +67,10 @@ class Viewer:
         self.opts = dict(camera_stride=camera_stride, device=device,
                          show_smplx=show_smplx, human_max_points=human_max_points,
                          video=video, video_dir=video_dir)
-        self.layers = {"body": show_smplx, "skeleton": False, "contact_frames": True,
+        self.layers = {"body": show_smplx, "skeleton": True, "contact_frames": True,
                        "frame_normals": False,
                        "human": False, "scene": True, "normals": False,
-                       "cameras": True, "gravity": False, "ground": True,
+                       "cameras": True, "gravity": True, "ground": True,
                        # force/torque section (torque scaling + fingers off by default)
                        "dyn_torque": False, "dyn_fingers": False, "dyn_forces": True,
                        "dyn_force_mode": "per-joint",

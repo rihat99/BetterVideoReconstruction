@@ -285,19 +285,26 @@ class Body:
 
 
 def load_body(model_path: str | Path | None = None, device: str | torch.device = "cpu",
-              frames_allow: Sequence[str] | None = None) -> Body:
+              frames_allow: Sequence[str] | None = None,
+              density: str | float = "Dempster") -> Body:
     """Load the SMPL-X body used throughout the pipeline, contact frames baked on.
 
     :param model_path: path to a ``SMPLX_*.npz`` weight file; defaults to the
         BetterHuman-bundled neutral model.
     :param device: torch device for the model tensors.
     :param frames_allow: contact-frame names to keep; ``None`` keeps all.
+    :param density: tissue density each body part's inertia is baked with — a
+        table name from BetterHuman's ``body_densities.json`` (``"Dempster"``,
+        ``"Clauser"``, ``"Chandler"``: one value per SMPL segment, fingers take
+        the hand's) or a single uniform kg/m³ value. Mass, and so every force in
+        newtons, follows from it.
     """
     base = bh.SMPLX(
         model_path=str(model_path if model_path is not None else _DEFAULT_MODEL_PATH),
         use_face=False,
         use_hands=True,
         num_betas=10,
+        density=density,
         device=device,
         contact_frames=_DEFAULT_CONTACT_FRAMES,
     )

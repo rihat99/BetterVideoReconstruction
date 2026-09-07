@@ -24,7 +24,9 @@ _DIFF_ORDER = {
     "velocity_root": 1, "velocity_joint": 1, "radial_velocity": 1, "ann_velocity": 1,
     "force_smooth_mag": 1, "force_smooth_dir": 1, "torque_smooth": 1,
     "accel_root": 2, "accel_joint": 2, "ann_acceleration": 2,
+    "force_accel_mag": 2, "force_accel_dir": 2, "torque_accel": 2,
     "jerk_root": 3, "jerk_joint": 3,
+    "force_jerk_mag": 3, "force_jerk_dir": 3,
     "snap_root": 4, "snap_joint": 4,
 }
 
@@ -86,7 +88,7 @@ def load_config(path: str | Path) -> HumanOptimConfig:
     knob_sections = ("optimizer", "chamfer", "keypoints", "reproj_init", "penetration",
                      "occlusion", "contact_gate", "auto_contact", "ann_attraction",
                      "ann_repulsion", "ann_velocity", "ann_acquisition", "ann_seating",
-                     "contacts", "contact", "dynamics_optimizer", "friction")
+                     "contacts", "contact", "dynamics_optimizer", "friction", "torque")
     knobs = {name: dict(raw[name]) for name in knob_sections if name in raw}
 
     return HumanOptimConfig(
