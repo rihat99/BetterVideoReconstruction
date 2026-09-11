@@ -34,8 +34,8 @@ dtype = "fp16"             # model dtype hint retained from the precompute runne
 
 [vggt]                      # VGGT-Omega multi-view camera + depth → vggt/camera.npz
 max_frames = 500            # cap per CAMERA VIEW; longer clips are uniformly subsampled (all views = one forward)
-frame_chunk = 0             # frames per chunk of the frame-local blocks; 0 runs them all at once
-token_chunk = 0             # query tokens per chunk of the cross-frame attention; 0 runs it all at once
+frame_chunk = 128           # PETER 2026-09-08: chunked — the whole-clip forward needs ~43 GB at 500 frames, which does not fit next to a labmate's job; chunking matches to bf16 rounding (~3e-4)
+token_chunk = 65536         # query tokens per chunk of the cross-frame attention (see frame_chunk)
 image_resolution = 512      # VGGT input resolution (512 model; use 256 for the text-aligned model)
 mode = "balanced"           # load_and_preprocess_images sizing: balanced | max_size
 save_depth = true           # also dump per-frame depth + confidence at the VGGT resolution (heavy; scale + fuse need it)

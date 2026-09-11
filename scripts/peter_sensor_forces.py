@@ -35,6 +35,7 @@ makes the measured-vs-predicted comparison fully independent.
 Usage:
     uv run python scripts/peter_sensor_forces.py [--tree out_climb_wall_single]
     uv run python scripts/peter_sensor_forces.py --tree out_climb_wall_2_single
+    uv run python scripts/peter_sensor_forces.py --tree out_climb_wall_3_single
 """
 from __future__ import annotations
 
@@ -82,11 +83,39 @@ NOTE_CW2 = ("channels are TRUE per-limb contact forces (one board per limb; "
             "structural ring after impacts")
 
 # gt dataset name -> (rotation, method tag, calibration clips, note)
+# climb_wall_3 (the 2026-09-03 session on the same demonstrator rig): the same
+# board frame, but the camera was moved between the three wall inclinations, so
+# there is one rotation per inclination, keyed by the recording name's middle
+# field (a_16_02_part3 -> "16"). Built by scratch/cw3_wall_datasheet.py exactly
+# like R_CW2_WALL_TO_WORLD: up = -gravity from that set-up's own 3-view floor fit
+# (scratch/cw3_gravity_fit.py; 0 deg needed a 12 deg tilt gate), tilt pinned to
+# the name's 0 / 16 / 32, azimuth from the fused scene's wall normal (the scene
+# normal sat 3-4 deg from the pinned tilt in all three). Left-handed, det -1.
+R_CW3_WALL_TO_WORLD = {
+    "00": np.array([
+        [+0.0299, +0.9807, +0.1930],
+        [-0.9892, +0.0568, -0.1350],
+        [+0.1434, +0.1869, -0.9719],
+    ], dtype=np.float32),
+    "16": np.array([
+        [+0.0783, +0.9966, +0.0250],
+        [-0.9743, +0.0712, +0.2138],
+        [-0.2113, +0.0411, -0.9766],
+    ], dtype=np.float32),
+    "32": np.array([
+        [+0.0444, +0.9808, +0.1899],
+        [-0.8627, -0.0582, +0.5023],
+        [-0.5037, +0.1862, -0.8436],
+    ], dtype=np.float32),
+}
+
 RIGS = {
     "climb_wall": (R_SENSOR_TO_WORLD, "total-kabsch-v1", CALIB_CLIPS, NOTE),
     "climb_wall_2": (R_CW2_WALL_TO_WORLD, "wall-datasheet-v1",
                      [f"trial_0{n}{p}" for n, parts in [(1, 2), (2, 2), (3, 3)]
                       for p in [f"_part{i + 1}" for i in range(parts)]], NOTE_CW2),
+    "climb_wall_3": (R_CW3_WALL_TO_WORLD, "wall-datasheet-v1", ["(per inclination, no fit)"],
+                     NOTE_CW2),
 }
 
 
@@ -121,13 +150,15 @@ def main() -> None:
         n = int(z["n_frames"])
         s = per_frame(np.asarray(z["forces"], np.float32),
                       float(z["fps"]) / float(z["video_fps"]), n)
-        reaction = -(s @ rotation.T)
+        # climb_wall_3 carries one rotation per wall inclination (the name's middle field).
+        clip_rotation = rotation[clip.split("_")[1]] if isinstance(rotation, dict) else rotation
+        reaction = -(s @ clip_rotation.T)
         np.savez(
             out_dir / "sensor_forces.npz",
             reaction_world=reaction.astype(np.float32),
             total_world=reaction.sum(1).astype(np.float32),
             limbs=np.asarray(z["limbs"]),
-            R_sensor_to_world=rotation,
+            R_sensor_to_world=clip_rotation,
             method=np.str_(method),
             calib_clips=np.array(calib_clips),
             note=np.str_(note),
