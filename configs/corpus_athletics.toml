@@ -1,0 +1,39 @@
+# AthleticsVideos corpus orchestration: gymnastics floor exercise + balance beam.
+# Same layout/schema as the ClimbingVideos DB (configs/corpus.toml); relative paths
+# are resolved from the repository root.
+
+[corpus]
+data_root = "../data/AthleticsVideos" # Scene DB + read-mostly feature tree.
+categories = [1, 2]                  # Athletics VLM classes: 1 = floor exercise, 2 = balance beam.
+rope_supported = -1                 # No rope filter (the athletics DB never sets it).
+seed = 0                            # Deterministic RNG seed used by --sample.
+devices = [0, 0, 2, 2, 3, 3, 4, 4]  # CUDA device ids; one stride-sharded worker per entry (2/GPU: geometry's pre-fit holds ~20-24 GiB; the runner bumps lighter stages to 3/GPU).
+skip_existing = true                # Resume: a rerun redoes only scenes missing the stage artifact (geometry: or left non-metric).
+out_root = ""                       # Contacts-only output-tree redirect; empty writes beside inputs.
+debug_overlay_dir = ""              # Gather overlays here; empty uses features/<stage>/_debug_overlays.
+pipeline_config = "configs/pipeline.toml" # Model-stage algorithm knobs (read, never modified).
+human_optim_config = "configs/human_optimization.toml" # Human/contact algorithm knobs.
+
+[overlay]
+# Stages without a key do not produce/gather an overlay.
+sam3 = true
+sapiens = false
+sam3d = false
+smplx = false
+human_optim = false
+contacts = false
+
+[track_sam3]
+min_presence = 0.9          # Minimum primary-mask frame fraction when discarding failures.
+discard_failed = false      # Write failed SAM3 QA back to scenes.db only after clean workers.
+text = "person"             # First-frame SAM3 grounding phrase.
+iou_thresh = 0.2            # Minimum grounded-mask/YOLO-box IoU for prompt selection.
+ground_min_area_frac = 0.002 # Reject smaller grounded masks before IoU matching.
+confidence = 0.5            # SAM3 text-grounding confidence.
+part_length = 200           # Frames per SAM3 propagation part.
+
+[contacts_run]
+bodies = "kinematic_1"      # Body artifact to score; produces contacts_1.npz (or use kinematic_2).
+frames = []                 # Contact-frame allowlist by name; empty keeps the human-optimization
+                            # TOML's [contacts].frames. Applied to every human stage
+                            # (kin1 / contacts / kin2 / kindyn).

@@ -27,6 +27,18 @@ DEFAULT_DATA_ROOT = _REPO_ROOT.parent / "data" / "ClimbingVideos"
 DEFAULT_CATEGORIES = (1, 2)
 DEFAULT_ROPE_SUPPORTED = 0
 
+# The AthleticsVideos DB (same layout) classifies scenes by sport instead; it has
+# no rope flag. Sport name → ``vlm_category`` (BetterParsing's athletics classes).
+ATHLETICS_DATA_ROOT = _REPO_ROOT.parent / "data" / "AthleticsVideos"
+ATHLETICS_SPORTS = {
+    "floor": 1,        # gymnastics floor exercise
+    "beam": 2,         # balance beam
+    "vault": 3,
+    "pommel": 4,       # pommel horse
+    "high_jump": 5,
+    "triple_jump": 6,
+}
+
 
 def shard(scene_id: str) -> tuple[str, str]:
     """``scene_id`` → its two-level shard (``aa``, ``bb``)."""
@@ -90,7 +102,7 @@ def select_targets(
     rope_supported: int | None,
 ) -> list[sqlite3.Row]:
     """The curated target scenes, ordered by ``scene_id`` (stable)."""
-    q = ("SELECT scene_id, video_id, rel_path, width, height, fps, n_frames "
+    q = ("SELECT scene_id, video_id, rel_path, width, height, fps, n_frames, vlm_category "
          "FROM scenes WHERE human_selected = 1")
     params: list = []
     if categories:

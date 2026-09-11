@@ -105,7 +105,8 @@ draws all 52 joints — fingers as small 0.30× spheres; the **`contact frames`*
 layer draws the 12 contact frames red/green from `contacts_1` with a thin
 connector to each parent joint and a 6 cm outward-normal arrow; a
 **`scene normals`** debug layer draws the per-point normal arrows). `--scenes`
-browses the DB.
+browses the ClimbingVideos DB; `--scenes athletics` the AthleticsVideos DB, with a
+**`sport`** dropdown in the sidebar that narrows the scene list to one sport.
 
 ## Run
 

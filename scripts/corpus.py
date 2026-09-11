@@ -207,6 +207,7 @@ class CorpusConfig:
     confidence: float
     part_length: int
     bodies: str
+    frames: tuple[str, ...]
 
 
 def _repo_path(value: str | Path) -> Path:
@@ -232,6 +233,7 @@ def load_config(path: Path) -> CorpusConfig:
     bodies = str(contacts.get("bodies", "kinematic_1"))
     if bodies not in {"kinematic_1", "kinematic_2"}:
         raise ValueError("[contacts_run].bodies must be kinematic_1 or kinematic_2")
+    frames = tuple(str(value) for value in contacts.get("frames", []))
     part_length = int(track.get("part_length", 200))
     if part_length < 2:
         raise ValueError("[track_sam3].part_length must be at least 2")
@@ -258,6 +260,7 @@ def load_config(path: Path) -> CorpusConfig:
         confidence=float(track.get("confidence", 0.5)),
         part_length=part_length,
         bodies=bodies,
+        frames=frames,
     )
 
 
@@ -594,20 +597,19 @@ def _stage_config_data(stage: str, config: CorpusConfig) -> dict[str, Any]:
     resolved: dict[str, Any] = {"runtime": dict(base.get("runtime", {}))}
     resolved["runtime"]["device"] = "cuda"
 
-    if stage in {"human_optim", "kinematics_2", "kindyn"}:
+    if stage in {"human_optim", "kinematics_2", "kindyn", "contacts"}:
         resolved = base
         resolved.setdefault("runtime", {})["device"] = "cuda"
+        if config.frames:  # corpus recipe restricts where contact may live (every human stage)
+            resolved.setdefault("contacts", {})["frames"] = list(config.frames)
         if stage == "human_optim":
             resolved.setdefault("stages", {}).setdefault("kinematics_1", {})["overlay"] = bool(
                 config.overlay.get(stage, False)
             )
-        return resolved
-    if stage == "contacts":
-        resolved = base
-        resolved.setdefault("runtime", {})["device"] = "cuda"
-        resolved.setdefault("contacts", {})["overlay"] = bool(
-            config.overlay.get(stage, False)
-        )
+        elif stage == "contacts":
+            resolved.setdefault("contacts", {})["overlay"] = bool(
+                config.overlay.get(stage, False)
+            )
         return resolved
 
     for section_name in spec.config_sections:
