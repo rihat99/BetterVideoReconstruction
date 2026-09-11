@@ -144,15 +144,15 @@ ann_acceleration    = [0, 0, 0, 0]   # OFF — near-redundant with a strong ann_
 base_wrench         = [0, 0, 0, 50]   # LINEAR rows of the root residual (N)
 base_wrench_ang     = [0, 0, 0, 300]  # ANGULAR rows (N·m) — the moment residual, weighted on its own
 force_magnitude     = [0, 0, 0, 1]
-force_smooth_mag    = [0, 0, 0, 40]   # smooth the force MAGNITUDE across persisting contacts (harder than direction)
-force_smooth_dir    = [0, 0, 0, 20]   # smooth the force DIRECTION (may adapt faster than magnitude)
+force_smooth_mag    = [0, 0, 0, 120]   # smooth the force MAGNITUDE across persisting contacts (harder than direction)
+force_smooth_dir    = [0, 0, 0, 60]   # smooth the force DIRECTION (may adapt faster than magnitude)
 # 2nd/3rd-order force smoothness: the same magnitude/direction split on the 2nd and 3rd
 # finite differences (force acceleration and jerk), masked to contacts that persist over
 # the whole 3-/4-frame window.
-force_accel_mag     = [0, 0, 0, 160]
-force_accel_dir     = [0, 0, 0, 80]
-force_jerk_mag      = [0, 0, 0, 80]
-force_jerk_dir      = [0, 0, 0, 40]
+force_accel_mag     = [0, 0, 0, 640]
+force_accel_dir     = [0, 0, 0, 320]
+force_jerk_mag      = [0, 0, 0, 400]
+force_jerk_dir      = [0, 0, 0, 200]
 # Joint-torque terms (2026-09-06), all weighted per joint by [torque.multipliers] and read
 # in body-weight units at a 1 m lever (τ / body weight). torque_magnitude is the effort
 # cost that resolves the statically indeterminate hands-vs-feet split — a load the body
@@ -165,9 +165,22 @@ force_jerk_dir      = [0, 0, 0, 40]
 # torque_accel are the 1st / 2nd differences of the same weighted torque; 40 / 160 cut
 # torque jitter 26 / 25 -> 16 / 11 N·m for ~2 % BW of root residual (the old
 # torque_smooth = 10 was unweighted and well below where it bites). 15 / 40 / 160 shipped.
-torque_magnitude    = [0, 0, 0, 15]
-torque_smooth       = [0, 0, 0, 40]
-torque_accel        = [0, 0, 0, 160]
+# 2026-09-09: force smoothness doubled (80/40, 320/160, 160/80) and torque smoothness cut
+# (40/160 -> 15/60) — the torques were over-smoothed while the forces still shook. 13 out/
+# scenes + climb_wall_2: force jitter d1/d2/d3 -14/-23/-29 %, torque jitter +4/+11 %, root
+# residual 0.210 -> 0.196 BW, pose moves 4.7 mm; boards MAE 77.7 -> 76.0 N, corr .672 -> .684,
+# limb-force step |df| 10.4 -> 8.9 N (the boards themselves: 6.1).
+# 2026-09-11 round 3: force smoothness up again, weighted to the higher orders (120/60,
+# 640/320, 400/200), torque smoothness cut to 8/30, torque_magnitude 15 -> 30 for more load
+# on the feet. Steeper [torque.multipliers] (table^1.5 / table^2) were tried on climb_wall_2
+# and overshoot the boards (hands/feet 0.75 / 0.47 vs 0.90 measured, MAE 86 / 106 N), so the
+# table stays. 13 out/ scenes: force jitter d1/d2/d3 -16/-27/-35 %, torque jitter -7/-2 %
+# (smoother forces need fewer torque corrections), root residual 0.196 -> 0.217 BW, force
+# confidence .75 -> .71, hands/feet 2.47 -> 2.29, pose 4.7 mm. climb_wall_2: hands/feet
+# 1.01 -> 0.96 (boards 0.90), share error 1.5 -> 0.8 pp, limb |df| 8.9 -> 8.1 N, MAE 76.0 -> 78.6 N.
+torque_magnitude    = [0, 0, 0, 30]
+torque_smooth       = [0, 0, 0, 8]
+torque_accel        = [0, 0, 0, 30]
 
 # Per-joint multipliers of the three torque terms, keyed by joint group (the joint name
 # without its side and index: left_hip -> hip, spine2 -> spine, right_index3 -> index).
