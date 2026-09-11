@@ -14,7 +14,7 @@ from pathlib import Path
 
 import numpy as np
 
-from .helpers import _background_image, _camera_follow_target
+from .helpers import _background_image, _camera_pose_at
 from .loading import ClipData, load_clip_data
 from .scene import ClipScene, _SKEL_ALPHA
 
@@ -61,9 +61,13 @@ class Viewer:
                  human_point_size: float, camera_scale: float, camera_stride: int,
                  show_smplx: bool, device: str, human_max_points: int = 0,
                  video: bool = True, video_dir: Path | None = None,
-                 up: str = "-y") -> None:
+                 up: str = "-y", groups: dict[str, str] | None = None) -> None:
         self.server = server
         self.clips = clips
+        #: Clip name → group label (e.g. the athletics DB's sport); a ``group``
+        #: dropdown narrows the scene list to one label. Empty = no grouping.
+        self.groups = groups or {}
+        self._all_clips = list(clips)
         self.opts = dict(camera_stride=camera_stride, device=device,
                          show_smplx=show_smplx, human_max_points=human_max_points,
                          video=video, video_dir=video_dir)
@@ -88,6 +92,13 @@ class Viewer:
         # capturing at connect would be stale).
         self._up_vec = _UP_VECTORS.get(up, (0.0, -1.0, 0.0))
         self._std_fov: float | None = None
+        # Playback clock: (playhead in fractional frames, wall-clock instant it was
+        # advanced) as ONE tuple so the lock-free onboard-camera thread reads a
+        # consistent pair; ``None`` while paused. That thread extrapolates from it
+        # between scene updates, so the camera glides at 60 Hz however long a frame
+        # takes to pose.
+        self._clock: tuple[float, float] | None = None
+        self._play_frame = -1                       # last frame the loop set on the slider
         # viser fires GUI callbacks on its own thread and setting a slider's
         # ``.value`` invokes its callback synchronously — so switching examples
         # mid-playback would let ``load_clip`` dispose a clip while the playback
@@ -104,6 +115,10 @@ class Viewer:
         self.pos = None
         if len(clips) > 1:
             with g.add_folder("example"):
+                if self.groups:
+                    labels = sorted({self.groups[c.name] for c in clips if c.name in self.groups})
+                    self.group = g.add_dropdown("sport", ("all", *labels), initial_value="all")
+                    self.group.on_update(lambda _: self._on_group())
                 self.example = g.add_dropdown("scene", tuple(c.name for c in clips),
                                               initial_value=clips[0].name)
                 self.example.on_update(lambda _: self._on_example())
@@ -118,8 +133,14 @@ class Viewer:
         # ``[viewer].video = false`` the pane is never created and the footage is
         # never decoded — streaming a JPEG per frame lags remote sessions.
         self.video_img = None
+        self.video_view = None
         if video:
             with g.add_folder("video"):
+                # Multi-view clips (a calibrated rig) pick which camera the pane
+                # plays; hidden for the single-camera clips that have only one.
+                self.video_view = g.add_dropdown("view", ("—",), initial_value="—",
+                                                 visible=False)
+                self.video_view.on_update(lambda _: self._on_video_view())
                 self.video_img = g.add_image(_background_image(), format="jpeg",
                                              jpeg_quality=80)
         self.video_frames = None
@@ -180,6 +201,13 @@ class Viewer:
         clip = next((c for c in self.clips if c.name == self.example.value), None)
         if clip is not None:
             self.load_clip(clip)
+
+    def _on_group(self) -> None:
+        """Narrow the scene list to one group label (``"all"`` restores every clip),
+        then jump to its first scene."""
+        self.clips = clips_in_group(self._all_clips, self.groups, self.group.value)
+        self.example.options = tuple(c.name for c in self.clips)
+        self.example.value = self.clips[0].name  # fires _on_example → load_clip
 
     def _pos_md(self, idx: int) -> str:
         return f"scene **{idx + 1} / {len(self.clips)}**"
@@ -247,14 +275,16 @@ class Viewer:
                 self.scene.set_mesh_opacity(float(self.body_opacity.value))
 
     def _on_client_connect(self, client) -> None:
-        # Snap the camera back whenever the user moves it while onboard mode is on
-        # (viser has no "disable controls"); then either lock it onto the
-        # reconstructed camera or frame it on the human.
-        client.camera.on_update(lambda _cam: self._on_cam_lock(client))
+        # Either lock the camera onto the reconstructed one or frame it on the human.
+        # (No camera-moved callback: while onboard mode is on, the 60 Hz camera
+        # thread re-drives every client anyway, which is what locks out orbiting —
+        # a per-event snap-back would answer each of the browser's ~50 Hz camera
+        # echoes with another send, a feedback loop that lags the whole client.)
         with self._lock:
-            onboard = self.follow.value and self.scene is not None
+            scene = self.scene
+            onboard = self.follow.value and scene is not None
             if onboard:
-                self._drive_camera(client, self._cur())
+                self._drive_camera(client, self._playhead(scene), scene.data)
         if not onboard:
             self._frame_camera(client)
 
@@ -269,7 +299,7 @@ class Viewer:
                     for client in self.server.get_clients().values():
                         self._std_fov = float(client.camera.fov)
                         break
-                self._drive_all(self._cur())
+                self._drive_all(self._playhead(self.scene))
             else:
                 for client in self.server.get_clients().values():
                     self._reset_camera(client)
@@ -281,40 +311,45 @@ class Viewer:
             client.camera.fov = self._std_fov
         self._frame_camera(client)
 
-    def _drive_all(self, f: int) -> None:
-        for client in self.server.get_clients().values():
-            self._drive_camera(client, f)
-
-    def _drive_camera(self, client, f: int) -> None:
-        """Place ``client``'s camera on the reconstructed camera at frame ``f`` —
-        pose (position / look-at / up) plus its vertical FOV."""
-        if self.scene is None or f >= len(self.scene.data.extr):
-            return
+    def _drive_all(self, t: float) -> None:
         data = self.scene.data
-        pos, look_at, up = _camera_follow_target(data.extr[f])
-        cam = client.camera
-        cam.position = tuple(float(x) for x in pos)
-        cam.up_direction = tuple(float(x) for x in up)
-        cam.look_at = tuple(float(x) for x in look_at)
-        if f < len(data.fov_y):
-            cam.fov = float(data.fov_y[f])
+        for client in self.server.get_clients().values():
+            self._drive_camera(client, t, data)
 
-    def _on_cam_lock(self, client) -> None:
-        """Camera-moved callback: while onboard mode is on, snap back to the
-        reconstructed camera unless we're already there (our own echo)."""
-        with self._lock:
-            if not (self.follow.value and self.scene is not None):
-                return
-            f = self._cur()
-            if f >= len(self.scene.data.extr):
-                return
-            pos = _camera_follow_target(self.scene.data.extr[f])[0]
-            # 1 cm deadzone: imperceptible in these metric scenes, but well above any
-            # world→client→world round-trip noise, so our own echo never re-fires the
-            # snap-back (an idle message loop) — a real orbit moves the eye far more.
-            if float(np.linalg.norm(np.asarray(client.camera.position) - pos)) < 1e-2:
-                return
-            self._drive_camera(client, f)
+    def _drive_camera(self, client, t: float, data: ClipData) -> None:
+        """Place ``client``'s camera on the reconstructed trajectory at playhead
+        ``t`` (fractional frames: pose and vertical FOV interpolated between frames).
+        The four camera fields go out as one atomic batch, so the browser never
+        renders a half-updated pose."""
+        pos, look_at, up, fov = _camera_pose_at(data.extr, data.fov_y, t)
+        cam = client.camera
+        with client.atomic():
+            cam.position = tuple(float(x) for x in pos)
+            cam.up_direction = tuple(float(x) for x in up)
+            cam.look_at = tuple(float(x) for x in look_at)
+            cam.fov = float(fov)
+
+    def _playhead(self, scene: ClipScene) -> float:
+        """Where playback is, in fractional frames: the slider while paused, else
+        the wall clock's extrapolation of the last playback tick (wrapping)."""
+        clock = self._clock
+        if clock is None:
+            return float(self._cur())
+        pos, t0 = clock
+        return (pos + (time.monotonic() - t0) * float(self.fps.value)) % scene.n_frames
+
+    def _camera_loop(self) -> None:
+        """Onboard-camera thread (60 Hz): glide every browser along the reconstructed
+        trajectory at the current playhead. Runs lock-free off the scene thread —
+        posing a frame can take tens of ms and the camera must not wait for it."""
+        while True:
+            time.sleep(1.0 / 60.0)
+            scene = self.scene
+            if not self.follow.value or scene is None:
+                continue
+            t = self._playhead(scene)
+            for client in self.server.get_clients().values():
+                self._drive_camera(client, t, scene.data)
 
     def _frame_camera(self, client) -> None:
         """Aim ``client``'s camera at the current clip's human root, so orbiting
@@ -333,8 +368,14 @@ class Viewer:
             if self.scene is not None:
                 self.scene.apply_frame(self._cur())
             self._update_video(self._cur())
-            if self.follow.value:
-                self._drive_all(self._cur())
+
+    def _on_video_view(self) -> None:
+        """Play another calibrated view in the sidebar pane (already frame-aligned)."""
+        with self._lock:
+            views = None if self.scene is None else self.scene.data.video_views
+            if views and self.video_view.value in views:
+                self.video_frames = views[self.video_view.value]
+                self._update_video(self._cur())
 
     def _update_video(self, f: int) -> None:
         """Point the sidebar video pane at frame ``f`` (no-op if the clip has no video)."""
@@ -384,6 +425,15 @@ class Viewer:
             self.frame.on_update(lambda _: self._apply_current())
 
             self.video_frames = data.video_frames
+            if self.video_view is not None:
+                names = tuple(data.video_views or ())
+                self.video_view.visible = len(names) > 1
+                if names:
+                    self.video_view.options = names
+                    # Assigning an unchanged value fires no callback, so point the pane
+                    # at this clip's first view here rather than relying on one.
+                    self.video_view.value = names[0]
+                    self.video_frames = data.video_views[names[0]]
             if self.video_img is not None:
                 self.video_img.visible = self.video_frames is not None
                 if self.video_frames is not None:
@@ -404,16 +454,40 @@ class Viewer:
               f"{len(data.scene_points)} scene pts · bodies {srcs}", flush=True)
 
     def run(self) -> None:
-        """Playback loop: advance the frame while ``play`` is on."""
+        """Playback loop: advance the playhead by wall-clock time while ``play`` is
+        on, so playback runs at the chosen fps however long a frame takes to pose
+        (a slow frame is skipped, not stretched)."""
+        threading.Thread(target=self._camera_loop, daemon=True).start()
         while True:
             with self._lock:
                 playing = (self.frame is not None and self.play.value
                            and self.scene is not None and self.scene.n_frames > 0)
                 if playing:
-                    # Setting ``.value`` fires the frame callback (same thread,
-                    # reentrant lock) → apply_frame; no explicit call needed.
-                    self.frame.value = (int(self.frame.value) + 1) % self.scene.n_frames
-            time.sleep(1.0 / float(self.fps.value) if playing else 0.05)
+                    now = time.monotonic()
+                    fps = float(self.fps.value)
+                    cur = int(self.frame.value)
+                    if self._clock is None or cur != self._play_frame:   # start, or scrubbed
+                        self._clock = (float(cur), now)
+                    pos = (self._clock[0] + (now - self._clock[1]) * fps) % self.scene.n_frames
+                    self._clock = (pos, now)
+                    f = int(pos)
+                    if f != cur:
+                        # Setting ``.value`` fires the frame callback (same thread,
+                        # reentrant lock) → apply_frame; no explicit call needed.
+                        self.frame.value = f
+                    self._play_frame = f
+                    wait = (f + 1 - pos) / fps                  # until the next frame is due
+                else:
+                    self._clock = None
+                    wait = 0.05
+            time.sleep(wait)
+
+
+def clips_in_group(clips: list[Path], groups: dict[str, str], label: str) -> list[Path]:
+    """The clips whose group label is ``label``; ``"all"`` keeps every clip."""
+    if label == "all":
+        return list(clips)
+    return [c for c in clips if groups.get(c.name) == label]
 
 
 def _discover_clips(root: Path) -> list[Path]:
@@ -431,7 +505,8 @@ def view_3d(root: Path, *, port: int = 8082, point_size: float = 0.02,
             human_point_size: float = 0.01, camera_scale: float = 0.1,
             camera_stride: int = 1, up: str = "-y", show_smplx: bool = True,
             device: str = "cuda", human_max_points: int = 6000,
-            video: bool = True, video_dir: Path | None = None) -> None:
+            video: bool = True, video_dir: Path | None = None,
+            groups: dict[str, str] | None = None) -> None:
     import viser
 
     clips = _discover_clips(root)
@@ -451,5 +526,5 @@ def view_3d(root: Path, *, port: int = 8082, point_size: float = 0.02,
                     camera_scale=camera_scale, camera_stride=camera_stride,
                     show_smplx=show_smplx, device=device,
                     human_max_points=human_max_points, video=video, video_dir=video_dir,
-                    up=up)
+                    up=up, groups=groups)
     viewer.run()

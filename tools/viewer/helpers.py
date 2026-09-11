@@ -48,6 +48,31 @@ def _camera_follow_target(extrinsic: np.ndarray) -> tuple[np.ndarray, np.ndarray
     return C, C + forward, up
 
 
+def _camera_pose_at(extr: np.ndarray, fov_y: np.ndarray, t: float,
+                    ) -> tuple[np.ndarray, np.ndarray, np.ndarray, float]:
+    """Reconstructed camera at fractional frame ``t`` → ``(position, look_at, up, fov)``.
+
+    Between two frames the eye is interpolated linearly, the optical axis and up
+    are interpolated then renormalised (adjacent frames differ by a fraction of a
+    degree, so this is slerp to numerical precision) and the vertical FOV is
+    interpolated linearly. ``t`` is clamped to the trajectory, so a playhead past
+    the last frame holds the last pose.
+    """
+    n = len(extr)
+    t = float(np.clip(t, 0.0, n - 1))
+    i = min(int(t), max(n - 2, 0))
+    a = t - i
+    fov = lambda k: float(fov_y[min(k, len(fov_y) - 1)])  # noqa: E731
+    c0, l0, u0 = _camera_follow_target(extr[i])
+    if a <= 0.0 or n < 2:
+        return c0, l0, u0, fov(i)
+    c1, l1, u1 = _camera_follow_target(extr[i + 1])
+    c = (1.0 - a) * c0 + a * c1
+    forward = _unit((1.0 - a) * (l0 - c0) + a * (l1 - c1))
+    up = _unit((1.0 - a) * u0 + a * u1)
+    return c, c + forward, up, (1.0 - a) * fov(i) + a * fov(i + 1)
+
+
 def _unit(v) -> np.ndarray:
     """Normalize a vector; return it unchanged if its norm is ~0."""
     v = np.asarray(v, np.float64)

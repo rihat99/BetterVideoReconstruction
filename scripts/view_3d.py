@@ -13,7 +13,8 @@ For each clip it shows, in the metric world frame:
 * per-frame **human** depth points, split by climber, preloaded once and shown
   one frame at a time via the frame slider (playback flips visibility, never
   re-uploads),
-* the per-frame **camera** frustums + centre path,
+* the per-frame **camera** frustums + centre path — or, for a clip filmed by a
+  calibrated rig (``cameras.npz``), one named cyan frustum per fixed camera,
 * the world-frame **gravity** arrow (when the geocalib stage has run),
 * the **ground plane** the gravity stage fitted and accepted (drawn from
   ``geocalib/gravity.npz``; absent when the floor was not visible), and
@@ -39,7 +40,10 @@ For each clip it shows, in the metric world frame:
   (``human_optim/mhr_1.npz``, the pose supervision the contact model trains on).
   Mesh only: no contact frames and no forces are drawn on it.
 
-The dynamics folder's **force display** dropdown picks the arrow regime:
+The dynamics folder's **sensor forces (measured)** toggle draws the wall rig's own
+reading — the measured reaction on each limb, in orange, at that limb's joint and on
+the same scale as the solved blue arrows — for the clips that ship a
+``sensor_forces.npz``. Its **force display** dropdown picks the solved arrows' regime:
 ``per-joint`` accumulates each joint's frame forces into one arrow at the joint —
 each hand's forces summed at its wrist, never on individual finger joints —
 ``per-frame`` draws every contact frame's own solved force where it acts on the
@@ -52,12 +56,18 @@ in the browser, one upload) over a single averaged ``betas`` identity.
 
 A **video** pane in the sidebar plays the clip's original footage in sync with the
 frame slider (loaded from the repo's ``data/`` by default, or ``[viewer].video_dir``;
-hidden when the source video is absent). ``[viewer].video = false`` disables the
+hidden when the source video is absent). A multi-view clip plays its own
+``views/<name>/video.mp4`` instead and gains a **view** dropdown to choose the
+camera; each view is shifted by the lag ``cameras.npz`` measured for it, so every
+view shows the same instant as the frame slider. ``[viewer].video = false`` disables the
 pane entirely — no decode, nothing streamed — which keeps playback smooth over a
 remote connection. The playback folder's **onboard camera**
-toggle (off by default) rides the reconstructed camera — matching its pose and
-field of view each frame and locking out manual orbiting — so you watch from the
-filming camera's own viewpoint.
+toggle (off by default) rides the reconstructed camera — gliding along its
+trajectory (pose and field of view interpolated between frames, updated at 60 Hz
+independently of how fast the scene is posed) and locking out manual orbiting — so
+you watch from the filming camera's own viewpoint. Playback itself runs on the wall
+clock at the chosen fps: a frame the machine cannot pose in time is skipped, never
+stretched, so motion keeps the video's real speed.
 
 The sidebar's **layers** checkboxes toggle whole groups on/off — SMPL-X body, body
 skeleton, contact frames, human points, scene points, scene normals, cameras,
@@ -80,6 +90,9 @@ the precompute drivers process). Each scene's stage-first feature dirs
 symlink farm shaped like ``out/<stem>/``, which the loaders read unchanged. When
 more than one clip is loaded (a local ``out/`` batch or a scene set) the sidebar
 gains a **◀ prev / random / next ▶** pager plus a "scene N / M" indicator.
+``--scenes athletics`` browses the AthleticsVideos DB instead; its sidebar gains a
+**sport** dropdown (all / floor / beam / vault / pommel / high_jump / triple_jump)
+that narrows the scene list.
 
 The viewer package lives under :mod:`tools.viewer`; this file is the thin CLI.
 
@@ -89,6 +102,10 @@ Usage::
     uv run python scripts/view_3d.py out/<stem>/     # a single clip
     uv run python scripts/view_3d.py out/ --config configs/pipeline.toml
     uv run python scripts/view_3d.py --scenes        # browse the ClimbingVideos DB
+    uv run python scripts/view_3d.py --scenes athletics  # AthleticsVideos DB, sport dropdown
+    # The climb_wall_3 ground-truth clips are ordinary trees — point at one, or at
+    # their root to get the example dropdown:
+    uv run python scripts/view_3d.py peter/climb_wall_3_gt/human/
     # Set viewer.sample = 50 in the config for a random 50-scene subset.
 """
 from __future__ import annotations
@@ -101,6 +118,7 @@ _REPO_ROOT = Path(__file__).resolve().parents[1]
 if str(_REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(_REPO_ROOT))
 
+import scene_db  # noqa: E402  (scripts/ is this file's own directory)
 from tools.config import load_toml, section
 from tools.viewer import view_3d
 
@@ -143,14 +161,19 @@ def _run_scenes(args: argparse.Namespace) -> None:
     import shutil
     import tempfile
 
-    import scene_db
-
     data_root = args.data_root or scene_db.DEFAULT_DATA_ROOT
-    paths = scene_db.ScenePaths(data_root)
+    categories = scene_db.parse_int_csv(args.categories)
     rope = None if args.rope_supported < 0 else args.rope_supported
+    groups = None
+    if args.scenes == "athletics":  # every sport; the viewer's sport dropdown narrows it
+        data_root = args.data_root or scene_db.ATHLETICS_DATA_ROOT
+        categories, rope = (), None
+    paths = scene_db.ScenePaths(data_root)
     with paths.connect() as conn:
-        rows = scene_db.select_targets(
-            conn, categories=scene_db.parse_int_csv(args.categories), rope_supported=rope)
+        rows = scene_db.select_targets(conn, categories=categories, rope_supported=rope)
+    if args.scenes == "athletics":
+        sport = {v: k for k, v in scene_db.ATHLETICS_SPORTS.items()}
+        groups = {r["scene_id"]: sport.get(r["vlm_category"], "other") for r in rows}
     rows = scene_db.resolve_rows(rows, scenes=args.scene_ids, sample=args.sample,
                                  limit=args.limit, seed=args.seed)
     if not rows:
@@ -169,7 +192,7 @@ def _run_scenes(args: argparse.Namespace) -> None:
             human_point_size=args.human_point_size, camera_scale=args.camera_scale,
             camera_stride=args.camera_stride, up=args.up, show_smplx=args.smplx,
             device=args.device, human_max_points=args.human_max_points,
-            video=args.video, video_dir=farm_root)
+            video=args.video, video_dir=farm_root, groups=groups)
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -177,8 +200,9 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("target", type=Path, nargs="?", default=None,
                    help="root of clips (out/) or a single clip dir (out/<stem>/); "
                         "omit when using --scenes")
-    p.add_argument("--scenes", action="store_true",
-                   help="browse the ClimbingVideos feature DB instead of a local out/ tree")
+    p.add_argument("--scenes", nargs="?", const="climbing", choices=("climbing", "athletics"),
+                   help="browse a scene DB instead of a local out/ tree: the ClimbingVideos "
+                        "DB (default) or the AthleticsVideos DB (sport dropdown in the sidebar)")
     p.add_argument("--config", type=Path, default=_REPO_ROOT / "configs" / "pipeline.toml",
                    help="pipeline TOML (default: configs/pipeline.toml)")
     cli = p.parse_args(sys.argv[1:] if argv is None else argv)

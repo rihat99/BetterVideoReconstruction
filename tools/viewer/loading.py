@@ -129,7 +129,7 @@ def _load_force_data(pred: Path, filename: str) -> dict | None:
 
 
 def _load_sensor_forces(pred: Path) -> dict | None:
-    """Measured wall-sensor forces (``human_optim/sensor_forces.npz``), if present.
+    """Measured wall-sensor forces (``sensor_forces.npz``), if present.
 
     Written by ``scripts/peter_sensor_forces.py`` for the climb_wall clips: the
     rig's four load-cell channels rotated into the world frame, in the reaction
@@ -138,15 +138,86 @@ def _load_sensor_forces(pred: Path) -> dict | None:
     corner's reaction — limb-dominated but mixed across limbs (only the channel
     sum is a clean physical force; the npz stores it as ``total_world``). Drawn
     by the ``sensor forces`` toggle in the dynamics folder.
+
+    The climb_wall_3 ground-truth clips (``scripts/peter_gt``) keep the file at the
+    clip root instead, where it is a per-limb board reading rather than a corner
+    reaction; both live in the same world frame, so either location is read here.
     """
-    f = pred / "human_optim" / "sensor_forces.npz"
-    if not f.exists():
+    f = next((c for c in (pred / "human_optim" / "sensor_forces.npz",
+                          pred / "sensor_forces.npz") if c.exists()), None)
+    if f is None:
         return None
     dd = np.load(f, allow_pickle=True)
     return {
         "rw": dd["reaction_world"].astype(np.float32),   # (N, 4, 3) per channel
         "limbs": [str(x) for x in dd["limbs"]],          # channel -> limb name
     }
+
+
+def _load_view_cameras(pred: Path) -> dict | None:
+    """The calibrated static cameras of a multi-view clip (``cameras.npz``).
+
+    Written by the climb_wall_3 ground-truth chain (``scripts/peter_gt``): three
+    fixed, calibrated cameras watching one climber, already in the metric world the
+    geometry uses. ``offset`` is how far each view lags ``cam_left``, whose clock the
+    frame slider follows — view ``k``'s video frame ``t + offset[k]`` is the same
+    instant as frame ``t``. ``None`` for an ordinary single-camera clip.
+    """
+    f = pred / "cameras.npz"
+    if not f.exists():
+        return None
+    cd = np.load(f, allow_pickle=True)
+    K = np.asarray(cd["K"], np.float64)                     # (V, 3, 3) pixel intrinsics
+    wh = np.asarray(cd["image_size"], np.int64)             # (V, 2) width, height
+    return {
+        "names": [str(x) for x in cd["view_names"]],
+        "extr": np.asarray(cd["extrinsics"], np.float64),   # (V, 4, 4) cam-from-world
+        "fov_y": 2.0 * np.arctan(wh[:, 1] / (2.0 * K[:, 1, 1])),
+        "aspect": wh[:, 0] / wh[:, 1],
+        "offset": (np.asarray(cd["frame_offset"], np.int64) if "frame_offset" in cd.files
+                   else np.zeros(len(wh), np.int64)),
+    }
+
+
+def _load_view_videos(pred: Path, n_frames: int, views: dict,
+                      max_dim: int = 400) -> dict[str, np.ndarray] | None:
+    """Each calibrated view's footage (``views/<name>/video.mp4``), on the frame clock.
+
+    Decoded with cv2 like the single-camera pane (decoder backends disagree on frame
+    counts, and cv2 is what the pipeline used) and shifted by that view's
+    ``frame_offset``, so index ``t`` is the same instant in every view and matches the
+    frame slider. Frames are downscaled to a longer side of ``max_dim`` for a light
+    sidebar pane; ``None`` when the clip has no per-view videos.
+    """
+    import cv2
+
+    out: dict[str, np.ndarray] = {}
+    for k, name in enumerate(views["names"]):
+        path = pred / "views" / name / "video.mp4"
+        if not path.exists():
+            continue
+        off = int(views["offset"][k])
+        cap = cv2.VideoCapture(str(path))
+        frames: list[np.ndarray] = []
+        for i in range(off + n_frames):
+            ok, bgr = cap.read()
+            if not ok:
+                break
+            if i < off:                          # this view's lag: skip into its clock
+                continue
+            rgb = cv2.cvtColor(bgr, cv2.COLOR_BGR2RGB)
+            h, w = rgb.shape[:2]
+            s = max_dim / max(h, w)
+            if s < 1.0:
+                rgb = cv2.resize(rgb, (round(w * s), round(h * s)),
+                                 interpolation=cv2.INTER_AREA)
+            frames.append(rgb)
+        cap.release()
+        if frames:
+            buf = np.zeros((n_frames, *frames[0].shape), np.uint8)   # black past the end
+            buf[:len(frames)] = frames
+            out[name] = buf
+    return out or None
 
 
 def _expand_frame_columns(arr: np.ndarray, names: list[str],
@@ -690,6 +761,8 @@ class ClipData:
     scene_voxel: float = 0.0                  # merge voxel size (m) — sizes the normal arrows
     video_frames: np.ndarray | None = None    # original footage, frame-slider aligned (sidebar pane)
     fps: float | None = None                  # real-time playback fps (from the source video)
+    views: dict | None = None                 # calibrated static cameras (_load_view_cameras)
+    video_views: dict | None = None           # view name -> its footage (_load_view_videos)
 
 
 def _subsample_human_mask(fid: np.ndarray, obj: np.ndarray, max_per_frame: int) -> np.ndarray:
@@ -713,13 +786,24 @@ def _subsample_human_mask(fid: np.ndarray, obj: np.ndarray, max_per_frame: int) 
     return keep
 
 
+def _fov_y_rad(transform) -> np.ndarray:
+    """Per-frame vertical field of view (radians) from ``geometry/transform.npz``.
+
+    VGGT records it directly (``fov_y_deg``); a calibrated rig saves only the pixel
+    intrinsics, so there it is derived from the focal length and the image height.
+    """
+    if "fov_y_deg" in transform.files:
+        return np.radians(transform["fov_y_deg"].astype(np.float64))
+    fy = transform["intrinsics_px_orig"][:, 1, 1].astype(np.float64)
+    return 2.0 * np.arctan(float(transform["image_height"]) / (2.0 * fy))
+
+
 def load_clip_data(pred: Path, *, device: str, show_smplx: bool,
                    human_max_points: int = 0, video: bool = True,
                    video_dir: Path | None = None) -> ClipData:
     """Load one clip's geometry + all SMPL-X body sources into numpy."""
     geo = pred / "geometry"
     scene = np.load(geo / "scene.npz")
-    human = np.load(geo / "human.npz")
     transform = np.load(geo / "transform.npz")
     if "metric" in transform.files and not bool(transform["metric"]):
         print("[viewer] WARNING: geometry is UP-TO-SCALE (run estimate_scale) — "
@@ -738,8 +822,16 @@ def load_clip_data(pred: Path, *, device: str, show_smplx: bool,
             sp, sco = sp[keep], sco[keep]
             sn = sn[keep] if sn is not None else None
 
-    hp, hc = human["points"], human["colors"]
-    hf, ho = human["frame_id"], human["obj_id"]
+    # Per-frame human depth points — absent on clips fused from calibrated cameras
+    # rather than VGGT depth (the climb_wall_3 ground truth), which just leaves the
+    # human-points layer empty.
+    if (geo / "human.npz").exists():
+        human = np.load(geo / "human.npz")
+        hp, hc = human["points"], human["colors"]
+        hf, ho = human["frame_id"], human["obj_id"]
+    else:
+        hp, hc = np.zeros((0, 3), np.float32), np.zeros((0, 3), np.uint8)
+        hf, ho = np.zeros(0, np.int32), np.zeros(0, np.int32)
     if human_max_points and len(hp):
         keep = _subsample_human_mask(hf, ho, human_max_points)
         hp, hc, hf, ho = hp[keep], hc[keep], hf[keep], ho[keep]
@@ -796,8 +888,17 @@ def load_clip_data(pred: Path, *, device: str, show_smplx: bool,
             if sk is not None:
                 skeletons[name] = sk
 
-    video_frames, play_fps = (_load_video_frames(pred, len(extr), video_dir=video_dir)
-                              if video else (None, None))
+    # Video pane: a multi-view clip plays whichever calibrated view the sidebar's
+    # ``view`` dropdown picks (all on the frame slider's clock); everything else has
+    # the one source clip.
+    views = _load_view_cameras(pred)
+    video_views = (_load_view_videos(pred, len(extr), views)
+                   if video and views is not None else None)
+    if video_views:
+        video_frames, play_fps = video_views[next(iter(video_views))], None
+    else:
+        video_frames, play_fps = (_load_video_frames(pred, len(extr), video_dir=video_dir)
+                                  if video else (None, None))
     if play_fps is None and "fps" in transform.files:
         # No decodable source video (video pane off, or --scenes farm without the
         # clip) — fall back to the container fps the pipeline recorded, scaled for
@@ -812,7 +913,7 @@ def load_clip_data(pred: Path, *, device: str, show_smplx: bool,
         human_points=hp, human_colors=hc, human_fid=hf, human_obj=ho,
         obj_ids=[int(o) for o in np.unique(ho)],
         extr=extr, aspect=float(transform["image_width"]) / float(transform["image_height"]),
-        fov_y=np.radians(transform["fov_y_deg"].astype(np.float64)),
+        fov_y=_fov_y_rad(transform),
         gravity=_load_gravity(pred),
         skinned=skinned,
         forces=forces,
@@ -821,7 +922,8 @@ def load_clip_data(pred: Path, *, device: str, show_smplx: bool,
         n_frames=len(extr),
         scene_normals=sn,
         scene_voxel=float(scene["voxel_size"]) if "voxel_size" in scene.files else 0.0,
-        video_frames=video_frames, fps=play_fps)
+        video_frames=video_frames, fps=play_fps,
+        views=views, video_views=video_views)
 
 
 def ensure_scene_mesh(data: ClipData, method: str) -> tuple | None:

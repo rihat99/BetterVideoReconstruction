@@ -54,6 +54,9 @@ _CONTACT_RGB, _FREE_RGB = (235, 45, 45), (60, 200, 90)
 _FRAME_R, _FRAME_CONN_SCALE, _FRAME_CONN_RGB, _FRAME_NORMAL_LEN = 0.012, 0.3, (150, 190, 160), 0.06
 # cap on drawn camera frustums, so a long clip isn't a dense wire mess
 _CAM_MAX_FRUSTUMS = 24
+# a calibrated rig's fixed cameras (``cameras.npz``): one cyan frustum per view,
+# named — they are known positions, not a reconstructed trajectory
+_CALIB_CAM_RGB = (0, 200, 255)
 # draw the ground grid this many times the fitted floor's data extent, so it reads
 # as a floor spanning the scene rather than a small patch under the climber
 _GROUND_GRID_MULT = 10.0
@@ -118,28 +121,45 @@ class ClipScene:
         # Framing anchor: where the human is. The viewer orbits about ``focus_point``.
         self.camera_mean = centers.mean(0).astype(np.float64)
         self.focus_point = self._compute_focus()
-        self.camera_nodes: list = []
-        # Thin, time-coloured frustums along the path, capped in number: hundreds of
-        # identical blue frustums read as a wire mess, so cap the count (the spline
-        # still shows the full path) and ramp their colour over the trajectory.
-        n_extr = len(data.extr)
-        step = max(camera_stride, int(np.ceil(n_extr / _CAM_MAX_FRUSTUMS)))
-        for k in range(0, n_extr, step):
-            pos, wxyz = _camera_world_pose(data.extr[k])
-            self.camera_nodes.append(ss.add_camera_frustum(
-                f"/clip/cameras/cam_{k:04d}", fov=float(data.fov_y[k]), aspect=data.aspect,
-                scale=camera_scale, color=_time_color(k / max(n_extr - 1, 1)),
-                line_width=1.5, wxyz=wxyz, position=pos))
-        self.camera_nodes.append(ss.add_spline_catmull_rom(
-            "/clip/cameras/path", centers, color=(255, 140, 0), line_width=2.0))
-        self.n_cameras = len(self.camera_nodes) - 1
-        # A marker that rides the path to show the camera's position at the current
-        # frame (moved in ``apply_frame``); toggles with the cameras layer.
+        self.camera_nodes: list = []       # everything the "cameras" layer toggles
+        self.camera_frustums: list = []    # just the frustums, which the size slider scales
         self.camera_centers = centers
-        self.camera_cursor = ss.add_icosphere(
-            "/clip/cameras/cursor", radius=max(camera_scale * 0.5, 0.02),
-            color=(235, 40, 40), position=tuple(centers[0].tolist()),
-            visible=self.layers["cameras"])
+        self.camera_cursor = None          # only a moving camera gets a position marker
+        if data.views is not None:
+            # A calibrated multi-camera rig (the climb_wall_3 ground-truth clips): the
+            # cameras never move and their poses are measured, so draw one labelled
+            # frustum per view instead of a trajectory of reconstructed ones.
+            for k, name in enumerate(data.views["names"]):
+                pos, wxyz = _camera_world_pose(data.views["extr"][k])
+                self.camera_frustums.append(ss.add_camera_frustum(
+                    f"/clip/cameras/{name}", fov=float(data.views["fov_y"][k]),
+                    aspect=float(data.views["aspect"][k]), scale=camera_scale,
+                    color=_CALIB_CAM_RGB, line_width=1.5, wxyz=wxyz, position=pos))
+                self.camera_nodes.append(self.camera_frustums[-1])
+                self.camera_nodes.append(ss.add_label(     # rides its frustum (child node)
+                    f"/clip/cameras/{name}/label", name))
+        else:
+            # Thin, time-coloured frustums along the path, capped in number: hundreds of
+            # identical blue frustums read as a wire mess, so cap the count (the spline
+            # still shows the full path) and ramp their colour over the trajectory.
+            n_extr = len(data.extr)
+            step = max(camera_stride, int(np.ceil(n_extr / _CAM_MAX_FRUSTUMS)))
+            for k in range(0, n_extr, step):
+                pos, wxyz = _camera_world_pose(data.extr[k])
+                self.camera_frustums.append(ss.add_camera_frustum(
+                    f"/clip/cameras/cam_{k:04d}", fov=float(data.fov_y[k]), aspect=data.aspect,
+                    scale=camera_scale, color=_time_color(k / max(n_extr - 1, 1)),
+                    line_width=1.5, wxyz=wxyz, position=pos))
+            self.camera_nodes = list(self.camera_frustums)
+            self.camera_nodes.append(ss.add_spline_catmull_rom(
+                "/clip/cameras/path", centers, color=(255, 140, 0), line_width=2.0))
+            # A marker that rides the path to show the camera's position at the current
+            # frame (moved in ``apply_frame``); toggles with the cameras layer.
+            self.camera_cursor = ss.add_icosphere(
+                "/clip/cameras/cursor", radius=max(camera_scale * 0.5, 0.02),
+                color=(235, 40, 40), position=tuple(centers[0].tolist()),
+                visible=self.layers["cameras"])
+        self.n_cameras = len(self.camera_frustums)
 
         # -- gravity arrow (down), anchored at the mean camera centre --
         self.gravity_nodes: list = []
@@ -297,7 +317,9 @@ class ClipScene:
                         and set(names) <= set(body_names)):
                     full = np.zeros(dyn["ff"].shape[:2] + (len(body_names), 3), np.float32)
                     full[:, :, [body_names.index(n) for n in names]] = dyn["ff"]
-                    dyn["ff"] = full
+                    dyn["ff"], dyn["ff_names"] = full, list(body_names)
+                    # (the force dict is the viewer's per-clip cache, so record the new
+                    # column order too — revisiting the clip must not expand it twice)
                 counts = {person["frame_pos"].shape[1] for person in people if person is not None}
                 if len(people) == dyn["P"] and counts == {dyn["ff"].shape[2]}:
                     self._force_frame_pos[source] = [
@@ -461,7 +483,8 @@ class ClipScene:
             h.visible = self.layers["normals"]
         for h in self.camera_nodes:
             h.visible = self.layers["cameras"]
-        self.camera_cursor.visible = self.layers["cameras"]
+        if self.camera_cursor is not None:
+            self.camera_cursor.visible = self.layers["cameras"]
         for h in self.gravity_nodes:
             h.visible = self.layers["gravity"]
         for h in self.ground_nodes:
@@ -479,7 +502,8 @@ class ClipScene:
         elif name == "cameras":
             for h in self.camera_nodes:
                 h.visible = on
-            self.camera_cursor.visible = on
+            if self.camera_cursor is not None:
+                self.camera_cursor.visible = on
         elif name == "gravity":
             for h in self.gravity_nodes:
                 h.visible = on
@@ -532,7 +556,7 @@ class ClipScene:
         """Live-update the camera frustum sizes (the centre-path spline is left as is)."""
         self.camera_scale = scale
         with self.server.atomic():
-            for h in self.camera_nodes[:-1]:   # last node is the centre-path spline
+            for h in self.camera_frustums:
                 h.scale = scale
 
     def set_mesh_opacity(self, alpha: float) -> None:
@@ -559,7 +583,8 @@ class ClipScene:
         with self.server.atomic():
             self._apply_human(f)
             self._apply_bodies(f)
-            self.camera_cursor.position = tuple(float(x) for x in self.camera_centers[f])
+            if self.camera_cursor is not None:
+                self.camera_cursor.position = tuple(float(x) for x in self.camera_centers[f])
         self._frame = f
 
     def _apply_human(self, f: int) -> None:
@@ -602,10 +627,14 @@ class ClipScene:
     # -- body-skeleton overlay --
     def _hide_skeleton_nodes(self, source: str) -> None:
         for nd in self.skel_nodes.get(source, {}).values():
-            for sp in nd["spheres"].values():
-                sp.visible = False
-            for h, *_rest in nd["bones"]:
-                h.visible = False
+            self._hide_person_skeleton(nd)
+
+    @staticmethod
+    def _hide_person_skeleton(nd: dict) -> None:
+        for sp in nd["spheres"].values():
+            sp.visible = False
+        for h, *_rest in nd["bones"]:
+            h.visible = False
 
     def _apply_skeleton(self, f: int) -> None:
         """Pose the active body source's 52-joint skeleton — gated on the ``skeleton``
@@ -632,19 +661,21 @@ class ClipScene:
                 nd = None if person is None else nodes.get(int(body_oids[p]))
                 if nd is None:
                     continue
-                live = f < len(person["valid"]) and bool(person["valid"][f])
+                # A body can cover fewer frames than the clip — a multi-view fit is
+                # shortened by the slowest camera's lag — so past its end, or on an
+                # invalid frame, this person simply disappears.
+                if not (f < len(person["valid"]) and bool(person["valid"][f])):
+                    self._hide_person_skeleton(nd)
+                    continue
                 bp = person["bone_pos"][f]                    # (J, 3) world joints
                 for j, sp in nd["spheres"].items():
-                    if live:
-                        sp.position = (float(bp[j, 0]), float(bp[j, 1]), float(bp[j, 2]))
-                        sp.visible = True
-                    else:
-                        sp.visible = False
+                    sp.position = (float(bp[j, 0]), float(bp[j, 1]), float(bp[j, 2]))
+                    sp.visible = True
                 for h, j, par, radius in nd["bones"]:
                     a, b = bp[par], bp[j]
                     d = b - a
                     length = float(np.linalg.norm(d))
-                    if live and length > 1e-6:
+                    if length > 1e-6:
                         h.position = (float((a[0] + b[0]) * 0.5), float((a[1] + b[1]) * 0.5),
                                       float((a[2] + b[2]) * 0.5))
                         h.wxyz = _wxyz_shortest_arc_z(d)
@@ -771,10 +802,15 @@ class ClipScene:
         show_fingers = ly.get("dyn_fingers", False)   # show finger / palm joints
         for p in range(dyn["P"]):
             nd = nodes[p]
-            valid = active and f < dyn["valid"].shape[1] and bool(dyn["valid"][p, f])
+            # As in ``_apply_skeleton``: a body can be shorter than the clip, so ``valid``
+            # is False past its end and ``fd`` keeps every array read in range (nothing
+            # is drawn from it — the overlays all hang off ``valid``).
+            n_body = dyn["valid"].shape[1]
+            valid = active and f < n_body and bool(dyn["valid"][p, f])
+            fd = min(f, n_body - 1)
             skel_live = valid and skel_on                # torque skeleton follows the skeleton layer
-            jw, tm = dyn["jw"][p, f], dyn["tm"][p, f]
-            fw = dyn["fw"][p, f]                          # (J, 3) solved contact force (hands at wrists)
+            jw, tm = dyn["jw"][p, fd], dyn["tm"][p, fd]
+            fw = dyn["fw"][p, fd]                         # (J, 3) solved contact force (hands at wrists)
             fmag = np.linalg.norm(fw, axis=-1)           # (J,)
             for j, sp in enumerate(nd["spheres"]):
                 if skel_live and (show_fingers or not finger[j]):
@@ -817,8 +853,8 @@ class ClipScene:
                 per_frame = (ly.get("dyn_force_mode", "per-joint") == "per-frame"
                              and frame_pos is not None and frame_pos[p] is not None)
                 if per_frame:
-                    vec = dyn["ff"][p, f]                                 # (F, 3)
-                    anchor = frame_pos[p][f]                              # (F, 3)
+                    vec = dyn["ff"][p, fd]                                # (F, 3)
+                    anchor = frame_pos[p][fd]                             # (F, 3)
                     keep = (np.linalg.norm(vec, axis=-1) > 1e-3) & np.isfinite(anchor).all(-1)
                     idx = np.flatnonzero(keep)
                 else:
@@ -841,8 +877,8 @@ class ClipScene:
             root = jw[0]
             bw_force = bw_torque = None
             if bw is not None:
-                R = _quat_mat(rq[p, f]) if rq is not None else np.eye(3, dtype=np.float32)
-                bw_force, bw_torque = R @ bw[p, f, :3], R @ bw[p, f, 3:]
+                R = _quat_mat(rq[p, fd]) if rq is not None else np.eye(3, dtype=np.float32)
+                bw_force, bw_torque = R @ bw[p, fd, :3], R @ bw[p, fd, 3:]
             self._root_arrow(source, nd, "root_force",
                              valid and bw_force is not None and ly.get("dyn_root_force", True),
                              root, None if bw_force is None else bw_force * _DYN_FSCALE,
