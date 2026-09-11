@@ -188,7 +188,7 @@ class Body:
         dense.scatter_add_(1, indices, weights)                # padding rows carry weight 0
         return dense
 
-    def shaped(self, betas: torch.Tensor) -> bh.ParametricBody:
+    def shaped(self, betas: torch.Tensor, *, fresh: bool = False) -> bh.ParametricBody:
         """Return the body shaped at ``betas (..., 10)``, baking once and caching.
 
         The returned :class:`better_human.ParametricBody` carries the BetterRobot
@@ -197,8 +197,15 @@ class Body:
         contract. Shape baking (``blend_shapes`` + joint regression + inertia) is
         the expensive part, so a single-slot cache reuses the shaped body while
         ``betas`` is unchanged — the common case across one person's optimization.
+
+        ``fresh`` bakes without touching the cache. Needed when ``betas`` is being
+        optimized: the bake is differentiable, but a cached body carries the
+        autograd graph of the iteration that baked it, and reusing it after that
+        graph was freed raises.
         """
         betas = betas.to(dtype=self._dtype, device=self._device)
+        if fresh:
+            return self._base.with_shape(betas=betas)
         cached = self._shaped_cache
         if cached is not None and cached[0].shape == betas.shape and torch.equal(cached[0], betas):
             return cached[1]
@@ -206,17 +213,19 @@ class Body:
         self._shaped_cache = (betas.clone(), shaped)
         return shaped
 
-    def forward(self, betas: torch.Tensor, q: torch.Tensor) -> _Posed:
+    def forward(self, betas: torch.Tensor, q: torch.Tensor, *, fresh: bool = False) -> _Posed:
         """Pose ``q`` on the body shaped at ``betas``.
 
         :param betas: shape coefficients ``(..., 10)`` (constant across the batch
             in the optimizer; per-frame is allowed).
         :param q: configuration ``(..., 211)`` with unit quaternions.
+        :param fresh: bake the shape outside the cache (see :meth:`shaped`); pass
+            it whenever ``betas`` requires grad.
         :returns: a :class:`_Posed` with ``.vertices (..., V, 3)``,
             ``.joints_world`` (``(..., 52, 7)``), ``.joints (..., 52, 3)`` and
             ``.frames_world (..., 12, 7)``.
         """
-        shaped = self.shaped(betas)
+        shaped = self.shaped(betas, fresh=fresh)
         data = shaped.fk(q.to(dtype=self._dtype, device=self._device))
         vertices = shaped.vertices_from_data(data)
         placements = data.joint_pose_world[..., 1:, :]         # drop the universe joint (row 0)

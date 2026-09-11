@@ -1,0 +1,55 @@
+# Model-stage knobs for the climb_wall_3 human ground truth (scripts/peter_gt/run_human.py).
+# Copies of configs/pipeline_peter.toml's [sam3] / [sam3d] / [smplx] sections: overlays off,
+# one (largest) person per view, resume on. The stage CLIs read only their own section.
+
+[runtime]
+device = "cuda"
+
+[sam3]
+text = "person"
+top_k = 1                  # the climber is the largest frame-0 person mask (labmates in the background)
+confidence = 0.5
+min_area_frac = 0.01
+bbox = []
+mask = ""
+points = []
+prompts = ""
+label = ""
+part_length = 200
+overlay = false
+fps = ""
+checkpoint = ""
+masks_subdir = "sam3"
+skip_existing = true
+dtype = "fp16"
+
+[sam3d]
+obj_ids = ""
+inference_type = "full"
+overlay = false
+subdir = "sam3d"
+skip_existing = true
+hf_repo = "facebook/sam-3d-body-dinov3"
+fps = ""
+
+[smplx]
+iters = 300
+gender = "neutral"
+overlay = false
+subdir = "sam3d"
+skip_existing = true
+smplx_model_folder = ""
+batch_size = 64
+fps = ""
+
+[sapiens]
+tasks = "pose"
+overlay = false
+label = "person"
+subdir = "sapiens"
+batch_size = 8              # crops per forward: bit-identical keypoints to batch 1, ~2.5x faster (tested 2026-09-11)
+checkpoint_root = ""
+score_thresh = 0.3
+fps = ""
+skip_existing = true
+dtype = "fp16"

@@ -33,6 +33,16 @@ applies is inside one of the four limb panels — yet the top panel is still not
 four below it added up, because both totals are the length of a *vector sum* and
 limb forces pointing against each other partially cancel in it.
 
+``peter/out_climb_wall_3_single/`` — the same demonstrator wall, 2026-09 session
+(two climbers, wall at 0 / 16 / 32 degrees, the camera moved between the three).
+Read exactly like climb_wall_2: ``sensor_forces.npz`` written by
+``scripts/peter_sensor_forces.py`` with that inclination's own datasheet rotation.
+
+``peter/climb_wall_3_gt/human/`` — the climb_wall_3 clips reconstructed from all THREE
+calibrated cameras (the ground-truth chain, ``scripts/peter_gt/``). Drawn on the
+undistorted ``cam_left`` view, read exactly like climb_wall_3; ``sensor_forces.npz``
+sits at the clip root there.
+
 ``parkour/out/`` — the LAAS Parkour dataset, where the feet land on floor force
 plates and the hands grab an instrumented bar, so a channel IS that limb's 3D
 contact force: the limb panels compare directly, like the demonstrator wall.
@@ -110,6 +120,9 @@ from score_pipeline_contacts import _limb_load, _limb_members  # noqa: E402
 
 WALL2_SOURCE = PETER / "climb_wall_2"
 WALL2_ROOT = PETER / "out_climb_wall_2_single"
+WALL3_SOURCE = PETER / "climb_wall_3"
+WALL3_ROOT = PETER / "out_climb_wall_3_single"
+GT_ROOT = PETER / "climb_wall_3_gt" / "human"
 PARKOUR_SOURCE = Path("/data3/rikhat.akizhanov/better/data/Parkour-dataset/processed")
 PARKOUR_ROOT = PARKOUR_SOURCE / "out"
 
@@ -240,6 +253,39 @@ def wall2_clip(name: str) -> Clip:
                 measured_cell=measured, limbs_measured=True)
 
 
+def wall3_clip(name: str) -> Clip:
+    """Describe a climb_wall_3 clip — the demonstrator rig again, one board per limb.
+
+    Same reading as :func:`wall2_clip`; the rotation inside ``sensor_forces.npz`` is
+    the one for this clip's wall inclination.
+    """
+    sensor = np.load(WALL3_ROOT / name / "human_optim" / "sensor_forces.npz")
+    channels = [str(limb) for limb in sensor["limbs"]]
+    if channels != LIMBS:
+        raise ValueError(f"sensor channels are {channels}, expected {LIMBS}")
+    measured = np.asarray(sensor["reaction_world"], float)
+    truth = (np.linalg.norm(measured, axis=-1) > BOARD_CONTACT_N).astype(np.int8)
+    return Clip(name=name, video=WALL3_SOURCE / name / "cam_left.mp4", tree=WALL3_ROOT / name,
+                plate_contact=truth,
+                measured_total=np.asarray(sensor["total_world"], float),
+                measured_cell=measured, limbs_measured=True)
+
+
+def gt_clip(name: str) -> Clip:
+    """Describe a climb_wall_3 multi-view ground-truth clip — the same boards as
+    :func:`wall3_clip`, drawn on its undistorted ``cam_left`` video."""
+    sensor = np.load(GT_ROOT / name / "sensor_forces.npz", allow_pickle=True)
+    channels = [str(limb) for limb in sensor["limbs"]]
+    if channels != LIMBS:
+        raise ValueError(f"sensor channels are {channels}, expected {LIMBS}")
+    measured = np.asarray(sensor["reaction_world"], float)
+    truth = (np.linalg.norm(measured, axis=-1) > BOARD_CONTACT_N).astype(np.int8)
+    return Clip(name=name, video=GT_ROOT / name / "views" / "cam_left" / "video.mp4",
+                tree=GT_ROOT / name, plate_contact=truth,
+                measured_total=np.asarray(sensor["total_world"], float),
+                measured_cell=measured, limbs_measured=True)
+
+
 def parkour_clip(name: str) -> Clip:
     """Describe a LAAS Parkour clip — floor plates under the feet, a sensed bar in the hands.
 
@@ -278,6 +324,8 @@ def render(clip: Clip) -> Path:
     n_frames = len(frame_indices)
     if not np.array_equal(frame_indices, np.arange(n_frames)):
         raise ValueError("pipeline frames are not the video frames — the rig's clock cannot be aligned")
+    # The multi-view GT body is a few frames shorter than the video (cut to the slowest camera's lag).
+    n_frames = min(n_frames, int(kindyn["num_frames"]))
     people = [int(x) for x in kindyn["object_ids"]]
     if len(people) != 1:
         raise ValueError(f"the rig measures one climber but kindyn_1 holds {people}")
@@ -359,7 +407,7 @@ def render(clip: Clip) -> Path:
             finite = np.isfinite(measured_size)
             print(f"[overlays] {clip.name}: total size ratio "
                   f"{model_total[finite].mean() / measured_size[finite].mean():.2f} "
-                  f"(sizes only - measured frame is the MoCap world)")
+                  f"(sizes only - the measured vectors are not in our world frame)")
 
     # The sensor's own per-limb force, drawn beside the solve's — only where
     # a channel IS a limb force (the demonstrator wall), not where it is a corner cell,
@@ -409,18 +457,25 @@ def render(clip: Clip) -> Path:
 
 
 TREES = [(CAMPUS_ROOT, campus_clip), (WALL_ROOT, wall_clip), (WALL2_ROOT, wall2_clip),
-         (PARKOUR_ROOT, parkour_clip)]
+         (WALL3_ROOT, wall3_clip), (GT_ROOT, gt_clip), (PARKOUR_ROOT, parkour_clip)]
 
 
 def _targets(names: list[str]) -> list[Clip]:
-    """Resolve clip names against both trees, or list every clip whose dynamics stage ran."""
+    """Resolve clip names (or clip directories) against the trees, or list every clip whose dynamics stage ran."""
     if not names:
         return [build(clip.name) for root, build in TREES for clip in sorted(root.iterdir())
                 if (clip / "human_optim" / "kindyn_1.npz").exists()]
     clips = []
     for name in names:
-        match = next((build for root, build in TREES
-                      if (root / name / "human_optim" / "kindyn_1.npz").exists()), None)
+        # A clip directory picks its own tree (a name alone takes the first tree holding it —
+        # climb_wall_3 clips exist both single-view and in the multi-view GT tree).
+        if Path(name).is_dir():
+            clip_dir = Path(name).resolve()
+            match = next((build for root, build in TREES if clip_dir.parent == root.resolve()), None)
+            name = clip_dir.name
+        else:
+            match = next((build for root, build in TREES
+                          if (root / name / "human_optim" / "kindyn_1.npz").exists()), None)
         if match is None:
             roots = ", ".join(str(root) for root, _ in TREES)
             raise SystemExit(f"[overlays] no kindyn_1 for {name!r} under any of: {roots}")

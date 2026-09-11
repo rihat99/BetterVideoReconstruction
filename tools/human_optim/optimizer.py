@@ -387,6 +387,8 @@ def optimize_person(
     keypoint_vis: torch.Tensor | None = None,
     joint_vis: torch.Tensor | None = None,
     dynamics: DynamicsSpec | None = None,
+    extra_terms: dict | None = None,
+    fit_betas: bool = False,
 ) -> tuple[torch.Tensor, Metrics, Metrics, dict]:
     """Optimize one person over ``phases``. Returns ``(q_world_opt, before, after, aux)``.
 
@@ -472,9 +474,32 @@ def optimize_person(
     forces are warm-started at the initial pose before the phases run. The solved
     forces + diagnostics are returned in ``aux['dynamics']``. ``None`` keeps the
     pure kinematic behaviour.
+
+    ``extra_terms`` (``{name: TermFn}``) registers caller-defined loss terms on the
+    same shared :class:`~tools.optim.State` (``"jw"``, ``"vw"``, ``"fw"``, ``"qn"``,
+    …); like every term they are active where their phase weight is non-zero. The
+    multi-view ground-truth fit uses this for its per-camera reprojection term.
+
+    ``fit_betas`` makes the 10 shape coefficients a leaf too, trainable in the phases
+    whose ``dofs`` name ``"betas"`` and frozen (gradient masked) elsewhere; the
+    returned ``aux["betas"]`` holds the result. Shape is baked afresh each iteration
+    while it is live. Terms that need the shape held constant (scene candidates, the
+    dynamics model) read the current value detached.
     """
+    if fit_betas and dynamics is not None:
+        raise ValueError("fit_betas with dynamics: the RNEA model is baked at one shape and would not follow")
     T = q_world_init.shape[0]
     betas = betas_mean[None].expand(T, -1).contiguous()
+    b_leaf = None                          # the betas leaf, when fit_betas (set below)
+    betas_cell: dict = {"live": False}     # is betas trainable in the running phase?
+
+    def _betas_T(live: bool = False) -> torch.Tensor:
+        """Current ``(T, 10)`` betas — the leaf (with grad if ``live``) or the constant."""
+        if b_leaf is None:
+            return betas
+        if live:
+            return b_leaf[None]          # (1, 10): ONE differentiable bake, broadcast over the frames
+        return b_leaf.detach()[None].expand(T, -1)
 
     # Shared (per-clip) knob sections — operational constants, not per-stage weights.
     oc = knobs["optimizer"]
@@ -594,7 +619,7 @@ def optimize_person(
     init_target = None
     if use_init:
         with torch.no_grad():
-            o0i = mid.forward(betas, normalize_q(q_world_init, mid.num_joints))
+            o0i = mid.forward(_betas_T(), normalize_q(q_world_init, mid.num_joints))
             jw0i = o0i.joints_world.tensor()[..., :3]
             init_target = project(transform_points(jw0i[:, body_idx, :], extrinsics), K)
 
@@ -619,7 +644,7 @@ def optimize_person(
         init_target_loss = torch.as_tensor(sm, dtype=init_target.dtype, device=init_target.device)
 
     mk = lambda q: _metrics(
-        mid, betas, q, extrinsics=extrinsics, K=K, depth_pad=depth_pad, depth_valid=depth_valid,
+        mid, _betas_T(), q, extrinsics=extrinsics, K=K, depth_pad=depth_pad, depth_valid=depth_valid,
         target_kp=target_kp, scores=scores, corr=corr, frame_vertex_ids=frame_vertex_ids,
         sub=sub, score_thresh=score_thresh, chunk=chunk,
         body_idx=body_idx, init_target=init_target,
@@ -641,9 +666,12 @@ def optimize_person(
     def _forward() -> State:
         st = State()
         qn = normalize_q(q, mid.num_joints)
-        out = mid.forward(betas, qn)
+        live = betas_cell["live"]
+        cur_betas = _betas_T(live)
+        out = mid.forward(cur_betas, qn, fresh=live)
         jw7 = out.joints_world.tensor()          # (T, J, 7) world SE3: position + scalar-last quat
         st.put("qn", qn)
+        st.put("betas", cur_betas[0])            # (10,) current shape (grad only while trainable)
         st.put("jw", jw7[..., :3])
         st.put("jwq", jw7[..., 3:7])
         st.put("vw", out.vertices)
@@ -695,6 +723,8 @@ def optimize_person(
     problem = Problem(_forward)
     q = problem.add_leaf("q", q_world_init)
     nq = q.shape[1]
+    if fit_betas:
+        b_leaf = problem.add_leaf("betas", betas_mean)
     # kindyn_1: a free world-force leaf per contact group per frame — plus, where a
     # friction cone is frozen (feet/ankles), a second leaf of four pyramid-generator
     # activations that replaces it — and the dynamics terms (registered here,
@@ -719,7 +749,7 @@ def optimize_person(
         if not use_pen:
             return None
         with torch.no_grad():
-            o0 = mid.forward(betas, normalize_q(q, mid.num_joints))
+            o0 = mid.forward(_betas_T(), normalize_q(q, mid.num_joints))
             box = torch.cat([o0.joints_world.tensor()[..., :3], o0.frames_world[..., :3]], 1)
             cand = _padded_scene_candidates(box, scene_pts, scene_normals,
                                             scene_conf, float(pen_cfg["prune_margin_m"]), max_cand)
@@ -741,7 +771,7 @@ def optimize_person(
         per stage — so contact detection cannot feed back into the fit."""
         ac = auto_contact
         with torch.no_grad():
-            frames7 = mid.forward(betas, normalize_q(q, mid.num_joints)).frames_world
+            frames7 = mid.forward(_betas_T(), normalize_q(q, mid.num_joints)).frames_world
         points = frames7[..., :3]
         drift = joint_drift(points, fps=fps, window_s=float(ac["window_s"]),
                             valid_mask=frame_valid)
@@ -912,6 +942,11 @@ def optimize_person(
             return loss, {"cm_s2": accel_cms2, "n": n_stencils}
         problem.add_term("ann_acceleration", _acceleration)
 
+    for name, fn in (extra_terms or {}).items():
+        if name in problem.terms:
+            raise ValueError(f"extra term {name!r} shadows a built-in term")
+        problem.add_term(name, fn)
+
     # ── run the phases in order ──────────────────────────────────────────────
     # Adam (per-coordinate steps) tolerates the very different gradient scales here
     # (metre root translation vs joint quaternions, pixel reproj vs metre chamfer)
@@ -923,6 +958,7 @@ def optimize_person(
 
     def _phase_start(ph: PhaseSpec):
         def on_start() -> None:
+            betas_cell["live"] = fit_betas and "betas" in ph.dofs
             scene_cell["cand"] = _build_scene_cand() if ph.scene else None
             # Bind the frozen kinematics_1 labels once, at the first scene phase (the body has
             # seated by then).
@@ -935,7 +971,7 @@ def optimize_person(
                       f"{int((lab == 1).any(1).sum())}/{lab.shape[0]} frames w/ contact  ({per_frame})")
             if use_contact_patch and use_pen and ph.scene:
                 with torch.no_grad():
-                    o0 = mid.forward(betas, normalize_q(q, mid.num_joints))
+                    o0 = mid.forward(_betas_T(), normalize_q(q, mid.num_joints))
                     pts0 = o0.frames_world[..., :3] if on_frames else o0.vertices[:, sub]
                 aq_cfg = knobs["ann_acquisition"]
                 patch_cell["patches"] = _build_contact_patches(
@@ -959,11 +995,17 @@ def optimize_person(
     # to stiffen kinematics_2 against the contact-patch repair (the body seats less,
     # 60 fps contact recall collapses .67 -> .42 on 2nwG).
     scale_w = (lambda w: fps_scaled_weights(w, fps)) if dynamics is not None else (lambda w: w)
+
+    def _grad_mask(ph: PhaseSpec) -> dict[str, torch.Tensor] | None:
+        mask = dict(lbfgs_mask or {}) if ph.optimizer == "lbfgs" else {
+            "q": _dof_mask(ph.dofs, nq, q.device, freeze_fingers=freeze_fingers)}
+        if b_leaf is not None:      # betas trains only in the phases that name it
+            mask["betas"] = torch.full_like(b_leaf, float("betas" in ph.dofs))
+        return mask or None
+
     engine_phases = [
         Phase(ph.name, int(ph.iters), scale_w(ph.weights), optimizer=ph.optimizer,
-              grad_mask=(lbfgs_mask if ph.optimizer == "lbfgs" else
-                         {"q": _dof_mask(ph.dofs, nq, q.device, freeze_fingers=freeze_fingers)}),
-              on_start=_phase_start(ph))
+              grad_mask=_grad_mask(ph), on_start=_phase_start(ph))
         for ph in phases
     ]
     # kindyn_1: seed the forces at the (frozen) initial pose so the base-wrench
@@ -979,8 +1021,10 @@ def optimize_person(
 
     with torch.no_grad():
         q_opt = normalize_q(q.detach(), mid.num_joints)
+    betas_cell["live"] = False
     aux = {"drift_pre": auto_drift_pre[0],                         # (T, J) refine-start drift, or None
-           "auto_labels": contact_labels if use_auto else None}   # (T, J) int8 frozen labels, or None
+           "auto_labels": contact_labels if use_auto else None,   # (T, J) int8 frozen labels, or None
+           "betas": _betas_T()[0].detach().clone()}               # (10,) fitted (or the input) shape
     if dynamics is not None:
         aux["dynamics"] = dynamics.extract(q_opt, f_free.detach(),
                                            None if gen_u is None else gen_u.detach(), mid)
