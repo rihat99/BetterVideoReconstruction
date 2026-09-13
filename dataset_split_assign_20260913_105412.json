@@ -554,13 +554,12 @@
   "zkwUFvH2T38_0088": "train",
   "zkwUFvH2T38_0090": "train",
   "zkwUFvH2T38_0091": "train",
-  "zkwUFvH2T38_0093": "train"
+  "zkwUFvH2T38_0093": "train",
+  "zoJj4g5jV80_0029": "test",
+  "zoJj4g5jV80_0034": "test"
  },
  "db": "../data/ClimbingVideos/scenes/scenes.db",
- "held_null_same_video_as_test": [
-  "zoJj4g5jV80_0029",
-  "zoJj4g5jV80_0034"
- ],
- "reason": "user request 2026-09-13: the 557 newly processed scenes get dataset_split=train; 2 scenes sharing a source video with an existing test scene left NULL (rollback = set listed ids back to NULL)",
+ "held_null_same_video_as_test": [],
+ "reason": "user request 2026-09-13: the 557 newly processed scenes get dataset_split=train; 2 scenes sharing a source video with an existing test scene left NULL (rollback = set listed ids back to NULL); user decision 2026-09-13: those 2 moved to test (also appended to results/test_scenes.txt)",
  "when": "20260913_105412"
 }
