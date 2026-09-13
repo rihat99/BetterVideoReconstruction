@@ -26,6 +26,7 @@ from __future__ import annotations
 
 import contextlib
 import os
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from typing import Literal
 
@@ -246,6 +247,7 @@ def forward_pose_batched(
     bboxes_list: list[np.ndarray],
     *,
     batch_size: int = 8,
+    workers: int = 8,
 ) -> list[tuple[np.ndarray, np.ndarray]]:
     """Cross-image batched top-down pose inference.
 
@@ -268,6 +270,7 @@ def forward_pose_batched(
         batch_size: crops per forward pass. 5B at 1024×768 bf16 is
             ~10-15 GB / forward including activations — 8 fits on a
             48-49 GB card comfortably.
+        workers: threads for the CPU crop building and heatmap decoding.
 
     Returns:
         List of ``N`` ``(keypoints, scores)`` tuples in input order.
@@ -280,20 +283,25 @@ def forward_pose_batched(
             f"{len(image_bgr_list)} vs {len(bboxes_list)}"
         )
 
-    inputs_list: list[torch.Tensor] = []
-    samples_list: list[dict] = []
-    image_index: list[int] = []
-    for img_idx, (img, bbs) in enumerate(zip(image_bgr_list, bboxes_list)):
-        bbs_arr = np.asarray(bbs, dtype=np.float32).reshape(-1, 4)
-        for bbox in bbs_arr:
-            info = dict(img=img)
-            info["bbox"] = bbox[None]
-            info["bbox_score"] = np.ones(1, dtype=np.float32)
-            data = model.pipeline(info)
-            data = model.data_preprocessor(data)
-            inputs_list.append(data["inputs"])
-            samples_list.append(data["data_samples"])
-            image_index.append(img_idx)
+    # Crop building (affine warp of the full image) and heatmap decoding
+    # (308 CPU Gaussian blurs per crop) are the CPU halves of the call; both
+    # release the GIL, so they run on a thread pool.
+    def _crop(img_idx: int, bbox: np.ndarray) -> tuple[torch.Tensor, dict]:
+        info = dict(img=image_bgr_list[img_idx])
+        info["bbox"] = bbox[None]
+        info["bbox_score"] = np.ones(1, dtype=np.float32)
+        data = model.data_preprocessor(model.pipeline(info))
+        return data["inputs"], data["data_samples"]
+
+    jobs: list[tuple[int, np.ndarray]] = []
+    for img_idx, bbs in enumerate(bboxes_list):
+        for bbox in np.asarray(bbs, dtype=np.float32).reshape(-1, 4):
+            jobs.append((img_idx, bbox))
+    image_index = [img_idx for img_idx, _ in jobs]
+    with ThreadPoolExecutor(workers) as pool:
+        crops = list(pool.map(lambda job: _crop(*job), jobs))
+    inputs_list = [inp for inp, _ in crops]
+    samples_list = [ds for _, ds in crops]
 
     empty = (
         np.zeros((0, NUM_KEYPOINTS, 2), dtype=np.float32),
@@ -330,16 +338,22 @@ def forward_pose_batched(
             preds.append(p.float())
     pred_arr = torch.cat(preds, dim=0).cpu().numpy()
 
-    buckets: list[list[tuple[np.ndarray, np.ndarray]]] = [
-        [] for _ in image_bgr_list
-    ]
-    for i, ds in enumerate(samples_list):
+    def _decode(i: int) -> tuple[np.ndarray, np.ndarray]:
+        ds = samples_list[i]
         kpts, scs = model.codec.decode(pred_arr[i])
         input_size = np.asarray(ds["meta"]["input_size"], dtype=np.float32)
         bbox_center = np.asarray(ds["meta"]["bbox_center"], dtype=np.float32)
         bbox_scale = np.asarray(ds["meta"]["bbox_scale"], dtype=np.float32)
         kpts = kpts / input_size * bbox_scale + bbox_center - 0.5 * bbox_scale
-        buckets[image_index[i]].append((kpts[0], scs[0]))
+        return kpts[0], scs[0]
+
+    buckets: list[list[tuple[np.ndarray, np.ndarray]]] = [
+        [] for _ in image_bgr_list
+    ]
+    with ThreadPoolExecutor(workers) as pool:
+        decoded = list(pool.map(_decode, range(K)))
+    for i, item in enumerate(decoded):
+        buckets[image_index[i]].append(item)
 
     out: list[tuple[np.ndarray, np.ndarray]] = []
     for items in buckets:

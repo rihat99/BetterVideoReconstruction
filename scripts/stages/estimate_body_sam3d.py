@@ -137,6 +137,13 @@ class Sam3dBodyEstimator:
             # No detector/segmentor/fov_estimator — we supply bboxes, masks,
             # and cam_int ourselves.
             self._estimator = _Estimator(sam_3d_body_model=model, model_cfg=model_cfg)
+            # process_one_image prints two lines and flushes the CUDA cache on
+            # EVERY call (one per person per frame); over a corpus that is a
+            # sync + re-allocation storm, so neutralize both in this process.
+            import sam_3d_body.sam_3d_body_estimator as _estimator_module
+
+            _estimator_module.print = lambda *args, **kwargs: None
+            torch.cuda.empty_cache = lambda: None
         return self._estimator
 
     def _resolve_cam_intrinsics(
@@ -325,7 +332,13 @@ class Sam3dBodyEstimator:
 
             for i in tqdm(range(N), desc="Estimating body params"):
                 idx = int(frame_indices[i])
-                overlay_bgr = None  # lazily read from disk on first render of this frame
+                overlay_bgr = None  # lazily copied from the decoded frame on first render
+                # Decode the frame ONCE for every person and the overlay (the
+                # estimator re-reads a path per call). It expects RGB arrays.
+                frame_bgr = cv2.imread(str(frame_paths[i]))
+                if frame_bgr is None:
+                    continue
+                frame_rgb = cv2.cvtColor(frame_bgr, cv2.COLOR_BGR2RGB)
 
                 for pi, (obj, bseq, msub) in enumerate(people):
                     bbox = bseq[i]
@@ -341,7 +354,7 @@ class Sam3dBodyEstimator:
                     bbox_f = bbox.reshape(1, 4).astype(np.float32)
 
                     outputs = estimator.process_one_image(
-                        str(frame_paths[i]),
+                        frame_rgb,
                         bboxes=bbox_f,
                         masks=mask,
                         cam_int=cam_int_list[i],
@@ -362,7 +375,7 @@ class Sam3dBodyEstimator:
 
                     if render_video:
                         if overlay_bgr is None:
-                            overlay_bgr = cv2.imread(str(frame_paths[i]))
+                            overlay_bgr = frame_bgr.copy()
                         if overlay_bgr is not None:
                             color = _MESH_COLORS[pi % len(_MESH_COLORS)]
                             mesh_renderer = Renderer(
@@ -382,7 +395,7 @@ class Sam3dBodyEstimator:
                 # ---- emit the (possibly multi-person) overlay frame ----
                 if render_video:
                     if overlay_bgr is None:  # no valid person this frame → plain frame
-                        overlay_bgr = cv2.imread(str(frame_paths[i]))
+                        overlay_bgr = frame_bgr
                     if single_image_render:
                         if overlay_bgr is not None:
                             cv2.imwrite(str(rendered_video_path), overlay_bgr)

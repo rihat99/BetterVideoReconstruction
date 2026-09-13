@@ -66,7 +66,7 @@ from tools.source import resolve_source  # noqa: E402
 from tools.adapters.sapiens2 import (  # noqa: E402
     NUM_KEYPOINTS,
     forward_dense,
-    forward_pose,
+    forward_pose_batched,
     load_sapiens2,
 )
 
@@ -259,28 +259,29 @@ class Sapiens2Step:
         kpts_view: list[list[np.ndarray]] = [[] for _ in range(N)]
         scs_view: list[list[np.ndarray]] = [[] for _ in range(N)]
 
-        for f in range(N):
-            rows: list[int] = []
-            bbox_rows: list[np.ndarray] = []
-            for p in range(P):
-                bb = bboxes[p, f]
-                if np.all(bb == 0):
-                    continue
-                rows.append(p)
-                bbox_rows.append(bb)
-            if not rows:
-                continue
-            bb_in = np.stack(bbox_rows, axis=0)
-            kpts, scs = forward_pose(
-                self._model, bgr_frames[f], bb_in,
+        # Frames go through the cross-image batched forward in windows of
+        # ``batch_size`` frames, so the backbone sees ~batch_size crops per
+        # call instead of the one or two people a single frame contributes.
+        window = max(1, int(self.args.batch_size))
+        for f0 in range(0, N, window):
+            frames = list(range(f0, min(N, f0 + window)))
+            rows_per_frame: list[list[int]] = []
+            bbs_per_frame: list[np.ndarray] = []
+            for f in frames:
+                rows = [p for p in range(P) if not np.all(bboxes[p, f] == 0)]
+                rows_per_frame.append(rows)
+                bbs_per_frame.append(bboxes[rows, f] if rows else np.zeros((0, 4), np.float32))
+            results = forward_pose_batched(
+                self._model, [bgr_frames[f] for f in frames], bbs_per_frame,
                 batch_size=self.args.batch_size,
             )
-            for k, p in enumerate(rows):
-                keypoints[p, f] = kpts[k]
-                scores[p, f] = scs[k]
-                valid[p, f] = True
-                kpts_view[f].append(kpts[k])
-                scs_view[f].append(scs[k])
+            for f, rows, (kpts, scs) in zip(frames, rows_per_frame, results):
+                for k, p in enumerate(rows):
+                    keypoints[p, f] = kpts[k]
+                    scores[p, f] = scs[k]
+                    valid[p, f] = True
+                    kpts_view[f].append(kpts[k])
+                    scs_view[f].append(scs[k])
 
         out_npz = sapiens_dir / "pose.npz"
         np.savez_compressed(
