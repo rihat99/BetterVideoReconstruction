@@ -417,36 +417,34 @@ res_before_bw_max = 2.5    # ... AND median pre-force root residual above this =
 smear_med_max = 2.0        # median along-ray human-cloud smear above this = "depth" flag
                            # (same 2.0 as the chamfer smear weight's dead zone — one meaning)
 
-# Label confidence — a trust weight in [0, 1] estimate_contacts saves with every
-# contact / no-contact label (frame_label_confidence + the joint_contact fold): the
-# per-joint era's source-conditional algebra on the frame axis — visibility ×
-# evidence, the evidence capped by the label's source (docs/contact_confidence.md).
-# It never changes the binary label.
+# Label confidence — P(the label agrees with a human annotator), one logistic head per label
+# class over three witnesses: the joint group, its drift over the readout window, and the time
+# to the nearest change of its own label. Fitted by scripts/calibrate_contact_confidence.py on
+# the annotated corpus scenes (docs/contact_confidence.md). `intercept` is 0 by construction:
+# each group term IS that group's intercept. Do not hand-edit the numbers.
 [contact_confidence]
-surface_inner_m = -0.02       # contact band: burial deeper than this is suspect geometry
-surface_outer_m = 0.05        # ... and further outside than this is not on the wall
-surface_soft_m = 0.01         # softness of both band edges
-penetration_floor = 0.40      # deep burial keeps at least this fraction of surface evidence
-motion_scale_mps = 0.10       # no-contact: net speed where motion evidence saturates (far)
-motion_near_scale_mps = 0.15  # ... inflated near the wall (suppresses slow drift)
-motion_near_power = 3.0       # ... with a steeper (cubic) response there
-image_margin_px = 10.0        # soft image border of the visibility term
-occ_margin_m = 0.05           # body-occlusion gap where visibility halves
-occ_soft_m = 0.01             # ... and its softness
-gate_only_cap = 0.50          # ceiling for a geometric (near-and-still) contact alone
-gate_force_cap = 0.85         # ... lifted to this under full solved-load corroboration
-force_only_cap = 0.70         # ceiling for a force-witness-only contact (misregistration rescue)
-force_share_scale = 0.25      # |f|/body-weight where the force ramp saturates
-nodata_cap = 1.0              # no-contact cap with an absent depth witness — OFF (premise refuted)
-nodata_force_cap = 1.0        # ... lifted where the solve allocates ~no force — OFF
+drift_floor_m = 0.005         # log(drift + floor)
+transition_cap_s = 1.0        # seconds to the nearest label change, capped
+fit = "2026-09-12 — annotated ClimbingVideos scenes after the manual-label check (scripts/calibrate_contact_confidence.py --write)"
 
-# Depth-fit trust — how well the local body fit agrees with the human depth cloud;
-# scales the motion (no-contact) evidence so a stretched limb cannot fake a
-# trustworthy "it moved".
-[depth_fit]
-cell_px = 8                # z-buffer cell size (px) for cloud↔mesh ray matching
-min_points = 5             # fewer matched cloud points than this = no depth witness
-trust_scale_log = 0.05     # log-depth-ratio scale of the trust falloff
+[contact_confidence.contact]    # the label says contact
+intercept = 0.000000
+log_drift = -0.766560
+log_transition = 0.454034
+hand = -0.331224
+foot = -1.267281
+ankle = -2.744473
+knee = 0.000000
+
+[contact_confidence.free]       # the label says free
+intercept = 0.000000
+log_drift = 0.985031
+log_transition = 0.618112
+hand = 0.833201
+foot = 1.191622
+ankle = 3.766264
+knee = 5.139848
+
 
 [friction]
 half_angle_deg = 45.0   # μ = tan(45°) = 1

@@ -359,11 +359,12 @@ The frame model removes the reason they were needed:
 
 Dropped with the old model, on this branch: completion and prediction fusion
 (`completion.py` and `fusion.py` are deleted; `docs/contact_fusion.md` is the
-design record). The per-label **confidence** — with its ray-cast occlusion
-witness and depth-fit trust — came back in 2026-08: the same source-conditional
-algebra now runs on the contact-frame axis inside `estimate_contacts`, and the
-frame labels fold onto report joints (hands at the wrist) for downstream
-per-joint consumers. See [contact_confidence.md](contact_confidence.md).
+design record). The per-label **confidence** stayed, but is no longer built by
+hand: the frame labels fold onto report joints (hands at the wrist), and each
+folded label carries a probability fitted against the manual annotations. Its
+old witnesses — the ray-cast body-occlusion test and the depth-fit trust — were
+measured to add nothing to that probability and are gone with it. See
+[contact_confidence.md](contact_confidence.md).
 Consumers pinned to a schema (the offline scorer, `kinematics_2`, `kindyn_1`)
 fail loudly on a mismatched `contact_label_schema` rather than misreading it.
 

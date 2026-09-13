@@ -25,7 +25,6 @@ from .contacts import (
     hysteresis_spans,
     joint_drift,
     joint_guarded_min_sdf,
-    joint_occlusion_gap,
     min_span_frames,
     merge_contact_spans,
     suppress_toe_sides,
@@ -34,7 +33,6 @@ from .contacts import (
     stillness_weight,
     vertex_to_joint,
 )
-from .depth_fit import DEPTH_FIT_DEFAULTS, NO_DATA_TRUST, joint_depth_fit
 from .keypoints import Correspondence, build_correspondence
 from .losses import (
     chamfer_loss,
@@ -66,7 +64,6 @@ __all__ = [
     "hysteresis_spans",
     "joint_drift",
     "joint_guarded_min_sdf",
-    "joint_occlusion_gap",
     "min_span_frames",
     "merge_contact_spans",
     "suppress_toe_sides",
@@ -74,9 +71,6 @@ __all__ = [
     "scene_sdf",
     "stillness_weight",
     "vertex_to_joint",
-    "DEPTH_FIT_DEFAULTS",
-    "NO_DATA_TRUST",
-    "joint_depth_fit",
     "Correspondence",
     "build_correspondence",
     "chamfer_loss",

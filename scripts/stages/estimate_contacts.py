@@ -41,18 +41,18 @@ Run from CLI::
     .venv/bin/python scripts/stages/estimate_contacts.py \\
         --source video.mp4 --predictions out/video/ --config configs/human_optimization.toml
 
-Every label — contact and no-contact — also gets a **confidence** weight in [0, 1]
-(the per-joint era's source-conditional algebra on the frame axis; see
-``docs/contact_confidence.md``), and the frame labels + confidences are folded onto
-**report joints** (each frame's parent joint; every hand frame reports at its wrist)
-for downstream per-joint consumers.
+The frame labels are folded onto **report joints** (each frame's parent joint; every
+hand frame reports at its wrist) for downstream per-joint consumers, and every folded
+label gets a **confidence**: the fitted probability that it agrees with a human
+annotator, from the joint, its drift and its distance to the next label change (see
+``docs/contact_confidence.md``). The per-frame confidence is its report joint's value.
 
 Reads:  human_optim/kinematic_1.npz, geometry/scene.npz, geometry/transform.npz,
-        geometry/human.npz (depth-fit trust; optional)
+        geometry/human.npz (the depth-smear quality metric; optional)
 Writes: human_optim/contacts_1.npz          (frame_contact (P,N,F) bool + the signed /
                                              Euclidean / normal / drift signals behind it
-                                             + frame_label_confidence and its witnesses
-                                             + the joint_contact / joint_label_confidence fold)
+                                             + the joint_contact fold and its
+                                             joint_label_confidence / frame_label_confidence)
         human_optim/contacts_1_overlay.mp4  ([contacts].overlay; default on)
 """
 
@@ -68,7 +68,6 @@ if str(_REPO_ROOT) not in sys.path:
 
 import argparse  # noqa: E402
 import json  # noqa: E402
-from typing import NamedTuple  # noqa: E402
 
 import numpy as np  # noqa: E402
 import torch  # noqa: E402
@@ -85,12 +84,8 @@ from tools.human_optim import (  # noqa: E402
 )
 from tools.human_optim import paths  # noqa: E402
 from tools.human_optim.confidence import (  # noqa: E402
-    CONTACT_CONFIDENCE_METHOD, confidence_config, fold_to_joints,
-    frame_report_joints, joint_label_confidence, occlusion_group_ids,
-)
-from tools.human_optim.contacts import joint_occlusion_gap, vertex_to_joint  # noqa: E402
-from tools.human_optim.depth_fit import (  # noqa: E402
-    DEPTH_FIT_DEFAULTS, NO_DATA_TRUST, joint_depth_fit,
+    CONTACT_CONFIDENCE_METHOD, confidence_coefficients, fold_contacts, fold_drift,
+    frame_report_joints, label_confidence,
 )
 from tools.human_optim.forces import (  # noqa: E402
     NO_SCENE_M,
@@ -147,12 +142,13 @@ def _load_config(path: Path) -> dict:
     q.setdefault("cam_depth_max", 0.4)     # camera flag: cam-travel/scene-depth above this ...
     q.setdefault("res_before_bw_max", 2.5)  # ... AND pre-force residual above this (both witnesses)
     q.setdefault("smear_med_max", 2.0)     # depth flag: median along-ray smear above this
-    # Label confidence: knob overrides for tools/human_optim/confidence.py (defaults there)
-    # + the depth-fit trust the motion evidence is scaled by.
-    cfg["contact_confidence"] = confidence_config(cfg.get("contact_confidence", {}))
-    d = cfg.setdefault("depth_fit", {})
-    for key, value in DEPTH_FIT_DEFAULTS.items():
-        d.setdefault(key, value)
+    # Label confidence: the fitted logistic coefficients. There are no defaults — a
+    # config without them has never been calibrated, and guessing numbers would be worse
+    # than saying so.
+    if "contact_confidence" not in cfg:
+        raise SystemExit(f"[estimate_contacts] {path} has no [contact_confidence] section — "
+                         "run scripts/calibrate_contact_confidence.py --write on it")
+    cfg["contact_confidence"] = confidence_coefficients(cfg["contact_confidence"])
     cfg.setdefault("runtime", {}).setdefault("device", "cuda")
     return cfg
 
@@ -162,27 +158,19 @@ def _sha256(path: Path) -> str:
         return hashlib.file_digest(source_file, "sha256").hexdigest()
 
 
-class _PosedPerson(NamedTuple):
-    """One person posed for the whole clip, at metric size."""
-
-    frames7: torch.Tensor    # (N, F, 7) contact-frame world poses
-    vertices: torch.Tensor   # (N, V, 3) full-resolution world vertices
-
-
 @torch.no_grad()
 def _pose(body, betas: torch.Tensor, q: torch.Tensor, scale: float,
-          *, chunk: int = 64) -> _PosedPerson:
-    """Pose all frames → contact-frame world poses + world vertices.
+          *, chunk: int = 64) -> torch.Tensor:
+    """Pose all frames → contact-frame world poses ``(N, F, 7)``.
 
     Re-applies the per-person global ``scale`` about the pelvis (joint 0), the same
     operation the kinematic optimizer and viewers use, so the contact detector sees
     the body at its stored metric size. A uniform scale about a point moves
     positions only — the frame rotations, and therefore the outward normals, are
-    untouched. The vertices feed the confidence witnesses (body occlusion, depth-fit
-    trust) and get the identical scaling.
+    untouched.
     """
     num_frames = q.shape[0]
-    posed, verts = [], []
+    posed = []
     for start in range(0, num_frames, chunk):
         end = min(start + chunk, num_frames)
         out = body.forward(betas[None].expand(end - start, -1),
@@ -191,8 +179,7 @@ def _pose(body, betas: torch.Tensor, q: torch.Tensor, scale: float,
         root = out.joints[:, :1, :]
         frames[..., :3] = root + scale * (frames[..., :3] - root)
         posed.append(frames)
-        verts.append(root + scale * (out.vertices - root))
-    return _PosedPerson(torch.cat(posed, 0), torch.cat(verts, 0))
+    return torch.cat(posed, 0)
 
 
 def _drift_pre(kin: dict, person: int, shape, device: str) -> torch.Tensor:
@@ -282,21 +269,7 @@ def run(source: str | Path, predictions_dir: str | Path, config_path: str | Path
     force_knobs = ForceKnobs(gap_dstar_m=float(cf["gap_dstar_m"]),
                              stillness_vstar_mps=float(cf["stillness_vstar_mps"]))
 
-    # Confidence witnesses shared across people: the mesh topology, the per-joint
-    # own-skin occlusion groups, and the human depth cloud (the depth-fit trust).
     cconf = cfg["contact_confidence"]
-    df = cfg["depth_fit"]
-    faces_t = body.faces.to(device).long()
-    occ_group_t = torch.as_tensor(occlusion_group_ids(list(body.joint_names)),
-                                  device=device)
-    frame_vertex_t = torch.as_tensor(np.array(body.contact_frame_vertices),
-                                     dtype=torch.long, device=device)
-    human_cloud = None
-    human_npz_path = pred / "geometry" / "human.npz"
-    if human_npz_path.exists():
-        with np.load(human_npz_path) as human:
-            human_cloud = tuple(torch.as_tensor(np.asarray(human[name]), device=device)
-                                for name in ("points", "frame_id", "obj_id"))
 
     # Gravity for the force solve: GeoCalib's world-down when the stage ran, else VGGT's
     # world-down convention — the same fallback kindyn uses.
@@ -325,31 +298,13 @@ def run(source: str | Path, predictions_dir: str | Path, config_path: str | Path
     residual_before_n = np.zeros((num_people, num_frames), dtype=np.float32)
     residual_after_n = np.zeros((num_people, num_frames), dtype=np.float32)
     contact_source = np.zeros(shape, dtype=np.int8)
-    frame_label_confidence = np.zeros(shape, dtype=np.float32)
-    frame_visibility = np.zeros(shape, dtype=np.float32)
-    frame_image_visibility = np.zeros(shape, dtype=np.float32)
-    frame_occlusion_visibility = np.zeros(shape, dtype=np.float32)
-    frame_occlusion_gap_cm = np.full(shape, np.nan, dtype=np.float32)
-    frame_surface_evidence = np.zeros(shape, dtype=np.float32)
-    frame_motion_evidence = np.zeros(shape, dtype=np.float32)
-    frame_depth_trust = np.full(shape, NO_DATA_TRUST, dtype=np.float32)
-    frame_depth_points = np.zeros(shape, dtype=np.float32)
-
-    # Everyone posed up front: the occlusion witness needs every OTHER person's mesh
-    # to know when a joint hides behind a body that is not its own.
-    posed_people = [
-        _pose(body,
-              torch.as_tensor(kin["betas"][p], dtype=torch.float32, device=device),
-              torch.as_tensor(kin["q"][p], dtype=torch.float32, device=device),
-              float(kin["scale"][p]))
-        for p in range(num_people)]
 
     for p in range(num_people):
         object_id = int(object_ids[p])
         betas = torch.as_tensor(kin["betas"][p], dtype=torch.float32, device=device)
         q = torch.as_tensor(kin["q"][p], dtype=torch.float32, device=device)
-        posed = posed_people[p]
-        points, normals = posed.frames7[..., :3], frame_normals(posed.frames7)
+        frames7 = _pose(body, betas, q, float(kin["scale"][p]))
+        points, normals = frames7[..., :3], frame_normals(frames7)
         person_valid = torch.as_tensor(valid_mask[p], device=device)
 
         # The persisted pre-enforcement drift is the honest motion measurement: the
@@ -498,74 +453,13 @@ def run(source: str | Path, predictions_dir: str | Path, config_path: str | Path
                       frame_normal_dot[p], frame_drift_m[p]):
             array[~valid_mask[p]] = np.nan
 
-        # ── label confidence: the per-joint era's algebra on the frame axis ──────
-        # How much should a learner trust each label, contact AND no-contact?
-        # visibility × evidence, the evidence capped by the label's source: the
-        # geometric arm is exactly "near and still" (the old gate — solved load lifts
-        # its cap), a force-only label is a misregistration rescue (mid cap), and the
-        # only honest no-contact witness is depth-trusted motion. The binary label is
-        # never changed. See docs/contact_confidence.md.
-        vertices_shaped, rest_joints = body.forward_shape(betas[None])
-        v2j = vertex_to_joint(vertices_shaped[0], rest_joints[0])              # (V,)
-        owner_joint = v2j[frame_vertex_t]                                      # (F,)
-        other_verts = None
-        if num_people > 1:
-            others = []
-            for i in range(num_people):
-                if i == p:
-                    continue
-                other_valid = torch.as_tensor(valid_mask[i], device=device)[:, None, None]
-                others.append(torch.where(other_valid, posed_people[i].vertices,
-                                          torch.full_like(posed_people[i].vertices,
-                                                          float("nan"))))
-            other_verts = torch.stack(others, dim=1)
-        occ_gap = joint_occlusion_gap(
-            posed.vertices, points, cam_centers, faces_t, v2j, occ_group_t,
-            other_vertices=other_verts, target_group=occ_group_t[owner_joint])
-        depth_trust_t = torch.full_like(drift, NO_DATA_TRUST)
-        depth_points_t = torch.zeros_like(drift)
-        if human_cloud is not None:
-            _, points_j, trust_j = joint_depth_fit(
-                posed.vertices, *human_cloud, object_id, extrinsics, intrinsics,
-                v2j, body.num_joints, cell_px=int(df["cell_px"]),
-                min_points=int(df["min_points"]),
-                trust_scale_log=float(df["trust_scale_log"]))
-            depth_trust_t = trust_j[:, owner_joint]      # a frame trusts its owner joint's fit
-            depth_points_t = points_j[:, owner_joint]
-        # Source bitmask on the final labels: 2 = the geometric arm (near AND still —
-        # or pressing with the solve's load confirmation; span-merge and union-weld
-        # fills included); 4 = the force witness. The frames era has no external
-        # detector, so bit 1 never appears.
+        # Where the label came from, saved for auditing: 2 = the geometric arm (near
+        # AND still — or pressing with the solve's load confirmation; span-merge and
+        # union-weld fills included); 4 = the force witness. The frames era has no
+        # external detector, so bit 1 never appears.
         src = ((contact_np & (frame_contact_geom[p] | merged_np)) * 2
                + (contact_np & force_label) * 4).astype(np.int8)
         src[contact_np & (src == 0)] = 2
-        share = force_solution.magnitude / max(float(force_solution.body_weight_n), 1e-9)
-        share = np.where(valid_mask[p][:, None], share, np.nan).astype(np.float32)
-        terms = joint_label_confidence(
-            torch.as_tensor(contact_np, device=device),
-            detected.guarded_sdf, drift, depth_trust_t, depth_points_t,
-            torch.as_tensor(src, dtype=torch.int64, device=device),
-            torch.as_tensor(share, device=device),
-            pixels, points_cam[..., 2], occ_gap,
-            height=height, width=width, window_s=float(cg["window_s"]),
-            min_depth_points=int(df["min_points"]), cfg=cconf)
-        invalid = ~valid_mask[p]
-        for name, dest in (("label_confidence", frame_label_confidence),
-                           ("visibility", frame_visibility),
-                           ("image_visibility", frame_image_visibility),
-                           ("occlusion_visibility", frame_occlusion_visibility),
-                           ("surface", frame_surface_evidence),
-                           ("motion", frame_motion_evidence)):
-            values = terms[name]
-            values[invalid] = 0.0            # an untracked frame carries no statement
-            dest[p] = values
-        gap_cm = terms["occlusion_gap"] * 100.0
-        gap_cm[invalid] = np.nan
-        frame_occlusion_gap_cm[p] = gap_cm
-        trust_np = depth_trust_t.cpu().numpy().astype(np.float32)
-        trust_np[invalid] = NO_DATA_TRUST
-        frame_depth_trust[p] = trust_np
-        frame_depth_points[p] = depth_points_t.cpu().numpy().astype(np.float32)
         contact_source[p] = src
 
         # How often did the toe tiebreak have to choose? Both toe frames of a foot were
@@ -604,14 +498,21 @@ def run(source: str | Path, predictions_dir: str | Path, config_path: str | Path
     print(f"[estimate_contacts] quality: cam/depth {cam_ratio:.2f}, smear med {smear_med:.2f}, "
           f"res_before {res_before_bw:.2f} BW → flag '{flag or 'pass'}'")
 
-    # ── frame → joint: fold the frame labels + confidences onto report joints ────
+    # ── frame → joint, then the label confidence ─────────────────────────────────
     # Each frame reports at its parent joint, except hand frames, which all report at
-    # their wrist (the joint we usually call "the hand"). Contact ORs; confidence
-    # folds with the label algebra (surest touching frame / least sure free frame).
-    report_joint = frame_report_joints(
-        body.contact_frame_parents, [str(n) for n in kin["joint_names"]], parents)
-    joint_contact, joint_confidence = fold_to_joints(
-        frame_contact, frame_label_confidence, report_joint, len(parents))
+    # their wrist (the joint we usually call "the hand"). A joint is in contact when any
+    # of its frames is, and is as still as its stillest frame. The confidence — how often
+    # a label like this one agrees with a human annotator — is fitted per joint, so it is
+    # computed on the folded joints and broadcast back to their frames.
+    joint_names = [str(n) for n in kin["joint_names"]]
+    report_joint = frame_report_joints(body.contact_frame_parents, joint_names, parents)
+    joint_contact = fold_contacts(frame_contact, report_joint, len(parents))
+    joint_drift = fold_drift(frame_drift_m, report_joint, len(parents))
+    joint_confidence = np.stack([
+        label_confidence(joint_contact[p], joint_drift[p], valid_mask[p], fps,
+                         joint_names, cconf)
+        for p in range(num_people)])
+    frame_label_confidence = joint_confidence[..., report_joint]
 
     save = dict(
         contact_label_schema=np.int32(CONTACT_LABEL_SCHEMA),
@@ -645,22 +546,14 @@ def run(source: str | Path, predictions_dir: str | Path, config_path: str | Path
         frame_normal_dot=frame_normal_dot,
         merged=merged_all,
         contact_source=contact_source,                  # (P,N,F) int8: 2=geometric arm, 4=force witness
-        frame_label_confidence=frame_label_confidence,  # (P,N,F) the per-label training weight
-        frame_visibility=frame_visibility,              # (P,N,F) image × body-occlusion visibility
-        frame_image_visibility=frame_image_visibility,  # (P,N,F) in-image / in-front-of-camera term
-        frame_occlusion_visibility=frame_occlusion_visibility,  # (P,N,F) smooth body-occlusion term
-        frame_occlusion_gap_cm=frame_occlusion_gap_cm,  # (P,N,F) in-front body gap (cm); NaN = clear
-        frame_surface_evidence=frame_surface_evidence,  # (P,N,F) raw contact evidence (uncapped)
-        frame_motion_evidence=frame_motion_evidence,    # (P,N,F) raw depth-trusted no-contact evidence
-        frame_depth_trust=frame_depth_trust,            # (P,N,F) local human-depth fit trust
-        frame_depth_points=frame_depth_points,          # (P,N,F) matched human-cloud point count
+        frame_label_confidence=frame_label_confidence,  # (P,N,F) its report joint's confidence
         frame_report_joint=report_joint,                # (F,) frame → report joint (hands → wrist)
         joint_contact=joint_contact,                    # (P,N,J) OR of the joint's frames
-        joint_label_confidence=joint_confidence,        # (P,N,J) folded confidence; NaN = joint owns no frame
+        joint_label_confidence=joint_confidence,        # (P,N,J) P(label agrees with an annotator);
+                                                        #         NaN where the stage makes no statement
         confidence_method=np.str_(CONTACT_CONFIDENCE_METHOD),
         confidence_motion_source=np.str_("drift_pre"),
-        confidence_knobs=np.str_(json.dumps(cconf)),
-        depth_fit_knobs=np.str_(json.dumps({k: df[k] for k in DEPTH_FIT_DEFAULTS})),
+        confidence_coefficients=np.str_(json.dumps(cconf)),
         contact_frame_names=np.array(frame_names),
         frame_parent_joint=np.array(body.contact_frame_parents, dtype=np.int64),
         frame_vertex=np.array(body.contact_frame_vertices, dtype=np.int64),

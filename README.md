@@ -52,7 +52,7 @@ Off the default chain, each runs on a single clip's `out/<stem>/` dir:
 | Stage | Output |
 |-------|--------|
 | `human_optimization --stages kinematics_2` | optional annotation- or auto-contact-guided refinement (`human_optim/kinematic_2.npz`) |
-| `estimate_contacts` | per-joint scene contact and confidence (`human_optim/contacts_1.npz` + overlay) |
+| `estimate_contacts` | contact-frame scene contact + its per-joint label confidence (`human_optim/contacts_1.npz` + overlay) |
 | `estimate_gravity_geocalib` | world-frame gravity (`geocalib/gravity.npz`) |
 | `human_optimization --stages dynamics` | force-only RNEA: per-contact-joint forces + torques (`human_optim/dynamics.npz`) |
 
@@ -63,9 +63,10 @@ YOLO track and sweeps every corpus stage over the batch (shared helpers in
 `scripts/scene_db.py`).
 `scripts/export_contact_dataset.py` packages the resulting frames, masks,
 intrinsics, and 22-joint contact labels into a self-contained train/test dataset.
-Manual annotations are not used by `kinematics_1` or by confidence generation.
-They are used only by the optional manual `kinematics_2` mode, confidence auditing,
-and the export's test labels.
+Manual annotations are not used by `kinematics_1` or by `estimate_contacts`.
+They are used by the optional manual `kinematics_2` mode, by the export's test
+labels, and offline to fit the label-confidence coefficients
+(`scripts/calibrate_contact_confidence.py`, whose numbers then live in the TOML).
 
 ## Quick start
 
@@ -90,5 +91,5 @@ and conventions.
 - [`docs/fusion.md`](docs/fusion.md) — the point clouds + the relative two-pass voxel merge.
 - [`docs/human_optimization.md`](docs/human_optimization.md) — the four-stage refinement, every loss term.
 - [`docs/contacts.md`](docs/contacts.md) — per-joint contact detection.
-- [`docs/contact_confidence.md`](docs/contact_confidence.md) — per-joint contact-confidence formula and artifact schema.
+- [`docs/contact_confidence.md`](docs/contact_confidence.md) — how much a contact label can be trusted, and how that number is fitted.
 - [`docs/contact_points.md`](docs/contact_points.md) — investigation (not implemented): moving contact from joints to points on the mesh surface.

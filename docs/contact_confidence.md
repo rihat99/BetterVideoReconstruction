@@ -1,192 +1,189 @@
 # Contact-label confidence
 
-Every label `estimate_contacts` writes — contact *and* no-contact, for every
-contact frame at every video frame — gets a weight `frame_label_confidence`
-between 0 and 1. It answers one question: **how much should a downstream
-consumer trust this label?** Zero means "ignore this label." It is a training
-weight, not a calibrated probability, and it never changes the binary label
-itself.
+`estimate_contacts` decides, for every tracked person and every video frame,
+which body points touch the scene. Those labels are not always right. The
+**confidence** is a number between 0 and 1 saved beside each label that says how
+often a label like this one turns out to be what a human annotator would have
+written. A learner uses it to weight its training loss. It never changes the
+label itself.
 
-The algebra was built in the per-joint era (schema 8, "source-conditional") and
-now runs unchanged on the contact-frame axis; the shapes were always
-axis-agnostic. It lives in `tools/human_optim/confidence.py` and is computed in
-both contact readouts (`contacts_1` from the `kinematic_1` body, `contacts_2`
-from `kinematic_2`).
+The number is fitted, not designed. `scripts/calibrate_contact_confidence.py`
+compares the automatic labels with the manual annotations on the corpus scenes
+that have them and fits a tiny model; the fitted numbers live in
+`[contact_confidence]` in `configs/human_optimization.toml`. The code is
+`tools/human_optim/confidence.py`.
 
-## The idea in one paragraph
+## The unit: a report joint
 
-Three things decide the weight. First, **can we even see the point?** A contact
-frame that is outside the image or hidden behind a body cannot be trusted
-either way, so visibility multiplies everything. Second, **how strong is the
-evidence for this label's class?** For a contact label, evidence means the
-point really sits on the wall. For a no-contact label, evidence means the point
-clearly moved — a still point proves nothing. Third, **where did the label come
-from?** A label must not be certified by the same signal that created it, so
-each source gets a **ceiling** on its evidence, and only a different,
-semi-independent signal can raise that ceiling.
+Contacts are detected on **contact frames** — named points baked onto the skin
+(palms, fingertips, heels, toes, knees). People do not annotate 35 skin points;
+they annotate joints. So the frame labels are first folded onto **report
+joints**: every frame reports at its parent joint, and every hand frame (palm,
+fingertip, thumb) reports at its wrist. A joint is in contact when any of its
+frames is.
 
-```text
-frame_label_confidence = visibility × evidence-capped-by-source
-```
+Confidence is computed on those folded joints, because that is the unit the
+annotations — and the learner — speak in. Each contact frame then simply carries
+its report joint's number.
 
-## The two sources
+Eight joints have fitted coefficients: the two wrists ("hand"), the two feet
+(the forefoot, i.e. the toes), the two ankles (the heel) and the two knees. Left
+and right share coefficients. Everywhere else — elbows, hips, torso, head — the
+confidence is `NaN`: the stage makes no statement there, and a consumer reading
+a non-finite value should treat the label as unassessed rather than as zero.
 
-The stage's union has two arms, and each is one source bit in `contact_source`:
+## What the old weight was doing
 
-| bit | source | what created the label |
+The confidence this replaced was hand-built: visibility times evidence, with the
+evidence capped according to which arm of the detector produced the label. Read
+as "how often is this label right", it did not work. Measured on 259 114 rows —
+one per (scene, person, frame, annotated joint) over the 118 annotated scenes
+(after the manual-label check finished on 2026-09-12):
+
+| | old weight | new confidence |
 |---|---|---|
-| 2 | geometric arm | "near the wall AND still" — or pressing, with the solve's load confirmation (plus the span merge and the union's gap-welding) |
-| 4 | force witness | the support solve had to route real load through this frame |
+| AUROC, contact labels | 0.65 | **0.82** |
+| AUROC, free labels | 0.71 | **0.87** |
+| calibration error (ECE), contact | 0.40 | **0.008** |
+| calibration error (ECE), free | 0.44 | **0.018** |
 
-The per-joint era also had an external image-model detector (bit 1) and a
-prediction-fusion path (bit 8); neither exists in the frames era, so those bits
-never appear.
+AUROC is how well the number separates right labels from wrong ones (0.5 = no
+better than a coin). ECE is how far the stated probability is from the observed
+truth — the old mean weight was 0.49 while 92 % of the labels were in fact
+right. The new numbers are out-of-fold: the model is refitted five times, each
+time without the videos it is then scored on, so scenes cut from the same video
+cannot flatter it.
 
-Why the caps: a label must not be certified by the signal that created it. A
-geometric label was created because the frame was near and still, so nearness and
-stillness would endorse it in a circle — and the known false positives (a hand
-hovering 3 cm beside a hold) are exactly near-and-still.
+Where the old weight was most wrong, split by whether the joint was actually
+still (net drift under 8 cm over the readout window) and what the annotator
+wrote:
 
-The 2026-08-30 rework kept the arms' roles — a one-day experiment that made the
-force witness the deciding arm was refuted (see [`contacts.md`](contacts.md),
-gate 3) — so the ceilings keep their original ordering: both arms agreeing is
-trusted most (0.85), a lone force rescue is positionally uncertain by
-construction (0.70), and a lone geometric label is merely unconfirmed (0.50).
+| cell | share of rows | labels right | old weight | new confidence |
+|---|---|---|---|---|
+| still & contact | 33 % | 0.920 | 0.54 | 0.92 |
+| still & free | 23 % | 0.938 | 0.40 | 0.93 |
+| moving & contact | 8 % | 0.539 | 0.28 | 0.74 |
+| moving & free | 37 % | 0.966 | 0.54 | 0.93 |
 
-With `share` the solved force at the frame as a fraction of body weight and
-`force_ramp = 1 − exp(−share / 0.25)`:
+The still-and-free row is the one that mattered. Those labels are 94 % right and
+the old weight muted them to 0.40 — so a learner trained on it was taught "still
+means contact". The new confidence gives them 0.93, which is what the data say.
+The remaining weak cell is moving-and-contact: only 54 % of those labels are
+right and the model still states 0.74, so it is the one place the confidence is
+meaningfully over-optimistic.
 
-| source | evidence | ceiling |
-|---|---|---|
-| geometric (bit 2) | `min(surface, 0.40 + 0.50·force_ramp)` | 0.40, lifted to 0.90 by real load |
-| force only (bit 4, no bit 2) | `min(0.85, max(surface, 0.85·force_ramp))` | 0.85 |
+## The formula
 
-So the red spheres come in tiers: a loaded on-the-wall contact reaches ~0.90, a
-force decision off the wall ~0.85, and a geometric label physics never saw stops
-at 0.40.
-
-## Evidence for a contact label
-
-The raw ingredient is **surface evidence**: how plausibly the point sits on the
-wall. With `d` the guarded signed distance to the scene (metres, positive
-outside; `+inf` where the far/confidence guards failed = zero evidence):
-
-```text
-near     = sigmoid((0.05 − d) / 0.01)        fades out past 5 cm outside
-not_deep = sigmoid((d + 0.02) / 0.01)        deep burial is suspect geometry
-surface  = near × (0.40 + 0.60 × not_deep)   ≈ 0.92 right on the wall
-```
-
-Then the source cap above.
-
-## Evidence for a no-contact label
-
-The only honest witness for "not touching" is **motion**: the point clearly
-moved through the window. With `v` the net displacement speed over the ~0.35 s
-window (from the persisted `drift_pre`, so the optimizer's own contact damping
-cannot fake stillness):
+Three witnesses, one logistic model per label class (one for "the label says
+contact", one for "the label says free"):
 
 ```text
-scale rises from 0.10 to 0.15 m/s near the wall, response steepens to cubic
-motion   = 1 − exp(−(v / scale)^power)
-evidence = depth_trust × motion
+x_drift = log(drift_m + 0.005)                drift over the readout window, metres
+x_trans = log1p(30 * min(t_s, 1.0))           t_s = seconds to the nearest label change
+logit   = group_term + w_drift * x_drift + w_trans * x_trans
+conf    = 1 / (1 + exp(-logit))
 ```
 
-Distance is deliberately **not** no-contact evidence: a whole-body floater sits
-far from the reconstructed wall while its limbs truly touch, so "far away" must
-never make a no-contact label look trustworthy. `depth_trust` discounts motion
-measured on a body whose local depth fit is stretched (the spaghettization
-detector, `[depth_fit]`); each contact frame reads the trust of the joint that
-owns its mesh vertex. A cap for "the depth witness is missing" exists
-(`nodata_cap`, `nodata_force_cap`) but ships disabled (both 1.0) — its premise
-was refuted on the annotated data in the per-joint era; the mechanism stays for
-study.
+* **Which joint.** `group_term` is the joint's own intercept: hand, foot, ankle
+  or knee. Accuracy differs enormously between them (knee labels are 99 %
+  right because a knee is essentially never labelled in contact; forefoot labels
+  are 83 % right), so the joint is the single strongest witness. Each group's term
+  IS its intercept — the model carries no separate global one, which keeps every
+  coefficient pinned by the data and the fit reproducible from run to run.
+* **How still it was.** `drift_m` is the joint's net displacement over the 0.35 s
+  readout window, taken from `drift_pre` — the motion measured *before* any
+  contact enforcement acted on the body, so the optimizer's own damping cannot
+  manufacture stillness. A joint's drift is the smallest among its frames: the
+  stillest frame speaks for the joint. Where the window is undefined (an
+  untracked stretch) the confidence is `NaN`. More drift makes a contact label
+  less believable and a free label more believable, which is why the two classes
+  fit this witness with opposite signs.
+* **How far from a label change.** Labels are least reliable exactly where they
+  flip. A flip between two consecutive tracked frames sits halfway between them,
+  so both frames are 0 s from it and the distance grows one frame at a time.
+  Untracked gaps are not flips, and neither is the start or the end of a track. A
+  joint whose label never changes is treated as being at the 1 s cap. The
+  distance is measured in seconds and then converted to 30-fps-equivalent frames,
+  so a 60-fps clip and a 30-fps clip mean the same thing by it.
 
-## Visibility
+## What was dropped
 
-Two factors, multiplied.
+Everything else that used to feed the weight, and several things that never did,
+were tested as extra features on the same rows: the signed distance to
+the scene cloud, the solved force share, the pre-union arm agreement, the span
+length, image-border and body-occlusion visibility, the depth-fit trust, the
+Sapiens keypoint score, the limb's reprojection residual, and the per-clip
+quality metrics. Each added at most 0.01 AUROC on top of the three witnesses
+above.
 
-**In the image.** The frame's projection must be inside the image (a soft
-10-pixel border) and in front of the camera.
+Two of them were also circular: the scene distance and the stillness *are* how
+the geometric arm decides, so letting them certify the label would be the label
+endorsing itself. The ray-cast body-occlusion witness and the depth-fit trust
+were removed outright (`tools/human_optim/depth_fit.py` is deleted), which also
+removes the most expensive part of the stage.
 
-**Not behind a body.** One exact ray is cast from the camera to the contact
-frame's world position and intersected with the full-resolution triangles of
-every tracked person. If the nearest surface *in front of* the point stands
-more than a few centimetres before it, the point is hidden:
+The honest reading of that result: the annotations say no image or depth
+evidence available here predicts label errors beyond what the joint, its
+stillness and its distance to a flip already say.
 
-```text
-occlusion_gap   = point_depth − nearest_in-front_surface_depth   (NaN if none)
-body_visibility = sigmoid((0.05 m − gap) / 0.01 m)               (1 when NaN)
+## Refitting
+
+```bash
+uv run --no-sync python scripts/calibrate_contact_confidence.py \
+    --config configs/human_optimization.toml --write
 ```
 
-A frame's *own* local skin never hides it: triangles owned by its own occlusion
-group — the whole hand, the ankle+foot pair, the whole axial torso, per the
-joint that owns the frame's mesh vertex — are skipped. Another person's
-triangles are never own, so a climber in front does hide the point.
+It reads every `features/annotation/<shard>/<scene>/annotation.npz` in the
+ClimbingVideos DB together with that scene's `contacts_1.npz`, folds both the
+same way, fits, prints the tables above, and replaces the `[contact_confidence]`
+section of each config given. Existing artifacts do not need the stage re-run —
+`scripts/recompute_contact_confidence.py` rewrites the confidence inside them
+from fields they already store.
 
-## The frame → joint fold
+The coefficients in the configs were fitted on 2026-09-12, after the manual
+labels had been checked; the `fit` string in the TOML says so. Refit after any
+change to the labeller or the annotations, and refresh the numbers in this
+document from the script's printout.
 
-Downstream consumers usually want **joints**, not 35 mesh points. The stage
-folds the frame labels onto **report joints** and saves the result:
+One known gap in the fit: the contact head has no knee rows at all, because the
+stage never labels a knee in contact. Its knee coefficient is therefore 0 and
+unused. And the fit is done on all annotated scenes at once, which are the
+downstream learner's *test* split — good for the learner, but it means the
+confidence has no fully held-out set of its own. When the fit was instead done on
+the 107 test scenes and scored on the 11 annotated train scenes (measured on the
+labels before the final check), the free head held up (AUROC 0.96) but the
+contact head dropped to 0.67. Those 11 scenes are
+the hardest in the corpus, so treat 0.67 as a floor rather than as the expected
+number, and re-check it after a refit.
 
-* Every frame reports at its parent joint — except the hand frames (palms,
-  fingertips, thumbs), which all report at their **wrist**, the joint we
-  usually call "the hand". The rule is an ancestor walk up the kinematic tree,
-  so no hand-frame name list exists.
-* `joint_contact` is the OR of the joint's frames.
-* `joint_label_confidence` folds with the label's own algebra: a **contact**
-  joint is as sure as its surest touching frame (the OR needs one true member);
-  a **no-contact** joint is only as sure as its least sure frame (the claim
-  needs every member). This is the same convention the per-joint era's export
-  used for fingers→wrist.
-* A joint that owns no contact frame stays `False` with `NaN` confidence — the
-  stage makes no statement there.
+## What is saved
 
-## Knobs
-
-`[contact_confidence]` in `configs/human_optimization.toml` (defaults in
-`tools/human_optim/confidence.py`): the surface band (`surface_*`,
-`penetration_floor`), the motion scales (`motion_*`), the visibility margins
-(`image_margin_px`, `occ_*`), the source caps (`gate_only_cap`,
-`gate_force_cap`, `force_only_cap`, `force_share_scale`) and the disabled
-no-data caps. `[depth_fit]` holds the depth-trust knobs (`cell_px`,
-`min_points`, `trust_scale_log`).
-
-## Saved fields
-
-Added to `human_optim/contacts_<tag>.npz` (all per person and video frame; `F`
-contact frames, `J` model joints):
+In `human_optim/contacts_<tag>.npz`, per person `P` and video frame `N`, over
+`F` contact frames and `J` model joints:
 
 | Field | Shape | Meaning |
 |---|---|---|
-| `frame_label_confidence` | `(P, N, F)` | The per-label training weight |
+| `joint_contact` | `(P, N, J)` bool | The label, folded: any of the joint's frames touching |
+| `joint_label_confidence` | `(P, N, J)` | P(this label agrees with an annotator); `NaN` = no statement |
+| `frame_label_confidence` | `(P, N, F)` | Its report joint's confidence |
+| `frame_report_joint` | `(F,)` | Which joint each frame reports at (hands → wrist) |
 | `contact_source` | `(P, N, F)` int8 | 2 = geometric arm, 4 = force witness (0 off-contact) |
-| `frame_visibility` | `(P, N, F)` | Image × body-occlusion visibility |
-| `frame_image_visibility` | `(P, N, F)` | In-image / in-front-of-camera term |
-| `frame_occlusion_visibility` | `(P, N, F)` | Smooth body-occlusion term |
-| `frame_occlusion_gap_cm` | `(P, N, F)` | In-front body gap (cm); NaN = clear |
-| `frame_surface_evidence` | `(P, N, F)` | Raw contact evidence (uncapped) |
-| `frame_motion_evidence` | `(P, N, F)` | Raw depth-trusted no-contact evidence |
-| `frame_depth_trust` | `(P, N, F)` | Local human-depth fit trust |
-| `frame_depth_points` | `(P, N, F)` | Matched human-cloud point count |
-| `frame_report_joint` | `(F,)` | Frame → report joint (hands fold to the wrist) |
-| `joint_contact` | `(P, N, J)` bool | OR of the joint's frames |
-| `joint_label_confidence` | `(P, N, J)` | Folded confidence; NaN where the joint owns no frame |
 
-Plus `confidence_method` / `confidence_motion_source` and the effective
-`confidence_knobs` / `depth_fit_knobs` as JSON strings. Terms are zero on
-invalid tracked frames. The binary labels are untouched — re-running the stage
-with confidence produced byte-identical `frame_contact` on every validated
-scene.
+Plus `confidence_method` (`calibrated-v2`), `confidence_motion_source`
+(`drift_pre`) and `confidence_coefficients`, the exact fitted numbers as a JSON
+string, so any artifact says how its confidence was produced.
 
-## What confidence can and cannot do
+## What it cannot do
 
-The caps and scales were calibrated in the per-joint era (selective-risk curves,
-2026-07: keeping the top half of contact labels by confidence raised their
-precision 0.961 → 0.983 on the frozen test set). The frames-era port keeps the
-algebra and the numbers; the selective-risk measurement has not yet been redone
-on the frame labels. Limitations carried over: the weight is not learned or
-calibrated; net displacement can miss out-and-back motion inside the window;
-wall and hold occlusion are not modeled; force is only semi-independent of
-geometry, so it lifts a cap but never by itself proves a label; and confidence
-does not repair a wrong binary label.
+* It contains no image evidence. It cannot tell you that a hand is hidden behind
+  a body, only that labels on hands drift-and-flip the way they do.
+* It does not repair a wrong label. A 0.2 confidence marks a label as doubtful;
+  it does not flip it.
+* Net displacement over the window misses out-and-back motion: a hand that leaves
+  a hold and returns inside 0.35 s reads as still.
+* The moving-and-contact cell stays over-confident (0.74 stated against 0.54
+  observed). Those are the reconstruction's genuinely hard frames, and none of
+  the witnesses available here separates them.
+* It moves little for the easy majority: 77 % of all rows land in the top
+  confidence bin, because most labels really are right. Weighting a loss by it
+  mostly reweights the ~5 % of rows that come out below 0.7.
