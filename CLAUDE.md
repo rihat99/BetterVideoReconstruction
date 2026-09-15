@@ -18,6 +18,8 @@ optimization — keep them current when the code changes:
 - [`docs/human_optimization.md`](docs/human_optimization.md) — the 4 stages, every loss term
 - [`docs/contacts.md`](docs/contacts.md) + [`docs/contact_confidence.md`](docs/contact_confidence.md) — contact labels + confidence
 - [`docs/force_contacts.md`](docs/force_contacts.md) — the force witness: contact detection by inverse dynamics, end to end
+- [`docs/board_contacts.md`](docs/board_contacts.md) — contacts MEASURED by the peter rigs'
+  force boards instead of estimated, and the `human_optim_gt_contact/` variant chain
 - [`docs/contact_fusion.md`](docs/contact_fusion.md) — retired per-joint-era mechanism (kept as a design record)
 - [`docs/quality.md`](docs/quality.md) — depth-smear downweighting, the scene-quality table, whole-body force confidence
 - [`docs/contact_points.md`](docs/contact_points.md) — investigation (not implemented): contact on mesh points instead of joints

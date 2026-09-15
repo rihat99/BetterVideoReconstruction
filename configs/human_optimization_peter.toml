@@ -372,6 +372,16 @@ merge_sdf_m = 0.08     # re-grip guard: it stayed within this signed distance of
 # is oriented to explain. A frame that has to carry theta_bw of the body's weight is called
 # in contact, and that label is UNIONED onto the geometric one (add-only, never removes).
 # Everything else about the solve is a fixed, measured choice in the code, not a knob.
+# Contact labels MEASURED by the force boards, for the instrumented rigs
+# (scripts/stages/measure_contacts_boards.py — the drop-in replacement for the
+# estimated contacts above). One three-axis board per limb says which limb is loaded
+# and when; near_scene_m decides which of that limb's contact frames carries the label.
+# Same numbers as the three-camera ground-truth chain, so the two trees are comparable.
+[boards]
+force_enter_n = 50       # a limb is in contact from this measured |F| ...
+force_exit_n = 30        # ... until it drops below this (hysteresis)
+near_scene_m = 0.05      # its contact frames within this of the wall get the label; none -> its nearest
+
 [contact_force]
 theta_bw = 0.02            # fraction of body weight at which a frame counts as loaded
                            # (0.05 -> 0.02 with the general config 2026-08-30: heels are

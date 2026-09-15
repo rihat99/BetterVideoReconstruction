@@ -62,6 +62,9 @@ if str(_REPO) not in sys.path:
 from scipy.spatial import cKDTree  # noqa: E402
 
 from tools.human_optim.camera import fold_root_to_world, world_from_cam  # noqa: E402
+from tools.human_optim.boards import (  # noqa: E402
+    LIMBS, frame_contact as board_frame_contact, limb_contact, limb_of_frame,
+)
 from tools.human_optim.config import load_config  # noqa: E402
 from tools.human_optim.force_confidence import force_confidence  # noqa: E402
 from tools.human_optim.keypoints import smooth_tracks  # noqa: E402
@@ -80,9 +83,6 @@ HUMAN_ROOT = _REPO / "peter/climb_wall_3_gt/human"
 SHAPES = HUMAN_ROOT / "_shapes"
 CONFIG = Path(__file__).resolve().parent / "human_gt.toml"
 VIEW_NAMES = ["cam_left", "cam_right", "cam_3"]
-LIMBS = ["left_hand", "right_hand", "left_foot", "right_foot"]       # the boards' order
-HAND_FRAMES = ("palm", "palm_distal", "finger", "thumb")
-FOOT_FRAMES = ("heel", "ball_inner", "ball_outer", "big_toe", "toe_above")
 FINGER = ("index", "middle", "pinky", "ring", "thumb")
 #: The two climbers (clip name ``a_*`` / ``b_*``), as told by the user.
 PARTICIPANTS = {"a": {"name": "A", "height_m": 1.80, "mass_kg": 72.5},
@@ -348,32 +348,6 @@ def initial_pose(views: list[dict], valid_any: np.ndarray, fps: float, device: s
     return q
 
 
-def limb_of_frame(name: str) -> str | None:
-    """``palm_distal_left`` → ``left_hand``; ``big_toe_right`` → ``right_foot``."""
-    base, side = name.rsplit("_", 1)
-    if base in HAND_FRAMES:
-        return f"{side}_hand"
-    if base in FOOT_FRAMES:
-        return f"{side}_foot"
-    return None
-
-
-def hysteresis(force_n: np.ndarray, enter: float, exit_: float) -> np.ndarray:
-    """``(N,)`` bool contact from a force magnitude series with enter/exit thresholds."""
-    on = np.zeros(len(force_n), bool)
-    state = False
-    for t, f in enumerate(force_n):
-        state = f >= enter if not state else f >= exit_
-        on[t] = state
-    return on
-
-
-def spans(on: np.ndarray) -> list[tuple[int, int]]:
-    """``[start, end)`` of every run of True in a bool series."""
-    idx = np.flatnonzero(np.diff(np.r_[False, on, False].astype(np.int8)))
-    return list(zip(idx[::2].tolist(), idx[1::2].tolist()))
-
-
 def load_wall(clip_dir: Path, device: str) -> tuple[torch.Tensor, torch.Tensor] | None:
     """``(normal, point)`` of the wall plane (``geometry/wall.npz``), normal out of the wall."""
     path = clip_dir / "geometry" / "wall.npz"
@@ -403,17 +377,8 @@ def wall_penetration_term(wall: tuple[torch.Tensor, torch.Tensor], sub: torch.Te
 def board_limb_on(clip_dir: Path, n: int) -> tuple[np.ndarray, np.ndarray]:
     """``(limb_on (N, 4) bool, force_world (N, 4, 3))`` from the boards with the [boards] hysteresis."""
     boards = gt_section("boards")
-    sensor = np.load(clip_dir / "sensor_forces.npz", allow_pickle=True)
-    assert [str(x) for x in sensor["limbs"]] == LIMBS, sensor["limbs"]
-    force_world = np.asarray(sensor["reaction_world"], np.float32)[:n]
-    assert force_world.shape[0] == n, (force_world.shape, n)
-    force_n = np.linalg.norm(force_world, axis=-1)
-    ok = np.isfinite(force_n)
-    if not ok.all():
-        print(f"  {int((~ok).any(1).sum())} frames with a non-finite board sample — no contact there")
-    limb_on = np.stack([hysteresis(np.where(ok[:, i], force_n[:, i], 0.0), float(boards["force_enter_n"]),
-                                   float(boards["force_exit_n"])) for i in range(4)], 1)
-    return limb_on, force_world
+    return limb_contact(clip_dir / "sensor_forces.npz", n,
+                        float(boards["force_enter_n"]), float(boards["force_exit_n"]))
 
 
 def board_frame_labels(limb_on: np.ndarray, frame_names: list[str], valid: np.ndarray) -> np.ndarray:
@@ -624,21 +589,7 @@ def run_contacts(clip: str, device: str) -> None:
         frames.reshape(-1, 3), k=1, workers=-1)[0].reshape(n, -1).astype(np.float32)   # (N, F)
 
     frame_limb = [limb_of_frame(name) for name in frame_names]
-    contact = np.zeros((n, len(frame_names)), bool)
-    rescued = np.zeros((n, len(frame_names)), bool)     # labelled although > near_m from the scene
-    for i, limb in enumerate(LIMBS):
-        cols = [c for c, l in enumerate(frame_limb) if l == limb]
-        for start, end in spans(limb_on[:, i] & valid):
-            # The label holds for the WHOLE span on the frames that are near the wall for at
-            # least a third of it (a frame set that changed from frame to frame made the seating
-            # and stillness terms chase a moving target); a span with no such frame gets its
-            # nearest one, flagged as rescued.
-            frac = (dist[start:end][:, cols] <= near_m).mean(0)
-            near = [c for c, f in zip(cols, frac) if f >= 1.0 / 3.0]
-            if not near:
-                near = [min(cols, key=lambda c: np.median(dist[start:end, c]))]
-                rescued[start:end, near] = True
-            contact[start:end, near] = True
+    contact, rescued = board_frame_contact(limb_on, valid, dist, frame_names, near_m)
     per_limb = []
     for i, limb in enumerate(LIMBS):
         cols = [c for c, l in enumerate(frame_limb) if l == limb]

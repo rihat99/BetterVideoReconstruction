@@ -92,15 +92,21 @@ never zeroed gives itself away instead of looking like a bad reconstruction.
 
 Writes ``<clip>/human_optim/kindyn_forces_overlay.mp4``.
 
+Naming an optimization directory instead of a clip draws that run: pass
+``<clip>/human_optim_gt_contact`` for the board-labelled variant chain
+(``docs/board_contacts.md``), and the overlay lands beside its own ``kindyn_1.npz``.
+
 Usage:
     uv run --no-sync python scripts/diagnostics/render_kindyn_overlays.py
     uv run --no-sync python scripts/diagnostics/render_kindyn_overlays.py 07_peter_climbing trial_10
+    uv run --no-sync python scripts/diagnostics/render_kindyn_overlays.py \
+        peter/out_climb_wall_3_single/a_00_01_part1/human_optim_gt_contact
 """
 
 from __future__ import annotations
 
 import sys
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 
 import cv2
@@ -156,6 +162,9 @@ class Clip:
     #: False when the measured vectors are in some other frame (parkour's MoCap
     #: world) — sizes still compare, but arrows and angles would be meaningless
     measured_in_world: bool = True
+    #: Which optimization directory under ``tree`` to draw — ``human_optim`` normally,
+    #: ``human_optim_gt_contact`` for the board-labelled variant (docs/board_contacts.md)
+    optim_dir: str = "human_optim"
 
 
 def _project(points: np.ndarray, extrinsic: np.ndarray, intrinsic: np.ndarray,
@@ -317,7 +326,8 @@ def parkour_clip(name: str) -> Clip:
 def render(clip: Clip) -> Path:
     """Write the ``kindyn_1`` overlay for one clip and return its path."""
     tree = clip.tree
-    kindyn = np.load(tree / "human_optim" / "kindyn_1.npz", allow_pickle=True)
+    optim = tree / clip.optim_dir
+    kindyn = np.load(optim / "kindyn_1.npz", allow_pickle=True)
     transform = np.load(tree / "geometry" / "transform.npz")
 
     frame_indices = transform["frame_indices"]
@@ -424,7 +434,7 @@ def render(clip: Clip) -> Path:
     pane_size = _fit(source, PANEL_SIZE[1])
     pane_scale = (pane_size[0] / source[0], pane_size[1] / source[1])
 
-    path = tree / "human_optim" / "kindyn_forces_overlay.mp4"
+    path = optim / "kindyn_forces_overlay.mp4"
     writer = imageio.get_writer(path, fps=fps, codec="libx264", quality=7)
     for frame_index in tqdm(range(n_frames), desc=f"[overlays] {clip.name}", leave=False):
         ok, bgr = capture.read()
@@ -468,18 +478,23 @@ def _targets(names: list[str]) -> list[Clip]:
     clips = []
     for name in names:
         # A clip directory picks its own tree (a name alone takes the first tree holding it —
-        # climb_wall_3 clips exist both single-view and in the multi-view GT tree).
-        if Path(name).is_dir():
-            clip_dir = Path(name).resolve()
+        # climb_wall_3 clips exist both single-view and in the multi-view GT tree). An
+        # optimization directory holding a kindyn_1 picks BOTH its clip and which run to
+        # draw, which is how the board-labelled variant is asked for.
+        path, optim_dir = Path(name), "human_optim"
+        if path.is_dir() and (path / "kindyn_1.npz").exists():
+            path, optim_dir = path.parent, path.name
+        if path.is_dir():
+            clip_dir = path.resolve()
             match = next((build for root, build in TREES if clip_dir.parent == root.resolve()), None)
             name = clip_dir.name
         else:
             match = next((build for root, build in TREES
-                          if (root / name / "human_optim" / "kindyn_1.npz").exists()), None)
+                          if (root / name / optim_dir / "kindyn_1.npz").exists()), None)
         if match is None:
             roots = ", ".join(str(root) for root, _ in TREES)
             raise SystemExit(f"[overlays] no kindyn_1 for {name!r} under any of: {roots}")
-        clips.append(match(name))
+        clips.append(replace(match(name), optim_dir=optim_dir))
     return clips
 
 
