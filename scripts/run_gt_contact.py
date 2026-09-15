@@ -11,6 +11,11 @@ The last step draws ``kindyn_forces_overlay.mp4`` beside the variant's own
 ``kindyn_1.npz`` — the usual force overlay, solved contacts and forces against the
 boards, so the two runs can be watched side by side.
 
+Two datasets are instrumented this way: the peter rigs (``--dataset climb_wall_3``,
+one board per limb) and the LAAS Parkour clips (``--dataset parkour``, the feet on floor
+plates and the hands on a sensed bar). Both write the same ``sensor_forces.npz``, so the
+chain below is the same for either.
+
 ``kinematic_1`` is shared with the normal run, not recomputed: it never sees a contact
 label. The boards say which LIMB is loaded and when; which of that limb's contact
 frames carries the label is still read off the body, which is why the board contacts
@@ -36,6 +41,7 @@ Usage::
         --clips a_00_01_part1 --steps contacts_1
     # four GPUs over one tree: one process each, disjoint quarters of the clips
     CUDA_VISIBLE_DEVICES=4 uv run --no-sync python scripts/run_gt_contact.py --shard 1/4
+    CUDA_VISIBLE_DEVICES=6 uv run --no-sync python scripts/run_gt_contact.py --dataset parkour
 """
 
 from __future__ import annotations
@@ -65,6 +71,21 @@ STEP_OUTPUT: dict[str, str] = {
     "kindyn_1": "kindyn_1.npz",
     "overlay": "kindyn_forces_overlay.mp4",
 }
+
+
+#: Clip trees that are not a peter rig: dataset -> (run tree, the clips' source root).
+OTHER_TREES = {
+    "parkour": Path("/data3/rikhat.akizhanov/better/data/Parkour-dataset/processed"),
+}
+
+
+def tree_layout(dataset: str) -> tuple[Path, Path, str]:
+    """The three things that differ per dataset: run tree, clip sources, video name."""
+    if dataset in OTHER_TREES:
+        source = OTHER_TREES[dataset]
+        return source / "out", source, "video.mp4"
+    return (_REPO_ROOT / "peter" / f"out_{dataset}_single",
+            _REPO_ROOT / "peter" / dataset, "cam_left.mp4")
 
 
 def build_farm(clip_dir: Path) -> Path:
@@ -101,7 +122,8 @@ def step_command(step: str, video: Path, farm: Path, config: Path) -> list[str]:
 
 def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
-    ap.add_argument("--dataset", default="climb_wall_3", help="dataset folder under peter/")
+    ap.add_argument("--dataset", default="climb_wall_3",
+                    help="dataset folder under peter/, or " + ", ".join(OTHER_TREES))
     ap.add_argument("--clips", default=None, help="comma-separated clip names (default: all)")
     ap.add_argument("--steps", default=None,
                     help=f"comma-separated subset of {','.join(STEP_OUTPUT)} (default: all)")
@@ -110,8 +132,7 @@ def main(argv: list[str] | None = None) -> int:
                     default=_REPO_ROOT / "configs" / "human_optimization_peter.toml")
     args = ap.parse_args(argv)
 
-    out_root = _REPO_ROOT / "peter" / f"out_{args.dataset}_single"
-    source_root = _REPO_ROOT / "peter" / args.dataset
+    out_root, source_root, video_name = tree_layout(args.dataset)
     clips = sorted(d for d in out_root.iterdir()
                    if (d / "human_optim" / "sensor_forces.npz").exists())
     if args.clips:
@@ -133,7 +154,7 @@ def main(argv: list[str] | None = None) -> int:
     for index, clip_dir in enumerate(clips, 1):
         print(f"\n########## [{index}/{len(clips)}] {clip_dir.name} ##########", flush=True)
         farm = build_farm(clip_dir)
-        video = source_root / clip_dir.name / "cam_left.mp4"
+        video = source_root / clip_dir.name / video_name
         for step in steps:
             done = clip_dir / VARIANT_DIR / STEP_OUTPUT[step]
             if done.exists():

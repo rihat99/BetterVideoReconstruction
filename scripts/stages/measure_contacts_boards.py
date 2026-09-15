@@ -136,7 +136,7 @@ def run(predictions_dir: str | Path, config_path: str | Path, *,
         far = f", far {int(rescued[:, cols].any(1).sum())}f med {np.median(gaps) * 100:.0f} cm" if gaps.size else ""
         print(f"[measure_contacts_boards] {limb}: {int(limb_on[:, i].sum())} loaded frames{far}")
     labelled = distance[contact] * 100
-    print(f"[measure_contacts_boards] labelled frames' distance to the wall: "
+    print(f"[measure_contacts_boards] labelled frames' distance to the scene: "
           + (f"med {np.median(labelled):.1f} p90 {np.percentile(labelled, 90):.1f} cm"
              if labelled.size else "no contact at all"))
 

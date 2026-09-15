@@ -135,6 +135,40 @@ carries what the boards said, which is what makes it auditable:
 | `limb_force_world (1, N, 4, 3)` | the measured force vectors |
 | `contact_label_method` | `boards-v3`, the same string the three-camera GT chain stamps |
 
+## The same stage on the Parkour clips
+
+The peter rigs are not the only instrumented data we have. The LAAS Parkour
+dataset films twenty-eight jumps and vaults with the feet landing on floor force
+plates and the hands on a sensed bar, so each of the same four limbs has its own
+measured 3D force, one row per video frame. That is the same measurement the
+peter boards make, so the same stage runs on it.
+
+Only the file shape differed: the import stores a 6D wrench plus a mask saying
+which samples the rig actually caught.
+[`scripts/parkour_sensor_forces.py`](../scripts/parkour_sensor_forces.py) writes
+the force part of it as the `sensor_forces.npz` the stage reads, and then the
+chain is one command:
+
+```bash
+uv run --no-sync python scripts/parkour_sensor_forces.py
+CUDA_VISIBLE_DEVICES=6 uv run --no-sync python scripts/run_gt_contact.py --dataset parkour
+```
+
+Two things about this rig are unlike the climbing boards. Both are written into
+the file, so no reader has to know which dataset it is looking at:
+
+- **A limb can be unmeasured.** A foot that lands beside the plate is not a
+  released foot — it is a foot nobody watched. Those samples are stored as `NaN`
+  (3.6% of limb-frames here, nearly all of them the right foot) and drop out of
+  every number, rather than counting as "not touching".
+- **The vectors live in the motion-capture world, not ours.** The two worlds do
+  not share a compass direction, so force *sizes* compare and force *directions*
+  do not. The file says `world_aligned = False`, and the comparison prints a
+  blank angle column instead of a meaningless number.
+
+Neither touches the labels: whether a force is big enough to count as contact
+does not depend on which way the world is facing.
+
 ## What it showed on climb_wall_3
 
 All 68 single-view clips, both runs, compared against the same boards
@@ -175,6 +209,51 @@ a hand that is 29 cm from where it should be. Second, the root residual gets
 estimated labels over-claim contact, and every spurious contact is one more handle
 the solve can use to absorb residual it cannot otherwise explain. A lower residual
 bought that way is flattery, not physics.
+
+## What it showed on Parkour
+
+All 28 clips, both runs, against the plates and the bar.
+
+Here the estimated labels are *not* decent, and the failure is one-sided. Pooled
+they score precision 0.69 and recall 0.97 — the pipeline almost never misses a
+real contact, and constantly invents ones that were not there. Split by limb, it
+is the feet:
+
+| limb | measured frames | claimed | precision | recall |
+|---|---|---|---|---|
+| left hand | 1333 | 1600 | 0.83 | 0.99 |
+| right hand | 1145 | 1404 | 0.80 | 0.98 |
+| left foot | 855 | 1357 | 0.62 | 0.98 |
+| right foot | 547 | 1067 | **0.46** | 0.89 |
+
+A parkour foot is near the ground and moving slowly a lot of the time without
+carrying any weight, which is exactly the situation the near-and-still test
+cannot tell from a real landing. The right foot is claimed in contact roughly
+twice as often as the plates say.
+
+That has a clean price, and removing it a clean payoff:
+
+| | limb MAE [N] | corr | share err [pp] | total MAE [N] | root resid [BW] |
+|---|---|---|---|---|---|
+| Estimated contacts (video) | 92.3 | 0.629 | 16.23 | 110.6 | 0.086 |
+| Measured contacts (boards) | **47.5** | **0.851** | **5.48** | 110.6 | 0.130 |
+
+The per-limb force error halves and the load-share error drops by two thirds,
+while the **total** force is identical to within 0.1 N. That is the signature of
+a distribution error, not a magnitude error: the solve always knew how hard the
+body was pushing, and was putting a large part of it through the wrong limb.
+
+Unlike climb_wall_3, the split by `rescued` does not reverse the result. No
+Parkour clip is more than 25 % rescued (climb_wall_3 had thirteen above 50 %),
+so every clip here is a clip whose body is roughly in the right place, and all of
+them gain — the five worst-placed go 82.5 → 46.9 N, the fifteen best 104.5 →
+48.1 N. The single-view geometry on these clips is good enough that contact
+detection really is the bottleneck, which is the opposite of what the climbing
+wall said.
+
+The root residual rises with true labels here too (0.086 → 0.130 BW), for the
+same reason as on the wall: spurious contacts are extra handles for absorbing
+residual, and a low residual bought that way is flattery, not physics.
 
 ## Shared with the ground-truth chain
 

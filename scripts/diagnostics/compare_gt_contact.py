@@ -26,10 +26,19 @@ Each run's jitter is measured over the frames *it* labelled in contact — how s
 own forces are — not over a shared mask, so read it as a per-run property rather than a
 head-to-head difference.
 
+Two things a rig can fail to give, both handled by skipping rather than guessing. A limb
+the rig did not measure at all (a Parkour foot landing off the plates) is written NaN by
+the importer and drops out of every number here — it is not a released limb. And on a rig
+whose vectors live in its own world (Parkour's MoCap yaw is not ours), only SIZES compare,
+so the angle column is blank; ``sensor_forces.npz`` says which case it is
+(``world_aligned``).
+
 Usage::
 
     uv run --no-sync python scripts/diagnostics/compare_gt_contact.py
     uv run --no-sync python scripts/diagnostics/compare_gt_contact.py --tree peter/out_climb_wall_2_single
+    uv run --no-sync python scripts/diagnostics/compare_gt_contact.py \\
+        --tree /data3/rikhat.akizhanov/better/data/Parkour-dataset/processed/out
 """
 
 from __future__ import annotations
@@ -97,59 +106,81 @@ def finished_clips(tree: Path) -> list[Path]:
 def gather(clips: list[Path]) -> dict[str, np.ndarray]:
     """Stack the given clips into pooled per-frame arrays."""
     columns: dict[str, list[np.ndarray]] = {key: [] for key in
-                                            ("boards", "board_on", "estimated_on",
+                                            ("boards", "board_on", "measured", "estimated_on",
                                              *(f"{d}_force" for d in RUNS.values()),
                                              *(f"{d}_residual" for d in RUNS.values()))}
+    aligned = True
     for clip in clips:
         sensor = np.load(clip / "human_optim" / "sensor_forces.npz")
         boards = np.asarray(sensor["reaction_world"], float)
+        aligned &= bool(sensor["world_aligned"]) if "world_aligned" in sensor else True
         n = min(len(boards), len(np.load(clip / "human_optim" / "kindyn_1.npz")["base_wrench"][0]))
         columns["boards"].append(boards[:n])
         columns["board_on"].append(np.linalg.norm(boards[:n], axis=-1) > CONTACT_N)
+        columns["measured"].append(np.isfinite(boards[:n]).all(-1))
         columns["estimated_on"].append(limb_labels(clip / "human_optim" / "contacts_2.npz", n))
         for directory in RUNS.values():
             force, residual = limb_forces(clip / directory / "kindyn_1.npz", n)
             columns[f"{directory}_force"].append(force)
             columns[f"{directory}_residual"].append(residual)
-    return {key: np.concatenate(parts) for key, parts in columns.items()}
+    data = {key: np.concatenate(parts) for key, parts in columns.items()}
+    data["world_aligned"] = np.bool_(aligned)
+    return data
+
+
+def hands_over_feet(size: np.ndarray, full: np.ndarray) -> float:
+    """Hand load divided by foot load, over the frames where all four limbs were measured."""
+    hands, feet = size[full][:, :2].sum(), size[full][:, 2:].sum()
+    return float(hands / max(feet, 1e-6))
 
 
 def force_metrics(boards: np.ndarray, ours: np.ndarray, residual: np.ndarray,
-                  contact: np.ndarray) -> dict[str, float]:
-    """One run's solved limb forces against the measured ones."""
+                  contact: np.ndarray, world_aligned: bool = True) -> dict[str, float]:
+    """One run's solved limb forces against the measured ones.
+
+    A limb-frame the rig did not measure is NaN in ``boards``; blanking our own vector
+    there makes every number below skip it instead of scoring against nothing.
+    """
+    ours = np.where(np.isfinite(boards), ours, np.nan)
     measured, solved = np.linalg.norm(boards, axis=-1), np.linalg.norm(ours, axis=-1)
-    both = (measured > CONTACT_N) & (solved > CONTACT_N)
+    full = np.isfinite(measured).all(1)                   # frames with all four limbs measured
+    both = (measured > CONTACT_N) & (solved > CONTACT_N)  # NaN compares False, so it drops out
     cos = (boards * ours).sum(-1)[both] / (measured[both] * solved[both])
     share = lambda m: m / np.maximum(m.sum(1, keepdims=True), 1e-6)  # noqa: E731
     step = np.linalg.norm(np.diff(ours, axis=0), axis=-1)[contact[1:] & contact[:-1]]
+    pair = np.isfinite(solved) & np.isfinite(measured)
     return {
-        "limb MAE [N]": np.abs(solved - measured).mean(),
-        "total MAE [N]": np.abs(np.linalg.norm(ours.sum(1), axis=-1)
-                                - np.linalg.norm(boards.sum(1), axis=-1)).mean(),
-        "corr": np.corrcoef(solved.ravel(), measured.ravel())[0, 1],
-        "angle [deg]": np.degrees(np.arccos(np.clip(cos, -1, 1))).mean(),
-        "share err [pp]": 100 * np.abs(share(solved) - share(measured)).mean(),
-        "hands/feet": solved[:, :2].sum() / max(solved[:, 2:].sum(), 1e-6),
+        "limb MAE [N]": np.nanmean(np.abs(solved - measured)),
+        "total MAE [N]": np.nanmean(np.abs(np.linalg.norm(ours.sum(1), axis=-1)
+                                           - np.linalg.norm(boards.sum(1), axis=-1))),
+        "corr": np.corrcoef(solved[pair], measured[pair])[0, 1],
+        "angle [deg]": (np.degrees(np.arccos(np.clip(cos, -1, 1))).mean()
+                        if world_aligned else np.nan),
+        "share err [pp]": 100 * np.nanmean(np.abs(share(solved) - share(measured))),
+        "hands/feet": hands_over_feet(solved, full),
         "root resid [BW]": np.median(residual),
-        "|df| [N]": step.mean(),
+        "|df| [N]": np.nanmean(step),
     }
 
 
 def force_table(title: str, data: dict[str, np.ndarray]) -> None:
     """Print both runs' solved limb forces against the boards, for one set of clips."""
     truth, claimed = data["board_on"], data["estimated_on"]
+    aligned = bool(data["world_aligned"])
     rows = {name: force_metrics(data["boards"], data[f"{d}_force"], data[f"{d}_residual"],
-                                claimed if d == "human_optim" else truth)
+                                claimed if d == "human_optim" else truth, aligned)
             for name, d in RUNS.items()}
     keys = list(next(iter(rows.values())))
+    cell = lambda v: f"{'—':>16s}" if np.isnan(v) else f"{v:16.3f}"  # noqa: E731
     print(f"\n  Solved limb forces vs the boards — {title}")
     print(f"  {'':28s}" + "".join(f"{k:>16s}" for k in keys))
     for name, metrics in rows.items():
-        print(f"  {name:28s}" + "".join(f"{metrics[k]:16.3f}" for k in keys))
+        print(f"  {name:28s}" + "".join(cell(metrics[k]) for k in keys))
     measured = np.linalg.norm(data["boards"], axis=-1)
     step = np.linalg.norm(np.diff(data["boards"], axis=0), axis=-1)[truth[1:] & truth[:-1]]
     print(f"  {'boards themselves':28s}" + " " * 80
-          + f"{measured[:, :2].sum() / measured[:, 2:].sum():16.3f}{'':16s}{step.mean():16.3f}")
+          + f"{hands_over_feet(measured, np.isfinite(measured).all(1)):16.3f}"
+          + f"{'':16s}{np.nanmean(step):16.3f}")
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -164,13 +195,17 @@ def main(argv: list[str] | None = None) -> int:
     clips = finished_clips(args.tree)
     print(f"[compare] {len(clips)} clip(s) of {args.tree}")
     data = gather(clips)
-    truth, claimed = data["board_on"], data["estimated_on"]
+    truth, claimed, measured = data["board_on"], data["estimated_on"], data["measured"]
+    if not measured.all():
+        print(f"[compare] {int((~measured).sum())}/{measured.size} limb-frames were never "
+              "measured by the rig; they are left out of every number below")
 
     print("\n  Estimated labels vs the boards")
     print(f"  {'limb':12s} {'board f':>8s} {'ours f':>8s} {'prec':>6s} {'rec':>6s} {'F1':>6s}")
     for i, limb in enumerate([*LIMBS, "pooled"]):
-        t = truth[:, i] if limb != "pooled" else truth.ravel()
-        c = claimed[:, i] if limb != "pooled" else claimed.ravel()
+        keep = measured[:, i] if limb != "pooled" else measured.ravel()
+        t = (truth[:, i] if limb != "pooled" else truth.ravel())[keep]
+        c = (claimed[:, i] if limb != "pooled" else claimed.ravel())[keep]
         tp = float((t & c).sum())
         precision, recall = tp / max(c.sum(), 1), tp / max(t.sum(), 1)
         f1 = 2 * precision * recall / max(precision + recall, 1e-9)
