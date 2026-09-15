@@ -1,0 +1,358 @@
+{
+  "contact": {
+    "Always in contact (floor)": {
+      "ClimbingVideos": {
+        "precision": 0.5190975877314481,
+        "recall": 1.0,
+        "f1": 0.6834288882080908,
+        "balanced_accuracy": 0.5,
+        "hands_f1": 0.9122036874451273,
+        "feet_f1": 0.5208624475943302,
+        "variant": null
+      },
+      "climb_wall_3": {
+        "precision": 0.8261964309855346,
+        "recall": 1.0,
+        "f1": 0.9048275606799485,
+        "balanced_accuracy": 0.5,
+        "hands_f1": 0.9098713236987298,
+        "feet_f1": 0.8997369081595656,
+        "variant": null
+      }
+    },
+    "Ours (contacts_1)": {
+      "ClimbingVideos": {
+        "precision": 0.927161847334521,
+        "recall": 0.8665015902832626,
+        "f1": 0.8958059782188924,
+        "balanced_accuracy": 0.8965111638052258,
+        "hands_f1": 0.9439013058392068,
+        "feet_f1": 0.835062486734834,
+        "variant": null
+      },
+      "climb_wall_3": {
+        "precision": 0.8986435343797307,
+        "recall": 0.9227771982573479,
+        "f1": 0.9105504818608406,
+        "balanced_accuracy": 0.7140137814330006,
+        "hands_f1": 0.9207961645773569,
+        "feet_f1": 0.8997323706977034,
+        "variant": null
+      }
+    },
+    "Ours (contacts_2)": {
+      "ClimbingVideos": {
+        "precision": 0.9245809117479088,
+        "recall": 0.8812303882852691,
+        "f1": 0.902385311074073,
+        "balanced_accuracy": 0.9018191111933258,
+        "hands_f1": 0.9491362387122104,
+        "feet_f1": 0.8436663995561857,
+        "variant": null
+      },
+      "climb_wall_3": {
+        "precision": 0.9023210640026957,
+        "recall": 0.9311120656153484,
+        "f1": 0.9164905075396106,
+        "balanced_accuracy": 0.7259838402943053,
+        "hands_f1": 0.9247020212441903,
+        "feet_f1": 0.9078677191353247,
+        "variant": null
+      }
+    },
+    "GVHMR (p > 0.5)": {
+      "ClimbingVideos": {
+        "precision": 0.5589928640934155,
+        "recall": 0.4414476914210088,
+        "f1": 0.49331488615626823,
+        "balanced_accuracy": 0.5327572558487532,
+        "hands_f1": 0.3761497875519447,
+        "feet_f1": 0.5660946488132643,
+        "variant": null
+      },
+      "climb_wall_3": {
+        "precision": 0.8920843053656182,
+        "recall": 0.6804626618396024,
+        "f1": 0.7720342522974102,
+        "balanced_accuracy": 0.644582327516787,
+        "hands_f1": 0.5798519702837925,
+        "feet_f1": 0.9117266943846115,
+        "variant": null
+      }
+    },
+    "PromptHMR (p > 0.5)": {
+      "ClimbingVideos": {
+        "precision": 0.5040352393547782,
+        "recall": 0.5165965803573335,
+        "f1": 0.5102386110276561,
+        "balanced_accuracy": 0.48394921183765294,
+        "hands_f1": 0.4591778579883386,
+        "feet_f1": 0.5390462685090526,
+        "variant": null
+      },
+      "climb_wall_3": {
+        "precision": 0.8518692107502744,
+        "recall": 0.7063365445583032,
+        "f1": 0.7723066773268329,
+        "balanced_accuracy": 0.5612382771406004,
+        "hands_f1": 0.6000000000000001,
+        "feet_f1": 0.8963070503514119,
+        "variant": null
+      }
+    },
+    "PromptHMR (p > 0.8)": {
+      "ClimbingVideos": {
+        "precision": 0.4769788572427049,
+        "recall": 0.34961683779110725,
+        "f1": 0.40348586561556943,
+        "balanced_accuracy": 0.4679017368679038,
+        "hands_f1": 0.23130449504782866,
+        "feet_f1": 0.5019311746769275,
+        "variant": null
+      },
+      "climb_wall_3": {
+        "precision": 0.8540718781210862,
+        "recall": 0.5509602994416151,
+        "f1": 0.6698205282821815,
+        "balanced_accuracy": 0.5517319727640744,
+        "hands_f1": 0.33478668619095414,
+        "feet_f1": 0.873283907196099,
+        "variant": null
+      }
+    },
+    "DECO": {
+      "ClimbingVideos": {
+        "precision": 0.4354668232530828,
+        "recall": 0.5936345977330458,
+        "f1": 0.5023959100167555,
+        "balanced_accuracy": 0.38146591637804367,
+        "hands_f1": 0.5117762117842503,
+        "feet_f1": 0.49762564979526763,
+        "variant": "lbs/any"
+      },
+      "climb_wall_3": {
+        "precision": 0.821124517670117,
+        "recall": 0.5484240453253155,
+        "f1": 0.6576246244404931,
+        "balanced_accuracy": 0.4902548034113209,
+        "hands_f1": 0.49001690108567986,
+        "feet_f1": 0.7830860279612316,
+        "variant": "seg/any"
+      }
+    },
+    "BSTRO": {
+      "ClimbingVideos": {
+        "precision": 0.47237526038117855,
+        "recall": 0.5179520566951993,
+        "f1": 0.4941148919705948,
+        "balanced_accuracy": 0.4467352449374614,
+        "hands_f1": 0.5204453120877962,
+        "feet_f1": 0.47756516548384964,
+        "variant": "lbs/any"
+      },
+      "climb_wall_3": {
+        "precision": 0.8401368904687175,
+        "recall": 0.45441901372440735,
+        "f1": 0.5898148947043558,
+        "balanced_accuracy": 0.5216917625744059,
+        "hands_f1": 0.3519421745318472,
+        "feet_f1": 0.758583130999115,
+        "variant": "seg/any"
+      }
+    },
+    "InteractVLM (query: wall)": {
+      "ClimbingVideos": {
+        "precision": 0.7378416491937728,
+        "recall": 0.8488163596388243,
+        "f1": 0.7894480841770896,
+        "balanced_accuracy": 0.7616374424922232,
+        "hands_f1": 0.8723280472928592,
+        "feet_f1": 0.6963860499420503,
+        "variant": "lbs/frac10"
+      },
+      "climb_wall_3": {
+        "precision": 0.8198975732549633,
+        "recall": 0.676187846433904,
+        "f1": 0.7411405352388959,
+        "balanced_accuracy": 0.4850555177721294,
+        "hands_f1": 0.8229084944012552,
+        "feet_f1": 0.6411719275517576,
+        "variant": "seg/any"
+      }
+    },
+    "InteractVLM (query: scene)": {
+      "ClimbingVideos": {
+        "precision": 0.4188959565855611,
+        "recall": 0.502550857045275,
+        "f1": 0.4569260403980611,
+        "balanced_accuracy": 0.3750139077853103,
+        "hands_f1": 0.2543863928321706,
+        "feet_f1": 0.5430630281738841,
+        "variant": "lbs/frac10"
+      },
+      "climb_wall_3": {
+        "precision": 0.8297352342158859,
+        "recall": 0.604129594403878,
+        "f1": 0.6991839126034904,
+        "balanced_accuracy": 0.5074123907848267,
+        "hands_f1": 0.6585686387698204,
+        "feet_f1": 0.7369515064300235,
+        "variant": "seg/any"
+      }
+    }
+  },
+  "pose": {
+    "SAM 3D Body init": {
+      "ClimbingVideos": {
+        "MPJPE": 64.00969159638825,
+        "PA-MPJPE": 44.71648760362037,
+        "PVE": 80.12775622795105,
+        "Accel": 33.170475471010334,
+        "WA-MPJPE": 88.4957029890663,
+        "W-MPJPE": 134.80857079955334,
+        "RTE": 2.0946834791526716,
+        "Jitter": 99.38199895015512
+      },
+      "climb_wall_3": {
+        "MPJPE": 42.920068620155405,
+        "PA-MPJPE": 22.762075115504427,
+        "PVE": 55.84806323014365,
+        "Accel": 13.728981423113817,
+        "WA-MPJPE": 37.83859530899519,
+        "W-MPJPE": 53.07814920395411,
+        "RTE": 1.4933267464554467,
+        "Jitter": 43.72246977975009
+      }
+    },
+    "Ours (single view)": {
+      "climb_wall_3": {
+        "MPJPE": 57.472195203506125,
+        "PA-MPJPE": 32.81382019043192,
+        "PVE": 71.09164071460341,
+        "Accel": 2.4038342443210303,
+        "WA-MPJPE": 44.68211711550561,
+        "W-MPJPE": 60.927716623066566,
+        "RTE": 1.5986267605903948,
+        "Jitter": 1.8156699374735443
+      }
+    },
+    "GVHMR (raw)": {
+      "ClimbingVideos": {
+        "MPJPE": 95.2460791445084,
+        "PA-MPJPE": 65.63138020789211,
+        "PVE": 121.68307375328278,
+        "Accel": 35.73631587400261,
+        "WA-MPJPE": 199.58037743383653,
+        "W-MPJPE": 329.75475028048896,
+        "RTE": 6.454950339780312,
+        "Jitter": 10.661045374774451
+      },
+      "climb_wall_3": {
+        "MPJPE": 68.35060600318839,
+        "PA-MPJPE": 49.35987726172808,
+        "PVE": 92.65345735958306,
+        "Accel": 6.486239760702065,
+        "WA-MPJPE": 90.12956688200636,
+        "W-MPJPE": 133.28200968846534,
+        "RTE": 4.81536502396461,
+        "Jitter": 4.422054291668011
+      }
+    },
+    "GVHMR (post)": {
+      "ClimbingVideos": {
+        "MPJPE": 95.2725212315562,
+        "PA-MPJPE": 65.69385733083197,
+        "PVE": 121.69243496031346,
+        "Accel": 35.69957359648653,
+        "WA-MPJPE": 191.18832649278576,
+        "W-MPJPE": 318.04263420245303,
+        "RTE": 5.780831798377806,
+        "Jitter": 12.887111120389477
+      },
+      "climb_wall_3": {
+        "MPJPE": 68.39596908467382,
+        "PA-MPJPE": 49.35452252892034,
+        "PVE": 92.71814691505924,
+        "Accel": 6.47273748684673,
+        "WA-MPJPE": 78.33281663801675,
+        "W-MPJPE": 107.47895866065973,
+        "RTE": 3.5818383270062677,
+        "Jitter": 5.390211422379795
+      }
+    },
+    "PromptHMR (raw)": {
+      "ClimbingVideos": {
+        "MPJPE": 108.49079336672598,
+        "PA-MPJPE": 76.77900495571991,
+        "PVE": 128.53308468084455,
+        "Accel": 15.711845050328076,
+        "WA-MPJPE": 211.26445602789525,
+        "W-MPJPE": 347.2457850472347,
+        "RTE": 6.949201410679532,
+        "Jitter": 5.584969458489514
+      },
+      "climb_wall_3": {
+        "MPJPE": 82.22120779704173,
+        "PA-MPJPE": 58.89310982786916,
+        "PVE": 91.65782640930485,
+        "Accel": 4.205990636678509,
+        "WA-MPJPE": 100.73607593589686,
+        "W-MPJPE": 149.09577553111956,
+        "RTE": 4.714028611030354,
+        "Jitter": 2.061569689899235
+      }
+    },
+    "PromptHMR (post)": {
+      "ClimbingVideos": {
+        "MPJPE": 159.07596431466436,
+        "PA-MPJPE": 76.77900420010566,
+        "PVE": 200.5711145982114,
+        "Accel": 10.439228348772474,
+        "WA-MPJPE": 199.17401989920018,
+        "W-MPJPE": 389.49859491496164,
+        "RTE": 5.66931355751374,
+        "Jitter": 14.144854169944042
+      },
+      "climb_wall_3": {
+        "MPJPE": 121.20228606952877,
+        "PA-MPJPE": 58.893111362026936,
+        "PVE": 149.76032189954032,
+        "Accel": 3.463599927152796,
+        "WA-MPJPE": 93.18534235087955,
+        "W-MPJPE": 136.33061861371505,
+        "RTE": 3.457814830734963,
+        "Jitter": 11.36526186872974
+      }
+    },
+    "Reference body": {
+      "ClimbingVideos": {
+        "Jitter": 4.231623977848063
+      },
+      "climb_wall_3": {
+        "Jitter": 1.4116354263900435
+      }
+    }
+  },
+  "notes": {
+    "contact_datasets_differ": "ClimbingVideos = 6 annotated joints, 51.9 % contact; climb_wall_3 = 4 instrumented limbs, 82.6 % contact. Compare on balanced accuracy, not F1.",
+    "pose_reference_differs": "ClimbingVideos pose is measured against OUR kindyn_1 body (so our row is the reference); climb_wall_3 against an independent 3-camera fit.",
+    "vertex_variant_chosen": {
+      "DECO": {
+        "ClimbingVideos": "lbs/any",
+        "climb_wall_3": "seg/any"
+      },
+      "BSTRO": {
+        "ClimbingVideos": "lbs/any",
+        "climb_wall_3": "seg/any"
+      },
+      "InteractVLM (query: wall)": {
+        "ClimbingVideos": "lbs/frac10",
+        "climb_wall_3": "seg/any"
+      },
+      "InteractVLM (query: scene)": {
+        "ClimbingVideos": "lbs/frac10",
+        "climb_wall_3": "seg/any"
+      }
+    }
+  }
+}
