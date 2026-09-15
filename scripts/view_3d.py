@@ -42,7 +42,7 @@ For each clip it shows, in the metric world frame:
 
 The dynamics folder's **sensor forces (measured)** toggle draws the wall rig's own
 reading — the measured reaction on each limb, in orange, at that limb's joint and on
-the same scale as the solved blue arrows — for the clips that ship a
+the same scale as the solved red arrows — for the clips that ship a
 ``sensor_forces.npz``. Its **force display** dropdown picks the solved arrows' regime:
 ``per-joint`` accumulates each joint's frame forces into one arrow at the joint —
 each hand's forces summed at its wrist, never on individual finger joints —

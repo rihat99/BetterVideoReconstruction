@@ -23,16 +23,16 @@ from .loading import _FINGER_TOKENS, ClipData, ensure_scene_mesh
 
 # dynamics sphere-floor / bone radius / max torque grow factor / metres-per-newton for
 # the contact-force arrows
-_DYN_R0, _DYN_RB, _DYN_MAXS, _DYN_FSCALE = 0.022, 0.012, 2.0, 1.2e-3
+_DYN_R0, _DYN_RB, _DYN_MAXS, _DYN_FSCALE = 0.022, 0.012, 2.0, 1.5e-3
 # joint-sphere colour while the ``joint torques`` toggle is on (torque-sized spheres);
 # off, the spheres stay the neutral skeleton grey like the kinematic overlay.
 _DYN_TORQUE_RGB = (245, 200, 40)
 # root residual-wrench arrows: metres per newton-metre for the torque part (the force
 # part reuses _DYN_FSCALE so it is directly comparable to the contact-force arrows)
 _DYN_TSCALE = 4.8e-3
-# contact-force arrow colour — a saturated blue that reads against the grey scene
-# cloud and the grey skeleton
-_DYN_FORCE_RGB = (50, 120, 255)
+# contact-force arrow colour — a saturated red that reads against the grey scene
+# cloud and the grey skeleton (the same red as the contact frames the forces act on)
+_DYN_FORCE_RGB = (235, 45, 45)
 # measured wall-sensor arrows (climb_wall GT): orange, one per channel; below the
 # floor a channel is not drawn (the sensors never read exactly zero, and the fixed
 # arrow head would clutter the wall)
