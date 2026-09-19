@@ -39,14 +39,33 @@ Selection — only sequences whose ground truth is complete:
 
 18,076 sequences / 5,493,090 frames / 26,178 people survive.
 
+Three things the ground truth does *not* give you. BEDLAM2 ships one
+``ground_height_world`` per sequence, so ``gravity.npz``'s floor is wrong for
+anyone standing on a step or platform (median foot gap -6 mm, which is shoe
+thickness, but 5% of people never come within 5 cm of it). The classic
+``body_pose`` arrays are AMASS axis-angle copied verbatim, including rotation
+vectors past 2*pi, so they do not match ``body.to_classic(betas, q)`` elementwise
+— ``q`` is the canonical form. And no stage in this repo reads ``features/gt``;
+it is a ground-truth tree for training, not a drop-in for the corpus chain.
+
 World frame: Unreal's world, mapped to OpenCV axes by ``unreal2cv2`` and metres.
 Up is ``-y``, so gravity is ``+y`` — the same convention the geocalib stage uses.
 ``camera.npz:extrinsics`` is camera-from-world, and the bodies are in that world.
 
-Shape: BEDLAM2 fits 16 betas against the *locked-head* SMPL-X model; the pipeline
-body is the standard model with 10 betas. Truncating costs 0.7 mm mean / 1.7 mm
-p95 vertex error on the real BEDLAM2 shapes (0.1 px mean reprojection), so the
-importer truncates and keeps the original 16 in ``betas_bedlam2``.
+Shape: BEDLAM2 renders through the *locked-head* SMPL-X model with 16 betas; the
+pipeline body is the standard model with 10. Going from one to the other costs
+0.7 mm mean / 1.8 mm p95 vertex error on the real BEDLAM2 shapes (0.1 px mean
+reprojection, and the >5 mm tail is head and face only), so the importer
+truncates and keeps the original 16 in ``betas_bedlam2``.
+
+Visibility: BEDLAM2 places crowd members outside the camera frustum and gives
+them ground truth anyway — 370,939 of 7,016,224 person-frames (5.3%) have no
+body pixels at all, and 1,100 of 26,178 people (4.2%) are never visible in a
+single frame of their clip. So
+``valid_mask`` is *measured*, not assumed: ``visible_fraction`` is the share of
+the body's 10,475 vertices inside the image that frame, and ``valid_mask`` is
+``visible_fraction > 0``. Threshold it as you like; occlusion is still not
+modelled, so a visible body may still be fully behind something.
 
 Hands: BEDLAM2 renders with ``flat_hand_mean=True`` (absolute hand pose), while
 ``Body.from_classic`` adds the model's hand mean, so the mean is subtracted on
@@ -59,7 +78,11 @@ Usage::
     uv run python scripts/import_bedlam2.py --step features --workers 48
     uv run python scripts/import_bedlam2.py --step frames   --workers 64
     uv run python scripts/import_bedlam2.py --step db
-    uv run python scripts/import_bedlam2.py --step verify   --sample 12
+    uv run python scripts/import_bedlam2.py --step verify   --sample 12   # writes _verify/*.png
+
+``vlm_category`` carries the environment (1..16, mapped in ``schema_meta``), not a
+climbing class, so a corpus config over this root wants ``categories = []``;
+``scene_db.select_targets(conn, categories=(), rope_supported=0)`` returns all 18,076.
     uv run python scripts/import_bedlam2.py --step all
 """
 from __future__ import annotations
@@ -118,6 +141,10 @@ STATIC_TRANSLATION_M = 0.01
 STATIC_ROTATION_DEG = 0.1
 STATIC_FOCAL_MM = 0.01
 
+#: Frames posed at once when measuring visibility; a full-length clip of vertices
+#: would be ~240 MB per worker.
+VISIBILITY_CHUNK = 256
+
 _BASE36 = "0123456789abcdefghijklmnopqrstuvwxyz"
 
 
@@ -161,6 +188,13 @@ def sha256_file(path: Path) -> str:
         for block in iter(lambda: handle.read(1 << 20), b""):
             digest.update(block)
     return digest.hexdigest()
+
+
+def save_npz(path: Path, **arrays) -> None:
+    """``np.savez`` through a temporary file, so a crash never leaves a readable stub."""
+    tmp = path.with_name(path.name + ".part.npz")
+    np.savez(tmp, **arrays)
+    tmp.rename(path)
 
 
 def open_render_db() -> sqlite3.Connection:
@@ -416,7 +450,7 @@ def write_camera_npz(path: Path, geometry: dict, rows: list[sqlite3.Row], portra
     locked = (travel < STATIC_TRANSLATION_M and spin < STATIC_ROTATION_DEG
               and focal_range < STATIC_FOCAL_MM)
 
-    np.savez(
+    save_npz(
         path,
         extrinsics=geometry["extrinsics"].astype(np.float32),
         intrinsics=normalised.astype(np.float32),
@@ -447,7 +481,7 @@ def write_camera_npz(path: Path, geometry: dict, rows: list[sqlite3.Row], portra
 def write_gravity_npz(path: Path, ground_height_world: float) -> None:
     """Unreal +z is up, and ``unreal2cv2`` sends it to -y, so gravity is +y."""
     ground_y = -ground_height_world / 100.0
-    np.savez(
+    save_npz(
         path,
         gravity_world=np.array([0.0, 1.0, 0.0], dtype=np.float32),
         up_world=np.array([0.0, -1.0, 0.0], dtype=np.float32),
@@ -504,16 +538,51 @@ def pelvis_offset(betas_key: bytes) -> np.ndarray:
     return q[0, :3].detach().numpy().astype(np.float64)
 
 
-def write_smplx_npz(path: Path, scene: dict, width: int, height: int) -> None:
+def visible_fraction(body, betas: np.ndarray, q: np.ndarray, geometry: dict) -> np.ndarray:
+    """Fraction of the body's vertices inside the image, per frame ``(N,)``.
+
+    BEDLAM2 places crowd members outside the camera frustum and labels them all
+    the same, so this is what separates a usable person-frame from one where the
+    body is simply not in the picture. Vertices, not joints: a body can be in
+    frame with every joint outside it.
+    """
+    import torch
+
+    extrinsics = geometry["extrinsics"]
+    intrinsics = geometry["intrinsics_px"]
+    width, height = geometry["width"], geometry["height"]
+    shape = torch.from_numpy(betas).float()[None]
+    fraction = np.empty(len(q), dtype=np.float32)
+    for start in range(0, len(q), VISIBILITY_CHUNK):
+        stop = min(start + VISIBILITY_CHUNK, len(q))
+        with torch.no_grad():
+            vertices = body.forward(shape, torch.from_numpy(q[start:stop])).vertices.numpy()
+        rotation = extrinsics[start:stop, :3, :3]
+        camera = np.einsum("fij,fvj->fvi", rotation, vertices.astype(np.float64))
+        camera += extrinsics[start:stop, None, :3, 3]
+        depth = camera[..., 2]
+        safe = np.where(np.abs(depth) < 1e-6, 1e-6, depth)
+        block = intrinsics[start:stop]
+        column = camera[..., 0] / safe * block[:, None, 0, 0] + block[:, None, 0, 2]
+        row = camera[..., 1] / safe * block[:, None, 1, 1] + block[:, None, 1, 2]
+        inside = ((depth > 0) & (column >= 0) & (column < width)
+                  & (row >= 0) & (row < height))
+        fraction[start:stop] = inside.mean(axis=1)
+    return fraction
+
+
+def write_smplx_npz(path: Path, scene: dict, geometry: dict) -> None:
     """Compose every body's world-frame SMPL-X trajectory and pack it as ``q``."""
     import torch
 
+    width, height = geometry["width"], geometry["height"]
     body, hand_mean = get_body()
     mean_left, mean_right = hand_mean
     n_frames = scene["n_frames"]
     people = scene["bodies"]
 
     q_all = np.zeros((len(people), n_frames, 211), dtype=np.float32)
+    visible = np.zeros((len(people), n_frames), dtype=np.float32)
     betas10 = np.zeros((len(people), NUM_BETAS), dtype=np.float32)
     betas16 = np.zeros((len(people), 16), dtype=np.float32)
     classic = {name: np.zeros((len(people), n_frames, width_), dtype=np.float32)
@@ -549,6 +618,7 @@ def write_smplx_npz(path: Path, scene: dict, width: int, height: int) -> None:
                               as_tensor(global_orient), as_tensor(left_hand),
                               as_tensor(right_hand))
         q_all[index] = q.detach().numpy()
+        visible[index] = visible_fraction(body, shape10.astype(np.float32), q_all[index], geometry)
         betas10[index] = shape10
         betas16[index] = betas
         classic["global_orient"][index] = global_orient
@@ -560,7 +630,7 @@ def write_smplx_npz(path: Path, scene: dict, width: int, height: int) -> None:
         classic["leye_pose"][index] = poses[:, 69:72]
         classic["reye_pose"][index] = poses[:, 72:75]
 
-    np.savez(
+    save_npz(
         path,
         q=q_all, betas=betas10, betas_bedlam2=betas16,
         scale=np.ones(len(people), dtype=np.float32),
@@ -568,12 +638,12 @@ def write_smplx_npz(path: Path, scene: dict, width: int, height: int) -> None:
         joint_names=np.array(body.joint_names, dtype="U16"),
         parents=np.array(joint_parents(body), dtype=np.int32),
         object_ids=np.arange(len(people), dtype=np.int32),
-        valid_mask=np.ones((len(people), n_frames), dtype=bool),
+        valid_mask=visible > 0.0, visible_fraction=visible,
         num_people=np.int32(len(people)), num_frames=np.int32(n_frames),
         video_width=np.int32(width), video_height=np.int32(height),
         fps=np.float32(FPS), frame=np.array("world", dtype="U8"),
         model_type=np.array("smplx_mid", dtype="U16"), num_betas=np.int32(NUM_BETAS),
-        animation_names=np.array([p["name"] for p in people], dtype="U64"),
+        animation_names=np.array([p["name"] for p in people]),
         start_frames=np.array([p["start_frame"] for p in people], dtype=np.int32),
         source=np.array("bedlam2", dtype="U16"),
         **classic,
@@ -596,7 +666,7 @@ def build_features(scene: dict) -> str:
     geometry = camera_geometry(rows, portrait)
     write_camera_npz(out / "camera.npz", geometry, rows, portrait)
     write_gravity_npz(out / "gravity.npz", scene["ground_height_world"])
-    write_smplx_npz(out / "smplx.npz", scene, geometry["width"], geometry["height"])
+    write_smplx_npz(out / "smplx.npz", scene, geometry)
     return scene["scene_id"]
 
 
@@ -649,8 +719,9 @@ def _frames_worker(scene: dict) -> tuple[str, int, str]:
             if written >= expected:
                 capture.release()
                 raise ValueError(f"more than {expected} decodable frames")
-            cv2.imwrite(str(out / f"{written:06d}.jpg"), image,
-                        [cv2.IMWRITE_JPEG_QUALITY, JPEG_QUALITY])
+            if not cv2.imwrite(str(out / f"{written:06d}.jpg"), image,
+                               [cv2.IMWRITE_JPEG_QUALITY, JPEG_QUALITY]):
+                raise ValueError(f"could not write frame {written}")
             written += 1
         capture.release()
         if written != expected:
@@ -761,7 +832,7 @@ def _db_row(scene: dict, now: str) -> tuple[tuple, tuple] | None:
         width, height, FPS, clip.stat().st_size, sha256_file(clip),
         f"{aa}/{bb}/{scene_id}.mp4", now, 1,
         0, None, "", None, None,
-        1, now, 1, None, scene["environment_code"], None,
+        1, now, 1, None, scene["environment_code"], 0,
         1, "train", 0, 0, int(camera["static_camera"]),
     )
     bedlam_row = (
