@@ -126,6 +126,36 @@ with the force thresholds dropped to `theta_bw = 0.02` / `theta_hold_bw = 0.01`
 and the span rule back at `min_span_s = 0.1`: precision **.880 → .922**, recall
 **.808 → .861** (test split .900/.803 → .944/.856) — both directions at once.
 
+## The floor gate
+
+A foot only touches the floor when it *is* on the floor. `[contacts].floor_gate_m`
+says how high above it a foot frame may still be labelled; `0` — every config but
+one — turns the rule off entirely.
+
+The floor is the plane the gravity stage already fitted and accepted
+(`geocalib/gravity.npz`: `ground_centroid`, `up_world`). A contact frame's height
+is its signed distance above that plane, measured along `up_world`. Only the
+**foot** frames are gated — heel, both ball points, big toe and the top of the
+toe. A hand, a knee or a sit bone touches things that are not the floor, so
+gating them by floor height would be nonsense.
+
+The gate cuts both readouts before any of the span rules run: a foot frame above
+the line is removed from the geometric labels *and* from the force-witness
+labels, so nothing downstream — hysteresis, the span merge, the union debounce —
+ever sees it. The stage saves every frame's height as `frame_floor_height_m` and
+the value it used as `floor_gate_m`, and prints how many frame-labels it removed.
+
+It is on in `configs/human_optimization_labvalidation.toml` at **0.17 m**, chosen
+from the OpenCap LabValidation walking clips: over 3290 foot-frame samples taken
+while that foot's force plate was loaded, the frame's height above the fitted
+plane had a median of 6 cm and a 95th percentile of 17 cm, so 0.17 m is the
+tightest line that keeps 95 % of the measured contacts. Be clear about what it
+buys there: splitting the same clips into true stance and true swing with the
+mocap foot markers, the labels that fire during a genuine swing sit at a median
+of 5 cm, so 0.17 m removes only 2 % of them. Our reconstruction does not separate
+a swing foot from a stance foot by height nearly as well as a real body does; the
+gate is a guard against the gross case, not a fix for the overlap.
+
 The gates are applied by pushing the signed distance to `+inf` wherever either of
 them fails. A blocked step then simply looks infinitely far from the wall, so
 everything downstream — hysteresis, minimum duration, span merging — works
@@ -280,7 +310,8 @@ All in `configs/human_optimization.toml`.
 `min_span_s` (the span rule, seconds), `max_dist_m` and `conf_thresh` (the
 surface guards), `conf_drop_q` and `normal_k` (scene-cloud loading),
 `prune_margin_m`, and the three `merge_*` knobs. `min_span_s` also sets the
-union debounce, in both directions.
+union debounce, in both directions. `floor_gate_m` is the floor gate above
+(0 = off), and `frames` the contact-frame allowlist.
 
 `[contact_force]` — the force witness: `theta_bw` / `theta_hold_bw` (the load
 thresholds a label enters and holds at — `theta_bw` is the **recall** knob),
@@ -312,6 +343,7 @@ witness).
 | `frame_distance_cm` | `(P, N, F)` f32 | Euclidean distance to the nearest scene point, cm |
 | `frame_normal_dot` | `(P, N, F)` f32 | how well the two normals face, in [−1, 1] |
 | `frame_drift_m` | `(P, N, F)` f32 | the net window drift the stillness gate read |
+| `frame_floor_height_m` | `(P, N, F)` f32 | height above the fitted ground plane, m (NaN = the floor gate is off) |
 | `frame_force` | `(P, N, F, 3)` f32 | the solved world contact force, newtons |
 | `frame_force_bw` | `(P, N, F)` f32 | its magnitude as a fraction of body weight |
 | `frame_force_label` | `(P, N, F)` bool | the force decision, before the union |

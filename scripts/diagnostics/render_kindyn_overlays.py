@@ -129,7 +129,7 @@ WALL2_ROOT = PETER / "out_climb_wall_2_single"
 WALL3_SOURCE = PETER / "climb_wall_3"
 WALL3_ROOT = PETER / "out_climb_wall_3_single"
 GT_ROOT = PETER / "climb_wall_3_gt" / "human"
-PARKOUR_SOURCE = Path("/data3/rikhat.akizhanov/better/data/Parkour-dataset/processed")
+PARKOUR_SOURCE = Path("/home/rikhat.akizhanov/better/data/Parkour-dataset/processed")
 PARKOUR_ROOT = PARKOUR_SOURCE / "out"
 
 METRES_PER_NEWTON = 1.2e-3  # the arrow length the viewer uses for a dynamics force

@@ -75,7 +75,7 @@ STEP_OUTPUT: dict[str, str] = {
 
 #: Clip trees that are not a peter rig: dataset -> (run tree, the clips' source root).
 OTHER_TREES = {
-    "parkour": Path("/data3/rikhat.akizhanov/better/data/Parkour-dataset/processed"),
+    "parkour": Path("/home/rikhat.akizhanov/better/data/Parkour-dataset/processed"),
 }
 
 

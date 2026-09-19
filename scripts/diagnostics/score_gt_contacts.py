@@ -102,8 +102,9 @@ def truth(clip: str) -> np.ndarray:
     return np.asarray(d["limb_contact"][0], bool)[:, [names.index(limb) for limb in LIMBS]]
 
 
-def ours(clip: str, tag: int, n_frames: int) -> np.ndarray:
-    d = np.load(OURS_ROOT / clip / "human_optim" / f"contacts_{tag}.npz", allow_pickle=True)
+def ours(clip: str, tag: int, n_frames: int, optim_dir: str = "human_optim") -> np.ndarray:
+    """``(T, 4)`` bool — one run's contact frames folded onto the four limbs."""
+    d = np.load(OURS_ROOT / clip / optim_dir / f"contacts_{tag}.npz", allow_pickle=True)
     names = [str(n) for n in d["contact_frame_names"]]
     contact = np.asarray(d["frame_contact"][0], bool)                       # (T, F)
     cols = [[names.index(f) for f in _FOLD_10[limb] if f in names] for limb in LIMBS]

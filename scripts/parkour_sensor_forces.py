@@ -38,7 +38,7 @@ if str(_REPO_ROOT) not in sys.path:
 
 from tools.human_optim.boards import LIMBS  # noqa: E402
 
-PARKOUR = Path("/data3/rikhat.akizhanov/better/data/Parkour-dataset/processed")
+PARKOUR = Path("/home/rikhat.akizhanov/better/data/Parkour-dataset/processed")
 
 
 def main(argv: list[str] | None = None) -> int:

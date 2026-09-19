@@ -112,7 +112,7 @@ def procrustes_errors(predicted: np.ndarray, truth: np.ndarray) -> np.ndarray:
 
 def main() -> int:
     clips = sorted(d for d in (PARKOUR / "out").iterdir()
-                   if (d / "human_optim" / "kindyn_1.npz").exists())
+                   if (d / "human_optim" / "kinematic_1.npz").exists())
     truth = {c.name: np.load(PARKOUR / c.name / "joints_3d.npz") for c in clips}
     gt_columns = {}
     for clip, gt in truth.items():

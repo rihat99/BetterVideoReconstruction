@@ -39,7 +39,8 @@ _DYN_LAYER_LABELS = (("dyn_torque", "joint torques (sphere size)"),
                      ("dyn_forces", "contact forces"),
                      ("dyn_root_force", "root force"),
                      ("dyn_root_torque", "root torque"),
-                     ("dyn_sensor", "sensor forces (measured)"))
+                     ("dyn_sensor", "sensor forces (measured)"),
+                     ("dyn_plate", "estimated forces (plate format)"))
 
 # Layer checkboxes that only apply to the contact-frame overlay — hidden unless the
 # active body source has contact labels (see ``ClipScene.frame_sources``).
@@ -81,7 +82,10 @@ class Viewer:
                        "dyn_root_force": True, "dyn_root_torque": True,
                        # measured wall-sensor arrows (climb_wall clips only) — off until
                        # asked for; the checkbox is hidden when the clip has no sensor npz
-                       "dyn_sensor": False}
+                       "dyn_sensor": False,
+                       # our forces collapsed to the plates' force-at-COP format
+                       # (estimated_forces.npz); hidden when the clip has none
+                       "dyn_plate": False}
         self._surface = "points"    # surface-mesh rendering is off (code kept in ClipScene)
         self.cache: dict[Path, ClipData] = {}
         self.scene: ClipScene | None = None
@@ -252,6 +256,7 @@ class Viewer:
             self.checkboxes[key].visible = src in sc.frame_sources
         self.dyn_folder.visible = src in sc.force_sources        # the whole dyn_* section
         self.checkboxes["dyn_sensor"].visible = sc.sensors is not None
+        self.checkboxes["dyn_plate"].visible = sc.plates is not None
         self.body_opacity.visible = src in sc.translucency_sources
 
     def _on_scene_ps(self) -> None:

@@ -28,7 +28,7 @@ from pathlib import Path
 
 import numpy as np
 
-MODELS = Path("/data3/rikhat.akizhanov/better/BetterHuman/models")
+MODELS = Path("/home/rikhat.akizhanov/better/BetterHuman/models")
 NUM_BETAS = 10
 NUM_SHARED_JOINTS = 22  # pelvis..wrists: identical order in SMPL and SMPL-X
 

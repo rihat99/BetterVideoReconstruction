@@ -24,6 +24,11 @@ contact frames could have supplied it (:mod:`tools.human_optim.forces`). A frame
 to carry real load is in contact whatever its distance says, which is how a contact on a
 badly reconstructed body is recovered at all. See ``docs/force_contacts.md``.
 
+**The floor gate** (``[contacts].floor_gate_m``, 0 = off) crosses both arms: where the
+gravity stage accepted a ground plane, a foot frame higher than that above it cannot carry
+a label, however near a scene point it is and however much load the solve routes through
+it. Only the foot frames are gated — everything else touches things that are not the floor.
+
 The union is then debounced once (a contact lasts at least ``min_frames``, and so does a
 release) and each foot is given a single toe patch per contact — whichever side of the
 toe the force solve loaded (the sole-side frame standing on the hold, ``toe_above``
@@ -83,6 +88,7 @@ from tools.human_optim import (  # noqa: E402
     project, transform_points, world_from_cam,
 )
 from tools.human_optim import paths  # noqa: E402
+from tools.human_optim.boards import FOOT_FRAMES  # noqa: E402
 from tools.human_optim.confidence import (  # noqa: E402
     CONTACT_CONFIDENCE_METHOD, confidence_coefficients, fold_contacts, fold_drift,
     frame_report_joints, label_confidence,
@@ -122,6 +128,8 @@ def _load_config(path: Path) -> dict:
     c.setdefault("merge_dist_m", 0.03)     # span-merge: bridge a gap the point barely moved across
     c.setdefault("merge_max_gap_s", 2.0)   # …only gaps shorter than this
     c.setdefault("merge_sdf_m", 0.08)      # …re-grip guard: it stayed this near the wall throughout
+    c.setdefault("floor_gate_m", 0.0)      # a FOOT frame may only be labelled this high above the
+                                           # fitted ground plane; 0 = off (every other config)
     c.setdefault("overlay", True)          # render the contact overlay
     if not bool(c.get("use_scene", True)):
         raise SystemExit("[estimate_contacts] use_scene=false is not supported by the contact-frame "
@@ -210,6 +218,21 @@ def _finite_cm(values: torch.Tensor) -> np.ndarray:
     return np.where(np.isfinite(out), out, np.nan).astype(np.float32)
 
 
+def floor_gate(points: torch.Tensor, centroid: torch.Tensor, up: torch.Tensor,
+               foot_columns: list[int], gate_m: float) -> tuple[torch.Tensor, torch.Tensor]:
+    """``(height (N, F), allowed (N, F))`` for the floor gate.
+
+    ``height`` is each contact frame's signed distance above the fitted ground plane,
+    measured along ``up`` from ``centroid``. ``allowed`` says which frames may carry a
+    label: a FOOT frame only within ``gate_m`` of that plane, everything else always —
+    a hand or a sit bone touches things that are not the floor.
+    """
+    height = ((points - centroid) * up).sum(-1)
+    allowed = torch.ones_like(height, dtype=torch.bool)
+    allowed[:, foot_columns] = height[:, foot_columns] <= gate_m
+    return height, allowed
+
+
 def _count_spans(mask: np.ndarray) -> int:
     """Number of contiguous ``True`` runs in a 1-D bool array."""
     return int(np.count_nonzero(mask[1:] & ~mask[:-1]) + (1 if mask.size and mask[0] else 0))
@@ -260,7 +283,8 @@ def run(source: str | Path, predictions_dir: str | Path, config_path: str | Path
           f"close<{float(cc['close_thresh_m']) * 100:.0f}cm, "
           f"still<{float(cg['still_m']) * 100:.1f}cm")
 
-    body = load_body(device=device, frames_allow=cc.get("frames") or None)
+    body = load_body(device=device, frames_allow=cc.get("frames") or None,
+                     sole_offsets=cc.get("sole_offset_m") or None)
     frame_names = list(body.contact_frame_names)
     num_contact_frames = len(frame_names)
     knee_columns = [i for i, n in enumerate(frame_names) if n.startswith("knee")]
@@ -279,7 +303,28 @@ def run(source: str | Path, predictions_dir: str | Path, config_path: str | Path
     else:
         gravity_world = np.array([0.0, 1.0, 0.0], np.float32)
 
+    # ── the floor gate ([contacts].floor_gate_m) ─────────────────────────────────────
+    # A foot only touches the floor when it is ON the floor. Where the gravity stage
+    # accepted a ground plane, this stage measures every FOOT frame's height above it
+    # (signed distance along up_world from ground_centroid) and refuses a contact label
+    # above floor_gate_m, on both readouts. Nothing else is gated: a hand, a knee or a
+    # sit bone touches things that are not the floor. 0 = off.
+    floor_gate_m = float(cc["floor_gate_m"])
+    foot_columns = [i for i, n in enumerate(frame_names) if n.rsplit("_", 1)[0] in FOOT_FRAMES]
+    ground = None
+    if floor_gate_m > 0.0 and foot_columns and gravity_path.exists():
+        geo = np.load(gravity_path)
+        if "ground_accepted" in geo.files and bool(geo["ground_accepted"]):
+            ground = tuple(torch.as_tensor(np.asarray(geo[k], np.float32), device=device)
+                           for k in ("ground_centroid", "up_world"))
+            print(f"[estimate_contacts] floor gate {floor_gate_m * 100:.0f} cm on "
+                  f"{len(foot_columns)} foot frame(s)")
+        else:
+            print(f"[estimate_contacts] floor gate {floor_gate_m * 100:.0f} cm asked for but "
+                  "the gravity stage accepted no ground plane — not gating")
+
     shape = (num_people, num_frames, num_contact_frames)
+    frame_floor_height_m = np.full(shape, np.nan, dtype=np.float32)
     frame_contact = np.zeros(shape, dtype=bool)
     merged_all = np.zeros(shape, dtype=bool)
     frame_sdf_cm = np.full(shape, np.nan, dtype=np.float32)
@@ -306,6 +351,13 @@ def run(source: str | Path, predictions_dir: str | Path, config_path: str | Path
         frames7 = _pose(body, betas, q, float(kin["scale"][p]))
         points, normals = frames7[..., :3], frame_normals(frames7)
         person_valid = torch.as_tensor(valid_mask[p], device=device)
+
+        # The floor gate's verdict, one bool per (video frame, contact frame): False only
+        # where a FOOT frame sits higher than floor_gate_m above the fitted ground plane.
+        floor_ok = torch.ones((num_frames, num_contact_frames), dtype=torch.bool, device=device)
+        if ground is not None:
+            floor_height, floor_ok = floor_gate(points, *ground, foot_columns, floor_gate_m)
+            frame_floor_height_m[p] = floor_height.cpu().numpy().astype(np.float32)
 
         # The persisted pre-enforcement drift is the honest motion measurement: the
         # optimizer's own damping must not be able to manufacture apparent stillness,
@@ -342,6 +394,10 @@ def run(source: str | Path, predictions_dir: str | Path, config_path: str | Path
             max_dist_m=float(cc["max_dist_m"]), conf_thresh=float(cc["conf_thresh"]),
             prune_margin_m=float(cc["prune_margin_m"]),
             load_bw=load_bw, min_load_bw=float(cf["confirm_bw"]), load_mute=load_mute)
+        # The gate acts on the geometric arm here, before the span rules, so a swing foot
+        # never enters them; the force arm is gated the same way further down.
+        gated = int((detected.contact & ~floor_ok).sum())
+        geometric = detected.contact & floor_ok
 
         # Bridge short same-frame gaps the point barely moved across AND stayed near the
         # wall throughout (flicker / brief re-settle); the re-grip guard blocks a genuine
@@ -350,7 +406,7 @@ def run(source: str | Path, predictions_dir: str | Path, config_path: str | Path
         # putting both toes of a foot back in contact at once. The tiebreak's verdict is
         # final, so bridged steps never land on a suppressed one.
         contact = merge_contact_spans(
-            detected.contact, points, detected.guarded_sdf,
+            geometric, points, detected.guarded_sdf,
             merge_dist_m=float(cc["merge_dist_m"]), max_gap_s=float(cc["merge_max_gap_s"]),
             gap_sdf_m=float(cc["merge_sdf_m"]), fps=fps) & ~detected.toe_suppressed
         # A knee rides near the wall (and still) for most of a climb without touching:
@@ -358,7 +414,7 @@ def run(source: str | Path, predictions_dir: str | Path, config_path: str | Path
         # actively harmful. The force arm already refuses knees (below), so the stage
         # simply never labels a knee. A real kneebar is the known cost.
         contact[:, knee_columns] = False
-        merged = contact & ~detected.contact
+        merged = contact & ~geometric
 
         points_cam = transform_points(points, extrinsics)                      # (N, F, 3)
         pixels = project(points_cam, intrinsics)                               # (N, F, 2)
@@ -400,6 +456,12 @@ def run(source: str | Path, predictions_dir: str | Path, config_path: str | Path
             hold_n=float(cf["theta_hold_bw"]) * force_solution.body_weight_n,
             min_frames=DETECT_MIN_FRAMES)
         force_label[:, knee_columns] = False        # force on a knee is ~all false positives
+        floor_ok_np = floor_ok.cpu().numpy()
+        gated += int((force_label & ~floor_ok_np).sum())
+        force_label &= floor_ok_np
+        if ground is not None:
+            print(f"[estimate_contacts] floor gate removed {gated} foot frame-labels "
+                  f"(both readouts, before the span rules)")
         contact_np = contact.cpu().numpy() | force_label
         contact_np[~valid_mask[p]] = False
 
@@ -408,7 +470,7 @@ def run(source: str | Path, predictions_dir: str | Path, config_path: str | Path
         # outranks the duration rules the same way it outranks stillness. A one-frame
         # bounce that presses in and carries weight is a contact, not flicker, and the
         # post-weld duration rule must not take it back.
-        pressed = (detected.pressed & ~detected.toe_suppressed).cpu().numpy()
+        pressed = (detected.pressed & ~detected.toe_suppressed & floor_ok).cpu().numpy()
 
         # One debounce over the union. Each readout already drops its own too-short spans,
         # but the union puts two of them end to end and can leave a one- or two-frame hole
@@ -432,6 +494,7 @@ def run(source: str | Path, predictions_dir: str | Path, config_path: str | Path
         merged_np = merged.cpu().numpy() & contact_np      # a bridged step that lost its
         merged_np[~valid_mask[p]] = False                  # toe is no longer a contact
         frame_contact_geom[p] = contact.cpu().numpy() & valid_mask[p][:, None]
+        frame_floor_height_m[p][~valid_mask[p]] = np.nan
         frame_pressed[p] = pressed
         force_dist_m[p] = np.where(force_solution.dist_m < NO_SCENE_M,
                                    force_solution.dist_m, np.nan)
@@ -575,6 +638,9 @@ def run(source: str | Path, predictions_dir: str | Path, config_path: str | Path
         merge_dist_m=np.float32(cc["merge_dist_m"]),
         merge_max_gap_s=np.float32(cc["merge_max_gap_s"]),
         merge_sdf_m=np.float32(cc["merge_sdf_m"]),
+        floor_gate_m=np.float32(floor_gate_m if ground is not None else 0.0),
+        frame_floor_height_m=frame_floor_height_m,   # (P,N,F) height above the fitted ground
+                                                     # plane, m; NaN where the gate is off
         drift_window_s=np.float32(cg["window_s"]),
         drift_still_m=np.float32(cg["still_m"]),
     )

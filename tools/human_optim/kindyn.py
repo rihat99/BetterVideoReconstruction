@@ -32,6 +32,7 @@ entry point is :func:`run_kindyn`, driven by
 from __future__ import annotations
 
 import dataclasses
+import json
 import math
 from dataclasses import dataclass
 from pathlib import Path
@@ -125,6 +126,39 @@ class DynamicsSpec:
         # term may act only where the contact holds over its whole (k+1)-frame window.
         self.ftrip = self.fpair[1:] * self.fpair[:-1]          # (T-2, 12)
         self.fquad = self.ftrip[1:] * self.ftrip[:-1]          # (T-3, 12)
+        # First / last frame of every contact interval (a tracked neighbour without the
+        # label). The smoothness terms only see PERSISTING contacts, so without this a
+        # force may jump from zero to full load in one frame at a contact switch.
+        vp = self.valid_pair[:, None]
+        onset = torch.zeros_like(self.mask)
+        onset[1:] = self.mask[1:] * (1.0 - self.mask[:-1]) * vp
+        release = torch.zeros_like(self.mask)
+        release[:-1] = self.mask[:-1] * (1.0 - self.mask[1:]) * vp
+        self.fedge = torch.clamp(onset + release, max=1.0)      # (T, 12)
+        self._onset, self._release = onset, release
+
+    def scale_edges_by_speed(self, root_pos: torch.Tensor, speed_scale: float) -> None:
+        """Weight each contact edge by ``1 / (1 + (v / speed_scale)²)``.
+
+        ``v`` is the body's vertical speed across the switch — downward at an onset,
+        upward at a release — read off the root joint trajectory ``root_pos (T, 3)`` of
+        the frozen pose. A force step at a contact switch is the impulse that changes
+        the whole body's momentum, so the allowed step grows with the body's speed: a
+        drop-jump landing at 2.5 m/s may step to a large force, a walking heel strike
+        with the body descending at 0.2 m/s may not. The body's speed, not the foot's:
+        a swinging foot arrives at 1 m/s in ordinary walking, the same as a soft landing.
+        """
+        if speed_scale <= 0:
+            return
+        up = -torch.as_tensor(self.gravity_world, dtype=root_pos.dtype, device=root_pos.device)
+        height = root_pos @ (up / up.norm())                              # (T,)
+        rate = torch.zeros_like(height)
+        rate[1:] = (height[1:] - height[:-1]) / self.dt                  # arrival velocity
+        down = torch.relu(-rate)                                          # onset: falling
+        rise = torch.zeros_like(rate)
+        rise[:-1] = torch.relu(rate[1:])                                  # release: leaving
+        speed = self._onset * down[:, None] + self._release * rise[:, None]
+        self.fedge = self.fedge / (1.0 + (speed / speed_scale) ** 2)
 
     def wrench_rms(self, tau: torch.Tensor) -> float:
         """Per-counted-frame RMS of the 6-row root residual — the stage's headline number.
@@ -277,6 +311,10 @@ class DynamicsSpec:
             f_eff = st["dyn"][1]
             return half * f_eff.pow(2).sum()
 
+        def _fedge(st):
+            f_eff = st["dyn"][1]
+            return half * (self.fedge[..., None] * f_eff.pow(2)).sum()
+
         def _smooth(split_key: str, part: int, mask: torch.Tensor):
             def term(st):
                 return half * (mask[..., None] * st[split_key][part].pow(2)).sum()
@@ -299,6 +337,7 @@ class DynamicsSpec:
         problem.add_term("base_wrench", _base)
         problem.add_term("base_wrench_ang", _base_ang)
         problem.add_term("force_magnitude", _fmag)
+        problem.add_term("force_edge", _fedge)
         problem.add_term("force_smooth_mag", _smooth("dyn_split", 0, self.fpair))
         problem.add_term("force_smooth_dir", _smooth("dyn_split", 1, self.fpair))
         problem.add_term("force_accel_mag", _smooth("dyn_split2", 0, self.ftrip))
@@ -363,7 +402,9 @@ class DynamicsSpec:
             loss = (w["base_wrench"] * half * (self.dyn_row[:, None] * tau[:, :3].pow(2)).sum()
                     + w.get("base_wrench_ang", 0.0) * half
                     * (self.dyn_row[:, None] * tau[:, 3:6].pow(2)).sum()
-                    + w["force_magnitude"] * half * f_eff.pow(2).sum())
+                    + w["force_magnitude"] * half * f_eff.pow(2).sum()
+                    + w.get("force_edge", 0.0) * half
+                    * (self.fedge[..., None] * f_eff.pow(2)).sum())
             for order, key_mag, key_dir, mask in smooth_orders:
                 if f.shape[0] > order and (w.get(key_mag, 0.0) or w.get(key_dir, 0.0)):
                     d_par, d_perp = self.force_split(f_world, order)
@@ -523,7 +564,9 @@ def build_dynamics_spec(body, betas: torch.Tensor, frame_labels: torch.Tensor,
                         weights: dict, dyn_opt: dict, fps: float, device: str,
                         q_world: torch.Tensor, cones: bool,
                         half_angle_deg: float = 45.0,
-                        torque_table: dict[str, float] | None = None) -> DynamicsSpec:
+                        torque_table: dict[str, float] | None = None,
+                        mass_kg: float | None = None,
+                        edge_speed_scale: float = 0.0) -> DynamicsSpec:
     """Assemble one person's :class:`DynamicsSpec` from the frozen-at-init pieces.
 
     The RNEA model comes baked from BetterHuman at ``betas`` (real per-part inertia,
@@ -531,7 +574,12 @@ def build_dynamics_spec(body, betas: torch.Tensor, frame_labels: torch.Tensor,
     contact mask marks, per contact frame and video frame, whether the labels say that
     frame touches on a valid frame — exactly the steps it may carry a force.
     ``torque_table`` (``[torque.multipliers]``) weights the joint-torque terms per
-    joint group; ``None`` weights every joint the same.
+    joint group; ``None`` weights every joint the same. ``mass_kg`` replaces the
+    shape-baked body mass by a known one: every segment's mass and rotational inertia
+    is scaled by the same ratio (centres of mass stay), so the mass distribution is
+    still the shape's, only the total is the subject's. ``edge_speed_scale`` (m/s, 0 =
+    off) makes the ``force_edge`` term speed-dependent, see
+    :meth:`DynamicsSpec.scale_edges_by_speed`.
 
     The friction pyramids are frozen here, once, at the warm-start pose ``q_world``:
     forward kinematics gives every contact frame its outward skin normal, the contact
@@ -552,6 +600,16 @@ def build_dynamics_spec(body, betas: torch.Tensor, frame_labels: torch.Tensor,
     g6 = torch.cat([g, torch.zeros(3, dtype=dtype, device=dev)])
     model = dataclasses.replace(model, values=dataclasses.replace(model.values, gravity=g6))
     total_mass = float(model.values.body_inertias[..., 1:, 0].sum())
+    if mass_kg is not None:
+        ratio = float(mass_kg) / total_mass
+        inertias = model.values.body_inertias.clone()       # rows [m, cx, cy, cz, I(6)]
+        inertias[..., 1:, 0] *= ratio
+        inertias[..., 1:, 4:] *= ratio
+        model = dataclasses.replace(model, values=dataclasses.replace(
+            model.values, body_inertias=inertias))
+        print(f"    [kindyn] body mass {total_mass:.1f} kg (shape) → {mass_kg:.1f} kg "
+              f"(given, ×{ratio:.3f})")
+        total_mass = float(mass_kg)
 
     frame_names = list(body.contact_frame_names)
     frame_ids = torch.as_tensor(list(body.contact_frames.frame_ids), dtype=torch.long, device=dev)
@@ -586,11 +644,14 @@ def build_dynamics_spec(body, betas: torch.Tensor, frame_labels: torch.Tensor,
         spacing=spacing, dyn_row=torch.as_tensor(ok, dtype=dtype, device=dev),
         tau_weight=None if torque_table is None else
         torque_multipliers(model, body.joint_names, torque_table).to(dev))
-    if cones:
+    if cones or edge_speed_scale > 0:
         with torch.no_grad():
-            _, frames7 = spec.placements(normalize_q(q_world.to(dev), body.num_joints))
-            spec.cone_axis = -frame_normals(frames7)                         # (T, 12, 3)
-            spec.cone_gen = cone_generators(spec.cone_axis, spec.mu).detach()
+            oMi, frames7 = spec.placements(normalize_q(q_world.to(dev), body.num_joints))
+            if cones:
+                spec.cone_axis = -frame_normals(frames7)                     # (T, 12, 3)
+                spec.cone_gen = cone_generators(spec.cone_axis, spec.mu).detach()
+            root = int(model.body_name_to_id[body.joint_names[0]])
+            spec.scale_edges_by_speed(oMi[:, root, :3], float(edge_speed_scale))
     return spec
 
 
@@ -613,7 +674,8 @@ def _kindyn_phases(cfg: HumanOptimConfig) -> list[PhaseSpec]:
 
 def run_kindyn(source, pred: Path, cfg: HumanOptimConfig, device: str, *,
                annotations=None, overlay: bool = False, labels_mode: str = "auto",
-               bodies: str = "kinematic_2", cones: bool = True) -> Path:
+               bodies: str = "kinematic_2", cones: bool = True,
+               mass_from_meta: bool = False, edge_speed_scale: float = 0.0) -> Path:
     """Joint kinematics + dynamics refinement of a refined body → ``human_optim/kindyn_1.npz``.
 
     Starts from a converged body and that body's contact labels, and optimizes the pose
@@ -626,11 +688,19 @@ def run_kindyn(source, pred: Path, cfg: HumanOptimConfig, device: str, *,
     body this stage starts from; ``'manual'`` reads the human annotation ``data/<stem>.npz``
     and spreads its coarse joints onto the contact frames they cover (a metrics-only
     comparison path). ``cones`` confines every contact force to a 45° friction pyramid
-    about its frame's contact normal.
+    about its frame's contact normal. ``mass_from_meta`` reads the subject's measured
+    ``mass_kg`` from the ``meta.json`` beside the source video and solves with it
+    instead of the shape-baked mass (see :func:`build_dynamics_spec`), and
+    ``edge_speed_scale`` (m/s) is its speed-dependent ``force_edge`` knob.
     """
     knobs = cfg.knobs
     pred = Path(pred)
     tag = "human_optim/kindyn_1"
+    mass_kg = None
+    if mass_from_meta:
+        meta_path = Path(source).parent / "meta.json"
+        mass_kg = float(json.loads(meta_path.read_text())["mass_kg"])
+        print(f"[{tag}] body mass from {meta_path}: {mass_kg:.1f} kg")
 
     if bodies not in ("kinematic_1", "kinematic_2"):
         raise SystemExit(f"[{tag}] [stages.kindyn_1].bodies must be 'kinematic_1' or "
@@ -733,7 +803,8 @@ def run_kindyn(source, pred: Path, cfg: HumanOptimConfig, device: str, *,
             mid, betas_mean, contact_labels, vmask, gravity_world,
             weights=weights, dyn_opt=dyn_opt, fps=fps, device=device,
             q_world=q_world, cones=cones, half_angle_deg=half_angle,
-            torque_table=knobs["torque"]["multipliers"])
+            torque_table=knobs["torque"]["multipliers"], mass_kg=mass_kg,
+            edge_speed_scale=edge_speed_scale)
 
         print(f"[{tag}] person obj_id={oid} ({int(vmask.sum())}/{N} valid) …")
         # Fingers stay UNfrozen (like kinematics_2): a fingertip contact frame must be
@@ -796,6 +867,8 @@ def run_kindyn(source, pred: Path, cfg: HumanOptimConfig, device: str, *,
         cones=np.bool_(cones), cone_half_angle_deg=np.float32(half_angle),
         source_bodies=np.array(bodies, dtype="U16"),
         source_labels=np.array(labels_mode, dtype="U8"),
+        mass_source=np.array("meta" if mass_from_meta else "shape", dtype="U8"),
+        edge_speed_scale=np.float32(edge_speed_scale),
     )
     # Carry kinematics_1's pre-enforcement drift through, for the same reason kinematics_2
     # does: any contact readout taken on THIS body must gate stillness on motion measured

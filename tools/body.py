@@ -20,7 +20,7 @@ person's optimization.
 
 from __future__ import annotations
 
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from dataclasses import replace as _dataclass_replace
 from pathlib import Path
 
@@ -35,7 +35,7 @@ from better_human.bodies.smpl_family.smplx import SMPLXClassic
 #: BetterHuman ships the licensed SMPL-X weights here; passed explicitly so no
 #: ``BETTERHUMAN_MODELS_DIR`` environment variable is needed at runtime.
 _DEFAULT_MODEL_PATH = Path(
-    "/data3/rikhat.akizhanov/better/BetterHuman/models/smplx/SMPLX_NEUTRAL.npz"
+    "/home/rikhat.akizhanov/better/BetterHuman/models/smplx/SMPLX_NEUTRAL.npz"
 )
 
 #: The authored **contact frames** — named mesh points baked onto the body as
@@ -48,7 +48,7 @@ _DEFAULT_MODEL_PATH = Path(
 #: and the direction the skin faces there. Contact detection lives entirely on
 #: these frames (see ``docs/contacts.md``).
 _DEFAULT_CONTACT_FRAMES = Path(
-    "/data3/rikhat.akizhanov/better/BetterHuman/studio_data/frames/smplx_neutral/better_contacts.json"
+    "/home/rikhat.akizhanov/better/BetterHuman/studio_data/frames/smplx_neutral/better_contacts.json"
 )
 
 
@@ -118,9 +118,18 @@ class Body:
         a recipe restricts where contact may live (e.g. the climb-wall rule:
         hands + feet only) — everything downstream (detection, labels, forces)
         simply sees a smaller frame set.
+    :param sole_offsets: metres to push a contact frame out along its outward
+        normal, keyed by frame stem (``"heel"`` covers ``heel_left`` and
+        ``heel_right``). A shod foot touches the ground through its sole, and a
+        shoe's heel stack is thicker than its forefoot, so the bare-skin heel frame
+        rides a few centimetres above the surface the foot is actually standing
+        on; the offset puts the frame on the sole. Applied in :meth:`forward`, so
+        every consumer — detection, penetration, attraction, the force solve's
+        lever arms — sees the same shod point. Unscaled metres, like the frames.
     """
 
-    def __init__(self, base: bh.SMPLX, frames_allow: Sequence[str] | None = None) -> None:
+    def __init__(self, base: bh.SMPLX, frames_allow: Sequence[str] | None = None,
+                 sole_offsets: Mapping[str, float] | None = None) -> None:
         if getattr(base, "contact_frames", None) is None:
             raise ValueError("body was built without contact frames; pass contact_frames= to SMPLX")
         self._base = base
@@ -177,6 +186,18 @@ class Body:
         self._contact_frame_ids = torch.tensor(
             self.contact_frames.frame_ids, dtype=torch.long, device=self._device
         )
+        #: Outward offset of each contact frame in metres ``(F,)``, from ``sole_offsets``.
+        self.contact_frame_offsets = torch.zeros(
+            len(self.contact_frame_names), dtype=self._dtype, device=self._device)
+        if sole_offsets:
+            stems = {n.rsplit("_", 1)[0] if n.endswith(("_left", "_right")) else n
+                     for n in self.contact_frame_names}
+            unknown = set(sole_offsets).difference(stems)
+            if unknown:
+                raise ValueError(f"sole offsets for frames this body does not carry: {sorted(unknown)}")
+            for i, name in enumerate(self.contact_frame_names):
+                stem = name.rsplit("_", 1)[0] if name.endswith(("_left", "_right")) else name
+                self.contact_frame_offsets[i] = float(sole_offsets.get(stem, 0.0))
 
         self._shaped_cache: tuple[torch.Tensor, bh.ParametricBody] | None = None
 
@@ -233,6 +254,9 @@ class Body:
         # them is a handful of rigid composes — differentiable through ``q``.
         update_frame_placements(shaped.robot, data)
         frames = data.frame_pose_world[..., self._contact_frame_ids, :]
+        if bool((self.contact_frame_offsets != 0).any()):
+            shifted = frames[..., :3] + self.contact_frame_offsets[:, None] * frame_normals(frames)
+            frames = torch.cat([shifted, frames[..., 3:]], dim=-1)
         return _Posed(vertices, placements, frames)
 
     def forward_shape(self, betas: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
@@ -295,13 +319,15 @@ class Body:
 
 def load_body(model_path: str | Path | None = None, device: str | torch.device = "cpu",
               frames_allow: Sequence[str] | None = None,
-              density: str | float = "Dempster") -> Body:
+              density: str | float = "Dempster",
+              sole_offsets: Mapping[str, float] | None = None) -> Body:
     """Load the SMPL-X body used throughout the pipeline, contact frames baked on.
 
     :param model_path: path to a ``SMPLX_*.npz`` weight file; defaults to the
         BetterHuman-bundled neutral model.
     :param device: torch device for the model tensors.
     :param frames_allow: contact-frame names to keep; ``None`` keeps all.
+    :param sole_offsets: outward offset per contact-frame stem, metres (see :class:`Body`).
     :param density: tissue density each body part's inertia is baked with — a
         table name from BetterHuman's ``body_densities.json`` (``"Dempster"``,
         ``"Clauser"``, ``"Chandler"``: one value per SMPL segment, fingers take
@@ -317,4 +343,4 @@ def load_body(model_path: str | Path | None = None, device: str | torch.device =
         device=device,
         contact_frames=_DEFAULT_CONTACT_FRAMES,
     )
-    return Body(base, frames_allow=frames_allow)
+    return Body(base, frames_allow=frames_allow, sole_offsets=sole_offsets)

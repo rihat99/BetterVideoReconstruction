@@ -37,6 +37,9 @@ _DYN_FORCE_RGB = (235, 45, 45)
 # floor a channel is not drawn (the sensors never read exactly zero, and the fixed
 # arrow head would clutter the wall)
 _SENSOR_RGB, _SENSOR_FLOOR_N = (255, 150, 30), 10.0
+# our forces in the plates' format (one force per foot at its centre of pressure):
+# blue, so measured (orange) vs estimated (blue) read side by side at the floor
+_PLATE_RGB = (40, 110, 255)
 # body-skeleton overlay: fixed joint-sphere radius / bone radius (m) and the
 # default kinematic mesh opacity while the skeleton shows over it (slider-tunable).
 _SKEL_R, _SKEL_RB, _SKEL_ALPHA = 0.028, 0.012, 0.7
@@ -344,7 +347,7 @@ class ClipScene:
                     bones.append((h, j, par))
                 node_list.append({"oid": oid, "spheres": spheres, "bones": bones,
                                   "forces": None, "root_force": None, "root_torque": None,
-                                  "sensor": None})
+                                  "sensor": None, "plate": None})
             self.force_nodes[source] = node_list
             # Per-joint finger/palm mask (for the fingers toggle).
             jnames = dyn.get("joint_names")
@@ -372,6 +375,9 @@ class ClipScene:
         # Measured wall-sensor forces (climb_wall clips only) — drawn on top of any
         # active force source by the ``sensor forces`` toggle.
         self.sensors = data.sensors
+        # Our forces in the plates' format — drawn by the ``estimated forces (plate
+        # format)`` toggle, beside the measured arrows.
+        self.plates = data.plates
         self._skeleton_sources = self.force_sources | set(self.skel_nodes)
         self.translucency_sources = {s for s in self.skinned
                                      if s in self._skeleton_sources | self.frame_sources}
@@ -901,20 +907,45 @@ class ClipScene:
             if sensor_on and names is not None and f < len(sens["rw"]):
                 joint_of = {"left_hand": "left_wrist", "right_hand": "right_wrist",
                             "left_foot": "left_foot", "right_foot": "right_foot"}
+                # A force plate also knows WHERE its force acts (the centre of
+                # pressure), so its arrow starts on the floor at that point; a wall
+                # cell does not, so its arrow starts at the limb joint.
                 pts, vecs = [], []
                 for c, limb in enumerate(sens["limbs"]):
                     v = sens["rw"][f, c]
                     jn = joint_of.get(limb)
                     if jn in names and float(np.linalg.norm(v)) > _SENSOR_FLOOR_N:
-                        pts.append(jw[names.index(jn)])
+                        cop = None if sens["cop"] is None else sens["cop"][f, c]
+                        pts.append(cop if cop is not None and np.isfinite(cop).all()
+                                   else jw[names.index(jn)])
                         vecs.append(v * _DYN_FSCALE)
-                if pts:
-                    seg = np.stack([np.asarray(pts), np.asarray(pts) + np.asarray(vecs)],
-                                   axis=1)
-                    nd["sensor"] = self.server.scene.add_arrows(
-                        f"/clip/{source}/p{nd['oid']:02d}/sensor",
-                        points=seg.astype(np.float32), colors=_SENSOR_RGB,
-                        shaft_radius=0.012, head_radius=0.028, head_length=0.05)
+                nd["sensor"] = self._plate_arrows(f"/clip/{source}/p{nd['oid']:02d}/sensor",
+                                                  pts, vecs, _SENSOR_RGB)
+            # Our own forces in the plates' format: one force per foot at our centre of
+            # pressure, on the same scale and floor as the measured arrows.
+            plates = self.plates
+            if nd["plate"] is not None:
+                nd["plate"].remove()
+                nd["plate"] = None
+            if (plates is not None and p == 0 and valid and ly.get("dyn_plate", False)
+                    and f < len(plates["rw"])):
+                pts, vecs = [], []
+                for c in range(len(plates["limbs"])):
+                    v, cop = plates["rw"][f, c], plates["cop"][f, c]
+                    if float(np.linalg.norm(v)) > _SENSOR_FLOOR_N and np.isfinite(cop).all():
+                        pts.append(cop)
+                        vecs.append(v * _DYN_FSCALE)
+                nd["plate"] = self._plate_arrows(f"/clip/{source}/p{nd['oid']:02d}/plate",
+                                                 pts, vecs, _PLATE_RGB)
+
+    def _plate_arrows(self, path: str, pts: list, vecs: list, color: tuple):
+        """Add one arrows node from ``pts`` to ``pts + vecs`` (``None`` when empty)."""
+        if not pts:
+            return None
+        seg = np.stack([np.asarray(pts), np.asarray(pts) + np.asarray(vecs)], axis=1)
+        return self.server.scene.add_arrows(
+            path, points=seg.astype(np.float32), colors=color,
+            shaft_radius=0.012, head_radius=0.028, head_length=0.05)
 
     def _root_arrow(self, source, nd, slot, active, root, vec, color) -> None:
         """Redraw one root arrow (force or torque) — remove-then-add each frame."""
@@ -938,4 +969,5 @@ class ClipScene:
                 nd["root_force"] = None
                 nd["root_torque"] = None
                 nd["sensor"] = None
+                nd["plate"] = None
         self.root.remove()

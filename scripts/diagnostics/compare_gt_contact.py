@@ -11,7 +11,8 @@ Two tables, pooled over every clip of the tree and its four limbs:
 * **contacts** — how well the estimated labels agree with the boards (the error the
   second table prices), per limb and pooled.
 * **forces** — each run's solved limb force against the measured one: mean absolute
-  error of the size in newtons, the angle between the vectors where both read above
+  error of the size in newtons (and its root-mean-square, which charges a few large
+  misses more than many small ones), the angle between the vectors where both read above
   50 N, the correlation of the sizes over time, the load-share error in percentage
   points (where "the total is right but the limbs are wrong" shows), the hands-to-feet
   split against the boards' own, the root residual the solve could not explain, and the
@@ -38,7 +39,7 @@ Usage::
     uv run --no-sync python scripts/diagnostics/compare_gt_contact.py
     uv run --no-sync python scripts/diagnostics/compare_gt_contact.py --tree peter/out_climb_wall_2_single
     uv run --no-sync python scripts/diagnostics/compare_gt_contact.py \\
-        --tree /data3/rikhat.akizhanov/better/data/Parkour-dataset/processed/out
+        --tree /home/rikhat.akizhanov/better/data/Parkour-dataset/processed/out
 """
 
 from __future__ import annotations
@@ -151,6 +152,7 @@ def force_metrics(boards: np.ndarray, ours: np.ndarray, residual: np.ndarray,
     pair = np.isfinite(solved) & np.isfinite(measured)
     return {
         "limb MAE [N]": np.nanmean(np.abs(solved - measured)),
+        "limb RMSE [N]": np.sqrt(np.nanmean((solved - measured) ** 2)),
         "total MAE [N]": np.nanmean(np.abs(np.linalg.norm(ours.sum(1), axis=-1)
                                            - np.linalg.norm(boards.sum(1), axis=-1))),
         "corr": np.corrcoef(solved[pair], measured[pair])[0, 1],

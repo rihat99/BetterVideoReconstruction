@@ -43,7 +43,12 @@ For each clip it shows, in the metric world frame:
 The dynamics folder's **sensor forces (measured)** toggle draws the wall rig's own
 reading — the measured reaction on each limb, in orange, at that limb's joint and on
 the same scale as the solved red arrows — for the clips that ship a
-``sensor_forces.npz``. Its **force display** dropdown picks the solved arrows' regime:
+``sensor_forces.npz``. When that file is a force plate's (the OpenCap
+LabValidation clips) the arrow starts at the measured centre of pressure on the
+floor, and the **estimated forces (plate format)** toggle draws our own foot forces
+collapsed to the same force-at-centre-of-pressure form (``estimated_forces.npz``,
+``scripts/export_opencap_mot.py``) in blue beside them — measured orange vs ours
+blue, same scale, same floor. Its **force display** dropdown picks the solved arrows' regime:
 ``per-joint`` accumulates each joint's frame forces into one arrow at the joint —
 each hand's forces summed at its wrist, never on individual finger joints —
 ``per-frame`` draws every contact frame's own solved force where it acts on the

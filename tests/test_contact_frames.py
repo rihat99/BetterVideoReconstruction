@@ -412,3 +412,33 @@ def test_frame_normals_follows_a_rotation_about_x(angle_deg: float, expected: fl
     quaternion = torch.tensor([[math.sin(angle / 2), 0.0, 0.0, math.cos(angle / 2)]])
     frames7 = torch.cat((torch.zeros(1, 3), quaternion), dim=-1)[None]
     assert frame_normals(frames7)[0, 0, 2] == pytest.approx(expected, abs=1e-6)
+
+
+# ── the floor gate ───────────────────────────────────────────────────────────
+
+def test_floor_gate_blocks_a_foot_frame_above_the_plane_and_nothing_else():
+    """A foot frame above ``floor_gate_m`` is refused; a hand frame at the same height is not."""
+    from scripts.stages.estimate_contacts import floor_gate
+
+    centroid = torch.tensor([1.0, 2.0, 3.0])          # the plane need not pass the origin
+    up = torch.tensor([0.0, 0.0, 1.0])
+    # two frames, three video frames: column 0 is a foot, column 1 a hand.
+    heights = torch.tensor([0.02, 0.10, 0.40])
+    points = centroid + torch.stack((heights, heights), dim=1)[..., None] * up
+    height, allowed = floor_gate(points, centroid, up, foot_columns=[0], gate_m=0.17)
+
+    assert torch.allclose(height[:, 0], heights, atol=1e-6)
+    assert allowed[:, 0].tolist() == [True, True, False]    # 0.40 m is not standing on the floor
+    assert allowed[:, 1].all()                              # the hand column is never gated
+
+
+def test_floor_gate_measures_height_along_up_not_along_z():
+    """The plane can be tilted: height is the signed distance along ``up_world``."""
+    from scripts.stages.estimate_contacts import floor_gate
+
+    up = torch.tensor([0.0, math.sin(math.radians(30.0)), math.cos(math.radians(30.0))])
+    centroid = torch.zeros(3)
+    points = (0.5 * up).expand(1, 1, 3)               # half a metre up the tilted normal
+    height, allowed = floor_gate(points, centroid, up, foot_columns=[0], gate_m=0.17)
+    assert height[0, 0] == pytest.approx(0.5, abs=1e-6)
+    assert not allowed[0, 0]

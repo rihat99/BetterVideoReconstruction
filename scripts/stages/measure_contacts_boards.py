@@ -108,7 +108,8 @@ def run(predictions_dir: str | Path, config_path: str | Path, *,
                          "the boards measure one climber and cannot say which")
     valid = np.asarray(kin["valid_mask"][0], bool)
 
-    body = load_body(device=device, frames_allow=cfg["contacts"].get("frames") or None)
+    body = load_body(device=device, frames_allow=cfg["contacts"].get("frames") or None,
+                     sole_offsets=cfg["contacts"].get("sole_offset_m") or None)
     frame_names = list(body.contact_frame_names)
     if frame_names != [str(x) for x in kin["contact_frame_names"]]:
         raise SystemExit("[measure_contacts_boards] the config's contact frames do not match the body's")

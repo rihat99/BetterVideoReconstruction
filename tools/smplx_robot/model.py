@@ -16,14 +16,15 @@ import torch
 
 
 def load_smplx_mid(model_path: str | Path | None = None, device: str | torch.device = "cpu",
-                   frames_allow=None):
+                   frames_allow=None, sole_offsets=None):
     """Load the 52-joint SMPL-X body used across the pipeline.
 
     Redirects to :func:`tools.body.load_body`. ``model_path`` is kept for call-site
     compatibility but ignored — BetterHuman bundles its own validated
     ``SMPLX_NEUTRAL.npz``. ``frames_allow`` restricts the contact frames by name
-    (``None`` keeps all).
+    (``None`` keeps all); ``sole_offsets`` pushes frames out along their normals by
+    stem (see :class:`tools.body.Body`).
     """
     from tools.body import load_body
 
-    return load_body(device=device, frames_allow=frames_allow)
+    return load_body(device=device, frames_allow=frames_allow, sole_offsets=sole_offsets)

@@ -81,6 +81,9 @@ dependencies = [
     # default; pin below that cutoff so ``import pkg_resources`` keeps working.
     "setuptools<80",
     "open3d>=0.19.0",
+    # scripts/import_opencap.py reads the OpenCap trial videos (get_ffmpeg_exe,
+    # read_frames); covered by tests/test_opencap_forces.py.
+    "imageio-ffmpeg>=0.6.0",
 ]
 
 [[tool.uv.index]]

@@ -50,6 +50,13 @@ GT_ROOT = _REPO / "peter" / "climb_wall_3_gt" / "human"
 OURS_ROOT = _REPO / "peter" / "out_climb_wall_3_single"
 OTHERS = _REPO / "peter" / "climb_wall_3_gt" / "others"
 POSE_MODELS = {"gvhmr": "GVHMR", "prompthmr": "PromptHMR"}
+#: Our own runs on this tree: row key -> (label, the run directory under ``<clip>/``).
+#: They share every stage but the last, so the rows price one change each — measured
+#: contacts instead of estimated ones, and a torque priced the same at every joint
+#: instead of by the joint's strength.
+OURS_RUNS = {"ours/kindyn_1": ("Ours (single view)", "human_optim"),
+             "ours/gt_contact": ("Ours + measured contacts", "human_optim_gt_contact"),
+             "ours/flat_torque": ("Ours, flat torque weights", "human_optim_flat_torque")}
 BODY_KEYS = ("global_orient", "body_pose", "transl", "left_hand_pose", "right_hand_pose",
              "jaw_pose", "leye_pose", "reye_pose", "expression", "betas")
 
@@ -97,9 +104,9 @@ def score_model(d, gj_w: np.ndarray, gv_w: np.ndarray, w2c: np.ndarray, valid: n
 
 
 def score_ours(clip: str, gj_w: np.ndarray, gv_w: np.ndarray, w2c: np.ndarray, valid: np.ndarray,
-               fps: float) -> dict:
+               fps: float, optim_dir: str = "human_optim") -> dict:
     """Our single-view body, carried into the left camera by its own extrinsics."""
-    k = np.load(OURS_ROOT / clip / "human_optim" / "kindyn_1.npz")
+    k = np.load(OURS_ROOT / clip / optim_dir / "kindyn_1.npz")
     tr = np.load(OURS_ROOT / clip / "geometry" / "transform.npz")
     assert bool(tr["metric"]), clip
     n = len(gj_w)
@@ -145,7 +152,9 @@ def collect() -> dict:
         ref_checks.append(check)
         ref_jitter.append(jitter(gj_w, fps, valid))
         add("sam3d/init", "SAM 3D Body init (camera frame)", score_init(clip, gj_w, gv_w, w2c, valid, fps))
-        add("ours/kindyn_1", "Ours (single view)", score_ours(clip, gj_w, gv_w, w2c, valid, fps))
+        for key, (label, optim_dir) in OURS_RUNS.items():
+            if (OURS_ROOT / clip / optim_dir / "kindyn_1.npz").exists():
+                add(key, label, score_ours(clip, gj_w, gv_w, w2c, valid, fps, optim_dir))
         for model, name in POSE_MODELS.items():
             for variant in ("raw", "post"):
                 path = OTHERS / model / clip / f"pose_{variant}.npz"

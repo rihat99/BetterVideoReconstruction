@@ -1,0 +1,146 @@
+# Stage knobs for the OpenCap LabValidation runs (scripts/run_opencap.py).
+# A copy of configs/pipeline_parkour.toml — the OpenCap clips share the same
+# failure mode (ONE static iPhone, so VGGT depth confidence is uniformly low and
+# the chamfer-based pre-fit is banned; see the [scale] / [fuse] comments).
+# 12 clips, 720x1280 PORTRAIT @ 60 fps, one subject in a MoCap lab with force
+# plates (subjects 2/3/4 x walking1/squats1/STS1/DJ1, camera Cam1).
+
+[steps]
+# Active stages, in order; the chain ends at human_optimization (four-stage SMPL-X
+# refinement). List order is honoured: `fuse` builds the point clouds in VGGT's
+# up-to-scale world; `scale` (estimate_scale) then measures the metric factor against
+# the fused human points and rescales the saved geometry in place. `--steps` runs any subset.
+run = ["sam3", "vggt", "sapiens", "sam3d", "smplx", "fuse", "scale", "human_optimization"]
+
+[runtime]
+device = "cuda"             # compute device shared by stages and the viewer
+
+[sam3]                      # SAM 3 video tracker → sam3/ (per-object masks + bboxes.npz)
+text = "person"             # grounding prompt for frame-0 detection
+top_k = 1                  # keep ONLY the largest frame-0 person mask — one subject per clip
+confidence = 0.5           # grounding confidence threshold
+min_area_frac = 0.01       # minimum grounded-mask fraction of the image
+bbox = []                  # optional frame-0 xyxy prompt; empty uses text/manifest prompts
+mask = ""                  # optional frame-0 mask path; empty disables
+points = []                # optional point prompts as ["X,Y,+", "X,Y,-"]
+prompts = ""               # optional multi-prompt JSON path; empty disables
+label = ""                 # optional single-object display label; empty uses text
+part_length = 200          # frames per propagation part
+overlay = false            # render mask and bbox overlays
+fps = ""                   # overlay fps; empty uses source fps or 30
+checkpoint = ""            # SAM 3 checkpoint path; empty uses HuggingFace download
+masks_subdir = "sam3"      # output subdir under each item
+skip_existing = true       # skip items whose bboxes.npz already exists
+dtype = "fp16"             # model dtype hint retained from the precompute runner
+
+[vggt]                      # VGGT-Omega multi-view camera + depth → vggt/camera.npz
+max_frames = 900            # cap per CAMERA VIEW; raised above the longest clip (subject4_STS1, 839 frames) so NO clip is subsampled and every output row stays one video frame — the force/marker arrays are indexed that way
+frame_chunk = 32            # chunked (as in pipeline_peter.toml; chunking matches the unchunked forward to bf16 rounding, ~3e-4). 128/65536 OOMs at 47 GB on the 800-frame portrait clips (subject4 squats1/STS1), so this dataset runs leaner
+token_chunk = 8192          # query tokens per chunk of the cross-frame attention (see frame_chunk)
+image_resolution = 512      # VGGT input resolution (512 model; use 256 for the text-aligned model)
+mode = "balanced"           # load_and_preprocess_images sizing: balanced | max_size
+save_depth = true           # also dump per-frame depth + confidence at the VGGT resolution (heavy; scale + fuse need it)
+checkpoint = "facebook/VGGT-Omega" # local .pt path or HF repo id
+subdir = "vggt"             # output subdir under each item
+skip_existing = true       # skip items whose camera.npz already exists
+dtype = "fp16"             # model dtype hint
+# Note: VGGT depth/translation are UP-TO-SCALE (not metric) — one arbitrary per-clip scale shared with the cameras.
+
+[sapiens]                   # Sapiens2 pose (keypoints) → sapiens/
+tasks = "pose"              # subset of {pose, pointmap, normal}; pointmap/normal are heavy & opt-in
+overlay = false             # render pose skeleton overlay
+label = "person"            # bboxes.npz label selected for pose
+subdir = "sapiens"          # output subdir under each item
+batch_size = 1             # bbox-crop batch size for pose inference
+checkpoint_root = ""        # checkpoint tree override; empty uses the HF cache
+score_thresh = 0.3         # overlay keypoint score threshold
+fps = ""                   # overlay fps; empty uses 30
+skip_existing = true       # skip items whose task output already exists
+dtype = "fp16"             # model dtype hint
+
+[scale]                     # human-anchored metric scale (runs AFTER fuse; rescales geometry/ in place)
+conf_drop_q = 0.0           # static-camera VGGT confidence is uniformly low at the limbs — the 0.3 cut would hide the hands/arms from the ruler median; un-gated keeps every body pixel voting
+min_inlier_verts = 50       # skip a frame with fewer inlier vertices than this
+mad_k = 3.0                 # reject frames beyond this many MADs from the median log-scale
+skip_existing = false       # skip when scale.npz exists and the world is already metric
+# pre-fit: dual scale + body refinement → geometry/prefit.npz (see docs/scale.md)
+prefit = false              # OFF (user, 2026-07-26 — do not rely on the static-camera human depth at
+                            # all). The pre-fit is a chamfer fit against the human cloud, so it drags the
+                            # body/init to the same wrong depth the kinematic chamfer was banned for. Ruler-only
+                            # scale keeps depth's influence to one robust median scalar (the body is the only
+                            # metric anchor there is); the kinematics then init from the converter bodies.
+                            # NOTE: delete any stale geometry/prefit.npz — kinematics inits from it when present.
+rounds = 4                  # body-round ↔ scale-re-measure alternations (early-stops at 0.1%)
+iters = 150                # Adam iterations per body round (per person)
+lr = 0.01                # Adam learning rate
+w_chamfer = 1.0             # depth term: every cloud point near a visible body vertex
+w_reproj = 0.5              # Sapiens reprojection weight (holds the body on the image)
+w_pose = 2.0                # pull of the joint rotations toward the converter pose
+w_orient = 1.0              # gentle root-orientation pull (stops ~180° flips)
+w_transl = 0.5              # gentle root-translation pull (m²; anchors depth where the image is silent)
+w_smooth = 0.1              # tiny converter-velocity tie on the posed joints
+gm_chamfer_m = 0.3          # chamfer robust scale (m); larger is more L2-like
+gm_reproj_px = 10.0         # reprojection robust scale (px)
+max_points = 2000           # depth points per frame for chamfer
+vertex_subsample = 3000     # body vertices used for chamfer
+
+[fuse]                      # backproject VGGT → up-to-scale point clouds → geometry/ (runs BEFORE scale)
+voxel_px = 5.5              # scene merge voxel size, in pixel footprints at the median scene depth
+conf_drop_q = 0.0           # the 0.3 cut deletes low-confidence static-camera scene geometry outright; un-gated the lab floor and walls survive
+edge_rtol = 0.04            # depth-edge (flying-pixel) filter tolerance; 0 disables
+human_dilate = 2            # 8 px erases the floor band around the feet; 2 keeps it while still cutting the person
+min_scene_voxels = 25       # drop scene clusters smaller than this many connected voxels (floating blobs); 1 disables
+person_obj_ids = ""         # restrict SAM3 ids treated as people, e.g. "0,1"; empty → all
+skip_existing = false      # skip when geometry/transform.npz exists
+
+[sam3d]                     # SAM-3D-Body MHR fit → sam3d/params.npz (camera from VGGT via fuse)
+obj_ids = ""                # tracked people to fit; empty → ALL tracked, else "0,1". Stacked (P,N,...)
+inference_type = "full"     # "full" (body+hands) or "body"
+overlay = false             # render the combined mesh overlay (all people) → sam3d/overlay.mp4
+subdir = "sam3d"            # manifest batch output subdir
+skip_existing = true       # batch mode: skip existing params.npz
+hf_repo = "facebook/sam-3d-body-dinov3" # SAM-3D-Body HuggingFace repo
+fps = ""                   # overlay fps; empty uses source fps or 30
+
+[smplx]                     # MHR → SMPL-X (pip smplx) → sam3d/smplx_params.npz
+iters = 300                 # fine-stage Adam iterations
+gender = "neutral"          # neutral | male | female
+overlay = false             # render the combined SMPL-X overlay (all people) → sam3d/smplx_overlay.mp4
+subdir = "sam3d"            # manifest batch input/output subdir
+skip_existing = true       # batch mode: skip existing smplx_params.npz
+smplx_model_folder = ""     # model parent override; empty uses better_human/models
+batch_size = 64            # converter frame batch size
+fps = ""                   # overlay fps; empty uses source fps or 30
+
+[gravity]                   # GeoCalib world-frame gravity → geocalib/gravity.npz
+num_frames = 48            # frames sampled uniformly across the clip
+conf_rel = 0.5             # relative confidence gate
+inlier_deg = 8.0           # world-frame angular inlier threshold
+min_frames = 5             # minimum frames retained by the confidence gate
+conf_floor = 0.01          # minimum reliable absolute GeoCalib confidence
+min_diversity_deg = 8.0    # minimum selected camera-rotation spread
+max_spread_deg = 5.0       # maximum reliable gravity inlier spread
+fallback_gravity = "0,1,0" # world-down direction used when inference is unreliable
+weights = "pinhole"        # GeoCalib checkpoint: pinhole | distorted
+skip_existing = false      # skip when geocalib/gravity.npz exists
+
+[viewer]                    # scripts/view_3d.py display and scene-selection knobs
+port = 8082                # viser server port
+point_size = 0.02          # scene point radius in metres
+human_point_size = 0.01    # human point radius in metres
+camera_scale = 0.1         # initial camera-frustum size in metres
+camera_stride = 1          # show every Nth camera frustum
+up = "-y"                  # viewer up direction
+smplx = true               # load fitted SMPL-X bodies
+human_max_points = 6000    # max human points per frame and climber; 0 keeps all
+video_dir = ""             # source-video directory; empty uses the viewer default
+data_root = ""             # ClimbingVideos root; empty uses the scene DB default
+categories = "1,2"         # ClimbingVideos vlm_category CSV filter
+rope_supported = 0        # rope-supported filter; -1 selects any
+scene_ids = ""             # optional scene-id CSV; empty selects all matches
+sample = ""                # optional random subset size; empty disables sampling
+limit = ""                 # optional first-N limit; empty disables limiting
+seed = 0                   # random-sampling seed
+
+[human_optimization]        # four-stage SMPL-X refinement → human_optim/ (default chain: root, kinematics_1)
+config = "configs/human_optimization_peter.toml"   # stage selection + all knobs live in THAT file (hands + feet contact frames only — what the force plates measure)

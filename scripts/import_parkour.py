@@ -1,6 +1,6 @@
 """Import the LAAS Parkour dataset (Li et al. CVPR'19) into ``data/Parkour-dataset/processed/``.
 
-Source tree: ``/data3/rikhat.akizhanov/better/data/Parkour-dataset`` (the
+Source tree: ``/home/rikhat.akizhanov/better/data/Parkour-dataset`` (the
 ``zongmianli/Parkour-dataset`` repo + its pre-extracted ``frames/``). 28 clips of
 four parkour actions (kong vault ``kv``, muscle-up ``mu``, pull-up ``pu``,
 safety vault ``sv``), one subject each, static camera, 720x576. Ground truth is
@@ -54,7 +54,7 @@ from pathlib import Path
 import numpy as np
 
 _REPO_ROOT = Path(__file__).resolve().parents[1]
-SRC = Path("/data3/rikhat.akizhanov/better/data/Parkour-dataset")
+SRC = Path("/home/rikhat.akizhanov/better/data/Parkour-dataset")
 DST = SRC / "processed"
 
 # Parkour stores (l_ankle, r_ankle, l_fingers, r_fingers); we keep the peter

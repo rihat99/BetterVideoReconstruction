@@ -1,9 +1,11 @@
 # PETER VARIANT of configs/human_optimization.toml (a full copy — the loader has no
-# defaults, so a fragment would not work). ONE difference from the general config:
+# defaults, so a fragment would not work). Differences from the general config:
 # [contacts].frames restricts the contact frames to the hands and feet — the peter
 # demonstrator rigs only instrument a board/plate under each limb, so contact detected
-# on knees / elbows / torso would route force where nothing measures it.
-# Every other knob is identical; keep it in sync with the general config.
+# on knees / elbows / torso would route force where nothing measures it. TWO differences,
+# in fact: the kinematic chamfer is OFF as well (see its line). Also used for the LAAS
+# Parkour clips (one static camera, plates + bar). Every other knob is identical; keep
+# it in sync with the general config.
 #
 # human_optimization — one config, four stages.
 # Loss-weight rows are per-stage arrays, columns = [root, kinematics_1, kinematics_2, kindyn_1].
@@ -70,7 +72,7 @@ overlay = false          # reprojected-keypoint debug overlay → human_optim/ki
 [loss_weights.kinematic]
 reproj_sapiens      = [8, 8, 8, 8]
 reproj_init         = [30, 30, 30, 30]
-chamfer             = [10, 10, 0, 0]   # OFF in kinematics_2 AND kindyn_1 — both start from the repaired body; chamfer would pull it back toward the (spaghetti-prone) human depth the repair just left
+chamfer             = [0, 0, 0, 0]     # PETER: OFF everywhere (user, 2026-07-26; lost in 860cbd3, restored 2026-09-17) — ONE static camera gives VGGT no parallax, and the human depth sits the limbs at the wrong depth (Parkour: ankle/wrist error +20 mm vs the init).
 pose_prior          = [300, 300, 300, 300]
 orient_prior        = [50, 50, 50, 50]
 

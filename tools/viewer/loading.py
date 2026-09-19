@@ -37,7 +37,7 @@ _SCENE_CONF_DROP_Q = 0.1
 # (18 439 vertices, 127 bones) — the LOD the corpus MHR fit was made on. Given
 # explicitly, like the SMPL-X path in ``tools/body.py``, so no env var is needed.
 _MHR_MODEL, _MHR_LOD = Path(
-    "/data3/rikhat.akizhanov/better/BetterHuman/models/MHR/converted/mhr_lod1.npz"), 1
+    "/home/rikhat.akizhanov/better/BetterHuman/models/MHR/converted/mhr_lod1.npz"), 1
 # Loaded MHR bodies by device — reading the archive costs ~4 s, and every clip with
 # an ``mhr_1.npz`` needs the same one.
 _MHR_CACHE: dict = {}
@@ -142,6 +142,10 @@ def _load_sensor_forces(pred: Path) -> dict | None:
     The climb_wall_3 ground-truth clips (``scripts/peter_gt``) keep the file at the
     clip root instead, where it is a per-limb board reading rather than a corner
     reaction; both live in the same world frame, so either location is read here.
+
+    Force plates (``scripts/opencap_sensor_forces.py``) also store where each force
+    acts — the centre of pressure on the floor, ``cop_world`` — so their arrows are
+    drawn from that point instead of the limb joint (NaN where the plate saw nothing).
     """
     f = next((c for c in (pred / "human_optim" / "sensor_forces.npz",
                           pred / "sensor_forces.npz") if c.exists()), None)
@@ -151,6 +155,30 @@ def _load_sensor_forces(pred: Path) -> dict | None:
     return {
         "rw": dd["reaction_world"].astype(np.float32),   # (N, 4, 3) per channel
         "limbs": [str(x) for x in dd["limbs"]],          # channel -> limb name
+        "cop": (dd["cop_world"].astype(np.float32)       # (N, 4, 3) centre of pressure,
+                if "cop_world" in dd.files else None),   # force plates only
+    }
+
+
+def _load_plate_estimate(pred: Path) -> dict | None:
+    """Our solved foot forces in the force plates' own format (``estimated_forces.npz``).
+
+    Written by ``scripts/export_opencap_mot.py`` next to the plates' ``sensor_forces.npz``:
+    each foot's solved contact forces collapsed to one force acting at one centre of
+    pressure on the floor — the same representation the plates report — in the
+    dataset's OpenSim ground frame. Rotated back into our world here with the ``R``/``t``
+    the file carries, so the viewer draws them beside the measured plate arrows.
+    """
+    f = pred / "human_optim" / "estimated_forces.npz"
+    if not f.exists():
+        return None
+    dd = np.load(f, allow_pickle=True)
+    R = np.asarray(dd["R_world_from_mocap"], np.float64)
+    t = np.asarray(dd["t_world_from_mocap"], np.float64)
+    return {
+        "rw": (dd["force"].astype(np.float64) @ R.T).astype(np.float32),        # (N, 2, 3)
+        "cop": (dd["cop"].astype(np.float64) @ R.T + t).astype(np.float32),     # (N, 2, 3)
+        "limbs": [str(x) for x in dd["limbs"]],
     }
 
 
@@ -752,6 +780,7 @@ class ClipData:
     skinned: dict          # name -> (faces, object_ids, people); "original" first
     forces: dict           # force source name ("kindyn_1"/"kindyn_manual") -> force dict
     sensors: dict | None   # measured wall-sensor forces (climb_wall), see _load_sensor_forces
+    plates: dict | None    # our forces in the plates' force-at-COP format, see _load_plate_estimate
     skeletons: dict        # body source name -> joint tree + contact-frame labels (_load_skeleton)
     n_frames: int
     # scene-surface meshes, built lazily and cached per method ("bpa"/"poisson");
@@ -918,6 +947,7 @@ def load_clip_data(pred: Path, *, device: str, show_smplx: bool,
         skinned=skinned,
         forces=forces,
         sensors=_load_sensor_forces(pred),
+        plates=_load_plate_estimate(pred),
         skeletons=skeletons,
         n_frames=len(extr),
         scene_normals=sn,

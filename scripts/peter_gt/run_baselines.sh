@@ -9,8 +9,8 @@
 set -euo pipefail
 
 MODEL="$1"; GPU="$2"; shift 2
-REPO=/data3/rikhat.akizhanov/better/BetterVideoReconstruction
-OTHER=/data3/rikhat.akizhanov/better/other
+REPO=/home/rikhat.akizhanov/better/BetterVideoReconstruction
+OTHER=/home/rikhat.akizhanov/better/other
 FARM="$REPO/peter/climb_wall_3_gt/others/_farm"
 OUT="$REPO/peter/climb_wall_3_gt/others"
 

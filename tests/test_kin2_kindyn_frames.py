@@ -317,6 +317,51 @@ def test_persisting_masks_require_the_whole_window():
     assert spec.fquad[:, 0].tolist() == [0.0, 0.0, 0.0, 1.0]
 
 
+def test_edge_mask_marks_the_first_and_last_frame_of_each_contact_interval():
+    mask = torch.tensor([[1.0], [1.0], [0.0], [1.0], [1.0], [1.0], [0.0]])
+    spec = _spec([0], num_steps=7)
+    spec.mask = mask
+    spec.fpair = mask[1:] * mask[:-1]
+    spec.__post_init__()
+    # a contact already held at the clip start is not an onset; the release before a
+    # gap and the onset after it are edges; a one-frame-long contact counts once
+    assert spec.fedge[:, 0].tolist() == [0.0, 1.0, 0.0, 1.0, 0.0, 1.0, 0.0]
+    single = torch.tensor([[0.0], [1.0], [0.0]])
+    spec = _spec([0], num_steps=3)
+    spec.mask, spec.fpair = single, single[1:] * single[:-1]
+    spec.__post_init__()
+    assert spec.fedge[:, 0].tolist() == [0.0, 1.0, 0.0]
+
+
+def test_edge_mask_ignores_a_switch_across_an_untracked_step():
+    mask = torch.tensor([[1.0], [0.0], [1.0]])
+    spec = _spec([0], num_steps=3)
+    spec.mask, spec.fpair = mask, mask[1:] * mask[:-1]
+    spec.valid_pair = torch.tensor([0.0, 0.0])
+    spec.__post_init__()
+    assert spec.fedge[:, 0].tolist() == [0.0, 0.0, 0.0]
+
+
+def test_edge_weight_falls_with_the_body_speed_across_the_switch():
+    mask = torch.tensor([[0.0], [1.0], [1.0], [0.0]])
+    spec = _spec([0], num_steps=4)
+    spec.mask, spec.fpair = mask, mask[1:] * mask[:-1]
+    spec.gravity_world = np.array([0.0, -1.0, 0.0], np.float32)      # world up is +y
+    spec.__post_init__()
+    # the body drops 0.6 m/s into the onset at step 1 and rises at 1.8 m/s out of the
+    # release at step 2
+    root = torch.zeros(4, 3)
+    root[:, 1] = torch.tensor([0.6 * spec.dt, 0.0, 0.0, 1.8 * spec.dt])
+    spec.scale_edges_by_speed(root, speed_scale=0.6)
+    assert spec.fedge[:, 0].tolist() == pytest.approx([0.0, 0.5, 0.1, 0.0])
+    # horizontal travel is not a landing: the weight stays full
+    spec.__post_init__()
+    root = torch.zeros(4, 3)
+    root[:, 0] = torch.arange(4.0)
+    spec.scale_edges_by_speed(root, speed_scale=0.6)
+    assert spec.fedge[:, 0].tolist() == [0.0, 1.0, 1.0, 0.0]
+
+
 def test_fps_scaling_treats_force_accel_and_jerk_as_orders_two_and_three():
     from tools.human_optim.config import fps_scaled_weights
 

@@ -20,7 +20,8 @@ world gravity and the lab camera's tilt is unknown — the world-down fallback
 would bake that tilt into every force direction.
 
 Knobs live in the TOMLs (``configs/pipeline_parkour.toml`` for the model +
-geometry stages, ``configs/human_optimization.toml`` for the human stages);
+geometry stages, ``configs/human_optimization_peter.toml`` for the human stages —
+the static-camera recipe: kinematic chamfer off, hand/foot contact frames only);
 this CLI only takes targets.
 
 Usage::
@@ -41,7 +42,7 @@ from pathlib import Path
 
 _REPO_ROOT = Path(__file__).resolve().parents[1]
 _STAGES_DIR = _REPO_ROOT / "scripts" / "stages"
-_PARKOUR = Path("/data3/rikhat.akizhanov/better/data/Parkour-dataset/processed")
+_PARKOUR = Path("/home/rikhat.akizhanov/better/data/Parkour-dataset/processed")
 
 # step → (stage script, output path relative to the clip's output tree).
 # The first five sweep every clip in one process; the rest run per clip.
@@ -111,7 +112,7 @@ def main(argv: list[str] | None = None) -> int:
                         default=_REPO_ROOT / "configs" / "pipeline_parkour.toml",
                         help="model + geometry stage TOML")
     parser.add_argument("--human-config", type=Path,
-                        default=_REPO_ROOT / "configs" / "human_optimization.toml",
+                        default=_REPO_ROOT / "configs" / "human_optimization_peter.toml",
                         help="human-optimization + contacts TOML")
     args = parser.parse_args(sys.argv[1:] if argv is None else argv)
 
