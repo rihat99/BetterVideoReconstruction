@@ -39,6 +39,10 @@ ATHLETICS_SPORTS = {
     "triple_jump": 6,
 }
 
+# BEDLAM2 (scripts/import_bedlam2.py) writes the same layout, with its ground truth
+# under the single feature stage ``gt/`` instead of one dir per pipeline stage.
+BEDLAM_DATA_ROOT = _REPO_ROOT.parent / "data" / "BEDLAM2_our"
+
 
 def shard(scene_id: str) -> tuple[str, str]:
     """``scene_id`` → its two-level shard (``aa``, ``bb``)."""

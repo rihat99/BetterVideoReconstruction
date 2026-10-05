@@ -354,6 +354,31 @@ class DynamicsSpec:
         sq = tau_joint.pow(2)
         return sq if self.tau_weight is None else sq * self.tau_weight
 
+    def frozen_dynamics(self, qn: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+        """``(tau_free (T, nv), jac (T, C, 3, nv))`` — the RNEA at a fixed pose, split.
+
+        With the pose fixed, RNEA is affine in the contact forces: the torques with
+        forces ``f`` are ``tau_free − Σ_c J_cᵀ f_c``, the unloaded RNEA minus every
+        frame's force pulled back through that frame's linear Jacobian (world
+        aligned). It is exactly what :meth:`forward` computes through ``fext`` — the
+        lever arm ``r × f`` on the parent joint IS that pullback — but one matrix
+        product per evaluation instead of an RNEA pass, so the frozen-pose solve
+        runs in the time of a few RNEA calls.
+        """
+        from better_robot.dynamics import rnea
+        from better_robot.kinematics import forward_kinematics, update_frame_placements
+        from better_robot.kinematics.jacobian import compute_joint_jacobians, get_frame_jacobian
+
+        v, a = velocity_acceleration_from_trajectory(self.model, qn, self.dt,
+                                                     spacing=self.spacing)
+        tau_free = rnea(self.model, qn, v, a)
+        data = forward_kinematics(self.model, qn)
+        update_frame_placements(self.model, data)
+        compute_joint_jacobians(self.model, data)
+        jac = torch.stack([get_frame_jacobian(self.model, data, int(fid))[..., :3, :]
+                           for fid in self.frame_ids], dim=1)
+        return tau_free, jac
+
     def warmstart(self, qn_init: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor | None]:
         """Solve the forces at the fixed initial pose (the sequential dynamics solve).
 
@@ -365,17 +390,17 @@ class DynamicsSpec:
         values seed the joint phase coherently. Returns ``(f_free (T, 12, 3),
         gen_u (T, 12, 4) or None)``, detached; the before/after base wrench lands
         on :attr:`base_wrench_before` / :attr:`base_wrench_warm`.
-        """
-        from better_robot.dynamics import rnea
 
+        The physics is the frozen affine form of :meth:`frozen_dynamics`, computed once.
+        """
         w = self.weights
         with torch.no_grad():
             qn = qn_init.detach()
-            v, a = velocity_acceleration_from_trajectory(self.model, qn, self.dt,
-                                                         spacing=self.spacing)
-            oMi, frames7 = self.placements(qn)
-            oMi, frames7 = oMi.detach(), frames7.detach()
-            base0 = self.wrench_rms(rnea(self.model, qn, v, a))
+            tau_free, jac = self.frozen_dynamics(qn)
+            base0 = self.wrench_rms(tau_free)
+
+        def torques(f_eff: torch.Tensor) -> torch.Tensor:
+            return tau_free - torch.einsum("tcdn,tcd->tn", jac, f_eff)
 
         f = self.zero_forces().requires_grad_(True)
         gen_u = self.zero_generators()
@@ -397,8 +422,8 @@ class DynamicsSpec:
         def closure():
             opt.zero_grad()
             f_world = self.compose_forces(f, gen_u)
-            fext, f_eff = self.build_fext(f_world, oMi, frames7)
-            tau = rnea(self.model, qn, v, a, fext=fext)
+            f_eff = f_world * self.mask[..., None]
+            tau = torques(f_eff)
             loss = (w["base_wrench"] * half * (self.dyn_row[:, None] * tau[:, :3].pow(2)).sum()
                     + w.get("base_wrench_ang", 0.0) * half
                     * (self.dyn_row[:, None] * tau[:, 3:6].pow(2)).sum()
@@ -427,8 +452,7 @@ class DynamicsSpec:
             opt.step(closure)
         with torch.no_grad():
             f_world = self.compose_forces(f, gen_u)
-            fext, _ = self.build_fext(f_world, oMi, frames7)
-            base1 = self.wrench_rms(rnea(self.model, qn, v, a, fext=fext))
+            base1 = self.wrench_rms(torques(f_world * self.mask[..., None]))
         self.base_wrench_before, self.base_wrench_warm = base0, base1
         print(f"    [kindyn warm-start] base wrench {base0:.1f}→{base1:.2f} N/frame RMS "
               f"(forces only, q frozen)")

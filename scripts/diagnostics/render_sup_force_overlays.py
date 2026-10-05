@@ -37,15 +37,22 @@ two-ring contact discs (outer ring = the model's contact head above 0.5, inner =
 board above 50 N), and a tiny dot-and-word legend instead of the caption; the clip's
 total ratio, median angle and the mass print to the console.
 
-Writes ``<clip>/predictions/forces_sup_overlay.mp4``.
+Writes ``<clip>/predictions/forces_sup_overlay.mp4``, or — with ``--run <name>`` — reads
+``<clip>/predictions/<name>/forces_sup.npz`` and writes the overlay beside it (the layout
+contact_anything's ``predict_reconstruction.py`` uses since round 11). A dump written on
+the 35 contact frames (``contact_set`` ``frames35``) is folded onto the six kindyn groups
+first: probabilities by max, forces by vector sum, each group's arrow anchored at the
+force-weighted mean of its member frames' anchors.
 
 Usage:
     uv run --no-sync python scripts/diagnostics/render_sup_force_overlays.py
     uv run --no-sync python scripts/diagnostics/render_sup_force_overlays.py 01_hanging trial_10
+    uv run --no-sync python scripts/diagnostics/render_sup_force_overlays.py --run climbing_frames35 a_00_01_part1
 """
 
 from __future__ import annotations
 
+import argparse
 import sys
 from pathlib import Path
 
@@ -78,6 +85,45 @@ GROUP_RGB = LIMB_RGB + [(148, 103, 189), (227, 119, 194)]  # heels get their own
 GROUP_LABEL = ["left hand", "right hand", "left foot (toe)", "right foot (toe)",
                "left heel", "right heel"]
 SUP_CONTACT_PROB = 0.5  # the model's contact head is a probability; 0.5 = its own claim
+CONTACT_ANYTHING = Path(__file__).resolve().parents[2].parent / "contact_anything"
+
+
+def _six_groups(sup) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """``(forces_world, anchor_cam, contact_probs)`` of a dump on the six kindyn groups.
+
+    A ``kindyn6`` dump (or an older one without ``contact_set``) is returned as is; a
+    ``frames35`` dump is folded with contact_anything's own contract: probabilities by
+    max, forces by sum, anchors by the force-magnitude-weighted mean of the group's member
+    frames (plain mean where no member carries force).
+    """
+    forces_world = np.asarray(sup["forces_world"], np.float32)[0]   # (N, K, 3) bw
+    anchor_cam = np.asarray(sup["anchor_cam"], np.float32)[0]       # (N, K, 3)
+    probs = np.asarray(sup["contact_probs"], np.float32)[0]         # (N, K)
+    name = str(sup["contact_set"]) if "contact_set" in sup.files else "kindyn6"
+    if name == "kindyn6":
+        return forces_world, anchor_cam, probs
+    if str(CONTACT_ANYTHING) not in sys.path:
+        sys.path.insert(0, str(CONTACT_ANYTHING))
+    from model.contact_frames import contact_set  # noqa: E402
+    slots = contact_set(name)
+    if [str(x) for x in sup["limbs"]] != list(slots.slot_names):
+        raise ValueError(f"forces_sup limbs do not match contact set {name!r}")
+    group_of = slots.group_of
+    n_frames = forces_world.shape[0]
+    folded_anchor = np.full((n_frames, len(SUP_GROUPS), 3), np.nan, np.float32)
+    for group in range(len(SUP_GROUPS)):
+        members = np.flatnonzero(group_of == group)
+        if not members.size:
+            continue
+        points = anchor_cam[:, members]                              # (N, m, 3)
+        weight = np.linalg.norm(np.nan_to_num(forces_world[:, members]), axis=-1)  # (N, m)
+        weight = np.where(np.isfinite(points).all(-1), weight, 0.0)
+        flat = np.where(weight.sum(1, keepdims=True) > 0, weight,
+                        np.isfinite(points).all(-1).astype(np.float32))
+        total = flat.sum(1, keepdims=True)
+        with np.errstate(invalid="ignore", divide="ignore"):
+            folded_anchor[:, group] = (np.nan_to_num(points) * flat[..., None]).sum(1) / total
+    return slots.fold_sum(np.nan_to_num(forces_world)), folded_anchor, slots.fold_max(np.nan_to_num(probs))
 
 
 def _draw_force_arrows(pane: np.ndarray, anchor_cam: np.ndarray, force_world: np.ndarray,
@@ -107,15 +153,16 @@ def _draw_force_arrows(pane: np.ndarray, anchor_cam: np.ndarray, force_world: np
         cv2.arrowedLine(pane, tail, head, GROUP_RGB[group], 3, cv2.LINE_AA, tipLength=0.22)
 
 
-def render(clip: Clip) -> Path:
+def render(clip: Clip, run: str | None = None) -> Path:
     """Write the supervised-model overlay for one clip and return its path."""
     tree = clip.tree
-    sup = np.load(tree / "predictions" / "forces_sup.npz", allow_pickle=True)
+    pred_dir = tree / "predictions" if run is None else tree / "predictions" / run
+    sup = np.load(pred_dir / "forces_sup.npz", allow_pickle=True)
     kindyn = np.load(tree / "human_optim" / "kindyn_1.npz", allow_pickle=True)
     transform = np.load(tree / "geometry" / "transform.npz")
 
     groups = [str(x) for x in sup["limbs"]]
-    if groups != SUP_GROUPS:
+    if groups != SUP_GROUPS and "contact_set" not in sup.files:
         raise ValueError(f"forces_sup limbs are {groups}, expected {SUP_GROUPS}")
     frame_indices = transform["frame_indices"]
     n_frames = len(frame_indices)
@@ -128,8 +175,9 @@ def render(clip: Clip) -> Path:
     mass = float(np.asarray(kindyn["total_mass"], float)[kindyn_ids.index(sup_ids[0])])
 
     fps = float(sup["fps"])
-    forces_world = np.asarray(sup["forces_world"], np.float32)[0, :n_frames]  # (N, 6, 3) bw
-    anchor_cam = np.asarray(sup["anchor_cam"], np.float32)[0, :n_frames]      # (N, 6, 3)
+    forces_world, anchor_cam, contact_probs = _six_groups(sup)
+    forces_world = forces_world[:n_frames]                                    # (N, 6, 3) bw
+    anchor_cam = anchor_cam[:n_frames]                                        # (N, 6, 3)
     down = np.asarray(kindyn["gravity_world"], float)
     down = down / np.linalg.norm(down)
 
@@ -193,7 +241,7 @@ def render(clip: Clip) -> Path:
         # The kindyn-style picture: two-ring discs, one summed green arrow per limb,
         # the board's own force in red, and a tiny legend instead of a caption.
         valid = np.asarray(sup["valid_mask"], bool)[0, :n_frames]
-        probs = np.asarray(sup["contact_probs"], np.float32)[0, :n_frames]    # (N, 6)
+        probs = contact_probs[:n_frames]                                      # (N, 6)
         limb_contact = np.stack([probs[:, g].max(1) for g in GROUP_FOLD], 1) > SUP_CONTACT_PROB
         truth = clip.plate_contact[:n_frames]
         measured_limb = clip.measured_cell[:n_frames]
@@ -206,7 +254,7 @@ def render(clip: Clip) -> Path:
     pane_size = _fit(source, PANEL_SIZE[1])
     pane_scale = (pane_size[0] / source[0], pane_size[1] / source[1])
 
-    path = tree / "predictions" / "forces_sup_overlay.mp4"
+    path = pred_dir / "forces_sup_overlay.mp4"
     writer = imageio.get_writer(path, fps=fps, codec="libx264", quality=7)
     for frame_index in tqdm(range(n_frames), desc=f"[overlays] {clip.name}", leave=False):
         ok, bgr = capture.read()
@@ -247,15 +295,16 @@ TREES = [(CAMPUS_ROOT, campus_clip), (WALL_ROOT, wall_clip), (WALL2_ROOT, wall2_
          (WALL3_ROOT, wall3_clip)]
 
 
-def _targets(names: list[str]) -> list[Clip]:
+def _targets(names: list[str], run: str | None) -> list[Clip]:
     """Resolve clip names against both trees, or list every clip the model predicted."""
+    sub = Path("predictions") if run is None else Path("predictions") / run
     if not names:
         return [build(clip.name) for root, build in TREES for clip in sorted(root.iterdir())
-                if (clip / "predictions" / "forces_sup.npz").exists()]
+                if (clip / sub / "forces_sup.npz").exists()]
     clips = []
     for name in names:
         match = next((build for root, build in TREES
-                      if (root / name / "predictions" / "forces_sup.npz").exists()), None)
+                      if (root / name / sub / "forces_sup.npz").exists()), None)
         if match is None:
             roots = ", ".join(str(root) for root, _ in TREES)
             raise SystemExit(f"[overlays] no forces_sup for {name!r} under any of: {roots}")
@@ -264,8 +313,13 @@ def _targets(names: list[str]) -> list[Clip]:
 
 
 if __name__ == "__main__":
-    for target in _targets(sys.argv[1:]):
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--run", default=None,
+                        help="read predictions/<run>/forces_sup.npz and write the overlay beside it")
+    parser.add_argument("clips", nargs="*")
+    args = parser.parse_args()
+    for target in _targets(args.clips, args.run):
         try:
-            print(f"[overlays] {target.name} -> {render(target)}")
+            print(f"[overlays] {target.name} -> {render(target, args.run)}")
         except Exception as error:  # noqa: BLE001 — one bad clip must not kill the batch
             print(f"[overlays] {target.name}: FAILED — {type(error).__name__}: {error}")

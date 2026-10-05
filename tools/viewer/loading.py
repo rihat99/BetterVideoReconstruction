@@ -26,6 +26,9 @@ _REPO_ROOT = Path(__file__).resolve().parents[2]
 # ``_SKEL_FINGER_SCALE`` in :mod:`tools.viewer.scene`) and the force sources sum
 # their per-joint forces into the wrist. Shared with :mod:`tools.viewer.scene`.
 _FINGER_TOKENS = ("index", "middle", "pinky", "ring", "thumb")
+# The body-source name a BEDLAM2 scene exposes. Its motion is the dataset's own
+# ground truth — nothing optimized it — so it is not one of the stage names.
+_BEDLAM_BODY = "ground truth"
 # The contact-label schema this viewer reads: contact lives on the 12 body-mounted
 # contact frames (``frame_contact``), not on joints. An older artifact is ignored.
 _CONTACT_SCHEMA = 2
@@ -71,15 +74,15 @@ def _load_gravity(pred: Path) -> dict | None:
             "spread": spread, "ground": ground, "ground_reject": reject}
 
 
-def _load_force_data(pred: Path, filename: str) -> dict | None:
-    """Numpy arrays for a force/torque body source (``human_optim/<filename>``).
+def _load_force_data(f: Path) -> dict | None:
+    """Numpy arrays for a force/torque body source (the npz at ``f``).
 
     Shared by the kinematics+dynamics bodies ``kindyn_1.npz`` / ``kindyn_manual.npz``
-    (the manual-annotation reference chain). Both store the same force fields, so the
-    viewer draws them the same way. Hand forces are folded to the wrists here, once,
-    so the per-joint display never draws arrows on individual finger joints.
+    (the manual-annotation reference chain) and BEDLAM2's ``gt/forces.npz``. All store
+    the same force fields, so the viewer draws them the same way. Hand forces are
+    folded to the wrists here, once, so the per-joint display never draws arrows on
+    individual finger joints.
     """
-    f = pred / "human_optim" / filename
     if not f.exists():
         return None
     dd = np.load(f, allow_pickle=True)
@@ -487,7 +490,8 @@ def _load_smplx_mid(device: str):
     return load_body(device=dev), dev
 
 
-def _smplx_kinematic_skinned(npz_path: Path, *, device: str = "cuda"):
+def _smplx_kinematic_skinned(npz_path: Path, *, device: str = "cuda",
+                             valid: np.ndarray | None = None):
     """Skinning data from a world-frame kinematic SMPL-X body (``human_optim/kinematic_*.npz``).
 
     The params are already world-frame (``frame='world'``) on the 52-joint
@@ -499,6 +503,10 @@ def _smplx_kinematic_skinned(npz_path: Path, *, device: str = "cuda"):
     points contact is detected on — so the viewer draws them exactly where the
     stages measured them: ``frame_pos``/``frame_normal`` per frame, in
     ``frame_names`` order.
+
+    ``valid`` replaces the file's own ``valid_mask`` with a ``(P, N)`` mask of the
+    frames to pose — BEDLAM2 stores visibility in that field, not whether a pose
+    exists, so its loader poses every frame.
 
     Returns ``(faces (F, 3), object_ids (P,), people)`` where ``people[p]`` is
     ``None`` (no valid frames) or a dict with ``v_shaped (V, 3)``, ``j_rest
@@ -514,7 +522,7 @@ def _smplx_kinematic_skinned(npz_path: Path, *, device: str = "cuda"):
     d = np.load(npz_path, allow_pickle=True)
     q_all = d["q"]                          # (P, N, 211)
     betas_all = d["betas"]                  # (P, 10)
-    valid = d["valid_mask"].astype(bool)    # (P, N)
+    valid = d["valid_mask"].astype(bool) if valid is None else valid   # (P, N)
     P, N = q_all.shape[:2]
     scales = d["scale"] if "scale" in d.files else np.ones(P, np.float32)  # ≡1 (compat)
     object_ids = (np.asarray(d["object_ids"], np.int32)
@@ -827,10 +835,138 @@ def _fov_y_rad(transform) -> np.ndarray:
     return 2.0 * np.arctan(float(transform["image_height"]) / (2.0 * fy))
 
 
+def _bedlam_gravity(gt: Path, centers: np.ndarray, people: list) -> dict:
+    """World-frame gravity + the floor BEDLAM2 placed the people on.
+
+    The floor is exact and unbounded, so all that is left is where to draw a patch
+    of it and how big. BEDLAM2's stored centroid is the world origin at floor
+    height, and an Unreal level can sit hundreds of metres from its origin, so the
+    patch is re-centred under the action (the cameras and every pelvis) at the
+    stored height. ``extent`` is the floor-patch diameter the gravity stage would
+    have measured and the viewer draws a grid ten times that, so report the
+    diameter that clears the action by a quarter of its span on every side — with
+    an 8 m floor under a scene that barely moves.
+    """
+    gd = np.load(gt / "gravity.npz")
+    plane = np.asarray(gd["ground_centroid"], np.float64)
+    normal = np.asarray(gd["ground_normal"], np.float64)
+    pelvis = [p["bone_pos"][:, 0, :] for p in people if p is not None]
+    action = np.concatenate([centers, *pelvis]).astype(np.float64)
+    centre = action.mean(0)
+    centre -= normal * ((centre - plane) @ normal)       # slide it onto the real floor
+    flat = action - centre
+    flat -= np.outer(flat @ normal, normal)              # distance along the floor only
+    radius = float(np.linalg.norm(flat, axis=1).max()) if len(flat) else 0.0
+    g = np.asarray(gd["gravity_world"], np.float32)
+    return {"g": g / (float(np.linalg.norm(g)) + 1e-9), "is_fallback": False,
+            "source": str(gd["source"]), "spread": float("nan"), "ground_reject": "",
+            "ground": {"centroid": centre, "normal": normal,
+                       "extent": max(0.25 * radius, 0.8),
+                       "angle_deg": float(gd["ground_angle_deg"])}}
+
+
+def _bedlam_contacts(gt: Path, body_oids: np.ndarray) -> dict:
+    """Ground-contact labels from ``gt/contacts.npz``, or empty fields when absent.
+
+    ``scripts/label_bedlam2.py`` writes the same label schema the estimated-body
+    stages do, so the viewer's contact-frames layer reads it unchanged. Empty fields
+    hide that layer, which is what a scene that has not been labelled yet should do.
+    """
+    empty = {"frame_contact": None, "frame_names": None,
+             "frame_parent": None, "contact_oids": None}
+    cf = gt / "contacts.npz"
+    if not cf.exists():
+        return empty
+    cd = np.load(cf)
+    schema = int(np.asarray(cd["contact_label_schema"]).item())
+    oids = np.asarray(cd["object_ids"], np.int32)
+    if schema != _CONTACT_SCHEMA or not np.array_equal(oids, body_oids):
+        warnings.warn(f"ignoring {cf}: label schema {schema} (viewer reads "
+                      f"{_CONTACT_SCHEMA}) or object ids that do not match the bodies",
+                      RuntimeWarning, stacklevel=2)
+        return empty
+    return {"frame_contact": np.asarray(cd["frame_contact"], bool),
+            "frame_names": [str(x) for x in np.asarray(cd["contact_frame_names"]).tolist()],
+            "frame_parent": np.asarray(cd["frame_parent_joint"], np.int32),
+            "contact_oids": oids}
+
+
+def load_bedlam_data(pred: Path, *, device: str, video: bool,
+                     video_dir: Path | None) -> ClipData:
+    """Load one BEDLAM2 scene from its ``gt/`` directory.
+
+    BEDLAM2 ships finished ground truth, so there is no stage chain to read. The
+    scene's ``gt/`` holds ``camera.npz`` (the per-frame camera, in the schema
+    ``geometry/transform.npz`` uses), ``gravity.npz`` (world-frame down plus the floor
+    the renderer stood everyone on) and ``smplx.npz`` (every person's world-frame
+    ``q`` and ``betas``, in the schema the kinematic bodies use). Where
+    ``scripts/label_bedlam2.py`` has run it also holds ``bboxes.npz`` (which people
+    are usable) and ``contacts.npz`` (which skin points are on the floor), and both
+    are read here. The synthetic environments ship no geometry, so the scene cloud
+    and the human depth points stay empty and the viewer draws the ground plane, the
+    cameras and the bodies.
+    """
+    gt = pred / "gt"
+    transform = np.load(gt / "camera.npz")
+    meta = np.load(gt / "smplx.npz")
+    extr = transform["extrinsics"]
+
+    # BEDLAM2 puts VISIBILITY in ``valid_mask`` — whether the person projects into
+    # the image — not whether a pose exists; the motion is ground truth on every
+    # frame. Pose them all, so someone who walks out of shot keeps their place in
+    # the world instead of blinking out of the 3D view. The one exception is a person
+    # ``label_bedlam2`` found no usable frame for at all (never in shot, or always
+    # more than a third out of it) — they are dropped by posing none of their frames,
+    # which is the path a person with no valid frames already takes everywhere else.
+    valid = np.ones(meta["q"].shape[:2], bool)
+    box = gt / "bboxes.npz"
+    if box.exists():
+        valid &= np.load(box)["person_valid"][:, None]
+    skinned = {_BEDLAM_BODY: _smplx_kinematic_skinned(gt / "smplx.npz", device=device,
+                                                      valid=valid)}
+    # The joint tree behind the skeleton overlay, plus the ground-contact labels when
+    # ``label_bedlam2`` has run — that is what turns the contact-frames layer on.
+    skeletons = {_BEDLAM_BODY: {"parents": np.asarray(meta["parents"], np.int32),
+                                "joint_names": [str(x) for x in meta["joint_names"]],
+                                **_bedlam_contacts(gt, skinned[_BEDLAM_BODY][1])}}
+    # The solved contact forces (``label_bedlam2 --step forces``), drawn on the same
+    # body: keyed by its name, so the viewer treats it as a force source that is also
+    # a skinned body, exactly like ``kindyn_1``.
+    forces = {}
+    fd = _load_force_data(gt / "forces.npz")
+    if fd is not None:
+        forces[_BEDLAM_BODY] = fd
+
+    video_frames, play_fps = (_load_video_frames(pred, len(extr), video_dir=video_dir)
+                              if video else (None, None))
+    centers = np.stack([_camera_world_pose(e)[0] for e in extr])
+    empty_pts, empty_col = np.zeros((0, 3), np.float32), np.zeros((0, 3), np.uint8)
+    return ClipData(
+        path=pred, name=pred.name,
+        scene_points=empty_pts, scene_colors=empty_col,
+        human_points=empty_pts, human_colors=empty_col,
+        human_fid=np.zeros(0, np.int32), human_obj=np.zeros(0, np.int32),
+        obj_ids=[int(o) for o in skinned[_BEDLAM_BODY][1]],
+        extr=extr,
+        aspect=float(transform["image_width"]) / float(transform["image_height"]),
+        fov_y=_fov_y_rad(transform),
+        gravity=_bedlam_gravity(gt, centers, skinned[_BEDLAM_BODY][2]),
+        skinned=skinned, forces=forces, sensors=None, plates=None, skeletons=skeletons,
+        n_frames=len(extr),
+        video_frames=video_frames, fps=play_fps or float(transform["fps"]))
+
+
 def load_clip_data(pred: Path, *, device: str, show_smplx: bool,
                    human_max_points: int = 0, video: bool = True,
                    video_dir: Path | None = None) -> ClipData:
-    """Load one clip's geometry + all SMPL-X body sources into numpy."""
+    """Load one clip's geometry + all SMPL-X body sources into numpy.
+
+    A BEDLAM2 scene has a ``gt/`` directory in place of a stage tree and is handed
+    to :func:`load_bedlam_data`, which always loads its bodies — they are the whole
+    scene, so ``show_smplx`` does not apply.
+    """
+    if (pred / "gt" / "smplx.npz").exists():
+        return load_bedlam_data(pred, device=device, video=video, video_dir=video_dir)
     geo = pred / "geometry"
     scene = np.load(geo / "scene.npz")
     transform = np.load(geo / "transform.npz")
@@ -893,7 +1029,7 @@ def load_clip_data(pred: Path, *, device: str, show_smplx: bool,
     forces: dict = {}
     for name, fn in (("kindyn_1", "kindyn_1.npz"),
                      ("kindyn_manual", "kindyn_manual.npz")):
-        fd = _load_force_data(pred, fn)
+        fd = _load_force_data(pred / "human_optim" / fn)
         if fd is not None:
             forces[name] = fd
 

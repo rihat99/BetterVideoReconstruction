@@ -135,6 +135,28 @@ def lowpass(x: np.ndarray, cutoff_hz: float, fps: float) -> np.ndarray:
     return filtfilt(b, a, x, axis=0)
 
 
+def hold_edges(force: np.ndarray, keep: np.ndarray) -> np.ndarray:
+    """``(N, 2, 3)`` forces with every row NOT in ``keep (N, 2)`` replaced by the nearest kept row.
+
+    The importer writes zero where the plates recorded nothing and the exporters write zero
+    where the method produced nothing; a zero-lag filter would smear those invented zeros
+    into the neighbouring measured rows, so the unmeasured rows hold their neighbour's value
+    instead (the same constant extension ``filtfilt`` pads the ends with) and are still
+    masked out of every number afterwards.
+    """
+    out = force.copy()
+    for foot in range(force.shape[1]):
+        kept = np.flatnonzero(keep[:, foot])
+        if kept.size == 0:
+            continue
+        nearest = kept[np.clip(np.searchsorted(kept, np.arange(len(force))), 0, kept.size - 1)]
+        before = np.clip(np.searchsorted(kept, np.arange(len(force)), side="right") - 1, 0, kept.size - 1)
+        prev, nxt = kept[before], nearest
+        pick = np.where(np.abs(np.arange(len(force)) - prev) <= np.abs(nxt - np.arange(len(force))), prev, nxt)
+        out[:, foot] = force[pick, foot]
+    return out
+
+
 def clip_series(clip: Path, run_dir: Path) -> dict:
     """One clip: plate and our triples per foot in the OpenSim ground frame, plus masks.
 
@@ -184,8 +206,12 @@ def clip_series(clip: Path, run_dir: Path) -> dict:
         "fps": fps, "mass_kg": float(gt["mass_kg"]), "mass_ours": mass_ours,
         "sync_uncertain": bool(json.loads(sync.read_text())["uncertain"]) if sync.exists() else False,
         "watched": watched,
-        "gt_force": lowpass(np.asarray(gt["force"], float)[:n, feet], CUTOFF_HZ[kind], fps),
-        "our_force": lowpass(np.asarray(ours["force"], float)[:n, our_cols], CUTOFF_HZ[kind], fps),
+        "gt_force": lowpass(hold_edges(np.asarray(gt["force"], float)[:n, feet],
+                                       np.asarray(gt["captured"], bool)[:n, feet]),
+                            CUTOFF_HZ[kind], fps),
+        "our_force": lowpass(hold_edges(np.asarray(ours["force"], float)[:n, our_cols],
+                                        np.repeat(valid[:, None], 2, 1)),
+                             CUTOFF_HZ[kind], fps),
         # unfiltered copies: a row counts as loaded for the CoP only if BOTH raw forces say so
         # (the exporters write a zero or fallback point where their own force is below LOADED_N)
         "gt_force_raw": np.asarray(gt["force"], float)[:n, feet],
@@ -226,12 +252,18 @@ def foot_metrics(gt: np.ndarray, ours: np.ndarray, watched: np.ndarray,
     out = {"stance frames": float(stance.sum())}
     for k, axis in enumerate(AXES):
         out[f"MAE {axis} [%BW]"] = float(np.mean(np.abs(o[:, k] - g[:, k]))) if stance.any() else np.nan
-    own = ours[stance, 1] / body_weight_ours * 100.0
-    out["MAE V own-BW [%BW]"] = float(np.mean(np.abs(own - g[:, 1]))) if stance.any() else np.nan
+    own = ours[stance] / body_weight_ours * 100.0
+    for k, axis in enumerate(AXES):          # our force in OUR body weights = the measured-mass reading
+        out[f"MAE {axis} own-BW [%BW]"] = (float(np.mean(np.abs(own[:, k] - g[:, k])))
+                                           if stance.any() else np.nan)
     out["fit gain"] = (float((o[:, 1] * g[:, 1]).sum() / (o[:, 1] * o[:, 1]).sum())
                        if stance.any() and (o[:, 1] * o[:, 1]).sum() > 0 else np.nan)
-    out["MAE V all [%BW]"] = (float(np.mean(np.abs(ours[watched, 1] - gt[watched, 1])))
-                              / body_weight * 100.0 if watched.any() else np.nan)
+    for k, axis in enumerate(AXES):          # Uhlrich 2023 scores whole trials
+        out[f"MAE {axis} all [%BW]"] = (float(np.mean(np.abs(ours[watched, k] - gt[watched, k])))
+                                        / body_weight * 100.0 if watched.any() else np.nan)
+        out[f"MAE {axis} all own-BW [%BW]"] = (float(np.mean(np.abs(
+            ours[watched, k] / body_weight_ours - gt[watched, k] / body_weight))) * 100.0
+            if watched.any() else np.nan)
     out["RMSE V [%BW]"] = rmse(o[:, 1], g[:, 1])
     out["rRMSE V [%]"] = relative_rmse(o[:, 1], g[:, 1])
     out["r V"] = pearson(o[:, 1], g[:, 1])
@@ -343,7 +375,9 @@ def table(rows: dict[str, dict[str, float]], keys: list[str], first: str) -> lis
 
 GRF_KEYS = ["clips", "subjects", "stance frames", "MAE V [%BW]", "MAE V [%BW] SD",
             "MAE V own-BW [%BW]", "fit gain", "mass gt/ours", "MAE AP [%BW]",
-            "MAE ML [%BW]", "MAE V all [%BW]", "RMSE V [%BW]", "rRMSE V [%]", "r V",
+            "MAE ML [%BW]", "MAE AP own-BW [%BW]", "MAE ML own-BW [%BW]", "MAE V all [%BW]",
+            "MAE AP all [%BW]", "MAE ML all [%BW]", "MAE V all own-BW [%BW]",
+            "MAE AP all own-BW [%BW]", "MAE ML all own-BW [%BW]", "RMSE V [%BW]", "rRMSE V [%]", "r V",
             "peak V err [%BW]", "MAE V L [%BW]", "MAE V R [%BW]"]
 COP_KEYS = ["CoP frames", "CoP raw [mm]", "CoP hip-aligned [mm]", "CoP hip-aligned [mm] SD",
             "CoP hip-aligned median [mm]", "CoP in-foot [mm]", "CoP in-foot AP [mm]",

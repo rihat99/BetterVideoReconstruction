@@ -41,12 +41,17 @@ Selection — only sequences whose ground truth is complete:
 
 Three things the ground truth does *not* give you. BEDLAM2 ships one
 ``ground_height_world`` per sequence, so ``gravity.npz``'s floor is wrong for
-anyone standing on a step or platform (median foot gap -6 mm, which is shoe
-thickness, but 5% of people never come within 5 cm of it). The classic
+anyone standing on a step or platform. Measured over all 26,178 people: the body's
+lowest point sits a median 7.6 mm *below* the plane (shoe thickness -- the mesh is
+naked), exactly **one** person never comes within 5 cm of it, and 333 (1.27%) spend
+most of their clip more than 2 cm above it. An earlier version of this line claimed
+5% of people never come within 5 cm; that is wrong by three orders of magnitude and
+no definition of the gap reproduces it. The classic
 ``body_pose`` arrays are AMASS axis-angle copied verbatim, including rotation
 vectors past 2*pi, so they do not match ``body.to_classic(betas, q)`` elementwise
-— ``q`` is the canonical form. And no stage in this repo reads ``features/gt``;
-it is a ground-truth tree for training, not a drop-in for the corpus chain.
+— ``q`` is the canonical form. And no *stage* in this repo reads ``features/gt``;
+it is a ground-truth tree for training, not a drop-in for the corpus chain. The
+viewer does read it: ``scripts/view_3d.py --bedlam``.
 
 World frame: Unreal's world, mapped to OpenCV axes by ``unreal2cv2`` and metres.
 Up is ``-y``, so gravity is ``+y`` — the same convention the geocalib stage uses.

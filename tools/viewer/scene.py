@@ -19,7 +19,7 @@ from .helpers import (
     _unlit_glb,
     _wxyz_shortest_arc_z,
 )
-from .loading import _FINGER_TOKENS, ClipData, ensure_scene_mesh
+from .loading import _BEDLAM_BODY, _FINGER_TOKENS, ClipData, ensure_scene_mesh
 
 # dynamics sphere-floor / bone radius / max torque grow factor / metres-per-newton for
 # the contact-force arrows
@@ -63,6 +63,15 @@ _CALIB_CAM_RGB = (0, 200, 255)
 # draw the ground grid this many times the fitted floor's data extent, so it reads
 # as a floor spanning the scene rather than a small patch under the climber
 _GROUND_GRID_MULT = 10.0
+# The floor reads as a surface, not a wire mesh: a translucent grey fill under
+# darker grey lines, with a heavier line every fifth cell. Cells are human-scale
+# (half a metre), growing past that only when a grid would otherwise carry more
+# than _GROUND_CELLS_MAX of them, and shrinking below it on a grid too small to
+# hold _GROUND_CELLS_MIN — the case for geometry that was never metricized.
+_GROUND_FILL_RGB, _GROUND_FILL_ALPHA = (150, 150, 150), 0.25
+_GROUND_CELL_RGB, _GROUND_SECTION_RGB = (110, 110, 110), (70, 70, 70)
+_GROUND_CELL_M = 0.5
+_GROUND_CELLS_MAX, _GROUND_CELLS_MIN = 80, 8
 
 
 def _quat_mat(q: np.ndarray) -> np.ndarray:
@@ -361,7 +370,7 @@ class ClipScene:
         self.body_source_names = (
             list(data.skinned) + [s for s in self.forces if s not in data.skinned])
         self.default_body = next(
-            (s for s in ("kinematics", "kinematics_2", "prefit", "original")
+            (s for s in (_BEDLAM_BODY, "kinematics", "kinematics_2", "prefit", "original")
              if s in self.body_source_names), None)
         self.active = self.default_body
 
@@ -392,6 +401,7 @@ class ClipScene:
         if d.gravity is not None:
             g = d.gravity["g"]
             tag = {"ground": "ground plane",
+                   "bedlam2_gt": "BEDLAM2 ground truth",
                    "fallback_down": "default↓"}.get(
                 d.gravity.get("source", ""), f"GeoCalib, spread {d.gravity['spread']:.1f}°")
             gtxt = f"[{g[0]:+.2f} {g[1]:+.2f} {g[2]:+.2f}] ({tag})"
@@ -464,17 +474,24 @@ class ClipScene:
         ``ground_angle`` is the fitted normal's angle to the prior down direction,
         shown in the info panel. The grid (natively in its local x-y plane, normal
         ``+z``) is rotated so ``+z`` aligns with the fitted up-normal and placed
-        at the plane centroid.
+        at the plane centroid. It draws as a translucent grey fill under grey
+        half-metre cells, so the floor reads as a surface you can see the scene
+        through rather than as a bare wireframe. That look is the same for every
+        clip, not only BEDLAM2 ones.
         """
         plane = None if self.data.gravity is None else self.data.gravity.get("ground")
         if plane is None:
             return
         self.ground_angle = plane["angle_deg"]
         size = plane["extent"] * _GROUND_GRID_MULT
+        cell = min(max(_GROUND_CELL_M, size / _GROUND_CELLS_MAX),
+                   size / _GROUND_CELLS_MIN)
         self.ground_nodes = [self.server.scene.add_grid(
             "/clip/ground", width=size, height=size,
-            cell_size=max(size / 20.0, 0.05), section_size=max(size / 4.0, 0.25),
-            cell_color=(170, 170, 170), section_color=(110, 110, 110),
+            cell_size=cell, section_size=cell * 5.0,
+            cell_color=_GROUND_CELL_RGB, section_color=_GROUND_SECTION_RGB,
+            section_thickness=2.0,
+            plane_color=_GROUND_FILL_RGB, plane_opacity=_GROUND_FILL_ALPHA,
             plane="xy", wxyz=_wxyz_shortest_arc_z(plane["normal"]),
             position=tuple(float(x) for x in plane["centroid"]),
             visible=self.layers["ground"])]

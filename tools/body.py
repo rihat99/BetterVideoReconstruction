@@ -93,9 +93,14 @@ class _Posed:
     """One posed body: world joints + vertices + contact frames."""
 
     def __init__(self, vertices: torch.Tensor, joint_placements: torch.Tensor,
-                 frame_placements: torch.Tensor) -> None:
+                 frame_placements: torch.Tensor, *, model=None, data=None) -> None:
         #: Posed world vertices with shape ``(..., V, 3)``.
         self.vertices = vertices
+        #: The BetterRobot model this pose was computed on and its FK ``Data``, so a
+        #: caller can take Jacobians of the same pose (e.g. contact-frame velocities)
+        #: without running FK again.
+        self.model = model
+        self.data = data
         #: World joint placements as a :class:`_JointsWorld` (``(..., 52, 7)``).
         self.joints_world = _JointsWorld(joint_placements)
         #: World joint positions with shape ``(..., 52, 3)``.
@@ -186,6 +191,8 @@ class Body:
         self._contact_frame_ids = torch.tensor(
             self.contact_frames.frame_ids, dtype=torch.long, device=self._device
         )
+        #: Those rows as plain ints (length F), for BetterRobot's per-frame Jacobians.
+        self.contact_frame_ids = tuple(int(i) for i in self.contact_frames.frame_ids)
         #: Outward offset of each contact frame in metres ``(F,)``, from ``sole_offsets``.
         self.contact_frame_offsets = torch.zeros(
             len(self.contact_frame_names), dtype=self._dtype, device=self._device)
@@ -257,7 +264,7 @@ class Body:
         if bool((self.contact_frame_offsets != 0).any()):
             shifted = frames[..., :3] + self.contact_frame_offsets[:, None] * frame_normals(frames)
             frames = torch.cat([shifted, frames[..., 3:]], dim=-1)
-        return _Posed(vertices, placements, frames)
+        return _Posed(vertices, placements, frames, model=shaped.robot, data=data)
 
     def forward_shape(self, betas: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
         """Return the neutral-pose ``(v_shaped (..., V, 3), rest_joints (..., 52, 3))``.

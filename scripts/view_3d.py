@@ -17,7 +17,9 @@ For each clip it shows, in the metric world frame:
   calibrated rig (``cameras.npz``), one named cyan frustum per fixed camera,
 * the world-frame **gravity** arrow (when the geocalib stage has run),
 * the **ground plane** the gravity stage fitted and accepted (drawn from
-  ``geocalib/gravity.npz``; absent when the floor was not visible), and
+  ``geocalib/gravity.npz``; absent when the floor was not visible) — a translucent
+  grey fill under grey half-metre cells, so it reads as a floor you can still see
+  the scene through, and
 * the fitted **SMPL-X bodies** for every tracked person, following the slider.
 
 **Body source** dropdown switches between:
@@ -99,6 +101,20 @@ gains a **◀ prev / random / next ▶** pager plus a "scene N / M" indicator.
 **sport** dropdown (all / floor / beam / vault / pommel / high_jump / triple_jump)
 that narrows the scene list.
 
+**BEDLAM2** — ``--bedlam`` browses the synthetic ground-truth set at
+``../data/BEDLAM2_our`` the same way. BEDLAM2 ships finished motion, so there is no
+stage chain and no body-source choice: one **ground truth** source, the cameras, the
+ground plane the renderer stood everyone on, and its gravity. The environments ship
+no geometry, so there are no scene points and no human depth points, and those
+layers are hidden. Where ``scripts/label_bedlam2.py`` has run, the **contact frames**
+layer draws its ground-contact labels (``gt/contacts.npz``) red for touching the floor
+and green for free, and the people it found no usable frame for (``gt/bboxes.npz``)
+are left out of the scene entirely, and the forces ``--step forces`` solved
+(``gt/forces.npz``) are drawn on that body the way ``kindyn_1``'s are.
+The video pane is on (the footage is what you check the bodies against), and all
+18 076 scenes are listed unless ``[viewer].scene_ids`` / ``sample`` / ``limit`` names
+a set — the pager and the dropdown load a scene only when it is selected.
+
 The viewer package lives under :mod:`tools.viewer`; this file is the thin CLI.
 
 Usage::
@@ -108,6 +124,7 @@ Usage::
     uv run python scripts/view_3d.py out/ --config configs/pipeline.toml
     uv run python scripts/view_3d.py --scenes        # browse the ClimbingVideos DB
     uv run python scripts/view_3d.py --scenes athletics  # AthleticsVideos DB, sport dropdown
+    uv run python scripts/view_3d.py --bedlam        # BEDLAM2 ground truth, all 18 076 scenes
     # The climb_wall_3 ground-truth clips are ordinary trees — point at one, or at
     # their root to get the example dropdown:
     uv run python scripts/view_3d.py peter/climb_wall_3_gt/human/
@@ -131,22 +148,23 @@ from tools.viewer import view_3d
 # not linked). Each is aliased as ``<farm>/<stage>`` → the scene's feature tree.
 _FARM_STAGES = ("geometry", "sam3d", "vggt", "human_optim", "geocalib")
 
-
-def _link_scene_farm(paths, row, farm_root: Path) -> bool:
+def _link_scene_farm(paths, row, farm_root: Path, *,
+                     stages: tuple[str, ...] = _FARM_STAGES,
+                     needs: tuple[str, str] = ("geometry", "scene.npz")) -> bool:
     """Alias one DB scene's feature dirs into an ``out/<stem>/``-shaped symlink farm.
 
     Builds ``<farm_root>/<scene_id>/<stage>`` symlinks into the scene's stage-first
     feature trees (skipping stages that were never produced), plus the source clip
-    as ``<farm_root>/<scene_id><ext>`` for the sidebar video pane. Returns ``True``
-    only when the scene is fused (``geometry/scene.npz`` present) so the viewer can
-    actually draw it — un-fused scenes are skipped.
+    as ``<farm_root>/<scene_id><ext>`` for the sidebar video pane. ``needs`` is the
+    ``(stage, file)`` the viewer cannot draw without — ``geometry/scene.npz`` for a
+    fused clip, ``gt/smplx.npz`` for a BEDLAM2 scene; a scene missing it is skipped.
     """
     sid = row["scene_id"]
-    if not (paths.feature_dir("geometry", sid) / "scene.npz").exists():
+    if not (paths.feature_dir(needs[0], sid) / needs[1]).exists():
         return False
     farm = farm_root / sid
     farm.mkdir(parents=True, exist_ok=True)
-    for stage in _FARM_STAGES:
+    for stage in stages:
         src = paths.feature_dir(stage, sid)
         link = farm / stage
         if src.exists() and not link.exists():
@@ -170,9 +188,14 @@ def _run_scenes(args: argparse.Namespace) -> None:
     categories = scene_db.parse_int_csv(args.categories)
     rope = None if args.rope_supported < 0 else args.rope_supported
     groups = None
+    stages, needs = _FARM_STAGES, ("geometry", "scene.npz")
     if args.scenes == "athletics":  # every sport; the viewer's sport dropdown narrows it
         data_root = args.data_root or scene_db.ATHLETICS_DATA_ROOT
         categories, rope = (), None
+    elif args.scenes == "bedlam":   # one feature stage, and every scene is a target
+        data_root = args.data_root or scene_db.BEDLAM_DATA_ROOT
+        categories, rope = (), None
+        stages, needs = ("gt",), ("gt", "smplx.npz")
     paths = scene_db.ScenePaths(data_root)
     with paths.connect() as conn:
         rows = scene_db.select_targets(conn, categories=categories, rope_supported=rope)
@@ -187,10 +210,11 @@ def _run_scenes(args: argparse.Namespace) -> None:
 
     farm_root = Path(tempfile.mkdtemp(prefix="bvr_view_"))
     atexit.register(shutil.rmtree, farm_root, ignore_errors=True)  # symlinks only; targets untouched
-    n = sum(_link_scene_farm(paths, row, farm_root) for row in rows)
+    n = sum(_link_scene_farm(paths, row, farm_root, stages=stages, needs=needs)
+            for row in rows)
     if not n:
-        print(f"[view_3d] none of {len(rows)} target scene(s) are fused yet "
-              f"(need geometry/scene.npz) under {data_root}", flush=True)
+        print(f"[view_3d] none of {len(rows)} target scene(s) have "
+              f"{needs[0]}/{needs[1]} under {data_root}", flush=True)
         return
     print(f"[view_3d] prepared {n}/{len(rows)} scene(s) from {data_root}", flush=True)
     view_3d(farm_root, port=args.port, point_size=args.point_size,
@@ -208,9 +232,17 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--scenes", nargs="?", const="climbing", choices=("climbing", "athletics"),
                    help="browse a scene DB instead of a local out/ tree: the ClimbingVideos "
                         "DB (default) or the AthleticsVideos DB (sport dropdown in the sidebar)")
+    p.add_argument("--bedlam", action="store_true",
+                   help="browse the BEDLAM2 ground-truth DB: cameras, ground plane and "
+                        "bodies, with the video pane on; every scene unless "
+                        "[viewer].scene_ids / sample / limit picks a set")
     p.add_argument("--config", type=Path, default=_REPO_ROOT / "configs" / "pipeline.toml",
                    help="pipeline TOML (default: configs/pipeline.toml)")
     cli = p.parse_args(sys.argv[1:] if argv is None else argv)
+    if cli.bedlam:
+        if cli.scenes:
+            p.error("--bedlam and --scenes pick different DBs; use one")
+        cli.scenes = "bedlam"
     cfg = load_toml(cli.config)
     args = section(cfg, "viewer", {
         "port": 8082,
@@ -238,6 +270,10 @@ def main(argv: list[str] | None = None) -> int:
     args.scene_ids = args.scene_ids or None
     args.sample = int(args.sample) if args.sample != "" else None
     args.limit = int(args.limit) if args.limit != "" else None
+    if cli.bedlam:
+        # The video pane is half of what you check a BEDLAM2 scene against, so it is
+        # on here whatever the config says (it defaults to off for remote sessions).
+        args.video = True
 
     if args.scenes:
         _run_scenes(args)

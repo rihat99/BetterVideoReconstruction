@@ -254,6 +254,13 @@ class Viewer:
             return
         for key in _FRAME_LAYER_KEYS:
             self.checkboxes[key].visible = src in sc.frame_sources
+        # Hide the layers this clip has no data for rather than leave dead
+        # checkboxes: a BEDLAM2 scene has neither cloud, and a clip fused from
+        # calibrated cameras (the climb_wall_3 rigs) has no human depth points.
+        has_scene, has_human = len(sc.data.scene_points) > 0, len(sc.data.human_points) > 0
+        self.checkboxes["scene"].visible = has_scene
+        self.checkboxes["normals"].visible = has_scene
+        self.checkboxes["human"].visible = has_human
         self.dyn_folder.visible = src in sc.force_sources        # the whole dyn_* section
         self.checkboxes["dyn_sensor"].visible = sc.sensors is not None
         self.checkboxes["dyn_plate"].visible = sc.plates is not None
@@ -495,15 +502,23 @@ def clips_in_group(clips: list[Path], groups: dict[str, str], label: str) -> lis
     return [c for c in clips if groups.get(c.name) == label]
 
 
+#: What makes a directory a clip: a fused ``out/<stem>/`` tree, or a BEDLAM2
+#: scene, whose ground truth stands in for the whole stage chain.
+_CLIP_MARKERS = (Path("geometry") / "scene.npz", Path("gt") / "smplx.npz")
+
+
+def _is_clip(d: Path) -> bool:
+    return any((d / marker).exists() for marker in _CLIP_MARKERS)
+
+
 def _discover_clips(root: Path) -> list[Path]:
-    """Clips = ``root`` itself if it holds ``geometry/scene.npz``, else its clip subdirs."""
+    """Clips = ``root`` itself when it is one, else its clip subdirs."""
     root = Path(root)
-    if (root / "geometry" / "scene.npz").exists():
+    if _is_clip(root):
         return [root]
     if not root.is_dir():
         return []
-    return [d for d in sorted(root.iterdir())
-            if d.is_dir() and (d / "geometry" / "scene.npz").exists()]
+    return [d for d in sorted(root.iterdir()) if d.is_dir() and _is_clip(d)]
 
 
 def view_3d(root: Path, *, port: int = 8082, point_size: float = 0.02,
@@ -517,7 +532,8 @@ def view_3d(root: Path, *, port: int = 8082, point_size: float = 0.02,
     clips = _discover_clips(root)
     if not clips:
         raise FileNotFoundError(
-            f"no clips with geometry/scene.npz under {root} — run the 'fuse' stage first")
+            f"no clips under {root} — an out/<stem>/ tree needs geometry/scene.npz "
+            f"(run the 'fuse' stage first), a BEDLAM2 scene needs gt/smplx.npz")
 
     server = viser.ViserServer(port=port)
     # Wider sidebar for the video pane: "large" is viser's widest built-in

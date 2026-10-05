@@ -13,12 +13,18 @@ copy — the two shape spaces differ — so SMPL betas are fitted by least squar
 reproduce OUR body's rest-pose skeleton over the 22 shared joints, the same recipe as
 the Li et al. inputs (``build_our_inputs.py`` there).
 
-Writes ``../other/PhysPT/parkour/<clip>_sam3d.json``. Run with the BVR environment::
+Writes ``../other/PhysPT/<dataset>/<clip>_sam3d.json``. Run with the BVR environment::
 
     uv run --no-sync python scripts/parkour_physpt_inputs.py
+    uv run --no-sync python scripts/parkour_physpt_inputs.py --dataset climb_wall_3
+
+``climb_wall_3`` is the instrumented climbing wall: the 68 single-camera trees under
+``peter/out_climb_wall_3_single`` whose three-camera reference exists. They are 30 fps and
+every frame is written, so ``video_inference.py`` needs ``--dt 0.0333333``.
 """
 from __future__ import annotations
 
+import argparse
 import json
 import pickle
 import sys
@@ -34,6 +40,22 @@ PARKOUR = (_REPO.parent / "data" / "Parkour-dataset" / "processed").resolve()
 PHYSPT = (_REPO.parent / "other" / "PhysPT").resolve()
 MODELS = _REPO.parent / "BetterHuman" / "models"
 NUM_SHARED_JOINTS = 22
+
+
+def clips_parkour() -> list[Path]:
+    """The Parkour trees carrying a SAM-3D fit."""
+    return sorted(d for d in (PARKOUR / "out").iterdir()
+                  if (d / "sam3d" / "smplx_params.npz").exists())
+
+
+def clips_climb_wall_3() -> list[Path]:
+    """The climb_wall_3 single-camera trees that have a three-camera reference."""
+    gt = _REPO / "peter" / "climb_wall_3_gt" / "human"
+    return [_REPO / "peter" / "out_climb_wall_3_single" / d.name
+            for d in sorted(gt.iterdir()) if d.is_dir() and not d.name.startswith("_")]
+
+
+DATASETS = {"parkour": clips_parkour, "climb_wall_3": clips_climb_wall_3}
 
 
 def rodrigues(axis_angle: np.ndarray) -> np.ndarray:
@@ -80,10 +102,17 @@ def fit_betas(base: np.ndarray, dirs: np.ndarray, target: np.ndarray) -> tuple[n
 
 
 def main() -> int:
-    out_dir = PHYSPT / "parkour"
+    parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
+    parser.add_argument("--dataset", default="parkour", choices=sorted(DATASETS))
+    parser.add_argument("--clips", default=None, help="comma-separated clip names (default: all)")
+    args = parser.parse_args()
+    out_dir = PHYSPT / args.dataset
     out_dir.mkdir(exist_ok=True)
     base, dirs = smpl_rest_joints()
-    clips = sorted(d for d in (PARKOUR / "out").iterdir() if (d / "sam3d" / "smplx_params.npz").exists())
+    clips = DATASETS[args.dataset]()
+    if args.clips:
+        wanted = set(args.clips.split(","))
+        clips = [c for c in clips if c.name in wanted]
     for clip in clips:
         body = np.load(clip / "sam3d" / "smplx_params.npz")
         orient = np.asarray(body["global_orient"][0], np.float64)               # (N, 3)

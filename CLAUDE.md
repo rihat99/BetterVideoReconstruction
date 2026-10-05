@@ -105,9 +105,35 @@ frozen-era sources when their files exist; the skeleton
 draws all 52 joints — fingers as small 0.30× spheres; the **`contact frames`**
 layer draws the 12 contact frames red/green from `contacts_1` with a thin
 connector to each parent joint and a 6 cm outward-normal arrow; a
-**`scene normals`** debug layer draws the per-point normal arrows). `--scenes`
+**`scene normals`** debug layer draws the per-point normal arrows; the **ground
+plane** draws as a translucent grey fill under grey half-metre cells). `--scenes`
 browses the ClimbingVideos DB; `--scenes athletics` the AthleticsVideos DB, with a
 **`sport`** dropdown in the sidebar that narrows the scene list to one sport.
+`--bedlam` browses the BEDLAM2 ground truth (`../data/BEDLAM2_our`, one feature
+stage `gt/`): a single **`ground truth`** body source, the cameras, the ground
+plane and gravity — the synthetic environments ship no geometry, so there are no
+scene points. Where `scripts/label_bedlam2.py` has run it also draws the **contact
+frames** red/green from `gt/contacts.npz` and drops the people `gt/bboxes.npz` found
+no usable frame for, and draws the solved forces from `gt/forces.npz` on that body
+the way it draws `kindyn_1`'s. Video pane on; all 18 076 scenes in the pager unless
+`[viewer].scene_ids`/`sample`/`limit` narrows them (a scene loads only when selected).
+
+**BEDLAM2 labels** — `scripts/label_bedlam2.py` measures what that pose ground truth
+implies but does not state, writing it beside it under `features/gt/`:
+`--step masks` rasterises the posed meshes into one 8-bit instance map per frame
+(`masks/NNNNNN.png`, `0` background and `p+1` per person, so occlusion between people
+is exact) plus `bboxes.npz` — unclipped boxes, mask areas and the per-frame `valid`
+flag (at most a third of the box outside the image, at least one visible pixel, nothing
+inside the near plane); `--step contacts` labels the 35 body contact frames against the
+floor from three measurements — height, stillness, and which way the skin faces
+(`contacts.npz`, the schema the viewer draws); `--step forces` solves the force on
+every labelled frame at the frozen ground-truth pose with `kindyn_1`'s force objective
+(`forces.npz`, the fields of `kindyn_1.npz`, so the viewer draws them; the RNEA is
+affine in the forces at a fixed pose, so a scene takes a second or two); `--step select`
+reports the scenes with no valid person and, with `--apply`, clears their
+`human_selected` in the DB with a rollback JSON. Nothing is deleted and `smplx.npz` is
+never rewritten — invalid people are flagged in `bboxes.npz` and the loaders skip them.
+Knobs in `[bedlam]` and `[bedlam_forces]`.
 
 ## Run
 
@@ -134,6 +160,8 @@ BetterVideoReconstruction/
 │   ├── pipeline.py                # LOCAL pipeline (subprocess orchestrator)
 │   ├── corpus.py                  # DATASET pipeline: any stage over the scene DB
 │   ├── scene_db.py                # scene-DB access + target selection
+│   ├── import_bedlam2.py          # BEDLAM2 → the ClimbingVideos layout (pose ground truth)
+│   ├── label_bedlam2.py           # BEDLAM2 masks / boxes / validity / ground contact
 │   ├── score_frame_contacts.py    # contact-frame scoring vs manual annotations
 │   ├── score_contacts.py          # per-joint-era scorer (frozen)
 │   ├── view_3d.py                 # viser viewer
@@ -143,6 +171,7 @@ BetterVideoReconstruction/
 │   ├── optim.py                   # the shared optimization engine (Problem/Phase/run_phases)
 │   ├── config.py                  # tiny TOML section helper
 │   ├── source.py / mask_io.py / precompute_runner.py
+│   ├── bedlam_masks.py / bedlam_contacts.py   # what label_bedlam2.py measures
 │   ├── adapters/                  # stateless model wrappers (sapiens2, vggt_omega, geocalib)
 │   ├── mhr_to_smplx/              # MHR → SMPL-X fitter (pip smplx)
 │   ├── smplx_robot/               # SMPL-X body loader + frozen-q trajectory finite-diff (model + inertia now come baked off the BetterHuman body)
