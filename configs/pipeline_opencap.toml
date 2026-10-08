@@ -1,4 +1,4 @@
-# Stage knobs for the OpenCap LabValidation runs (scripts/run_opencap.py).
+# Stage knobs for the OpenCap LabValidation runs (scripts/run_dataset.py --dataset opencap).
 # A copy of configs/pipeline_parkour.toml (retired 2026-10-08, see git history) — the OpenCap clips share the same
 # failure mode (ONE static iPhone, so VGGT depth confidence is uniformly low and
 # the chamfer-based pre-fit is banned; see the [scale] / [fuse] comments).

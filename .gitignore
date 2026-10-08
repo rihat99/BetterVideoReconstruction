@@ -225,6 +225,13 @@ temp/
 *.log
 agent_notes/**/vis/
 agent_notes/**/artifacts/
+# Data lives in ../data (tools/paths.py); these must never come back into the repo.
+/data/
+/data_2/
+/out/
+/out_2/
+/peter/
+/scratch/
 
 # Large model files / outputs
 *.ckpt

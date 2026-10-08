@@ -260,7 +260,7 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--clips", type=Path, default=CLIP_LIST)
     ap.add_argument("--run", default="method_physpt")
     ap.add_argument("--physpt-dir", type=Path, default=PHYSPT / "opencap",
-                    help="where run_opencap.py wrote <clip>_output.npz")
+                    help="where PhysPT's own run_opencap.py wrote <clip>_output.npz")
     args = ap.parse_args(argv)
 
     rows, missing = [], []

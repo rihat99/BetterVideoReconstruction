@@ -128,8 +128,8 @@ def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     ap.add_argument("--dataset", required=True, choices=sorted(FARMS))
     ap.add_argument("--clips", default=None,
-                    help="comma-separated clip names (default: all); the farm then lists "
-                         "only these in test_scenes.txt")
+                    help="comma-separated clip names (default: all); builds only these and "
+                         "leaves the farm's results/test_scenes.txt untouched")
     ap.add_argument("--skip-existing", action="store_true",
                     help="keep a clip's frames when its JPEGs are already there")
     ap.add_argument("--jobs", type=int, default=8, help="parallel frame decoders")
@@ -142,9 +142,12 @@ def main(argv: list[str] | None = None) -> int:
     if args.clips:
         wanted = set(args.clips.split(","))
         clips = [row for row in clips if row[0] in wanted]
-    (farm / "results").mkdir(parents=True, exist_ok=True)
-    (farm / "results" / "test_scenes.txt").write_text(
-        "".join(f"{name}\t{sub(name)}.mp4\t{fps}\n" for name, _, _, fps in clips))
+    scenes = farm / "results" / "test_scenes.txt"
+    if args.clips:
+        print(f"--clips given: {scenes} left untouched")
+    else:
+        scenes.parent.mkdir(parents=True, exist_ok=True)
+        scenes.write_text("".join(f"{name}\t{sub(name)}.mp4\t{fps}\n" for name, _, _, fps in clips))
     for name, *_ in clips:
         FEATURES[args.dataset](farm, name)
 

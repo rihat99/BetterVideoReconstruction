@@ -20,9 +20,9 @@ If already cloned without submodules:
 git submodule update --init --recursive
 ```
 
-The six submodules under `third_party/` are `sam3`, `sam-3d-body`,
-`sapiens2`, `MHR`, `vggt-omega`, and `geocalib` (no `sam-3d-objects` — this
-repo is human-only).
+The five submodules under `third_party/` are `sam3`, `sam-3d-body`,
+`sapiens2`, `MHR`, and `geocalib`; `vggt-omega` sits beside them as a vendored
+copy (no `sam-3d-objects` — this repo is human-only).
 
 ## 2. Create venv and install dependencies
 
@@ -49,8 +49,9 @@ refuses a lock with two indexes for one package. So both are commented out of
 `uv sync` re-syncs to the lock and silently uninstalls the two hand-installed
 libraries; if that happens, repeat the `uv pip install -e` line.
 
-Unlike the sibling repos, **VGGT-Omega is an editable submodule** here
-(not a git-pip dep), so `uv sync` installs it directly — no extra git step.
+Unlike the sibling repos, **VGGT-Omega is vendored** in `third_party/vggt-omega`
+(not a git-pip dep or a submodule; it is patched for chunked low-memory
+inference), so `uv sync` installs it editable directly — no extra git step.
 
 ### MHR model assets
 

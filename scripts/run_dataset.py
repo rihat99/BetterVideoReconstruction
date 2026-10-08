@@ -133,8 +133,25 @@ def owns_scene(variant: str | None) -> bool:
     return any(step in SUPPORT_STEPS for step in VARIANT_CHAINS.get(variant or "", []))
 
 
+def _farm_link(link: Path, target: Path, *, dry_run: bool = False) -> None:
+    """Point ``link`` at the relative ``target``; a link already pointing there is kept.
+
+    Anything else in the way is refused, never re-pointed: a farm laid out by other code
+    (e.g. a variant linking another variant's geometry) would otherwise be rewired under
+    the results already computed through it.
+    """
+    if link.is_symlink() and link.resolve() == (link.parent / target).resolve():
+        return
+    if link.is_symlink() or link.exists():
+        current = link.readlink() if link.is_symlink() else "a real file or directory"
+        raise SystemExit(f"[run_dataset] {link} already points to {current}, not {target}; "
+                         "move it aside to rebuild this farm")
+    if not dry_run:
+        link.symlink_to(target)
+
+
 def build_farm(clip_dir: Path, variant: str, *, synthetic_scene: bool = False,
-               inherit: tuple[str, ...] = ()) -> Path:
+               inherit: tuple[str, ...] = (), dry_run: bool = False) -> Path:
     """Create (or refresh) the clip's symlink farm; return the path to point the stages at.
 
     :param synthetic_scene: give the farm a real ``geometry/`` directory — the variant's
@@ -142,46 +159,50 @@ def build_farm(clip_dir: Path, variant: str, *, synthetic_scene: bool = False,
         instead of linking the whole directory.
     :param inherit: files of the normal run's ``human_optim/`` linked into the variant
         directory instead of being recomputed.
+    :param dry_run: only check that the existing links agree; write nothing.
     """
     out_dir, farm = clip_dir / f"human_optim_{variant}", clip_dir / f"_{variant}"
-    out_dir.mkdir(parents=True, exist_ok=True)
-    farm.mkdir(exist_ok=True)
+    if not dry_run:
+        out_dir.mkdir(parents=True, exist_ok=True)
+        farm.mkdir(exist_ok=True)
     for name in inherit:
-        (out_dir / name).unlink(missing_ok=True)
-        (out_dir / name).symlink_to(Path("..") / "human_optim" / name)
+        _farm_link(out_dir / name, Path("..") / "human_optim" / name, dry_run=dry_run)
     for name in (*FARM_LINKS, "human_optim"):
         if synthetic_scene and name == "geometry":
             continue
-        (farm / name).unlink(missing_ok=True)
-        (farm / name).symlink_to(Path("..") / (out_dir.name if name == "human_optim" else name))
+        _farm_link(farm / name, Path("..") / (out_dir.name if name == "human_optim" else name),
+                   dry_run=dry_run)
     if synthetic_scene:
         geometry = farm / "geometry"
         if geometry.is_symlink():
-            geometry.unlink()
-        geometry.mkdir(exist_ok=True)
+            raise SystemExit(f"[run_dataset] {geometry} is a link to {geometry.readlink()}, but "
+                             f"--variant {variant} owns its geometry/; move it aside to rebuild")
+        if not dry_run:
+            geometry.mkdir(exist_ok=True)
         for name in GEOMETRY_LINKS:
             if not (clip_dir / "geometry" / name).exists():
                 continue
-            (geometry / name).unlink(missing_ok=True)
-            (geometry / name).symlink_to(Path("..") / ".." / "geometry" / name)
+            _farm_link(geometry / name, Path("..") / ".." / "geometry" / name, dry_run=dry_run)
     return farm
 
 
-def build_view_farm(out_root: Path, variant: str) -> Path:
+def build_view_farm(out_root: Path, variant: str, *, dry_run: bool = False) -> Path:
     """``out/_view_<variant>/<clip>`` → each clip's ``_<variant>`` farm, for the viewer.
 
     ``scripts/view_3d.py`` wants a root of clip-named directories and finds each clip's
     footage through ``_batch_manifest.jsonl`` beside them, so the farms (all named
     ``_<variant>``) get a clip-named alias here and the manifest is linked in.
+    ``dry_run`` prints each link instead of writing it.
     """
     view = out_root / f"_view_{variant}"
-    view.mkdir(exist_ok=True)
-    for farm in sorted(out_root.glob(f"*/_{variant}")):
-        link = view / farm.parent.name
-        link.unlink(missing_ok=True)
-        link.symlink_to(Path("..") / farm.parent.name / farm.name)
-    (view / "_batch_manifest.jsonl").unlink(missing_ok=True)
-    (view / "_batch_manifest.jsonl").symlink_to(Path("..") / "_batch_manifest.jsonl")
+    if not dry_run:
+        view.mkdir(exist_ok=True)
+    links = [(view / farm.parent.name, Path("..") / farm.parent.name / farm.name)
+             for farm in sorted(out_root.glob(f"*/_{variant}"))]
+    for link, target in [*links, (view / "_batch_manifest.jsonl", Path("..") / "_batch_manifest.jsonl")]:
+        if dry_run:
+            print(f"[run_dataset] would link {link} -> {target}")
+        _farm_link(link, target, dry_run=dry_run)
     return view
 
 
@@ -388,7 +409,8 @@ def main(argv: list[str] | None = None) -> int:
     if args.view_farm:
         if not args.variant:
             raise SystemExit("[run_dataset] --view-farm needs --variant")
-        print(f"[run_dataset] viewer root: {build_view_farm(out_root, args.variant)}")
+        print(f"[run_dataset] viewer root: {build_view_farm(out_root, args.variant, dry_run=args.dry_run)}"
+              f"{'  (dry run)' if args.dry_run else ''}")
         return 0
     pipeline_config = _CONFIGS / dataset["pipeline_config"]
     human_config = _CONFIGS / (recipe.get("config", f"human_optimization_{args.variant}.toml")
@@ -443,6 +465,9 @@ def main(argv: list[str] | None = None) -> int:
     if len(places) != len(steps) or any(a >= b for a, b in zip(places, places[1:])):
         raise SystemExit(f"[run_dataset] --steps must be a subset of this run's chain, in its "
                          f"order {chain}; got {steps}")
+    for path in (human_config, pipeline_config):
+        if not path.exists():
+            raise SystemExit(f"[run_dataset] config not found: {path}")
 
     sweeps = [s for s in steps if s in MANIFEST_STEPS]
     # --skip-existing: a sweep every selected clip has finished is not launched at all.
@@ -491,10 +516,10 @@ def main(argv: list[str] | None = None) -> int:
         clip_dir = out_root / clip.name
         if args.variant:
             # The stages are pointed at the farm, so every path below — including the
-            # resume check — resolves through it into human_optim_<variant>/.
-            clip_dir = (clip_dir / f"_{args.variant}" if args.dry_run else
-                        build_farm(clip_dir, args.variant, synthetic_scene=owns_scene(args.variant),
-                                   inherit=tuple(recipe.get("inherit", ()))))
+            # resume check — resolves through it into human_optim_<variant>/. A dry run
+            # only checks the farm's existing links.
+            clip_dir = build_farm(clip_dir, args.variant, synthetic_scene=owns_scene(args.variant),
+                                  inherit=tuple(recipe.get("inherit", ())), dry_run=args.dry_run)
         # A synthetic-scene variant that has not built its scene yet would run the whole human
         # chain with the scene terms silently off (tools.human_optim.stages._load_scene prints
         # a note and carries on), which looks like a finished variant and is not one.

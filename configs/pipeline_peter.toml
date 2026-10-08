@@ -1,4 +1,4 @@
-# Stage knobs for the peter dataset runs (scripts/run_peter.py).
+# Stage knobs for the peter rig and Parkour runs (scripts/run_dataset.py, configs/datasets.toml).
 # A copy of configs/pipeline.toml with every model-stage overlay turned OFF —
 # the peter batch is 24+ clips and the mesh renders cost more than the fits do.
 # Keep the rest in sync with configs/pipeline.toml when that file is tuned.

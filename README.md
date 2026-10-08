@@ -54,28 +54,30 @@ Off the default chain, each runs on a single clip's `out/<stem>/` dir:
 | `human_optimization --stages kinematics_2` | optional annotation- or auto-contact-guided refinement (`human_optim/kinematic_2.npz`) |
 | `estimate_contacts` | contact-frame scene contact + its per-joint label confidence (`human_optim/contacts_1.npz` + overlay) |
 | `estimate_gravity_geocalib` | world-frame gravity (`geocalib/gravity.npz`) |
-| `human_optimization --stages dynamics` | force-only RNEA: per-contact-joint forces + torques (`human_optim/dynamics.npz`) |
+| `human_optimization --stages kindyn_1` | joint kinematics + dynamics: pose and per-contact-frame forces solved together (`human_optim/kindyn_1.npz`) |
 
-### Dataset pipeline (ClimbingVideos DB)
+### Dataset pipelines
 
 For the large scene database, `scripts/corpus.py` seeds SAM 3 from the per-scene
 YOLO track and sweeps every corpus stage over the batch (shared helpers in
 `scripts/scene_db.py`).
-`scripts/export_contact_dataset.py` packages the resulting frames, masks,
-intrinsics, and 22-joint contact labels into a self-contained train/test dataset.
 Manual annotations are not used by `kinematics_1` or by `estimate_contacts`.
-They are used by the optional manual `kinematics_2` mode, by the export's test
-labels, and offline to fit the label-confidence coefficients
+They are used by the optional manual `kinematics_2` mode and offline to fit the
+label-confidence coefficients
 (`scripts/calibrate_contact_confidence.py`, whose numbers then live in the TOML).
+
+For the measured datasets (LAAS Parkour, OpenCap LabValidation, the peter climbing
+rigs), `scripts/run_dataset.py --dataset <name>` runs the same chain over every clip;
+the datasets and their variant chains live in `configs/datasets.toml`.
 
 ## Quick start
 
 ```bash
 # See INSTALL.md for env + submodule + checkpoint setup first.
-uv run python scripts/pipeline.py --source ../data/examples/data/boulder_1.mp4 --save-dir ../data/examples/out/
+uv run --no-sync python scripts/pipeline.py --source ../data/examples/data/boulder_1.mp4 --save-dir ../data/examples/out/
 
 # Then view the fused scene + refined SMPL-X bodies in a viser web viewer:
-uv run python scripts/view_3d.py ../data/examples/out/boulder_1/
+uv run --no-sync python scripts/view_3d.py ../data/examples/out/boulder_1/
 ```
 
 Outputs land under `out/<stem>/` (per clip). Each stage is also runnable on its

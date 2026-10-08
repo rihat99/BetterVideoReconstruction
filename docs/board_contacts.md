@@ -106,10 +106,12 @@ uses to fan a stage over the scene database.
 ```bash
 # the whole tree, four GPUs
 for i in 1 2 3 4; do
-  CUDA_VISIBLE_DEVICES=$((i + 1)) uv run --no-sync python scripts/run_gt_contact.py --shard $i/4 &
+  CUDA_VISIBLE_DEVICES=$((i + 1)) uv run --no-sync python scripts/run_dataset.py \
+    --dataset climb_wall_3 --variant gt_contact --shard $i/4 &
 done
 # one clip, one step
-uv run --no-sync python scripts/run_gt_contact.py --clips a_00_01_part1 --steps contacts_1
+uv run --no-sync python scripts/run_dataset.py --dataset climb_wall_3 --variant gt_contact \
+  --clips a_00_01_part1 --steps contacts_1
 ```
 
 Every step is resumable: a step whose output already exists is skipped. A clip
@@ -151,7 +153,7 @@ chain is one command:
 
 ```bash
 uv run --no-sync python scripts/parkour_sensor_forces.py
-CUDA_VISIBLE_DEVICES=6 uv run --no-sync python scripts/run_gt_contact.py --dataset parkour
+CUDA_VISIBLE_DEVICES=6 uv run --no-sync python scripts/run_dataset.py --dataset parkour --variant gt_contact
 ```
 
 Two things about this rig are unlike the climbing boards. Both are written into

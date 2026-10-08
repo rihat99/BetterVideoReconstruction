@@ -24,10 +24,10 @@ optimization — keep them current when the code changes:
 - [`docs/quality.md`](docs/quality.md) — depth-smear downweighting, the scene-quality table, whole-body force confidence
 - [`docs/contact_points.md`](docs/contact_points.md) — investigation (not implemented): contact on mesh points instead of joints
 
-## Experimental branch — working principles
+## Working principles
 
-This is the `experimental` branch: try ideas, simplify the code. Commits land
-here (not `main`). Four rules guide every change:
+The repo lives on `main`: try ideas, simplify the code. Four rules guide every
+change:
 
 1. **Keep new features simple and clean.** Add the least code that does the job.
    If it starts sprawling, step back and find the smaller version.
@@ -41,27 +41,53 @@ here (not `main`). Four rules guide every change:
 
 ## Git workflow
 
-Commit directly to **`experimental`** — do **not** create branches (this
-overrides the default "branch before committing" behavior for this repo).
+Commit directly to **`main`** — do **not** create branches (this overrides the
+default "branch before committing" behavior for this repo).
+
+## Data layout
+
+Data lives outside the repo, in `../data` (set `BVR_DATA_ROOT` to move it; the
+resolver is `tools/paths.py`): `examples/{data,data_2,out,out_2}` (example clips +
+their results), `peter/` (the force-rig recordings and their out trees), and the
+datasets (`ClimbingVideos`, `LabValidation_withVideos`, `Parkour-dataset`,
+`BEDLAM2_our`, ...). Nothing data-like lives in the repo. `configs/corpus.toml`
+`data_root` is resolved against the repo root by `corpus.py`,
+`assign_dataset_split.py`, `calibrate_contact_confidence.py` and
+`score_test_contacts.py`, not via `BVR_DATA_ROOT`.
 
 ## Configs over CLIs
 
 **Every behavior knob lives in a TOML; CLIs take only targets** (what to
 process: `--source`, `--predictions`, `--save-dir`, stage/scene selection,
-`--config`). Three config files:
+`--config`). The config files:
 
 - [`configs/pipeline.toml`](configs/pipeline.toml) — one section per stage
   (`[sam3] [vggt] [sapiens] [scale] [fuse] [sam3d] [smplx] [gravity] [viewer]`),
   read by the stage CLIs themselves + `[steps]`/`[runtime]` for the orchestrator.
+- [`configs/pipeline_peter.toml`](configs/pipeline_peter.toml) — the static-camera
+  peter rigs and Parkour: one tracked person, overlays off, no pre-fit, chunked VGGT.
+- [`configs/pipeline_opencap.toml`](configs/pipeline_opencap.toml) — OpenCap
+  LabValidation: the peter copy with no frame subsampling and leaner VGGT chunks.
 - [`configs/human_optimization.toml`](configs/human_optimization.toml) — the four
   human-optimization stages: loss weights as length-4 columns
   `[root, kinematics_1, kinematics_2, kindyn_1]` (a term is off where its
   column is 0), per-stage `[stages.*]` options, shared knob sections, `[contacts]` +
   `[contact_force]`.
+- [`configs/human_optimization_peter.toml`](configs/human_optimization_peter.toml) —
+  the rigs, Parkour and OpenCap: contact frames on hands and feet only, kinematic
+  chamfer off; otherwise a copy of the general config.
+- [`configs/human_optimization_floorplane.toml`](configs/human_optimization_floorplane.toml) —
+  the OpenCap `floorplane` variant: feet + sit-bone frames, no hands, contact against
+  a synthetic support scene (`floor_gate_m = 0`).
+- [`configs/human_optimization_floorplane_edgev.toml`](configs/human_optimization_floorplane_edgev.toml) —
+  floorplane with the `kindyn_1` edge knobs on (`force_edge`, `edge_speed_m_s`).
 - [`configs/corpus.toml`](configs/corpus.toml) — ClimbingVideos DB fan-out (data
-  root, devices, QA/discard) + the corpus tools (`[export]`, `[score]`).
+  root, devices, QA/discard) + the corpus tools (`[split]`, `[score]`).
+- [`configs/datasets.toml`](configs/datasets.toml) — the measured datasets
+  `run_dataset.py` runs (roots, clips or rig views, out trees, their configs) and the
+  `[variants.*]` chains.
 
-## Two pipelines, shared stages
+## Three pipelines, shared stages
 
 - **Local, file-based** — `scripts/pipeline.py` runs the chain on a video/folder
   → `out/<stem>/` (one tree per clip). Resume with `--skip-existing`.
@@ -73,6 +99,15 @@ process: `--source`, `--predictions`, `--save-dir`, stage/scene selection,
   knobs come from the same pipeline/human-optimization TOMLs (written per shard
   with the corpus overrides), so the two pipelines cannot drift. Selection:
   `--scenes/--sample/--limit`, plus `--dry-run`. DB access in `scripts/scene_db.py`.
+- **Measured datasets** — `scripts/run_dataset.py --dataset <name>` runs the chain
+  over one dataset of `configs/datasets.toml` (`parkour`, `opencap`, and the peter
+  rigs `campus_board`, `climb_wall_2`, `climb_wall_3`) → `<out>/<clip>/`, the same
+  tree as `out/<stem>/`. The five model stages sweep every clip with one model load;
+  the rest run clip by clip, resumable, `--shard i/n` across GPUs, `--dry-run` to
+  print the commands. `--variant <name>` re-runs the human chain into
+  `<clip>/human_optim_<name>/` (`floorplane`: a synthetic support scene;
+  `gt_contact`: the boards' measured contacts); `--views a,b` reconstructs a rig clip
+  from several cameras at once.
 - `scripts/score_frame_contacts.py` scores the stage's contact-frame labels
   against manual annotations.
 
@@ -93,7 +128,9 @@ Default chain in order (rows 1–8; `human_optimization` runs its `root` +
 | 8 | `human_optimization.py` (`root`+`kinematics_1`) | `sam3d/smplx_params.npz`, `sapiens/pose.npz`, `geometry/` (init pose = `prefit.npz` when present) | `human_optim/kinematic_1.npz` (world-frame `q (P,N,211)` + per-contact-frame `drift_pre`/`auto_labels (P,N,12)`), optional overlay |
 | – | `human_optimization.py --stages kinematics_2` | `kinematic_1.npz` + `contacts_1.npz` frame labels (per-joint `../data/examples/data/<stem>.npz` via `[stages.kinematics_2].labels = "manual"`) | `human_optim/kinematic_2.npz` (contact-patch repair: each labelled contact frame pulled onto the wall seen at its own pixel; `drift_pre` forwarded) |
 | – | `estimate_contacts.py` | a refined body (`--bodies`), `geometry/`, its `drift_pre` | `human_optim/contacts_<tag>.npz` — **per-contact-frame** labels (schema 2 `frames-v4`: 12 frames, geometry-gated-by-solved-load ∪ the force witness (stillness decides only where the solve explained nothing), toe rule = whichever side the solve loaded, debounce + hysteresis; see `docs/force_contacts.md`) |
+| – | `measure_contacts_boards.py` | a refined body (`--bodies`), `human_optim/sensor_forces.npz`, `geometry/` | `human_optim/contacts_<tag>.npz` — the same schema, labels **measured** by a rig's force boards instead of estimated (`docs/board_contacts.md`) |
 | – | `estimate_gravity_geocalib.py` | frames, `geometry/transform.npz`, `geometry/scene.npz` | `geocalib/gravity.npz` (world-frame down + `source`: reliable GeoCalib > gated ground-plane fit > camera-down fallback; the accepted floor plane is saved for the viewer) |
+| – | `build_support_scene.py` | `geocalib/gravity.npz` (+ a body for the plateaus) | `geometry/scene.npz` REPLACED by a synthetic support scene: the floor plane as a lattice + one horizontal patch per surface the body rests on (the `floorplane` variant, written into its farm) |
 | – | `human_optimization.py --stages kindyn_1` | a refined body + its contacts (default `kinematic_2.npz` + `contacts_2.npz`; `[stages.kindyn_1].bodies`), gravity | `human_optim/kindyn_1.npz` (pose AND per-contact-frame forces solved together; each force in a 45° cone about that frame's contact normal) |
 
 Viewer: `scripts/view_3d.py out/<stem>/` (viser: fused scene + cameras + human
@@ -106,7 +143,8 @@ layer draws the 12 contact frames red/green from `contacts_1` with a thin
 connector to each parent joint and a 6 cm outward-normal arrow; a
 **`scene normals`** debug layer draws the per-point normal arrows; the **ground
 plane** draws as a translucent grey fill under grey half-metre cells). `--scenes`
-browses the ClimbingVideos DB; `--scenes athletics` the AthleticsVideos DB, with a
+browses the ClimbingVideos DB; `--scenes athletics` the AthleticsVideos DB (not
+present on this machine), with a
 **`sport`** dropdown in the sidebar that narrows the scene list to one sport.
 `--bedlam` browses the BEDLAM2 ground truth (`../data/BEDLAM2_our`, one feature
 stage `gt/`): a single **`ground truth`** body source, the cameras, the ground
@@ -138,14 +176,16 @@ Knobs in `[bedlam]` and `[bedlam_forces]`.
 
 ```bash
 # Whole chain on one clip (knobs in configs/pipeline.toml).
-uv run python scripts/pipeline.py --source video.mp4 --save-dir out/
+uv run --no-sync python scripts/pipeline.py --source ../data/examples/data/boulder_1.mp4 --save-dir ../data/examples/out/
 # Batch of clips; resume.
-uv run python scripts/pipeline.py --source clips/ --save-dir out/ --skip-existing
+uv run --no-sync python scripts/pipeline.py --source ../data/examples/data/ --save-dir ../data/examples/out/ --skip-existing
 # One stage standalone (all stages follow this shape).
-uv run python scripts/stages/estimate_scale.py --predictions out/video/
-uv run python scripts/stages/human_optimization.py --source video.mp4 --predictions out/video/
+uv run --no-sync python scripts/stages/estimate_scale.py --predictions ../data/examples/out/boulder_1/
+uv run --no-sync python scripts/stages/human_optimization.py --source ../data/examples/data/boulder_1.mp4 --predictions ../data/examples/out/boulder_1/
 # Corpus: any stage over the scene DB.
-uv run python scripts/corpus.py --stage geometry --limit 10 --dry-run
+uv run --no-sync python scripts/corpus.py --stage geometry --limit 10 --dry-run
+# A measured dataset (configs/datasets.toml); --dry-run prints the commands, runs nothing.
+uv run --no-sync python scripts/run_dataset.py --dataset climb_wall_3 --variant gt_contact --dry-run
 ```
 
 ## Project layout
@@ -154,29 +194,43 @@ uv run python scripts/corpus.py --stage geometry --limit 10 --dry-run
 BetterVideoReconstruction/
 ├── CLAUDE.md / README.md / INSTALL.md
 ├── docs/                          # the algorithm docs (see top of this file)
-├── configs/                       # pipeline.toml, human_optimization.toml, corpus.toml
+├── configs/                       # the TOMLs listed under "Configs over CLIs"
 ├── scripts/
 │   ├── pipeline.py                # LOCAL pipeline (subprocess orchestrator)
 │   ├── corpus.py                  # DATASET pipeline: any stage over the scene DB
+│   ├── run_dataset.py             # MEASURED datasets: the chain + variants per configs/datasets.toml
 │   ├── scene_db.py                # scene-DB access + target selection
+│   ├── assign_dataset_split.py    # train/test split for newly curated scenes
 │   ├── import_bedlam2.py          # BEDLAM2 → the ClimbingVideos layout (pose ground truth)
+│   ├── import_opencap.py / import_parkour.py   # OpenCap LabValidation / LAAS Parkour → processed/<clip>/
 │   ├── label_bedlam2.py           # BEDLAM2 masks / boxes / validity / ground contact
+│   ├── label_amass.py             # AMASS SMPL-X motions: contacts + forces by the BEDLAM2 readout
+│   ├── peter_sensor_forces.py / parkour_sensor_forces.py   # rig force logs → sensor_forces.npz
+│   ├── opencap_sensor_forces.py   # OpenCap force plates → our world frame
+│   ├── opencap_plates.py / sync_opencap.py / export_opencap_mot.py   # OpenCap plate algebra, video sync, .mot export
+│   ├── calibrate_contact_confidence.py / recompute_contact_confidence.py   # fit / rewrite the label confidence
 │   ├── score_frame_contacts.py    # contact-frame scoring vs manual annotations
 │   ├── view_3d.py                 # viser viewer
 │   ├── _pym_preload.py            # libstdc++ LD_PRELOAD shim for pymomentum
-│   └── stages/                    # the per-stage CLIs in the table above
+│   ├── stages/                    # the per-stage CLIs in the table above
+│   ├── diagnostics/               # scorers, comparisons, force overlays (shared helpers in _common.py)
+│   ├── methods/                   # inputs for and outputs of the published baselines (Li et al., PhysPT, ...)
+│   └── peter_gt/                  # the climb_wall_3 three-camera ground-truth chain
 ├── tools/                         # importable library
 │   ├── optim.py                   # the shared optimization engine (Problem/Phase/run_phases)
+│   ├── paths.py                   # where the data lives (DATA_ROOT, EXAMPLES, PETER, ...)
+│   ├── body.py                    # the one place a human body is built
 │   ├── config.py                  # tiny TOML section helper
+│   ├── npz_io.py                  # atomic .npz writes
 │   ├── source.py / mask_io.py / precompute_runner.py
-│   ├── bedlam_masks.py / bedlam_contacts.py   # what label_bedlam2.py measures
+│   ├── bedlam_masks.py / bedlam_contacts.py / bedlam_forces.py   # what label_bedlam2.py measures
 │   ├── adapters/                  # stateless model wrappers (sapiens2, vggt_omega, geocalib)
 │   ├── mhr_to_smplx/              # MHR → SMPL-X fitter (pip smplx)
 │   ├── smplx_robot/               # SMPL-X body loader + frozen-q trajectory finite-diff (model + inertia now come baked off the BetterHuman body)
 │   ├── human_optim/               # the stage machinery: losses/optimizer/stages/prefit/contacts/confidence/…
 │   ├── geometry/                  # depth clean + backproject + voxel + normals + human scale
 │   └── viewer/                    # view_3d internals
-└── third_party/                   # submodules: sam3, sam-3d-body, sapiens2, MHR, vggt-omega, geocalib
+└── third_party/                   # submodules sam3, sam-3d-body, sapiens2, MHR, geocalib; vendored vggt-omega
 ```
 
 ## Conventions & deliberate choices

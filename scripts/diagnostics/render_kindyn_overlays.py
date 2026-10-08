@@ -4,7 +4,7 @@
 two external models. This is the same picture for **our** reconstruction: same discs,
 same arrows, same five stacked plots, same moving cursor.
 
-Four rigs are covered, and they measure different things:
+Five output trees are covered, and their rigs measure different things:
 
 ``peter/out_campus_board_single/`` — the campus board, where each limb pulls on its
 own single-axis force plate. So every limb can be compared on its own, and the
@@ -47,13 +47,11 @@ limb's inner ring goes grey.
 
 What is on screen, per limb:
 
-*A disc* at the limb's joint — the wrist for a hand, the foot for a foot. On the
-campus board it is a two-ring disc: **inner** is the force plate, **outer** is what
-``kindyn_1`` used, so one colour means the two agree and a two-tone disc is a
-disagreement. Red is contact, green is free, grey means that limb had no plate. The
-wall has no per-limb truth to show, so there it is a single white-rimmed disc holding
-``kindyn_1``'s label alone — deliberately a different shape, so a reader never
-mistakes a model-only overlay for perfect agreement.
+*A disc* at the limb's joint — the wrist for a hand, the foot for a foot. It is a
+two-ring disc: **inner** is the measured contact (the campus plate's label; on the
+walls and parkour, the limb's own sensor above 50 N), **outer** is what ``kindyn_1``
+used, so one colour means the two agree and a two-tone disc is a disagreement. Red is
+contact, green is free, grey means that limb had no measurement.
 
 *An arrow* along the contact force the solve put on the limb — everything it pushes
 through the hand's points summed into one vector, likewise for each foot — drawn in
@@ -75,13 +73,13 @@ behind it on its 1000 Hz clock. That is the only quantity a single-axis plate an
 so there a foot's inner ring is grey, its panel is shaded, and the total adds up the
 hands alone.
 
-On the wall every panel is instead the plain **size** of a force. Only the top panel
-can be compared, and it holds two sizes: the wall's measured total in black against
-the size of the solve's total. Both are the length of a vector sum, so the top panel
-is deliberately *not* the four panels below it added up. The four limb panels are
-shaded, because the wall never measured a single limb. Each clip's ratio and median
-angle between the two totals is printed to the console, so a trial whose cells were
-never zeroed gives itself away instead of looking like a bad reconstruction.
+On the walls and parkour every panel is instead the plain **size** of a force: the
+measured total in black against the size of the solve's total on top, each limb's own
+sensor against the solve's limb force below. Both totals are the length of a vector
+sum, so the top panel is deliberately *not* the four panels below it added up. Each
+clip's ratio and median angle between the two totals is printed to the console (the
+ratio alone on parkour), so a trial whose sensors were never zeroed gives itself away
+instead of looking like a bad reconstruction.
 
 Writes ``<clip>/human_optim/kindyn_forces_overlay.mp4``.
 
@@ -91,7 +89,7 @@ Naming an optimization directory instead of a clip draws that run: pass
 
 Usage:
     uv run --no-sync python scripts/diagnostics/render_kindyn_overlays.py
-    uv run --no-sync python scripts/diagnostics/render_kindyn_overlays.py 07_peter_climbing trial_10
+    uv run --no-sync python scripts/diagnostics/render_kindyn_overlays.py 07_peter_climbing trial_01_part1
     uv run --no-sync python scripts/diagnostics/render_kindyn_overlays.py \
         ../data/peter/out_climb_wall_3_single/a_00_01_part1/human_optim_gt_contact
 """
@@ -226,9 +224,9 @@ def campus_clip(name: str) -> Clip:
 def wall2_clip(name: str) -> Clip:
     """Describe a climb_wall_2 trial — the demonstrator rig, one board per limb.
 
-    Unlike the first wall, a channel here IS that limb's contact force, so the limb
-    panels compare directly, and per-limb contact truth comes from the measured force
-    the same way the campus plates' labels did: bigger than ``BOARD_CONTACT_N``.
+    A channel here IS that limb's contact force, so the limb panels compare directly,
+    and per-limb contact truth comes from the measured force the same way the campus
+    plates' labels did: bigger than ``BOARD_CONTACT_N``.
     """
     sensor = np.load(WALL2_ROOT / name / "human_optim" / "sensor_forces.npz")
     channels = [str(limb) for limb in sensor["limbs"]]
