@@ -36,7 +36,12 @@ import smplx
 import torch
 
 _REPO = Path(__file__).resolve().parents[1]
-PARKOUR = (_REPO.parent / "data" / "Parkour-dataset" / "processed").resolve()
+if str(_REPO) not in sys.path:
+    sys.path.insert(0, str(_REPO))
+
+from tools import paths  # noqa: E402
+
+PARKOUR = (paths.PARKOUR / "processed").resolve()
 PHYSPT = (_REPO.parent / "other" / "PhysPT").resolve()
 MODELS = _REPO.parent / "BetterHuman" / "models"
 NUM_SHARED_JOINTS = 22
@@ -50,8 +55,8 @@ def clips_parkour() -> list[Path]:
 
 def clips_climb_wall_3() -> list[Path]:
     """The climb_wall_3 single-camera trees that have a three-camera reference."""
-    gt = _REPO / "peter" / "climb_wall_3_gt" / "human"
-    return [_REPO / "peter" / "out_climb_wall_3_single" / d.name
+    gt = paths.PETER / "climb_wall_3_gt" / "human"
+    return [paths.PETER / "out_climb_wall_3_single" / d.name
             for d in sorted(gt.iterdir()) if d.is_dir() and not d.name.startswith("_")]
 
 

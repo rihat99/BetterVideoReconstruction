@@ -39,16 +39,19 @@ from pathlib import Path
 import numpy as np
 
 _REPO = Path(__file__).resolve().parents[2]
+if str(_REPO) not in sys.path:
+    sys.path.insert(0, str(_REPO))
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from score_baseline_pose import (  # noqa: E402
     METRICS, N_BODY, _cell, camera_metrics, jitter, model_params, pose, to_camera, world_metrics,
 )
 from score_prediction_contacts import _render_table  # noqa: E402
+from tools.paths import PETER  # noqa: E402
 
-GT_ROOT = _REPO / "peter" / "climb_wall_3_gt" / "human"
-OURS_ROOT = _REPO / "peter" / "out_climb_wall_3_single"
-OTHERS = _REPO / "peter" / "climb_wall_3_gt" / "others"
+GT_ROOT = PETER / "climb_wall_3_gt" / "human"
+OURS_ROOT = PETER / "out_climb_wall_3_single"
+OTHERS = PETER / "climb_wall_3_gt" / "others"
 POSE_MODELS = {"gvhmr": "GVHMR", "prompthmr": "PromptHMR"}
 #: Our own runs on this tree: row key -> (label, the run directory under ``<clip>/``).
 #: They share every stage but the last, so the rows price one change each — measured

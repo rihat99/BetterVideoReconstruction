@@ -100,7 +100,7 @@ Usage:
     uv run --no-sync python scripts/diagnostics/render_kindyn_overlays.py
     uv run --no-sync python scripts/diagnostics/render_kindyn_overlays.py 07_peter_climbing trial_10
     uv run --no-sync python scripts/diagnostics/render_kindyn_overlays.py \
-        peter/out_climb_wall_3_single/a_00_01_part1/human_optim_gt_contact
+        ../data/peter/out_climb_wall_3_single/a_00_01_part1/human_optim_gt_contact
 """
 
 from __future__ import annotations
@@ -117,19 +117,23 @@ from tqdm import tqdm
 _DIAGNOSTICS = Path(__file__).resolve().parent
 if str(_DIAGNOSTICS) not in sys.path:
     sys.path.insert(0, str(_DIAGNOSTICS))
+_REPO_ROOT = _DIAGNOSTICS.parents[1]
+if str(_REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(_REPO_ROOT))
 
 from render_prediction_overlays import (  # noqa: E402
     CAMPUS_ROOT, LIMBS, PANEL_SIZE, PETER, PLATE_ROOT, WALL_ROOT, WALL_SOURCE,
     _draw_contact_discs, _fit, _force_panel, _wall_panel, _wired,
 )
 from score_pipeline_contacts import _limb_load, _limb_members  # noqa: E402
+from tools.paths import PARKOUR  # noqa: E402
 
 WALL2_SOURCE = PETER / "climb_wall_2"
 WALL2_ROOT = PETER / "out_climb_wall_2_single"
 WALL3_SOURCE = PETER / "climb_wall_3"
 WALL3_ROOT = PETER / "out_climb_wall_3_single"
 GT_ROOT = PETER / "climb_wall_3_gt" / "human"
-PARKOUR_SOURCE = Path("/home/rikhat.akizhanov/better/data/Parkour-dataset/processed")
+PARKOUR_SOURCE = PARKOUR / "processed"
 PARKOUR_ROOT = PARKOUR_SOURCE / "out"
 
 METRES_PER_NEWTON = 1.2e-3  # the arrow length the viewer uses for a dynamics force
@@ -466,7 +470,7 @@ def render(clip: Clip) -> Path:
     return path
 
 
-TREES = [(CAMPUS_ROOT, campus_clip), (WALL_ROOT, wall_clip), (WALL2_ROOT, wall2_clip),
+TREES = [(CAMPUS_ROOT, campus_clip), (WALL2_ROOT, wall2_clip),
          (WALL3_ROOT, wall3_clip), (GT_ROOT, gt_clip), (PARKOUR_ROOT, parkour_clip)]
 
 

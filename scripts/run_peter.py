@@ -65,7 +65,10 @@ from pathlib import Path
 
 _REPO_ROOT = Path(__file__).resolve().parents[1]
 _STAGES_DIR = _REPO_ROOT / "scripts" / "stages"
-_PETER = _REPO_ROOT / "peter"
+if str(_REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(_REPO_ROOT))
+
+from tools.paths import PETER as _PETER  # noqa: E402
 
 SINGLE_VIEW = "cam_left"   # the view the out_<dataset>_single tree was built from
 

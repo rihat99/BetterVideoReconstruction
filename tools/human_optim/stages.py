@@ -25,6 +25,7 @@ import torch
 
 from tools.geometry.normals import load_scene_cloud
 from tools.npz_io import atomic_savez
+from tools.paths import EXAMPLES
 from tools.smplx_robot import load_smplx_mid
 from tools.smplx_robot.vertex_weights import geodesic_endeffector_weights
 
@@ -776,10 +777,10 @@ def resolve_annotation_path(source, annotations) -> Path:
     cand = src.with_suffix(".npz")
     if cand.exists():
         return cand
-    legacy = _REPO_ROOT / "data" / f"{src.stem}.npz"
+    legacy = EXAMPLES / "data" / f"{src.stem}.npz"
     if legacy.exists():
         return legacy
-    return _REPO_ROOT / "data_2" / f"{src.stem}.npz"
+    return EXAMPLES / "data_2" / f"{src.stem}.npz"
 
 
 def run_kinematics_2(source, pred: Path, cfg: HumanOptimConfig, device: str, *,

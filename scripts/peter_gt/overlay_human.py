@@ -29,8 +29,9 @@ for _p in (str(_REPO.parent / "better_human" / "src"), str(_REPO)):
 
 from tools.body import load_body  # noqa: E402
 from tools.human_optim.qmath import normalize_q  # noqa: E402
+from tools.paths import PETER  # noqa: E402
 
-HUMAN_ROOT = _REPO / "peter/climb_wall_3_gt/human"
+HUMAN_ROOT = PETER / "climb_wall_3_gt/human"
 CONFIG = Path(__file__).resolve().parent / "human_gt.toml"
 VIEW_NAMES = ["cam_left", "cam_right", "cam_3"]
 TILE_H = 720

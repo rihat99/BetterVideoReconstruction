@@ -56,6 +56,7 @@ for _p in (_REPO, _REPO / "scripts", Path(__file__).resolve().parent):
 
 from score_frame_contacts import _FOLD_10  # noqa: E402
 from score_prediction_contacts import _rates, _render_table  # noqa: E402
+from tools.paths import PETER  # noqa: E402
 
 
 def _fmt(value: float | None) -> str:
@@ -66,9 +67,9 @@ def _fmt(value: float | None) -> str:
     text = f"{value:.3f}"
     return text[1:] if text.startswith("0.") else text
 
-GT_ROOT = _REPO / "peter" / "climb_wall_3_gt" / "human"
-OURS_ROOT = _REPO / "peter" / "out_climb_wall_3_single"
-OTHERS = _REPO / "peter" / "climb_wall_3_gt" / "others"
+GT_ROOT = PETER / "climb_wall_3_gt" / "human"
+OURS_ROOT = PETER / "out_climb_wall_3_single"
+OTHERS = PETER / "climb_wall_3_gt" / "others"
 SEGMENTATION = _REPO.parent / "other" / "deco" / "data"
 BODY_MODELS = _REPO.parent / "BetterHuman" / "models"
 

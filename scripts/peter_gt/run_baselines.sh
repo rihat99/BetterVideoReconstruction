@@ -5,14 +5,15 @@
 #
 #   run_baselines.sh <deco|bstro|gvhmr|prompthmr|interactvlm> <gpu> [extra args...]
 #
-# Predictions land in peter/climb_wall_3_gt/others/<model>/<clip>/.
+# Predictions land in ${BVR_DATA_ROOT:-../data}/peter/climb_wall_3_gt/others/<model>/<clip>/.
 set -euo pipefail
 
 MODEL="$1"; GPU="$2"; shift 2
 REPO=/home/rikhat.akizhanov/better/BetterVideoReconstruction
 OTHER=/home/rikhat.akizhanov/better/other
-FARM="$REPO/peter/climb_wall_3_gt/others/_farm"
-OUT="$REPO/peter/climb_wall_3_gt/others"
+PETER="${BVR_DATA_ROOT:-$REPO/../data}/peter"
+FARM="$PETER/climb_wall_3_gt/others/_farm"
+OUT="$PETER/climb_wall_3_gt/others"
 
 source /data3/rikhat.akizhanov/miniconda3/etc/profile.d/conda.sh
 export CUDA_VISIBLE_DEVICES="$GPU"

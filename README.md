@@ -72,10 +72,10 @@ labels, and offline to fit the label-confidence coefficients
 
 ```bash
 # See INSTALL.md for env + submodule + checkpoint setup first.
-uv run python scripts/pipeline.py --source data/boulder_1.mp4 --save-dir out/
+uv run python scripts/pipeline.py --source ../data/examples/data/boulder_1.mp4 --save-dir ../data/examples/out/
 
 # Then view the fused scene + refined SMPL-X bodies in a viser web viewer:
-uv run python scripts/view_3d.py out/boulder_1/
+uv run python scripts/view_3d.py ../data/examples/out/boulder_1/
 ```
 
 Outputs land under `out/<stem>/` (per clip). Each stage is also runnable on its

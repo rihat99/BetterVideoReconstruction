@@ -42,8 +42,9 @@ sys.path.insert(0, str(_REPO))
 
 from tools.geometry.backproject import backproject  # noqa: E402
 from tools.geometry.intrinsics import denormalize_K  # noqa: E402
+from tools.paths import PETER  # noqa: E402
 
-GT_ROOT = _REPO / "peter/climb_wall_3_gt/scene"
+GT_ROOT = PETER / "climb_wall_3_gt/scene"
 STAGE = _REPO / "scripts/stages/estimate_camera_vggt.py"
 CONFIG = _REPO / "scripts/peter_gt/vggt_gt.toml"
 SETS = ["00", "16", "16b", "16c", "32"]

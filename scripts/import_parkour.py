@@ -54,7 +54,12 @@ from pathlib import Path
 import numpy as np
 
 _REPO_ROOT = Path(__file__).resolve().parents[1]
-SRC = Path("/home/rikhat.akizhanov/better/data/Parkour-dataset")
+if str(_REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(_REPO_ROOT))
+
+from tools.paths import PARKOUR  # noqa: E402
+
+SRC = PARKOUR
 DST = SRC / "processed"
 
 # Parkour stores (l_ankle, r_ankle, l_fingers, r_fingers); we keep the peter

@@ -27,6 +27,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts"))
 from export_opencap_mot import COLUMNS, plate_triple, write_mot  # noqa: E402
 from opencap_plates import LOADED_N, cop_free_torque, origin_moment  # noqa: E402
 from opencap_sensor_forces import main as sensor_forces_main  # noqa: E402
+from tools.paths import LABVALIDATION  # noqa: E402
 
 #: A plate triple that has no COP does not need a fallback point; pass an unused one.
 NO_FALLBACK = None
@@ -39,7 +40,7 @@ def triple(force: np.ndarray, moment: np.ndarray, y0: float = 0.006, fallback=No
     return plate_triple(force, moment, fallback, y0)
 
 #: The dataset the round-trip reads; the synthetic checks run without it.
-LAB_VALIDATION = Path("/home/rikhat.akizhanov/better/data/LabValidation_withVideos")
+LAB_VALIDATION = LABVALIDATION
 
 FLOOR_Y = 0.006
 

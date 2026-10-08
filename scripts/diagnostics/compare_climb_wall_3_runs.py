@@ -38,7 +38,7 @@ Sixteen columns in three families, all pooled over the 68 clips:
   this table says 11.6° / 2.9 pp. Neither is wrong and they are not comparable; the strict
   pair is printed under the table and kept in the JSON under ``extra``.
 
-Writes ``benchmark_tables/climb_wall_3_runs_{table.png,metrics.json}``.
+Writes ``../data/peter/benchmark_tables/climb_wall_3_runs_{table.png,metrics.json}``.
 
 Usage::
 
@@ -62,9 +62,10 @@ from compare_gt_contact import CONTACT_N, force_metrics, limb_forces, limb_label
 from score_gt_contacts import GT_ROOT, OURS_ROOT, _count, _rates_balanced, clips, ours, truth  # noqa: E402
 from score_prediction_contacts import _render_table  # noqa: E402
 from tools.human_optim.boards import LIMBS  # noqa: E402
+from tools.paths import PETER  # noqa: E402
 
-POSE_JSON = _REPO / "peter" / "climb_wall_3_gt" / "others" / "gt_pose_metrics.json"
-OUT = _REPO / "benchmark_tables"
+POSE_JSON = PETER / "climb_wall_3_gt" / "others" / "gt_pose_metrics.json"
+OUT = PETER / "benchmark_tables"
 
 #: (row label, the run directory under ``<clip>/``, the key ``score_gt_pose`` files it under).
 RUNS = (("Full optimization", "human_optim", "ours/kindyn_1"),

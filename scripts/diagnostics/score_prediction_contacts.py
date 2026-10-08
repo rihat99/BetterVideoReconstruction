@@ -31,6 +31,7 @@ Usage:
 from __future__ import annotations
 
 import json
+import sys
 from pathlib import Path
 
 import matplotlib
@@ -39,7 +40,12 @@ import numpy as np
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt  # noqa: E402
 
-PETER = Path(__file__).resolve().parents[2] / "peter"
+_REPO_ROOT = Path(__file__).resolve().parents[2]
+if str(_REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(_REPO_ROOT))
+
+from tools.paths import PETER  # noqa: E402
+
 GT_ROOT = PETER / "campus_board"
 PRED_ROOT = PETER / "out_campus_board_single"
 RESULTS = PRED_ROOT / "results"

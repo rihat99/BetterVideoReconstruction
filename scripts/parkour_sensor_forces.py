@@ -36,9 +36,10 @@ _REPO_ROOT = Path(__file__).resolve().parents[1]
 if str(_REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(_REPO_ROOT))
 
+from tools import paths  # noqa: E402
 from tools.human_optim.boards import LIMBS  # noqa: E402
 
-PARKOUR = Path("/home/rikhat.akizhanov/better/data/Parkour-dataset/processed")
+PARKOUR = paths.PARKOUR / "processed"
 
 
 def main(argv: list[str] | None = None) -> int:

@@ -53,8 +53,9 @@ for _p in (_REPO_ROOT, _REPO_ROOT / "scripts", Path(__file__).resolve().parent):
 
 from score_frame_contacts import _FOLD_14, metrics as _metrics  # noqa: E402
 from score_prediction_contacts import _fmt, _render_table  # noqa: E402
+from tools.paths import CLIMBING  # noqa: E402
 
-DATA_ROOT = (_REPO_ROOT.parent / "data" / "ClimbingVideos").resolve()
+DATA_ROOT = CLIMBING.resolve()
 FEATURES, RESULTS = DATA_ROOT / "features", DATA_ROOT / "results"
 SEGMENTATION = _REPO_ROOT.parent / "other" / "deco" / "data"  # smpl(x)_vert_segmentation.json
 BODY_MODELS = _REPO_ROOT.parent / "BetterHuman" / "models"

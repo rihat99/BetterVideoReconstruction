@@ -67,11 +67,11 @@ if str(_DIAGNOSTICS) not in sys.path:
 
 from render_kindyn_overlays import (  # noqa: E402
     BOARD_CONTACT_N, MEASURED_RGB, SOLVE_RGB, WALL2_ROOT, WALL3_ROOT, Clip, campus_clip,
-    wall2_clip, wall3_clip, wall_clip, _draw_force_arrows as _draw_limb_arrows, _draw_legend,
+    wall2_clip, wall3_clip, _draw_force_arrows as _draw_limb_arrows, _draw_legend,
     _project,
 )
 from render_prediction_overlays import (  # noqa: E402
-    CAMPUS_ROOT, LIMB_RGB, PANEL_SIZE, WALL_ROOT, _draw_caption, _draw_contact_discs,
+    CAMPUS_ROOT, LIMB_RGB, PANEL_SIZE, _draw_caption, _draw_contact_discs,
     _fit, _force_panel, _wall_panel,
 )
 
@@ -291,8 +291,7 @@ def render(clip: Clip, run: str | None = None) -> Path:
     return path
 
 
-TREES = [(CAMPUS_ROOT, campus_clip), (WALL_ROOT, wall_clip), (WALL2_ROOT, wall2_clip),
-         (WALL3_ROOT, wall3_clip)]
+TREES = [(CAMPUS_ROOT, campus_clip), (WALL2_ROOT, wall2_clip), (WALL3_ROOT, wall3_clip)]
 
 
 def _targets(names: list[str], run: str | None) -> list[Clip]:

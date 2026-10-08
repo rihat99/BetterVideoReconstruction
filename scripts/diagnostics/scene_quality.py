@@ -25,7 +25,7 @@ user-labelled operating point, 2026-08-24). The metric columns:
 
 Run::
 
-    uv run python scripts/diagnostics/scene_quality.py --predictions out_2/ out/
+    uv run python scripts/diagnostics/scene_quality.py --predictions ../data/examples/out_2/ ../data/examples/out/
 """
 
 from __future__ import annotations

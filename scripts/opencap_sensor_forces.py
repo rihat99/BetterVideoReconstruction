@@ -61,9 +61,10 @@ if str(_REPO_ROOT) not in sys.path:
 
 from tools.human_optim.boards import LIMBS  # noqa: E402
 from tools.npz_io import atomic_savez  # noqa: E402
+from tools.paths import LABVALIDATION  # noqa: E402
 
 #: Where ``scripts/import_opencap.py`` writes the clips and the pipeline writes its runs.
-PROCESSED = Path("/home/rikhat.akizhanov/better/data/LabValidation_withVideos/processed")
+PROCESSED = LABVALIDATION / "processed"
 
 #: Mocap up axis — the OpenSim ground frame is Y up, so this is where "down" lives.
 MOCAP_DOWN = np.array([0.0, -1.0, 0.0])

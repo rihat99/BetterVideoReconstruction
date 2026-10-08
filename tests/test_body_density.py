@@ -11,7 +11,7 @@ from tools.body import load_body
 _DEMPSTER = {"pelvis": 1010.0, "left_hip": 1050.0, "spine2": 920.0, "head": 1110.0,
              "right_elbow": 1130.0, "left_wrist": 1160.0}
 _FINGER_KEYWORDS = ("index", "middle", "ring", "pinky", "thumb")
-# One real clip's fitted shape (out_2/0Zgts-jmjR4_0006), so the check is off-template.
+# One real clip's fitted shape (../data/examples/out_2/0Zgts-jmjR4_0006), so the check is off-template.
 _BETAS = torch.tensor([[-0.73, 0.03, -0.83, -0.06, 0.27, -0.78, -0.60, 0.31, -0.35, -1.40]])
 
 

@@ -54,6 +54,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import sys
 import warnings
 from pathlib import Path
 
@@ -63,8 +64,13 @@ import torch
 from smplx.joint_names import JOINT_NAMES
 
 _REPO = Path(__file__).resolve().parents[2]
-PROCESSED = (_REPO.parent / "data" / "LabValidation_withVideos" / "processed").resolve()
-OUT_DIR = (_REPO.parent / "data" / "Estimating-3D-Motion-Forces" / "data"
+if str(_REPO) not in sys.path:
+    sys.path.insert(0, str(_REPO))
+
+from tools.paths import ESTMF, LABVALIDATION  # noqa: E402
+
+PROCESSED = (LABVALIDATION / "processed").resolve()
+OUT_DIR = (ESTMF / "data"
            / "OpenCap" / "ours").resolve()
 MODELS = _REPO.parent / "BetterHuman" / "models"
 

@@ -42,7 +42,12 @@ from pathlib import Path
 
 _REPO_ROOT = Path(__file__).resolve().parents[1]
 _STAGES_DIR = _REPO_ROOT / "scripts" / "stages"
-_PARKOUR = Path("/home/rikhat.akizhanov/better/data/Parkour-dataset/processed")
+if str(_REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(_REPO_ROOT))
+
+from tools.paths import PARKOUR  # noqa: E402
+
+_PARKOUR = PARKOUR / "processed"
 
 # step → (stage script, output path relative to the clip's output tree).
 # The first five sweep every clip in one process; the rest run per clip.

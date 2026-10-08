@@ -41,7 +41,12 @@ import smplx
 import torch
 
 _REPO = Path(__file__).resolve().parents[2]
-PROCESSED = (_REPO.parent / "data" / "LabValidation_withVideos" / "processed").resolve()
+if str(_REPO) not in sys.path:
+    sys.path.insert(0, str(_REPO))
+
+from tools.paths import LABVALIDATION  # noqa: E402
+
+PROCESSED = (LABVALIDATION / "processed").resolve()
 PHYSPT = (_REPO.parent / "other" / "PhysPT").resolve()
 MODELS = _REPO.parent / "BetterHuman" / "models"
 CLIP_LIST = PROCESSED / "out" / "_methods" / "clips_natural.txt"

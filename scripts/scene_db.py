@@ -16,11 +16,16 @@ from __future__ import annotations
 
 import random
 import sqlite3
+import sys
 from pathlib import Path
 
-# ``../data/ClimbingVideos`` relative to the repo root (this file is scripts/).
 _REPO_ROOT = Path(__file__).resolve().parents[1]
-DEFAULT_DATA_ROOT = _REPO_ROOT.parent / "data" / "ClimbingVideos"
+if str(_REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(_REPO_ROOT))
+
+from tools.paths import CLIMBING, DATA_ROOT  # noqa: E402
+
+DEFAULT_DATA_ROOT = CLIMBING
 
 # The curated target set: human-selected indoor bouldering + indoor rope, no
 # rope support (== BetterParsing's SceneTrackConfig default). Overridable on CLI.
@@ -29,7 +34,7 @@ DEFAULT_ROPE_SUPPORTED = 0
 
 # The AthleticsVideos DB (same layout) classifies scenes by sport instead; it has
 # no rope flag. Sport name → ``vlm_category`` (BetterParsing's athletics classes).
-ATHLETICS_DATA_ROOT = _REPO_ROOT.parent / "data" / "AthleticsVideos"
+ATHLETICS_DATA_ROOT = DATA_ROOT / "AthleticsVideos"
 ATHLETICS_SPORTS = {
     "floor": 1,        # gymnastics floor exercise
     "beam": 2,         # balance beam
@@ -41,7 +46,7 @@ ATHLETICS_SPORTS = {
 
 # BEDLAM2 (scripts/import_bedlam2.py) writes the same layout, with its ground truth
 # under the single feature stage ``gt/`` instead of one dir per pipeline stage.
-BEDLAM_DATA_ROOT = _REPO_ROOT.parent / "data" / "BEDLAM2_our"
+BEDLAM_DATA_ROOT = DATA_ROOT / "BEDLAM2_our"
 
 
 def shard(scene_id: str) -> tuple[str, str]:

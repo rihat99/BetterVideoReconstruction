@@ -78,8 +78,9 @@ from tools.human_optim.stages import (  # noqa: E402
     _new_out, _save_body, load_frame_contacts,
 )
 from tools.npz_io import atomic_savez  # noqa: E402
+from tools.paths import PETER  # noqa: E402
 
-HUMAN_ROOT = _REPO / "peter/climb_wall_3_gt/human"
+HUMAN_ROOT = PETER / "climb_wall_3_gt/human"
 SHAPES = HUMAN_ROOT / "_shapes"
 CONFIG = Path(__file__).resolve().parent / "human_gt.toml"
 VIEW_NAMES = ["cam_left", "cam_right", "cam_3"]

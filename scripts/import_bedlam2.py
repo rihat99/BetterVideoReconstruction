@@ -110,8 +110,13 @@ import numpy as np
 from scipy.spatial.transform import Rotation
 
 _REPO_ROOT = Path(__file__).resolve().parents[1]
-SRC = _REPO_ROOT.parent / "data" / "BEDLAM2"
-DST = _REPO_ROOT.parent / "data" / "BEDLAM2_our"
+if str(_REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(_REPO_ROOT))
+
+from tools.paths import DATA_ROOT  # noqa: E402
+
+SRC = DATA_ROOT / "BEDLAM2"
+DST = DATA_ROOT / "BEDLAM2_our"
 
 IMAGE_DIR = SRC / "b2_imagedata_download"
 RENDER_DB = SRC / "bedlam2_render_database-20250318" / "bedlam2.sqlite"

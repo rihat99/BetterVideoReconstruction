@@ -16,6 +16,7 @@ Usage:
 from __future__ import annotations
 
 import argparse
+import sys
 from concurrent.futures import ProcessPoolExecutor
 from pathlib import Path
 
@@ -23,10 +24,15 @@ import cv2
 import numpy as np
 
 REPO = Path(__file__).resolve().parents[2]
-CLIPS = REPO / "peter" / "climb_wall_3"                       # original, distorted videos
-GT = REPO / "peter" / "climb_wall_3_gt" / "human"             # multi-view reference fits
-SINGLE = REPO / "peter" / "out_climb_wall_3_single"           # our single-view run on the same video
-FARM = REPO / "peter" / "climb_wall_3_gt" / "others" / "_farm"
+if str(REPO) not in sys.path:
+    sys.path.insert(0, str(REPO))
+
+from tools.paths import PETER  # noqa: E402
+
+CLIPS = PETER / "climb_wall_3"                       # original, distorted videos
+GT = PETER / "climb_wall_3_gt" / "human"             # multi-view reference fits
+SINGLE = PETER / "out_climb_wall_3_single"           # our single-view run on the same video
+FARM = PETER / "climb_wall_3_gt" / "others" / "_farm"
 VIEW, FPS = "cam_left", 30.0
 STAGES = ("sam3", "sapiens", "sam3d", "vggt", "geometry", "geocalib", "human_optim")
 

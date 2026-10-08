@@ -20,6 +20,7 @@ Usage:
 """
 from __future__ import annotations
 
+import sys
 import warnings
 from pathlib import Path
 
@@ -29,8 +30,13 @@ import torch
 from smplx.joint_names import JOINT_NAMES
 
 _REPO = Path(__file__).resolve().parents[1]
-PARKOUR = (_REPO.parent / "data" / "Parkour-dataset" / "processed").resolve()
-OUT_DIR = (_REPO.parent / "data" / "Estimating-3D-Motion-Forces" / "data"
+if str(_REPO) not in sys.path:
+    sys.path.insert(0, str(_REPO))
+
+from tools import paths  # noqa: E402
+
+PARKOUR = (paths.PARKOUR / "processed").resolve()
+OUT_DIR = (paths.ESTMF / "data"
            / "Parkour-dataset" / "ours").resolve()
 MODELS = _REPO.parent / "BetterHuman" / "models"
 

@@ -21,8 +21,8 @@ the column that compares across the two, because guessing "contact" scores
 For the per-vertex models the table reports the best of their four
 vertex→joint mappings on each dataset, named in the JSON.
 
-Writes ``benchmark_tables/final_{contact,pose}_table.png`` and
-``benchmark_tables/final_metrics.json``.
+Writes ``../data/peter/benchmark_tables/final_{contact,pose}_table.png`` and
+``../data/peter/benchmark_tables/final_metrics.json``.
 
 Usage:
     uv run --no-sync python scripts/diagnostics/score_combined_table.py
@@ -34,9 +34,12 @@ import sys
 from pathlib import Path
 
 _REPO = Path(__file__).resolve().parents[2]
+if str(_REPO) not in sys.path:
+    sys.path.insert(0, str(_REPO))
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from score_prediction_contacts import _render_table  # noqa: E402
+from tools.paths import CLIMBING, PETER  # noqa: E402
 
 
 def rate(value: float | None) -> str:
@@ -47,9 +50,9 @@ def rate(value: float | None) -> str:
     text = f"{value:.3f}"
     return text[1:] if text.startswith("0.") else text
 
-CV = _REPO.parent / "data" / "ClimbingVideos" / "results"
-CW = _REPO / "peter" / "climb_wall_3_gt" / "others"
-OUT = _REPO / "benchmark_tables"
+CV = CLIMBING / "results"
+CW = PETER / "climb_wall_3_gt" / "others"
+OUT = PETER / "benchmark_tables"
 
 # (label, ClimbingVideos key, climb_wall_3 key). None = the row does not exist there.
 CONTACT_ROWS = [

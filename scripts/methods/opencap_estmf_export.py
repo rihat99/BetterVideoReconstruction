@@ -70,8 +70,9 @@ from export_opencap_mot import floor_y, plate_triple  # noqa: E402
 from opencap_plates import LOADED_N  # noqa: E402
 from opencap_sensor_forces import PROCESSED, world_from_mocap  # noqa: E402
 from tools.npz_io import atomic_savez  # noqa: E402
+from tools.paths import ESTMF  # noqa: E402
 
-ESTIMATOR = (_REPO_ROOT.parent / "data" / "Estimating-3D-Motion-Forces").resolve()
+ESTIMATOR = ESTMF.resolve()
 RESULTS = ESTIMATOR / "validation" / "results" / "opencap"
 INERTIA = ESTIMATOR / "person_models" / "full_body_inertia.pkl"
 

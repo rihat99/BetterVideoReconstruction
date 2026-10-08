@@ -20,6 +20,7 @@ Usage:
 from __future__ import annotations
 
 import argparse
+import sys
 from pathlib import Path
 
 import cv2
@@ -28,12 +29,17 @@ import numpy as np
 from tqdm import tqdm
 
 _REPO = Path(__file__).resolve().parents[2]
-ESTIMATOR = _REPO.parent / "data" / "Estimating-3D-Motion-Forces"
+if str(_REPO) not in sys.path:
+    sys.path.insert(0, str(_REPO))
+
+from tools.paths import ESTMF, PETER  # noqa: E402
+
+ESTIMATOR = ESTMF
 PREDICTIONS = ESTIMATOR / "validation" / "results" / "climb_wall_3" / "run" / "evaluation"
-GT = _REPO / "peter" / "climb_wall_3_gt" / "human"
-VIDEOS = _REPO / "peter" / "climb_wall_3"
-SINGLE = _REPO / "peter" / "out_climb_wall_3_single"
-OUT_DIR = _REPO / "peter" / "climb_wall_3_gt" / "others" / "estmf" / "videos"
+GT = PETER / "climb_wall_3_gt" / "human"
+VIDEOS = PETER / "climb_wall_3"
+SINGLE = PETER / "out_climb_wall_3_single"
+OUT_DIR = PETER / "climb_wall_3_gt" / "others" / "estmf" / "videos"
 
 DEFAULT_CLIPS = ["a_00_01_part3", "b_00_02_part2", "a_16_01_part2", "b_32_02_part2"]
 

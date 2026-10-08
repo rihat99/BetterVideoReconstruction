@@ -36,7 +36,12 @@ import torch
 from smplx.joint_names import JOINT_NAMES
 
 _REPO = Path(__file__).resolve().parents[2]
-PARKOUR = (_REPO.parent / "data" / "Parkour-dataset" / "processed").resolve()
+if str(_REPO) not in sys.path:
+    sys.path.insert(0, str(_REPO))
+
+from tools import paths  # noqa: E402
+
+PARKOUR = (paths.PARKOUR / "processed").resolve()
 MODELS = _REPO.parent / "BetterHuman" / "models"
 DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
 

@@ -16,13 +16,19 @@ Writes ``peter/climb_wall_3_gt/scene/<set>/frames/<cam>.png`` + ``frames.json``.
 from __future__ import annotations
 
 import json
+import sys
 from pathlib import Path
 
 import cv2
 
 REPO = Path(__file__).resolve().parents[2]
-ORIG = REPO / "peter/climb_wall_3_orig"
-OUT = REPO / "peter/climb_wall_3_gt/scene"
+if str(REPO) not in sys.path:
+    sys.path.insert(0, str(REPO))
+
+from tools.paths import PETER  # noqa: E402
+
+ORIG = PETER / "climb_wall_3_orig"
+OUT = PETER / "climb_wall_3_gt/scene"
 CAMS = ["cam_left", "cam_right", "cam_3"]
 
 # set -> (recording per camera, calibration folder or None, recordings using this cam_3 pose)

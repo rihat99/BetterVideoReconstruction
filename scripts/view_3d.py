@@ -62,7 +62,7 @@ The three mesh sources are each one skinned mesh per person, posed per frame (LB
 in the browser, one upload) over a single averaged ``betas`` identity.
 
 A **video** pane in the sidebar plays the clip's original footage in sync with the
-frame slider (loaded from the repo's ``data/`` by default, or ``[viewer].video_dir``;
+frame slider (loaded from ``../data/examples/data/`` by default, or ``[viewer].video_dir``;
 hidden when the source video is absent). A multi-view clip plays its own
 ``views/<name>/video.mp4`` instead and gains a **view** dropdown to choose the
 camera; each view is shifted by the lag ``cameras.npz`` measured for it, so every
@@ -127,7 +127,7 @@ Usage::
     uv run python scripts/view_3d.py --bedlam        # BEDLAM2 ground truth, all 18 076 scenes
     # The climb_wall_3 ground-truth clips are ordinary trees — point at one, or at
     # their root to get the example dropdown:
-    uv run python scripts/view_3d.py peter/climb_wall_3_gt/human/
+    uv run python scripts/view_3d.py ../data/peter/climb_wall_3_gt/human/
     # Set viewer.sample = 50 in the config for a random 50-scene subset.
 """
 from __future__ import annotations

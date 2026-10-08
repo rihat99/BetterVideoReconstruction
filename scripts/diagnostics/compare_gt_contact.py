@@ -37,7 +37,7 @@ so the angle column is blank; ``sensor_forces.npz`` says which case it is
 Usage::
 
     uv run --no-sync python scripts/diagnostics/compare_gt_contact.py
-    uv run --no-sync python scripts/diagnostics/compare_gt_contact.py --tree peter/out_climb_wall_2_single
+    uv run --no-sync python scripts/diagnostics/compare_gt_contact.py --tree ../data/peter/out_climb_wall_2_single
     uv run --no-sync python scripts/diagnostics/compare_gt_contact.py \\
         --tree /home/rikhat.akizhanov/better/data/Parkour-dataset/processed/out
 """
@@ -58,6 +58,7 @@ for _p in (str(_REPO_ROOT), str(_DIAGNOSTICS)):
 
 from score_pipeline_contacts import _limb_members  # noqa: E402
 from tools.human_optim.boards import LIMBS, limb_of_frame  # noqa: E402
+from tools.paths import PETER  # noqa: E402
 
 #: A board above this is loaded — the same rule the climb_wall_2 comparison uses.
 CONTACT_N = 50.0
@@ -188,7 +189,7 @@ def force_table(title: str, data: dict[str, np.ndarray]) -> None:
 def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     ap.add_argument("--tree", type=Path,
-                    default=_REPO_ROOT / "peter" / "out_climb_wall_3_single")
+                    default=PETER / "out_climb_wall_3_single")
     ap.add_argument("--clean", type=float, default=0.05,
                     help="rescued share below which a clip counts as reconstructed on the wall")
     ap.add_argument("--broken", type=float, default=0.50,

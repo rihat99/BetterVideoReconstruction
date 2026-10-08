@@ -57,7 +57,12 @@ from pathlib import Path
 
 _REPO_ROOT = Path(__file__).resolve().parents[1]
 _STAGES_DIR = _REPO_ROOT / "scripts" / "stages"
-_OPENCAP = Path("/home/rikhat.akizhanov/better/data/LabValidation_withVideos/processed")
+if str(_REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(_REPO_ROOT))
+
+from tools.paths import LABVALIDATION  # noqa: E402
+
+_OPENCAP = LABVALIDATION / "processed"
 
 # step → (stage script, output path relative to the clip's output tree).
 # The first five sweep every clip in one process; the rest run per clip.

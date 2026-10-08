@@ -92,8 +92,9 @@ for _p in (str(_REPO_ROOT), str(_REPO_ROOT / "scripts")):
 from export_opencap_mot import frame_positions  # noqa: E402
 from opencap_plates import LOADED_N  # noqa: E402
 from tools.human_optim.boards import LIMBS  # noqa: E402
+from tools.paths import LABVALIDATION  # noqa: E402
 
-PROCESSED = Path("/home/rikhat.akizhanov/better/data/LabValidation_withVideos/processed")
+PROCESSED = LABVALIDATION / "processed"
 
 #: The two feet as columns of the importer's ``LIMBS``-ordered arrays.
 FEET = {"left_foot": LIMBS.index("left_foot"), "right_foot": LIMBS.index("right_foot")}

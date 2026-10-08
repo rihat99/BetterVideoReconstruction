@@ -2,8 +2,8 @@
 
 The frames-era detector labels named body contact frames (the legacy 12-frame climbing
 set, or the full-body ``better_contacts`` set with per-foot ball / big_toe frames). The
-manual annotations in ``data/<stem>.npz`` label coarse joints (a 10-joint or a 14-joint
-schema). To compare them we fold each coarse joint's frames together with an OR — a
+manual annotations in ``../data/examples/data/<stem>.npz`` label coarse joints (a 10-joint
+or a 14-joint schema). To compare them we fold each coarse joint's frames together with an OR — a
 joint is predicted in contact if ANY of its frames is:
 
     hand  <- palm | finger                    (both schemas)
@@ -19,7 +19,7 @@ Annotations are tri-state: 1 = contact, 0 = no contact, -1 = unlabeled. Only cel
 are 0 or 1 and whose frame is in the prediction's ``valid_mask`` are scored. Annotated
 people flagged ``ignored`` are skipped. People are matched by ``object_ids``.
 
-    uv run --no-sync python scripts/score_frame_contacts.py --predictions out/
+    uv run --no-sync python scripts/score_frame_contacts.py --predictions ../data/examples/out/
 """
 
 from __future__ import annotations
@@ -36,6 +36,7 @@ if str(_REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(_REPO_ROOT))
 
 from tools.human_optim.stages import _ANN_TO_SMPLX, _ANN_TO_SMPLX_14  # noqa: E402
+from tools.paths import EXAMPLES  # noqa: E402
 
 # Which contact frames fold onto which annotated coarse joint, per annotation schema.
 # Names cover BOTH frame sets — the legacy 12-frame set (toe_under) and the full-body
@@ -128,14 +129,14 @@ def metrics(counts: dict[str, int]) -> dict[str, float | int | None]:
 
 
 def score_scene(scene_dir: Path, tag: str) -> dict:
-    """Score one ``out/<scene>/`` against ``data/<scene>.npz``.
+    """Score one ``out/<scene>/`` against ``../data/examples/data/<scene>.npz``.
 
     Reads ``human_optim/contacts_<tag>.npz`` (``frame_contact (P,N,12)``, ``valid_mask (P,N)``,
     ``object_ids (P,)``) and the annotation ``contacts (P_ann,J_ann,N_ann)`` — note the
     annotation's time axis is LAST. Returns the per-joint counts pooled over the scored people.
     """
     pred = np.load(scene_dir / "human_optim" / f"contacts_{tag}.npz", allow_pickle=True)
-    ann_path = _REPO_ROOT / "data" / f"{scene_dir.name}.npz"
+    ann_path = EXAMPLES / "data" / f"{scene_dir.name}.npz"
     if not ann_path.exists():
         raise FileNotFoundError(f"no manual annotation at {ann_path}")
     ann = np.load(ann_path, allow_pickle=True)

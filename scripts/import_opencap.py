@@ -102,9 +102,14 @@ _SCRIPTS = Path(__file__).resolve().parent
 if str(_SCRIPTS) not in sys.path:
     sys.path.insert(0, str(_SCRIPTS))
 
-from opencap_plates import LOADED_N, cop_free_torque, origin_moment  # noqa: E402
+_REPO_ROOT = _SCRIPTS.parent
+if str(_REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(_REPO_ROOT))
 
-SRC = Path("/home/rikhat.akizhanov/better/data/LabValidation_withVideos")
+from opencap_plates import LOADED_N, cop_free_torque, origin_moment  # noqa: E402
+from tools.paths import LABVALIDATION  # noqa: E402
+
+SRC = LABVALIDATION
 DST = SRC / "processed"
 
 SUBJECTS = (2, 3, 4)

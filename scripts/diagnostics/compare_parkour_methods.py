@@ -83,10 +83,11 @@ if str(_DIAGNOSTICS) not in sys.path:
 from score_parkour_pose import predicted_joints as _init_joints  # noqa: E402
 from tools.human_optim.boards import LIMBS, limb_of_frame  # noqa: E402
 from tools.human_optim.qmath import normalize_q  # noqa: E402
+from tools.paths import ESTMF, PARKOUR  # noqa: E402
 
-DATASET = (_REPO.parent / "data" / "Parkour-dataset").resolve()
+DATASET = PARKOUR.resolve()
 TREE = DATASET / "processed"
-ESTIMATOR = (_REPO.parent / "data" / "Estimating-3D-Motion-Forces").resolve()
+ESTIMATOR = ESTMF.resolve()
 
 #: Where each force ground truth lives. The joints come from the dataset's copy either
 #: way -- the two files are byte-identical.

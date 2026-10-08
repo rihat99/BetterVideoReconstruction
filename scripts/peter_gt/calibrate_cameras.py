@@ -53,6 +53,7 @@ for _var in ("OMP_NUM_THREADS", "OPENCV_FOR_THREADS_NUM", "OPENBLAS_NUM_THREADS"
     os.environ.setdefault(_var, "8")
 
 import json  # noqa: E402
+import sys  # noqa: E402
 import time  # noqa: E402
 from concurrent.futures import ProcessPoolExecutor  # noqa: E402
 from pathlib import Path  # noqa: E402
@@ -61,8 +62,13 @@ import cv2  # noqa: E402
 import numpy as np  # noqa: E402
 
 REPO = Path(__file__).resolve().parents[2]
-ORIG = REPO / "peter/climb_wall_3_orig"
-GT = REPO / "peter/climb_wall_3_gt/scene"
+if str(REPO) not in sys.path:
+    sys.path.insert(0, str(REPO))
+
+from tools.paths import PETER  # noqa: E402
+
+ORIG = PETER / "climb_wall_3_orig"
+GT = PETER / "climb_wall_3_gt/scene"
 
 CAMS = ["cam_left", "cam_right", "cam_3"]
 REFERENCE = "cam_left"  # world, and the first camera of both pairs

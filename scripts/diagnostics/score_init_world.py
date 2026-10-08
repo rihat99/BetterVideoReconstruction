@@ -31,13 +31,16 @@ from pathlib import Path
 import numpy as np
 
 _REPO = Path(__file__).resolve().parents[2]
+if str(_REPO) not in sys.path:
+    sys.path.insert(0, str(_REPO))
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 import score_baseline_pose as cv  # noqa: E402
 import score_gt_pose as cw  # noqa: E402
+from tools.paths import CLIMBING, PETER  # noqa: E402
 
-CV_RESULTS = _REPO.parent / "data" / "ClimbingVideos" / "results"
-CW_RESULTS = _REPO / "peter" / "climb_wall_3_gt" / "others"
+CV_RESULTS = CLIMBING / "results"
+CW_RESULTS = PETER / "climb_wall_3_gt" / "others"
 BODY_KEYS = ("global_orient", "body_pose", "transl", "betas", "left_hand_pose",
              "right_hand_pose", "jaw_pose", "leye_pose", "reye_pose", "expression")
 

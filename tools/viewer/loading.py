@@ -17,10 +17,10 @@ from pathlib import Path
 import numpy as np
 
 from tools.geometry.surface import point_cloud_to_mesh
+from tools.paths import EXAMPLES
 
 from .helpers import _camera_world_pose, _top4_skin_weights
 
-_REPO_ROOT = Path(__file__).resolve().parents[2]
 
 # SMPL-X hand joints — the fingers. The body skeleton draws them small (see
 # ``_SKEL_FINGER_SCALE`` in :mod:`tools.viewer.scene`) and the force sources sum
@@ -394,10 +394,10 @@ def _load_video_frames(pred: Path, n_frames: int, *, video_dir: Path | None,
                        max_dim: int = 400) -> tuple[np.ndarray | None, float | None]:
     """Load the clip's original footage + its playback fps, aligned to the frame index.
 
-    Finds ``<video_dir>/<clip-stem>.<ext>`` (``video_dir`` defaults to the repo's
-    ``data/``), falling back to the ``source`` path in the batch manifest next to
-    the clip (see :func:`_manifest_video`), and decodes it the **same way the
-    pipeline did** — cv2 sequential —
+    Finds ``<video_dir>/<clip-stem>.<ext>`` (``video_dir`` defaults to
+    ``../data/examples/data/``), falling back to the ``source`` path in the
+    batch manifest next to the clip (see :func:`_manifest_video`), and decodes it
+    the **same way the pipeline did** — cv2 sequential —
     so the RGB lines up with the geometry frame-for-frame. VGGT records the
     original index of each processed frame in ``vggt/camera.npz``
     (``frame_indices``); those pick the frames matching the ``n_frames`` extrinsics
@@ -408,7 +408,7 @@ def _load_video_frames(pred: Path, n_frames: int, *, video_dir: Path | None,
 
     :param pred: the clip's ``out/<stem>/`` directory.
     :param n_frames: number of pipeline frames (extrinsics) to align to.
-    :param video_dir: directory holding ``<stem>.<ext>``; ``None`` → repo ``data/``.
+    :param video_dir: directory holding ``<stem>.<ext>``; ``None`` → ``../data/examples/data/``.
     :param max_dim: longer-side pixel cap for the returned frames.
     :returns: ``(frames, fps)`` — ``(n_frames, h, w, 3)`` ``uint8`` RGB indexed by the
         frame slider (black where a frame is missing) and the real-time playback fps
@@ -417,7 +417,7 @@ def _load_video_frames(pred: Path, n_frames: int, *, video_dir: Path | None,
     """
     import cv2
 
-    vdir = video_dir if video_dir is not None else _REPO_ROOT / "data"
+    vdir = video_dir if video_dir is not None else EXAMPLES / "data"
     video = next((vdir / f"{pred.name}{ext}" for ext in _VIDEO_EXTS
                   if (vdir / f"{pred.name}{ext}").exists()), None)
     if video is None:

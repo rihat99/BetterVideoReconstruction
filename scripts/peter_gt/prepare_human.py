@@ -48,13 +48,14 @@ sys.path.insert(0, str(_REPO / "scripts"))
 from peter_sensor_forces import R_CW3_WALL_TO_WORLD, per_frame  # noqa: E402
 from tools.geometry.intrinsics import normalize_K  # noqa: E402
 from tools.geometry.normals import estimate_point_normals  # noqa: E402
+from tools.paths import PETER  # noqa: E402
 
 from extract_frames import SETS  # noqa: E402  (scripts/peter_gt on sys.path via __main__ dir)
 
-CLIPS_DIR = _REPO / "peter/climb_wall_3"
-SINGLE_OUT = _REPO / "peter/out_climb_wall_3_single"
-GT_SCENE = _REPO / "peter/climb_wall_3_gt/scene"
-HUMAN_ROOT = _REPO / "peter/climb_wall_3_gt/human"
+CLIPS_DIR = PETER / "climb_wall_3"
+SINGLE_OUT = PETER / "out_climb_wall_3_single"
+GT_SCENE = PETER / "climb_wall_3_gt/scene"
+HUMAN_ROOT = PETER / "climb_wall_3_gt/human"
 VIEW_NAMES = ["cam_left", "cam_right", "cam_3"]
 CALIB_REF = {"16b": "16", "16c": "16"}
 FFMPEG = next((_REPO / ".venv/lib/python3.12/site-packages/imageio_ffmpeg/binaries").glob("ffmpeg-*"))
@@ -199,10 +200,10 @@ def write_scene(clip_dir: Path, set_name: str, cams: dict, n_frames: int) -> Non
     np.savez(geo / "scene.npz", points=pts, colors=np.asarray(z["colors"]),
              confidence=np.asarray(z["conf"], np.float32), normals=normals,
              view_id=np.asarray(z["view_id"]), metric=np.bool_(True), scale=np.float32(1.0),
-             source=np.str_(str(src.relative_to(_REPO))), camera_set=np.str_(set_name))
+             source=np.str_(str(src.relative_to(PETER.parent))), camera_set=np.str_(set_name))
     normal, point, inliers = wall_plane(pts, normals, centres[0])
     np.savez(geo / "wall.npz", normal=normal.astype(np.float32), point=point.astype(np.float32),
-             inlier_frac=np.float32(inliers), source=np.str_(str(src.relative_to(_REPO))),
+             inlier_frac=np.float32(inliers), source=np.str_(str(src.relative_to(PETER.parent))),
              note=np.str_("the climbing wall's plane: normal points out of the wall toward the cameras; "
                           "holds stand in front of it, nothing of the climber can be behind it"))
     print(f"  wall plane: normal {normal.round(3)}, {inliers:.0%} of the cloud within 1.5 cm")
@@ -278,7 +279,7 @@ def prepare(clip: str, skip_existing: bool, scene_only: bool = False) -> None:
     (clip_dir / "clip.json").write_text(json.dumps({
         "clip": clip, "camera_set": set_name, "num_frames": n_frames,
         "cam3_pose_source": cams["cam3_pose_source"],
-        "source_videos": str(src_dir.relative_to(_REPO)), "gravity": str(gravity.relative_to(_REPO)),
+        "source_videos": str(src_dir.relative_to(PETER.parent)), "gravity": str(gravity.relative_to(PETER.parent)),
     }, indent=2) + "\n")
 
 

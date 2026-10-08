@@ -40,7 +40,12 @@ from pathlib import Path
 _REPO = Path(__file__).resolve().parents[2]
 _HERE = Path(__file__).resolve().parent
 _STAGES = _REPO / "scripts/stages"
-HUMAN_ROOT = _REPO / "peter/climb_wall_3_gt/human"
+if str(_REPO) not in sys.path:
+    sys.path.insert(0, str(_REPO))
+
+from tools.paths import PETER  # noqa: E402
+
+HUMAN_ROOT = PETER / "climb_wall_3_gt/human"
 VIEW_NAMES = ["cam_left", "cam_right", "cam_3"]
 STEPS = ["prepare", "sam3", "sapiens", "sam3d", "smplx", "sync", "cam3", "fit", "shape", "contacts", "kin2",
          "kindyn", "overlay"]

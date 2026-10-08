@@ -278,7 +278,7 @@ wall.
 `contacts_1.npz`, one label per **contact frame** per video frame, positives
 only. That is the same axis contact is detected on, forced at and measured on
 everywhere else, so nothing has to be translated on the way in. Manual
-annotations (`data/<stem>.npz`, 10- or 14-joint schema) remain available via
+annotations (`../data/examples/data/<stem>.npz`, 10- or 14-joint schema) remain available via
 `[stages.kinematics_2] labels = "manual"` but are metrics-only in the pipeline;
 they label coarse joints, so in that mode the labels reach the mesh through each
 vertex's nearest joint, exactly as they always did.

@@ -43,10 +43,13 @@ import smplx
 import torch
 
 _REPO_ROOT = Path(__file__).resolve().parents[2]
+if str(_REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(_REPO_ROOT))
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from score_prediction_contacts import _render_table  # noqa: E402
+from tools.paths import CLIMBING  # noqa: E402
 
-DATA_ROOT = (_REPO_ROOT.parent / "data" / "ClimbingVideos").resolve()
+DATA_ROOT = CLIMBING.resolve()
 FEATURES, RESULTS = DATA_ROOT / "features", DATA_ROOT / "results"
 MODELS = _REPO_ROOT.parent / "BetterHuman" / "models"
 POSE_MODELS = {"gvhmr": "GVHMR", "prompthmr": "PromptHMR"}

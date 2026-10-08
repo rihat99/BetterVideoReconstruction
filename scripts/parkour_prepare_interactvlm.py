@@ -13,13 +13,19 @@ Run with the BVR environment::
 """
 from __future__ import annotations
 
+import sys
 from pathlib import Path
 
 import cv2
 import numpy as np
 
 _REPO = Path(__file__).resolve().parents[1]
-PARKOUR = (_REPO.parent / "data" / "Parkour-dataset" / "processed").resolve()
+if str(_REPO) not in sys.path:
+    sys.path.insert(0, str(_REPO))
+
+from tools import paths  # noqa: E402
+
+PARKOUR = (paths.PARKOUR / "processed").resolve()
 FARM = PARKOUR / "others" / "_farm"
 JPEG_QUALITY = 95
 

@@ -57,7 +57,6 @@ cover/
 
 # Django stuff:
 *.log
-peter
 local_settings.py
 db.sqlite3
 db.sqlite3-journal
@@ -221,22 +220,11 @@ __marimo__/
 # Claude Code local session state
 .claude/
 
-# Corpus config variants generated at runtime by the corpus runner scripts
-# (sed derivatives of configs/corpus.toml — never edit by hand).
-configs/corpus_onepergpu.toml
-configs/corpus_contacts2.toml
-configs/corpus_contacts2_onepergpu.toml
-configs/corpus_retry.toml
-
 # Project outputs / data
-data/
-data_2/
-out/
-out_2/
-peter/
 temp/
-scratch/
 *.log
+agent_notes/**/vis/
+agent_notes/**/artifacts/
 
 # Large model files / outputs
 *.ckpt
@@ -249,10 +237,5 @@ scratch/
 *.npy
 *.onnx
 *.safetensors
-
-# Keep committed model-conversion data files (robot_motion mass/inertia tables),
-# which the global *.npy / *.json rules above would otherwise exclude.
-!tools/robot_motion/data/
-!tools/robot_motion/data/smpl_3d_segmentation.npy
 
 trash/

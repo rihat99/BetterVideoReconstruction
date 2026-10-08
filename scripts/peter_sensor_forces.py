@@ -33,18 +33,22 @@ from the fused scene's wall normal. Nothing touches our predictions, which
 makes the measured-vs-predicted comparison fully independent.
 
 Usage:
-    uv run python scripts/peter_sensor_forces.py [--tree out_climb_wall_single]
     uv run python scripts/peter_sensor_forces.py --tree out_climb_wall_2_single
-    uv run python scripts/peter_sensor_forces.py --tree out_climb_wall_3_single
+    uv run python scripts/peter_sensor_forces.py [--tree out_climb_wall_3_single]
 """
 from __future__ import annotations
 
 import argparse
+import sys
 from pathlib import Path
 
 import numpy as np
 
 REPO = Path(__file__).resolve().parent.parent
+if str(REPO) not in sys.path:
+    sys.path.insert(0, str(REPO))
+
+from tools.paths import PETER  # noqa: E402
 
 # Sensor frame -> world (cam_left) rotation, columns = world images of the
 # sensor x/y/z axes. Data-derived constant (see module docstring).
@@ -110,7 +114,6 @@ R_CW3_WALL_TO_WORLD = {
 }
 
 RIGS = {
-    "climb_wall": (R_SENSOR_TO_WORLD, "total-kabsch-v1", CALIB_CLIPS, NOTE),
     "climb_wall_2": (R_CW2_WALL_TO_WORLD, "wall-datasheet-v1",
                      [f"trial_0{n}{p}" for n, parts in [(1, 2), (2, 2), (3, 3)]
                       for p in [f"_part{i + 1}" for i in range(parts)]], NOTE_CW2),
@@ -127,13 +130,13 @@ def per_frame(forces: np.ndarray, ratio: float, n_frames: int) -> np.ndarray:
 
 def main() -> None:
     ap = argparse.ArgumentParser(description=__doc__.split("\n", 1)[0])
-    ap.add_argument("--tree", default="out_climb_wall_single",
-                    help="out tree under peter/ to write into")
+    ap.add_argument("--tree", default="out_climb_wall_3_single",
+                    help="out tree under ../data/peter/ to write into")
     args = ap.parse_args()
 
-    tree = REPO / "peter" / args.tree
+    tree = PETER / args.tree
     dataset = args.tree.removeprefix("out_").removesuffix("_single").removesuffix("_multi")
-    gt = REPO / "peter" / dataset
+    gt = PETER / dataset
     if dataset not in RIGS:
         raise SystemExit(f"[peter_sensor_forces] no rig calibration for {dataset!r}")
     rotation, method, calib_clips, note = RIGS[dataset]

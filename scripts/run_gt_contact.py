@@ -53,6 +53,10 @@ from pathlib import Path
 
 _REPO_ROOT = Path(__file__).resolve().parents[1]
 _STAGES = _REPO_ROOT / "scripts" / "stages"
+if str(_REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(_REPO_ROOT))
+
+from tools.paths import PARKOUR, PETER  # noqa: E402
 
 #: Output directory of the variant chain, beside the normal ``human_optim/``.
 VARIANT_DIR = "human_optim_gt_contact"
@@ -75,7 +79,7 @@ STEP_OUTPUT: dict[str, str] = {
 
 #: Clip trees that are not a peter rig: dataset -> (run tree, the clips' source root).
 OTHER_TREES = {
-    "parkour": Path("/home/rikhat.akizhanov/better/data/Parkour-dataset/processed"),
+    "parkour": PARKOUR / "processed",
 }
 
 
@@ -84,8 +88,8 @@ def tree_layout(dataset: str) -> tuple[Path, Path, str]:
     if dataset in OTHER_TREES:
         source = OTHER_TREES[dataset]
         return source / "out", source, "video.mp4"
-    return (_REPO_ROOT / "peter" / f"out_{dataset}_single",
-            _REPO_ROOT / "peter" / dataset, "cam_left.mp4")
+    return (PETER / f"out_{dataset}_single",
+            PETER / dataset, "cam_left.mp4")
 
 
 def build_farm(clip_dir: Path) -> Path:

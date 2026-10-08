@@ -74,6 +74,7 @@ Usage:
 from __future__ import annotations
 
 import argparse
+import sys
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -87,13 +88,17 @@ matplotlib.use("Agg")
 import matplotlib.pyplot as plt  # noqa: E402
 
 ROOT = Path(__file__).resolve().parents[2]
-PETER = ROOT / "peter"
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
+
+from tools.paths import EXAMPLES, PETER  # noqa: E402
+
 PLATE_ROOT = PETER / "campus_board"
 CAMPUS_ROOT = PETER / "out_campus_board_single"
-WALL_SOURCE = PETER / "climb_wall"
-WALL_ROOT = PETER / "out_climb_wall_single"
-OUT_ROOT = ROOT / "out"
-DATA_ROOT = ROOT / "data"
+WALL_SOURCE = PETER / "climb_wall_3"
+WALL_ROOT = PETER / "out_climb_wall_3_single"
+OUT_ROOT = EXAMPLES / "out"
+DATA_ROOT = EXAMPLES / "data"
 
 LIMBS = ["left_hand", "right_hand", "left_foot", "right_foot"]
 LIMB_KEYPOINT = [62, 41, 13, 14]  # Goliath-308: left/right wrist, left/right ankle
