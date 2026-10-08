@@ -34,13 +34,9 @@ For each clip it shows, in the metric world frame:
   the scene / green free, from its own contact artifact ``contacts_1`` /
   ``contacts_2``), a thin link to the joint it rides on, and a short arrow along
   its outward normal;
-* ``kindyn_1`` / ``kindyn_manual`` — the joint kinematics+dynamics bodies
-  (``human_optim/kindyn_{1,manual}.npz``; ``kindyn_manual`` is the
-  manual-annotation reference chain), skinned meshes that also carry
-  force/torque data;
-* ``mhr_1_sup`` — the kindyn body re-fitted onto Meta's MHR rig
-  (``human_optim/mhr_1.npz``, the pose supervision the contact model trains on).
-  Mesh only: no contact frames and no forces are drawn on it.
+* ``kindyn_1`` — the joint kinematics+dynamics body
+  (``human_optim/kindyn_1.npz``), a skinned mesh that also carries
+  force/torque data.
 
 The dynamics folder's **sensor forces (measured)** toggle draws the wall rig's own
 reading — the measured reaction on each limb, in orange, at that limb's joint and on

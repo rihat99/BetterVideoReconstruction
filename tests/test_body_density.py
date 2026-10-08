@@ -23,7 +23,7 @@ def bodies():
 
 def test_the_default_body_carries_dempster_densities(bodies) -> None:
     body, _ = bodies
-    density = body.shaped(_BETAS).values.density
+    density = body.density
     names = list(body.joint_names)
     assert density.shape == (52,)
     for name, value in _DEMPSTER.items():
@@ -35,9 +35,9 @@ def test_the_default_body_carries_dempster_densities(bodies) -> None:
 
 def test_kindyn_inertia_is_baked_with_those_densities(bodies) -> None:
     body, uniform = bodies
-    dempster = body.shaped(_BETAS).robot.values.body_inertias[0]          # (53, 10), row 0 = universe
-    plain = uniform.shaped(_BETAS).robot.values.body_inertias[0]
-    density = body.shaped(_BETAS).values.density
+    dempster = body.shaped(_BETAS).model.values.body_inertias[0]          # (53, 10), row 0 = universe
+    plain = uniform.shaped(_BETAS).model.values.body_inertias[0]
+    density = body.density
     # Same part volumes, so every packed row (mass, first and second moments) scales
     # with that part's own density — the moment of inertia follows the table too.
     torch.testing.assert_close(dempster[1:] / density[:, None], plain[1:] / 1000.0,

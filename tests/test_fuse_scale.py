@@ -261,7 +261,6 @@ def test_cloud_chamfer_matches_only_visible_vertices():
 
 
 def test_kinematic_init_prefers_matching_prefit(tmp_path):
-    import scripts.stages.human_optimization  # noqa: F401 — puts better_human on sys.path
     from tools.human_optim.stages import _init_params
 
     sp = {"num_frames": np.int32(4), "object_ids": np.array([2], np.int32),

@@ -1,11 +1,12 @@
 """The one place BetterVideoReconstruction builds a human body (swap-ready seam).
 
-Wraps BetterHuman's parametric :class:`better_human.SMPLX` (52 native joints,
-``q (N, 211)``) behind the small interface the kinematic / contact / scale stages
-call, so a future body swap (MHR) only touches this file. The wrapper reproduces
-the exact surface the stages used from the previous ``SMPLXMid`` body:
+Wraps BetterHuman's SMPL-X family (``better_human.Body`` → ``Identity`` →
+``HumanState``; 52 native joints, ``q (N, 211)``) behind the small interface the
+kinematic / contact / scale stages call, so a future body swap (MHR) only touches
+this file. The wrapper reproduces the exact surface the stages used from the
+previous ``SMPLXMid`` body:
 
-* :meth:`Body.forward` — pose ``q`` → world joints + vertices + the 12 contact
+* :meth:`Body.forward` — pose ``q`` → world joints + vertices + the contact
   frames (differentiable);
 * :meth:`Body.forward_shape` — the neutral-pose shaped mesh + rest joints;
 * :meth:`Body.from_classic` / :meth:`Body.to_classic` — classic SMPL-X ↔ ``q``;
@@ -20,26 +21,33 @@ person's optimization.
 
 from __future__ import annotations
 
+import os
 from collections.abc import Mapping, Sequence
 from dataclasses import replace as _dataclass_replace
 from pathlib import Path
 
 import torch
-from better_robot.kinematics import update_frame_placements
 from better_robot.lie import so3
 
 import better_human as bh
-from better_human.bodies.smpl_family.config_smplx import SMPLX_CONFIG
-from better_human.bodies.smpl_family.smplx import SMPLXClassic
+from better_human.families import tables
+from better_human.families.assets import load_density_table
+from better_human.families.classic import SMPLXClassic, smplx_from_classic, smplx_to_classic
 
-#: BetterHuman ships the licensed SMPL-X weights here; passed explicitly so no
-#: ``BETTERHUMAN_MODELS_DIR`` environment variable is needed at runtime.
-_DEFAULT_MODEL_PATH = Path(
-    "/home/rikhat.akizhanov/better/BetterHuman/models/smplx/SMPLX_NEUTRAL.npz"
-)
+#: The BetterHuman checkout the installed (editable) package comes from
+#: (``src/better_human/__init__.py`` → repo root): its ``models/`` holds the licensed
+#: weights and ``studio_data/`` the authored contact frames.
+_BETTER_HUMAN_ROOT = Path(bh.__file__).resolve().parents[2]
+
+
+def models_dir() -> Path:
+    """BetterHuman's licensed weights: ``$BETTERHUMAN_MODELS_DIR``, else the checkout's ``models/``."""
+    env = os.environ.get("BETTERHUMAN_MODELS_DIR")
+    return Path(env).expanduser() if env else _BETTER_HUMAN_ROOT / "models"
+
 
 #: The authored **contact frames** — named mesh points baked onto the body as
-#: BetterRobot frames. ``better_contacts.json`` is the full-body set (33 frames:
+#: BetterRobot frames. ``better_contacts.json`` is the full-body set (35 frames:
 #: per-foot heel / ball_inner / ball_outer / big_toe / toe_above, hands, knees,
 #: elbows, forearms, shoulders, sit bones, hips, chest, sacrum, back, head) that
 #: extends the original 12-frame climbing set (``contacts.json``). Each frame's
@@ -47,8 +55,8 @@ _DEFAULT_MODEL_PATH = Path(
 #: rest-pose surface normal, so forward kinematics reports both a contact point
 #: and the direction the skin faces there. Contact detection lives entirely on
 #: these frames (see ``docs/contacts.md``).
-_DEFAULT_CONTACT_FRAMES = Path(
-    "/home/rikhat.akizhanov/better/BetterHuman/studio_data/frames/smplx_neutral/better_contacts.json"
+_DEFAULT_CONTACT_FRAMES = (
+    _BETTER_HUMAN_ROOT / "studio_data" / "frames" / "smplx_neutral" / "better_contacts.json"
 )
 
 
@@ -93,14 +101,15 @@ class _Posed:
     """One posed body: world joints + vertices + contact frames."""
 
     def __init__(self, vertices: torch.Tensor, joint_placements: torch.Tensor,
-                 frame_placements: torch.Tensor, *, model=None, data=None) -> None:
+                 frame_placements: torch.Tensor, *, model=None, kinematics=None) -> None:
         #: Posed world vertices with shape ``(..., V, 3)``.
         self.vertices = vertices
-        #: The BetterRobot model this pose was computed on and its FK ``Data``, so a
-        #: caller can take Jacobians of the same pose (e.g. contact-frame velocities)
-        #: without running FK again.
+        #: The BetterRobot model this pose was computed on and its FK
+        #: ``KinematicState``, so a caller can take Jacobians of the same pose
+        #: (``frame_jacobian(model, kinematics, frame=…)``, e.g. contact-frame
+        #: velocities) without running FK again.
         self.model = model
-        self.data = data
+        self.kinematics = kinematics
         #: World joint placements as a :class:`_JointsWorld` (``(..., 52, 7)``).
         self.joints_world = _JointsWorld(joint_placements)
         #: World joint positions with shape ``(..., 52, 3)``.
@@ -114,10 +123,10 @@ class _Posed:
 
 
 class Body:
-    """Thin SMPL-X body wrapper over BetterHuman's :class:`better_human.ParametricBody`.
+    """Thin SMPL-X body wrapper over BetterHuman's :class:`better_human.Body`.
 
-    :param base: an unshaped :class:`better_human.SMPLX` (``use_face=False``,
-        ``use_hands=True``, ``num_betas=10``) built with contact frames.
+    :param base: a :class:`better_human.Body` of the SMPL-X family (``face=False``,
+        ``hands=True``, ``num_betas=10``) built with contact frames.
     :param frames_allow: contact-frame names to keep (authored order preserved);
         ``None`` keeps every frame the body carries. The filter is the one place
         a recipe restricts where contact may live (e.g. the climb-wall rule:
@@ -133,35 +142,38 @@ class Body:
         lever arms — sees the same shod point. Unscaled metres, like the frames.
     """
 
-    def __init__(self, base: bh.SMPLX, frames_allow: Sequence[str] | None = None,
+    def __init__(self, base: bh.Body, frames_allow: Sequence[str] | None = None,
                  sole_offsets: Mapping[str, float] | None = None) -> None:
-        if getattr(base, "contact_frames", None) is None:
-            raise ValueError("body was built without contact frames; pass contact_frames= to SMPLX")
+        if base.contact_frames is None:
+            raise ValueError("body was built without contact frames; pass contact_frames= to Body")
         self._base = base
-        self._dtype = base.values.v_template.dtype
-        self._device = base.values.v_template.device
+        self._dtype = base.dtype
+        self._device = base.device
 
         #: Triangle indices with shape ``(F, 3)`` (long).
-        self.faces = base.structure.faces
+        self.faces = base.faces
         #: Native LBS joint names in weight-file order (length 52).
-        self.joint_names = tuple(base.structure.joint_names)
+        self.joint_names = tuple(base.joint_names)
         #: Number of native joints (52).
         self.num_joints = len(self.joint_names)
         #: Configuration width (211): free-flyer root + 51 spherical joints.
-        self.nq = base.robot.nq
+        self.nq = base.model.nq
         #: Number of template vertices (10475).
-        self.num_vertices = base.structure.num_vertices
+        self.num_vertices = base.num_vertices
         #: Unshaped native template vertices with shape ``(V, 3)``.
-        self.vertices_template = base.values.v_template
+        self.vertices_template = base.spec.vertices
         #: OpenPose-style landmark keypoint names, aligned with ``frame_vertex_ids``.
-        self.frame_names = tuple(SMPLX_CONFIG.frame_names)
+        self.frame_names = tuple(tables.SMPLX.keypoint_names)
         #: Template vertex index of each landmark keypoint, aligned with ``frame_names``.
-        self.frame_vertex_ids = tuple(SMPLX_CONFIG.frame_vertex_ids)
+        self.frame_vertex_ids = tuple(tables.SMPLX.keypoint_vertex_ids)
         #: Dense LBS skinning matrix with shape ``(V, 52)``.
-        self.lbs_weights = self._dense_lbs_weights()
+        self.lbs_weights = base.skin_matrix
+        #: Tissue density per body part ``(52,)`` in kg/m³, native joint order — what
+        #: every baked inertia (and so every force in newtons) follows from.
+        self.density = base.density
         #: Parent index per joint as ``(1, 52)`` (``[0, i]`` = parent of joint ``i``).
         self.parent_tree = torch.tensor(
-            [base.structure.parents], dtype=torch.long, device=self._device
+            [base.parents], dtype=torch.long, device=self._device
         )
 
         spec = base.contact_frames
@@ -178,15 +190,15 @@ class Body:
                 parent_joints=tuple(spec.parent_joints[i] for i in keep),
                 frame_ids=tuple(spec.frame_ids[i] for i in keep),
             )
-        #: The resolved :class:`better_human.ContactFrames` spec of the contact frames.
+        #: The resolved :class:`better_human.core.contact_frames.ContactFrames` spec.
         self.contact_frames = spec
         #: Contact-frame names in authored order, e.g. ``"big_toe_left"`` (length F).
         self.contact_frame_names = tuple(self.contact_frames.names)
         #: Parent joint of each contact frame, as a native 52-joint index (length F).
         self.contact_frame_parents = tuple(self.contact_frames.parent_joints)
-        #: Template mesh vertex carrying each contact frame (length 12).
+        #: Template mesh vertex carrying each contact frame (length F).
         self.contact_frame_vertices = tuple(self.contact_frames.vertex_ids)
-        # Rows of BetterRobot's frame table these 12 frames occupy (53… after the
+        # Rows of BetterRobot's frame table these frames occupy (53… after the
         # auto-generated per-body frames).
         self._contact_frame_ids = torch.tensor(
             self.contact_frames.frame_ids, dtype=torch.long, device=self._device
@@ -206,24 +218,16 @@ class Body:
                 stem = name.rsplit("_", 1)[0] if name.endswith(("_left", "_right")) else name
                 self.contact_frame_offsets[i] = float(sole_offsets.get(stem, 0.0))
 
-        self._shaped_cache: tuple[torch.Tensor, bh.ParametricBody] | None = None
+        self._shaped_cache: tuple[torch.Tensor, bh.Identity] | None = None
 
-    def _dense_lbs_weights(self) -> torch.Tensor:
-        """Reconstruct the dense ``(V, 52)`` skinning matrix from BetterHuman's sparse form."""
-        weights = self._base.values.skinning_weights          # (V, K)
-        indices = self._base.structure.skinning_indices        # (V, K)
-        dense = weights.new_zeros((weights.shape[0], self.num_joints))
-        dense.scatter_add_(1, indices, weights)                # padding rows carry weight 0
-        return dense
-
-    def shaped(self, betas: torch.Tensor, *, fresh: bool = False) -> bh.ParametricBody:
+    def shaped(self, betas: torch.Tensor, *, fresh: bool = False) -> bh.Identity:
         """Return the body shaped at ``betas (..., 10)``, baking once and caching.
 
-        The returned :class:`better_human.ParametricBody` carries the BetterRobot
-        model (``.robot``), baked inertias (``.values.body_inertias``) and FK
-        (``.fk``) the dynamics solves need; a future MHR body implements the same
-        contract. Shape baking (``blend_shapes`` + joint regression + inertia) is
-        the expensive part, so a single-slot cache reuses the shaped body while
+        The returned :class:`better_human.Identity` carries the BetterRobot model
+        (``.model``, with the baked inertias in ``.model.values.body_inertias``) and
+        FK (``.forward``) the dynamics solves need; a future MHR body implements the
+        same contract. Shape baking (``blend_shapes`` + joint regression + inertia)
+        is the expensive part, so a single-slot cache reuses the shaped body while
         ``betas`` is unchanged — the common case across one person's optimization.
 
         ``fresh`` bakes without touching the cache. Needed when ``betas`` is being
@@ -233,11 +237,11 @@ class Body:
         """
         betas = betas.to(dtype=self._dtype, device=self._device)
         if fresh:
-            return self._base.with_shape(betas=betas)
+            return self._base.bake(betas=betas)
         cached = self._shaped_cache
         if cached is not None and cached[0].shape == betas.shape and torch.equal(cached[0], betas):
             return cached[1]
-        shaped = self._base.with_shape(betas=betas)
+        shaped = self._base.bake(betas=betas)
         self._shaped_cache = (betas.clone(), shaped)
         return shaped
 
@@ -251,20 +255,18 @@ class Body:
             it whenever ``betas`` requires grad.
         :returns: a :class:`_Posed` with ``.vertices (..., V, 3)``,
             ``.joints_world`` (``(..., 52, 7)``), ``.joints (..., 52, 3)`` and
-            ``.frames_world (..., 12, 7)``.
+            ``.frames_world (..., F, 7)``.
         """
         shaped = self.shaped(betas, fresh=fresh)
-        data = shaped.fk(q.to(dtype=self._dtype, device=self._device))
-        vertices = shaped.vertices_from_data(data)
-        placements = data.joint_pose_world[..., 1:, :]         # drop the universe joint (row 0)
-        # Contact frames ride the joint poses already computed above, so placing
+        state = shaped.forward(q.to(dtype=self._dtype, device=self._device))
+        # Contact frames ride the joint poses already computed by the FK, so placing
         # them is a handful of rigid composes — differentiable through ``q``.
-        update_frame_placements(shaped.robot, data)
-        frames = data.frame_pose_world[..., self._contact_frame_ids, :]
+        frames = state.frame_poses[..., self._contact_frame_ids, :]
         if bool((self.contact_frame_offsets != 0).any()):
             shifted = frames[..., :3] + self.contact_frame_offsets[:, None] * frame_normals(frames)
             frames = torch.cat([shifted, frames[..., 3:]], dim=-1)
-        return _Posed(vertices, placements, frames, model=shaped.robot, data=data)
+        return _Posed(state.vertices, state.joint_poses, frames,
+                      model=state.model, kinematics=state.kinematics)
 
     def forward_shape(self, betas: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
         """Return the neutral-pose ``(v_shaped (..., V, 3), rest_joints (..., 52, 3))``.
@@ -275,9 +277,9 @@ class Body:
         browser LBS (invariant to a shared translation of vertices and joints).
         """
         shaped = self.shaped(betas)
-        pelvis = shaped.values.pelvis_offset[..., None, :]
-        v_shaped = shaped.values.v_shaped + pelvis
-        rest_joints = shaped.values.rest_joints + pelvis
+        pelvis = shaped.pelvis[..., None, :]
+        v_shaped = shaped.v_shaped + pelvis
+        rest_joints = shaped.rest_joints + pelvis
         return v_shaped, rest_joints
 
     def from_classic(
@@ -304,7 +306,8 @@ class Body:
             right_hand_pose=prepare(right_hand_pose),
             num_pca_comps=None,
         )
-        return shaped.from_classic(classic)
+        q, _stream = smplx_from_classic(shaped, classic)
+        return q
 
     def to_classic(self, betas: torch.Tensor, q: torch.Tensor) -> dict[str, torch.Tensor]:
         """Convert ``q (..., 211)`` → classic SMPL-X params keyed for the stages.
@@ -313,7 +316,8 @@ class Body:
         ``body_pose``, ``left_hand_pose``, ``right_hand_pose`` (full axis-angle hands).
         """
         shaped = self.shaped(betas)
-        classic = shaped.to_classic(q.to(dtype=self._dtype, device=self._device), num_pca_comps=None)
+        classic = smplx_to_classic(shaped, q.to(dtype=self._dtype, device=self._device),
+                                   num_pca_comps=None)
         return {
             "betas": betas,
             "global_orient": classic.global_orient,
@@ -331,7 +335,7 @@ def load_body(model_path: str | Path | None = None, device: str | torch.device =
     """Load the SMPL-X body used throughout the pipeline, contact frames baked on.
 
     :param model_path: path to a ``SMPLX_*.npz`` weight file; defaults to the
-        BetterHuman-bundled neutral model.
+        neutral model under :func:`models_dir`.
     :param device: torch device for the model tensors.
     :param frames_allow: contact-frame names to keep; ``None`` keeps all.
     :param sole_offsets: outward offset per contact-frame stem, metres (see :class:`Body`).
@@ -341,13 +345,11 @@ def load_body(model_path: str | Path | None = None, device: str | torch.device =
         the hand's) or a single uniform kg/m³ value. Mass, and so every force in
         newtons, follows from it.
     """
-    base = bh.SMPLX(
-        model_path=str(model_path if model_path is not None else _DEFAULT_MODEL_PATH),
-        use_face=False,
-        use_hands=True,
-        num_betas=10,
-        density=density,
-        device=device,
-        contact_frames=_DEFAULT_CONTACT_FRAMES,
-    )
+    path = Path(model_path) if model_path is not None else models_dir() / "smplx" / "SMPLX_NEUTRAL.npz"
+    spec = bh.families.smplx(path, num_betas=10, hands=True, face=False, device=device)
+    if isinstance(density, str):
+        density = load_density_table(
+            "body_densities.json", density,
+            [spec.joint_names[j] for j in spec.parts.joints], spec.vertices)
+    base = bh.Body(spec, density=density, contact_frames=_DEFAULT_CONTACT_FRAMES)
     return Body(base, frames_allow=frames_allow, sole_offsets=sole_offsets)

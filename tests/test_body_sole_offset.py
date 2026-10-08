@@ -20,7 +20,8 @@ def bodies():
 def _frames(body):
     betas = torch.zeros(1, 10)
     q = torch.zeros(1, body.nq)
-    q[:, 6] = 1.0                                   # identity root quaternion (xyzw)
+    q[:, 3:7] = torch.tensor([0.0, 0.0, 0.0, 1.0])                        # identity root (xyzw)
+    q[:, 7:] = torch.tensor([0.0, 0.0, 0.0, 1.0]).repeat(body.num_joints - 1)  # identity joints
     return body.forward(betas, q).frames_world
 
 

@@ -156,14 +156,14 @@ def com_force_needed(body, betas: np.ndarray, q: np.ndarray, fps: float, device)
     The centre of mass from BetterRobot's CCRBA, differenced over the same ±``fps/30``
     frame stencil the force solve uses, so the two see the same acceleration noise.
     """
-    from better_robot.dynamics.centroidal import center_of_mass
+    from better_robot.dynamics import center_of_mass
 
     from tools.human_optim.qmath import normalize_q
 
-    model = body.shaped(torch.as_tensor(betas, device=device)).robot
+    model = body.shaped(torch.as_tensor(betas, device=device)).model
     with torch.no_grad():
         qn = normalize_q(torch.as_tensor(q, device=device), body.num_joints)
-        com = center_of_mass(model, qn).cpu().numpy().astype(np.float64)
+        com = center_of_mass(model, model.fk(qn)).cpu().numpy().astype(np.float64)
     step = max(1, round(fps / FPS_REF))
     accel = np.full_like(com, np.nan)
     accel[step:-step] = (com[2 * step:] - 2 * com[step:-step] + com[:-2 * step]) * (fps / step) ** 2

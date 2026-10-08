@@ -4,7 +4,7 @@ The genuinely new work behind ``scripts/stages/human_optimization.py`` (kinemati
 SMPL-X joints to the image (reprojection), pull visible vertices onto the metric
 depth cloud (chamfer), anchor the pose (prior), and limit acceleration + jerk
 (smoothness). Posed-mesh inference stays in ``better_human``; the BetterRobot
-robot model (``tools.smplx_robot``) supplies the Lie smoothness only.
+model baked onto that body supplies the Lie smoothness only.
 """
 
 from .camera import (

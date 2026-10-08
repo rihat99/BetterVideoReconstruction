@@ -54,11 +54,11 @@ from pathlib import Path
 
 import numpy as np
 import torch
-from better_robot.kinematics.jacobian import compute_joint_jacobians, get_frame_jacobian
+from better_robot.kinematics import frame_jacobian
 
 from tools.body import frame_normals
 from tools.human_optim.contacts import drift_gate, hysteresis_spans, min_span_frames
-from tools.smplx_robot.dynamics import velocity_acceleration_from_trajectory
+from tools.human_optim.motion import velocity_acceleration_from_trajectory
 
 #: Window (seconds) the speed is averaged across — a tenth of a second either side of
 #: now. Long enough to reject a foot swinging through at walking speed, short enough
@@ -127,10 +127,9 @@ def frame_velocity(posed, frame_ids, qdot: torch.Tensor) -> torch.Tensor:
 
     ``J(q) · q̇`` per frame, with the Jacobian in BetterRobot's ``local_world_aligned``
     reference so the linear rows are the velocity of the frame origin in world axes.
-    The joint Jacobians are computed once for the chunk and shared by every frame.
+    The joint-column table is built once per ``KinematicState`` and shared by every frame.
     """
-    compute_joint_jacobians(posed.model, posed.data)
-    jac = torch.stack([get_frame_jacobian(posed.model, posed.data, int(fid))[..., :3, :]
+    jac = torch.stack([frame_jacobian(posed.model, posed.kinematics, frame=int(fid))[..., :3, :]
                        for fid in frame_ids], dim=-3)                       # (B, F, 3, nv)
     return (jac @ qdot[:, None, :, None])[..., 0]
 
@@ -175,7 +174,7 @@ def frame_positions(body, betas: np.ndarray, q: np.ndarray, device, *,
     """
     shape = torch.as_tensor(betas, device=device)[None]
     q = torch.as_tensor(q, device=device)
-    qdot = generalised_velocity(body.shaped(shape).robot, q, fps=fps)
+    qdot = generalised_velocity(body.shaped(shape).model, q, fps=fps)
     count = len(body.contact_frame_names)
     frames = torch.empty((len(q), count, 3), device=device)
     velocities = torch.empty((len(q), count, 3), device=device)

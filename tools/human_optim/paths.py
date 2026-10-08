@@ -20,7 +20,7 @@ def human_optim_dir(pred: str | Path) -> Path:
 
 def body_path(pred: str | Path, name: str) -> Path:
     """Refined-body npz by basename (``root`` / ``kinematic_1`` / ``kinematic_2`` /
-    ``kindyn_1`` / ``kindyn_manual``)."""
+    ``kindyn_1``)."""
     return human_optim_dir(pred) / f"{name}.npz"
 
 

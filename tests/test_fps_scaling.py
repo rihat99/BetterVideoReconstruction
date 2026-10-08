@@ -11,7 +11,7 @@ import torch
 
 from tools.human_optim.config import fps_scaled_weights
 from tools.human_optim.contacts import min_span_frames
-from tools.smplx_robot.dynamics import velocity_acceleration_from_trajectory
+from tools.human_optim.motion import velocity_acceleration_from_trajectory
 
 
 def test_fps_scaled_weights_identity_at_or_below_reference():

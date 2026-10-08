@@ -389,7 +389,7 @@ def test_torque_multipliers_land_on_each_joints_dof_rows():
     from tools.human_optim.kindyn import joint_group, torque_multipliers
 
     body = load_body(device="cpu")
-    model = body.shaped(torch.zeros(10)).robot
+    model = body.shaped(torch.zeros(10)).model
     table = {"wrist": 17.0, "index": 25.0}
     groups = {joint_group(n) for n in body.joint_names[1:]}
     table.update({g: 1.0 for g in groups if g not in table})
@@ -408,7 +408,7 @@ def test_torque_multipliers_reject_an_uncovered_joint():
     from tools.human_optim.kindyn import torque_multipliers
 
     body = load_body(device="cpu")
-    model = body.shaped(torch.zeros(10)).robot
+    model = body.shaped(torch.zeros(10)).model
     with pytest.raises(KeyError):
         torque_multipliers(model, body.joint_names, {"hip": 1.0})
 

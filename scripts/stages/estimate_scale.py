@@ -55,16 +55,15 @@ import sys
 from pathlib import Path
 
 _REPO_ROOT = Path(__file__).resolve().parents[2]
-_BETTER_HUMAN_SRC = _REPO_ROOT.parent / "better_human" / "src"
-for _p in (str(_BETTER_HUMAN_SRC), str(_REPO_ROOT)):
-    if Path(_p).exists() and _p not in sys.path:
-        sys.path.insert(0, _p)
+if str(_REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(_REPO_ROOT))
 
 import argparse  # noqa: E402
 
 import numpy as np  # noqa: E402
 import torch  # noqa: E402
 
+from tools.body import load_body  # noqa: E402
 from tools.config import load_toml, section  # noqa: E402
 from tools.geometry.depth_smear import alongray_smear, smear_weight  # noqa: E402
 from tools.geometry.human_scale import combine_log_scales, weighted_median  # noqa: E402
@@ -75,11 +74,7 @@ from tools.npz_io import atomic_savez  # noqa: E402
 from tools.human_optim.losses import pad_frames  # noqa: E402
 from tools.human_optim.prefit import PrefitWeights, measure_person_scale, prefit_person_round  # noqa: E402
 from tools.human_optim.visibility import front_facing_mask, subsample_indices, vertex_normals  # noqa: E402
-from tools.smplx_robot import load_smplx_mid  # noqa: E402
 
-_DEFAULT_SMPLX_MODEL = (
-    _REPO_ROOT.parent / "better_human" / "models" / "smplx" / "SMPLX_NEUTRAL.npz"
-)
 _CLASSIC_KEYS = ("betas", "body_pose", "global_orient", "transl",
                  "left_hand_pose", "right_hand_pose")
 
@@ -543,7 +538,7 @@ def estimate_scale(args: argparse.Namespace) -> None:
               f"vs transform {float(tr['scale']):.4f})")
         human["points"] = np.asarray(human["points"], np.float32) * (float(tr["scale"]) / hu_ws)
 
-    mid = load_smplx_mid(str(_DEFAULT_SMPLX_MODEL), device)
+    mid = load_body(device=device)
     # One (person, frame)-sorted view of the fused human cloud, shared by the ruler
     # and the pre-fit (built after the partial-rescale repair above).
     grouped = _group_cloud(human, len(frame_indices))

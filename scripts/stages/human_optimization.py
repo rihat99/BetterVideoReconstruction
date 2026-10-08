@@ -33,10 +33,8 @@ import sys
 from pathlib import Path
 
 _REPO_ROOT = Path(__file__).resolve().parents[2]
-_BETTER_HUMAN_SRC = _REPO_ROOT.parent / "better_human" / "src"
-for _p in (str(_BETTER_HUMAN_SRC), str(_REPO_ROOT)):
-    if Path(_p).exists() and _p not in sys.path:
-        sys.path.insert(0, _p)
+if str(_REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(_REPO_ROOT))
 
 import argparse  # noqa: E402
 

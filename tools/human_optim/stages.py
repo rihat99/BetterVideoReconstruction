@@ -9,10 +9,8 @@ the weight columns their phases use, and (for
 ``kinematics_2``) the manual contact annotation. The joint kinematics+dynamics
 stage lives in :mod:`tools.human_optim.kindyn`.
 
-The caller (``scripts/stages/human_optimization.py``) has already put
-``better_human`` on ``sys.path``; this module assumes it. Weights + knobs come from a
-:class:`~tools.human_optim.config.HumanOptimConfig`; outputs are placed by
-:mod:`tools.human_optim.paths`.
+Weights + knobs come from a :class:`~tools.human_optim.config.HumanOptimConfig`;
+outputs are placed by :mod:`tools.human_optim.paths`.
 """
 
 from __future__ import annotations
@@ -23,11 +21,10 @@ from pathlib import Path
 import numpy as np
 import torch
 
+from tools.body import load_body
 from tools.geometry.normals import load_scene_cloud
 from tools.npz_io import atomic_savez
 from tools.paths import EXAMPLES
-from tools.smplx_robot import load_smplx_mid
-from tools.smplx_robot.vertex_weights import geodesic_endeffector_weights
 
 from . import paths
 from .camera import fold_root_to_world, project, transform_points, world_from_cam
@@ -36,10 +33,9 @@ from .keypoints import build_correspondence, visibility_weights
 from .optimizer import PhaseSpec, optimize_person
 from .prefit import smooth_finger_quats
 from .qmath import normalize_q
+from .vertex_weights import geodesic_endeffector_weights
 from .visibility import subsample_indices
 
-_REPO_ROOT = Path(__file__).resolve().parents[2]
-_DEFAULT_SMPLX_MODEL = _REPO_ROOT.parent / "better_human" / "models" / "smplx" / "SMPLX_NEUTRAL.npz"
 _FINGER = ("index", "middle", "pinky", "ring", "thumb")
 _ALL_DOF = ("transl", "orient", "joints")
 _ROOT_DOF = ("transl", "orient")
@@ -264,8 +260,8 @@ def _body_context(knobs: dict, device: str):
     """
     # [contacts].frames restricts where contact may live (empty/absent = all frames).
     allow = knobs.get("contacts", {}).get("frames") or None
-    mid = load_smplx_mid(_DEFAULT_SMPLX_MODEL, device, frames_allow=allow,
-                         sole_offsets=knobs.get("contacts", {}).get("sole_offset_m") or None)
+    mid = load_body(device=device, frames_allow=allow,
+                    sole_offsets=knobs.get("contacts", {}).get("sole_offset_m") or None)
     fvids = torch.as_tensor([int(x) for x in mid.frame_vertex_ids], dtype=torch.long, device=device)
     corr = build_correspondence(list(mid.frame_names),
                                 include_hands=bool(knobs["keypoints"]["include_hands"]), device=device)

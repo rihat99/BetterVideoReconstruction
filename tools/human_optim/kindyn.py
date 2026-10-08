@@ -41,13 +41,13 @@ import numpy as np
 import torch
 
 from tools.body import frame_normals
-from tools.smplx_robot.dynamics import velocity_acceleration_from_trajectory
 
 from . import paths
 from .camera import world_from_cam
 from .config import FPS_REF, HumanOptimConfig, fps_scaled_weights
 from .force_confidence import force_confidence
 from .friction import cone_generators
+from .motion import velocity_acceleration_from_trajectory
 from .optimizer import PhaseSpec, optimize_person
 from .qmath import normalize_q
 from .stages import (
@@ -211,11 +211,13 @@ class DynamicsSpec:
 
     def placements(self, qn: torch.Tensor):
         """``(joint_pose_world, contact-frame poses (T, 12, 7))`` at the current pose."""
-        from better_robot.kinematics import forward_kinematics, update_frame_placements
+        from better_robot.kinematics import forward_kinematics_state
 
-        data = forward_kinematics(self.model, qn)
-        update_frame_placements(self.model, data)
-        return data.joint_pose_world, data.frame_pose_world[..., self.frame_ids, :]
+        return self._placements(forward_kinematics_state(self.model, qn))
+
+    def _placements(self, state):
+        """The same pair read off an already-computed BetterRobot ``KinematicState``."""
+        return state.joint_pose, state.frame_pose[..., self.frame_ids, :]
 
     def build_fext(self, f_world: torch.Tensor, oMi: torch.Tensor, frames7: torch.Tensor):
         """``(fext (T, njoints, 6), f_eff (T, 12, 3))`` — frame forces as parent-joint wrenches.
@@ -247,13 +249,15 @@ class DynamicsSpec:
         residual pulls on ``q``. Returns ``(tau (T, nv), f_eff (T, 12, 3))`` where
         ``f_eff`` is the mask-gated world force.
         """
-        from better_robot.dynamics import rnea
+        from better_robot.dynamics import inverse_dynamics
+        from better_robot.kinematics import forward_kinematics_state
 
         v, a = velocity_acceleration_from_trajectory(self.model, qn, self.dt,
                                                      spacing=self.spacing)
-        oMi, frames7 = self.placements(qn)
+        state = forward_kinematics_state(self.model, qn)
+        oMi, frames7 = self._placements(state)
         fext, f_eff = self.build_fext(f_world, oMi, frames7)
-        return rnea(self.model, qn, v, a, fext=fext), f_eff
+        return inverse_dynamics(self.model, state, v=v, a=a, fext=fext), f_eff
 
     @staticmethod
     def force_split(f_world: torch.Tensor, order: int = 1) -> tuple[torch.Tensor, torch.Tensor]:
@@ -365,17 +369,14 @@ class DynamicsSpec:
         product per evaluation instead of an RNEA pass, so the frozen-pose solve
         runs in the time of a few RNEA calls.
         """
-        from better_robot.dynamics import rnea
-        from better_robot.kinematics import forward_kinematics, update_frame_placements
-        from better_robot.kinematics.jacobian import compute_joint_jacobians, get_frame_jacobian
+        from better_robot.dynamics import inverse_dynamics
+        from better_robot.kinematics import forward_kinematics_state, frame_jacobian
 
         v, a = velocity_acceleration_from_trajectory(self.model, qn, self.dt,
                                                      spacing=self.spacing)
-        tau_free = rnea(self.model, qn, v, a)
-        data = forward_kinematics(self.model, qn)
-        update_frame_placements(self.model, data)
-        compute_joint_jacobians(self.model, data)
-        jac = torch.stack([get_frame_jacobian(self.model, data, int(fid))[..., :3, :]
+        state = forward_kinematics_state(self.model, qn)
+        tau_free = inverse_dynamics(self.model, state, v=v, a=a)
+        jac = torch.stack([frame_jacobian(self.model, state, frame=int(fid))[..., :3, :]
                            for fid in self.frame_ids], dim=1)
         return tau_free, jac
 
@@ -618,7 +619,7 @@ def build_dynamics_spec(body, betas: torch.Tensor, frame_labels: torch.Tensor,
     dev = torch.device(device)
     dtype = torch.float32
 
-    model = body.shaped(betas.to(dev)).robot
+    model = body.shaped(betas.to(dev)).model
     g = torch.as_tensor(gravity_world, dtype=dtype, device=dev)
     g = g / (g.norm() + 1e-9) * _GRAVITY_MAG
     g6 = torch.cat([g, torch.zeros(3, dtype=dtype, device=dev)])
@@ -629,8 +630,7 @@ def build_dynamics_spec(body, betas: torch.Tensor, frame_labels: torch.Tensor,
         inertias = model.values.body_inertias.clone()       # rows [m, cx, cy, cz, I(6)]
         inertias[..., 1:, 0] *= ratio
         inertias[..., 1:, 4:] *= ratio
-        model = dataclasses.replace(model, values=dataclasses.replace(
-            model.values, body_inertias=inertias))
+        model = model.with_values(body_inertias=inertias)
         print(f"    [kindyn] body mass {total_mass:.1f} kg (shape) → {mass_kg:.1f} kg "
               f"(given, ×{ratio:.3f})")
         total_mass = float(mass_kg)

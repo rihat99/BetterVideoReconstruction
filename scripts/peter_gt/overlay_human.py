@@ -23,9 +23,8 @@ import numpy as np
 import torch
 
 _REPO = Path(__file__).resolve().parents[2]
-for _p in (str(_REPO.parent / "better_human" / "src"), str(_REPO)):
-    if _p not in sys.path:
-        sys.path.insert(0, _p)
+if str(_REPO) not in sys.path:
+    sys.path.insert(0, str(_REPO))
 
 from tools.body import load_body  # noqa: E402
 from tools.human_optim.qmath import normalize_q  # noqa: E402

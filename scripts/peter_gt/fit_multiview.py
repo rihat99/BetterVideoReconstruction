@@ -304,9 +304,9 @@ def shape_of(mid, betas: torch.Tensor, *, fresh: bool = False) -> tuple[torch.Te
     bake BetterHuman does for the dynamics, so the kindyn body weighs exactly this.
     """
     body = mid.shaped(betas, fresh=fresh)
-    v = body.values.v_shaped
+    v = body.v_shaped
     height = v[..., 1].max() - v[..., 1].min()
-    mass = body.values.body_inertias[..., 1:, 0].sum()
+    mass = body.model.values.body_inertias[..., 1:, 0].sum()
     return height, mass
 
 

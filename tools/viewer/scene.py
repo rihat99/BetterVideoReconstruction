@@ -4,7 +4,7 @@ Builds every scene node for a single clip from its :class:`~tools.viewer.loading
 — the scene cloud, the per-point normal arrows (debug), the camera frustums +
 centre path, the gravity arrow, the per-frame human
 points, the skinned SMPL-X bodies, their joint skeletons and contact frames, and
-the force/torque skeletons (kindyn_1 / kindyn_manual) — and
+the force/torque skeletons (kindyn_1) — and
 moves them together with the frame slider. One ``/clip`` root frame owns them all, so :meth:`ClipScene.dispose`
 tears the whole clip down in a single removal.
 """
@@ -305,7 +305,7 @@ class ClipScene:
                 self.frame_nodes[source] = nodes
 
         # -- force/torque skeletons (spheres + bones), one per force source
-        #    ("kindyn_1" / "kindyn_manual"), hidden; forces added per frame. Node paths
+        #    ("kindyn_1"), hidden; forces added per frame. Node paths
         #    are keyed by the source name, so each source's nodes stay independent. --
         self.forces = data.forces                          # {source: force dict}
         self.force_nodes: dict[str, list[dict]] = {}
@@ -313,7 +313,7 @@ class ClipScene:
         # Per-person contact-frame world positions for the "per-frame" force display —
         # reused from the SAME body forward pass that poses the source's mesh, so a
         # per-frame arrow starts exactly on the drawn skin. Only sources that store
-        # ``frame_forces`` and have a skinned body ("kindyn_1" / "kindyn_manual")
+        # ``frame_forces`` and have a skinned body ("kindyn_1")
         # qualify; anything else falls back to per-joint.
         self._force_frame_pos: dict[str, list[np.ndarray | None]] = {}
         for source, dyn in self.forces.items():

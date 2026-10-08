@@ -125,17 +125,14 @@ class FrameDynamics:
 
     def __init__(self, body, betas: torch.Tensor, q: torch.Tensor, *,
                  gravity_world: np.ndarray, fps: float, device: str = "cuda") -> None:
-        from better_robot.dynamics import rnea
-        from better_robot.kinematics import (
-            compute_joint_jacobians, forward_kinematics, get_frame_jacobian,
-            update_frame_placements,
-        )
+        from better_robot.dynamics import inverse_dynamics
+        from better_robot.kinematics import forward_kinematics_state, frame_jacobian
 
         from ..body import frame_normals
-        from ..smplx_robot.dynamics import velocity_acceleration_from_trajectory
+        from .motion import velocity_acceleration_from_trajectory
 
         dev = torch.device(device)
-        model = body.shaped(betas.to(dev)).robot
+        model = body.shaped(betas.to(dev)).model
         gravity = torch.as_tensor(gravity_world, dtype=torch.float32, device=dev)
         gravity = gravity / (gravity.norm() + 1e-9) * _GRAVITY_MAG
         model = dataclasses.replace(model, values=dataclasses.replace(
@@ -150,17 +147,15 @@ class FrameDynamics:
         with torch.no_grad():
             velocity, acceleration = velocity_acceleration_from_trajectory(
                 model, self.q_model, 1.0 / float(fps))
+            state = forward_kinematics_state(model, self.q_model)
             #: ``(T, nv)`` no-contact generalized force.
-            self.tau = rnea(model, self.q_model, velocity, acceleration)
+            self.tau = inverse_dynamics(model, state, v=velocity, a=acceleration)
 
-            data = forward_kinematics(model, self.q_model)
-            compute_joint_jacobians(model, data)      # once, else every frame redoes the pass
             frame_ids = list(body.contact_frames.frame_ids)
             #: ``(T, 12, 3, nv)`` world translation Jacobian of each contact frame.
             self.jacobians = torch.stack(
-                [get_frame_jacobian(model, data, fid)[..., :3, :] for fid in frame_ids], dim=-3)
-            update_frame_placements(model, data)
-            placements = data.frame_pose_world[..., torch.tensor(frame_ids, device=dev), :]
+                [frame_jacobian(model, state, frame=fid)[..., :3, :] for fid in frame_ids], dim=-3)
+            placements = state.frame_pose[..., torch.tensor(frame_ids, device=dev), :]
             #: ``(T, 12, 3)`` world contact-frame positions and outward skin normals.
             self.points = placements[..., :3]
             self.normals = frame_normals(placements)

@@ -36,14 +36,6 @@ _CONTACT_SCHEMA = 2
 # cloud the optimizer / estimate_contacts actually run their SDF against (mirrors
 # ``[penetration]/[contacts].conf_drop_q`` in configs/human_optimization.toml).
 _SCENE_CONF_DROP_Q = 0.1
-# The MHR body the ``mhr_1_sup`` source poses: BetterHuman's converted LOD1 archive
-# (18 439 vertices, 127 bones) — the LOD the corpus MHR fit was made on. Given
-# explicitly, like the SMPL-X path in ``tools/body.py``, so no env var is needed.
-_MHR_MODEL, _MHR_LOD = Path(
-    "/home/rikhat.akizhanov/better/BetterHuman/models/MHR/converted/mhr_lod1.npz"), 1
-# Loaded MHR bodies by device — reading the archive costs ~4 s, and every clip with
-# an ``mhr_1.npz`` needs the same one.
-_MHR_CACHE: dict = {}
 
 
 def _load_gravity(pred: Path) -> dict | None:
@@ -77,8 +69,8 @@ def _load_gravity(pred: Path) -> dict | None:
 def _load_force_data(f: Path) -> dict | None:
     """Numpy arrays for a force/torque body source (the npz at ``f``).
 
-    Shared by the kinematics+dynamics bodies ``kindyn_1.npz`` / ``kindyn_manual.npz``
-    (the manual-annotation reference chain) and BEDLAM2's ``gt/forces.npz``. All store
+    Shared by the kinematics+dynamics body ``kindyn_1.npz`` and BEDLAM2's
+    ``gt/forces.npz``. All store
     the same force fields, so the viewer draws them the same way. Hand forces are
     folded to the wrists here, once, so the per-joint display never draws arrows on
     individual finger joints.
@@ -675,99 +667,6 @@ def _smplx_params_skinned(path: Path, extr: np.ndarray, *, device: str = "cuda")
     return faces, object_ids, people
 
 
-def _load_mhr(device: str):
-    """Load the MHR LOD1 body once per process (``body, torch device``)."""
-    import torch
-
-    import better_human as bh
-
-    dev = torch.device(device if torch.cuda.is_available() else "cpu")
-    key = str(dev)
-    if key not in _MHR_CACHE:
-        _MHR_CACHE[key] = bh.MHR(_MHR_MODEL, lod=_MHR_LOD, use_expression=False,
-                                 use_correctives=False, compute_mass=False, device=dev)
-    return _MHR_CACHE[key], dev
-
-
-def _mhr_skinned(npz_path: Path, *, device: str = "cuda"):
-    """Skinning data for the MHR fit of the refined body (``human_optim/mhr_1.npz``).
-
-    ``mhr_1.npz`` is the kindyn body re-expressed on Meta's MHR rig: one identity
-    per person, the full native ``lbs_params (204)`` per frame, and a world-frame
-    ``q (132)`` per frame. Posing it here shows that fit as a moving mesh — the same
-    fit ``mhr_sup_1.npz`` replays into keypoint / vertex training targets, which
-    carry no topology of their own. Body only: no contact labels, no forces.
-
-    **Every parameter has to be read per frame.** MHR has two kinds of size knob:
-    fixed ``scale_*`` ones, and six "flexible" ones — spine, neck and arm and leg
-    length, shoulder and hip width — that the MHR fitter may re-estimate on every
-    frame, and does. Over one clip the fitted rest skeleton's legs swing by 10 cm
-    and its spine by 9 cm, all hanging off a pelvis that never moves; identity, the
-    other 67 size knobs and the rest mesh stay put. Shaping once and posing every
-    frame off that one skeleton is wrong by 2.4 cm (median) to 8.6 cm, and wrong
-    differently each frame — which reads as a mis-shaped body that moves oddly. So
-    the per-frame skinning transform
-    ``world_pose ∘ inverse_bind(frame)`` is folded into the bone pose here, and the
-    mesh is uploaded with ONE rest skeleton and identity bind rotations (the same
-    convention as the SMPL-X sources). The browser's LBS then reproduces
-    BetterHuman's own posing to ~0.3 cm — all that is dropped are the per-joint
-    scales (≥ 0.95, applied about each joint) and the pose correctives, which are
-    per-vertex per-frame and cannot ride on a fixed rest mesh.
-
-    Same ``(faces, object_ids, people)`` contract as :func:`_smplx_kinematic_skinned`.
-    """
-    import torch
-    from better_robot.lie import se3, so3
-
-    from better_human.bodies.mhr.body import MHRClassic
-
-    mhr, dev = _load_mhr(device)
-    d = np.load(npz_path)
-    q_all = d["q_world"]                       # (P, N, 132), world frame
-    valid = d["valid_mask"].astype(bool)       # (P, N)
-    P, N = q_all.shape[:2]
-    object_ids = np.asarray(d["object_ids"], np.int32)
-    faces = mhr.structure.faces.cpu().numpy().astype(np.int32)
-
-    people: list[dict | None] = []
-    with torch.no_grad():
-        for p in range(P):
-            idx = np.flatnonzero(valid[p])
-            if idx.size == 0:
-                people.append(None)
-                continue
-            lbs = torch.as_tensor(d["lbs_params"][p][idx], device=dev)         # (B, 204)
-            shaped, _q = mhr.from_classic(MHRClassic(
-                identity_coeffs=torch.as_tensor(d["identity"][p], device=dev)[None]
-                .expand(len(lbs), -1),
-                model_parameters=lbs))                       # a body per frame
-            q = torch.as_tensor(q_all[p][idx], dtype=torch.float32, device=dev)
-            poses = shaped.native_joint_poses(shaped.fk(q))                    # (B, J, 7) xyzw
-            skin = se3.compose(poses, shaped.values.inverse_bind_poses)        # (B, J, 7)
-            # One rest skeleton for the upload (the identity fixes the rest mesh, so
-            # only the skeleton re-proportions); the bone pose carries the rest.
-            j_rest = shaped.values.rest_joints[0]                              # (J, 3)
-            rot = so3.to_matrix(skin[..., 3:7])                                # (B, J, 3, 3)
-            pos = (rot @ j_rest.unsqueeze(-1)).squeeze(-1) + skin[..., :3]
-            J = j_rest.shape[0]
-            bone_wxyz = np.full((N, J, 4), np.nan, np.float32)
-            bone_pos = np.full((N, J, 3), np.nan, np.float32)
-            bone_wxyz[idx] = skin[..., [6, 3, 4, 5]].cpu().numpy()             # → wxyz
-            bone_pos[idx] = pos.cpu().numpy()
-            vmask = np.zeros(N, bool)
-            vmask[idx] = True
-            people.append({
-                "v_shaped": shaped.values.v_shaped[0].cpu().numpy().astype(np.float32),
-                "j_rest": j_rest.cpu().numpy().astype(np.float32),
-                "weights": _top4_skin_weights(
-                    shaped.values.skinning_weight_matrix.cpu().numpy()),
-                "bone_wxyz": bone_wxyz,
-                "bone_pos": bone_pos,
-                "valid": vmask,
-            })
-    return faces, object_ids, people
-
-
 @dataclass
 class ClipData:
     """Cached numpy for one clip (no viser handles)."""
@@ -786,7 +685,7 @@ class ClipData:
     fov_y: np.ndarray
     gravity: dict | None
     skinned: dict          # name -> (faces, object_ids, people); "original" first
-    forces: dict           # force source name ("kindyn_1"/"kindyn_manual") -> force dict
+    forces: dict           # force source name ("kindyn_1") -> force dict
     sensors: dict | None   # measured wall-sensor forces (climb_wall), see _load_sensor_forces
     plates: dict | None    # our forces in the plates' force-at-COP format, see _load_plate_estimate
     skeletons: dict        # body source name -> joint tree + contact-frame labels (_load_skeleton)
@@ -1010,25 +909,18 @@ def load_clip_data(pred: Path, *, device: str, show_smplx: bool,
             if orig is not None:
                 skinned["original"] = orig
         for name, fn in (("kinematics", "kinematic_1.npz"), ("kinematics_2", "kinematic_2.npz"),
-                         ("kindyn_1", "kindyn_1.npz"), ("kindyn_manual", "kindyn_manual.npz")):
+                         ("kindyn_1", "kindyn_1.npz")):
             if (pred / "human_optim" / fn).exists():
                 skinned[name] = _smplx_kinematic_skinned(pred / "human_optim" / fn, device=device)
-        # mhr_1_sup: the kindyn body re-fitted onto the MHR rig — a mesh and nothing
-        # else (its contacts and forces live on the SMPL-X sources it came from).
-        if (pred / "human_optim" / "mhr_1.npz").exists():
-            skinned["mhr_1_sup"] = _mhr_skinned(pred / "human_optim" / "mhr_1.npz",
-                                                device=device)
         # prefit: the scale stage's dual scale+body alignment (camera frame, like original).
         if (pred / "geometry" / "prefit.npz").exists():
             pf = _smplx_params_skinned(pred / "geometry" / "prefit.npz", extr, device=device)
             if pf is not None:
                 skinned["prefit"] = pf
 
-    # Force/torque sources, in display order — the kinematics+dynamics bodies,
-    # whichever exist.
+    # Force/torque sources — the kinematics+dynamics body, when it exists.
     forces: dict = {}
-    for name, fn in (("kindyn_1", "kindyn_1.npz"),
-                     ("kindyn_manual", "kindyn_manual.npz")):
+    for name, fn in (("kindyn_1", "kindyn_1.npz"),):
         fd = _load_force_data(pred / "human_optim" / fn)
         if fd is not None:
             forces[name] = fd
@@ -1043,8 +935,7 @@ def load_clip_data(pred: Path, *, device: str, show_smplx: bool,
     if show_smplx:
         for name, body_fn, contacts_fn in (("kinematics", "kinematic_1.npz", "contacts_1.npz"),
                                            ("kinematics_2", "kinematic_2.npz", "contacts_2.npz"),
-                                           ("kindyn_1", "kindyn_1.npz", None),
-                                           ("kindyn_manual", "kindyn_manual.npz", None)):
+                                           ("kindyn_1", "kindyn_1.npz", None)):
             body = skinned.get(name)
             person = next((p for p in body[2] if p is not None), None) if body else None
             sk = _load_skeleton(pred, body_fn, contacts_fn,

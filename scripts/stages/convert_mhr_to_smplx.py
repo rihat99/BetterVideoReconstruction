@@ -112,10 +112,7 @@ _FIT_KEYS: tuple[str, ...] = (
 
 
 def _add_sys_paths() -> None:
-    """Ensure better_human (editable src layout) and tools/ are importable."""
-    better_human_src = _REPO_ROOT.parent / "better_human" / "src"
-    if better_human_src.exists():
-        sys.path.insert(0, str(better_human_src))
+    """Ensure tools/ is importable."""
     sys.path.insert(0, str(_REPO_ROOT))
 
 
