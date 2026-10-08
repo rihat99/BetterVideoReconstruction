@@ -38,12 +38,12 @@ have no hand contact at all.
 Output ``processed/out/<clip>/<run>/sensor_forces.npz``, beside the run, exactly where
 ``scripts/parkour_sensor_forces.py`` and ``scripts/peter_sensor_forces.py`` put their
 rigs' own. ``--run`` names the run directory, so a variant chain
-(``human_optim_labvalidation``) gets its own copy of the same rotated plates.
+(``human_optim_floorplane``) gets its own copy of the same rotated plates.
 
 Usage::
 
     uv run --no-sync python scripts/opencap_sensor_forces.py
-    uv run --no-sync python scripts/opencap_sensor_forces.py --run human_optim_labvalidation
+    uv run --no-sync python scripts/opencap_sensor_forces.py --run human_optim_floorplane
 """
 
 from __future__ import annotations

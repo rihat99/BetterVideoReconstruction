@@ -68,7 +68,7 @@ Usage::
 
     uv run --no-sync python scripts/diagnostics/compare_opencap_forces.py
     uv run --no-sync python scripts/diagnostics/compare_opencap_forces.py \
-        --run human_optim_labvalidation
+        --run human_optim_floorplane
 """
 
 from __future__ import annotations

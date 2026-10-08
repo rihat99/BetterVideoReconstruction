@@ -254,3 +254,5 @@ scratch/
 # which the global *.npy / *.json rules above would otherwise exclude.
 !tools/robot_motion/data/
 !tools/robot_motion/data/smpl_3d_segmentation.npy
+
+trash/

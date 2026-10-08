@@ -246,11 +246,12 @@ and 2× below the first clip that genuinely moves, so nothing near the line is a
 camera that actually travels. On the 972-scene ClimbingVideos corpus it marks
 about 14% of scenes static.
 
-Results fused before this existed do not need re-fusing —
-`scripts/backfill_static_camera.py` measures them from the files already on disk
-and writes the flag back into the same npz (and, for a corpus, into
-`scenes.static_camera` in the scene DB). Scenes the fuse stage has not reached
-yet are measured from `vggt/camera.npz` with one frame's depth map backprojected
+Results fused before this existed were not re-fused —
+`scripts/backfill_static_camera.py` (retired 2026-10-08 once the backfill was done,
+see git history) measured them from the files already on disk
+and wrote the flag back into the same npz (and, for a corpus, into
+`scenes.static_camera` in the scene DB). Scenes the fuse stage had not reached
+yet were measured from `vggt/camera.npz` with one frame's depth map backprojected
 in place of the scene cloud; on clips where both probes exist they agree to
 within a few percent, and at the threshold to three digits.
 

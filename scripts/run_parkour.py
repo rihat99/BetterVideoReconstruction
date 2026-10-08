@@ -19,7 +19,7 @@ fails is reported and skipped — one bad clip never kills the batch.
 world gravity and the lab camera's tilt is unknown — the world-down fallback
 would bake that tilt into every force direction.
 
-Knobs live in the TOMLs (``configs/pipeline_parkour.toml`` for the model +
+Knobs live in the TOMLs (``configs/pipeline_peter.toml`` for the model +
 geometry stages, ``configs/human_optimization_peter.toml`` for the human stages —
 the static-camera recipe: kinematic chamfer off, hand/foot contact frames only);
 this CLI only takes targets.
@@ -109,7 +109,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--steps", default=None,
                         help=f"comma-separated subset of {','.join(ALL_STEPS)} (default: all)")
     parser.add_argument("--config", type=Path,
-                        default=_REPO_ROOT / "configs" / "pipeline_parkour.toml",
+                        default=_REPO_ROOT / "configs" / "pipeline_peter.toml",
                         help="model + geometry stage TOML")
     parser.add_argument("--human-config", type=Path,
                         default=_REPO_ROOT / "configs" / "human_optimization_peter.toml",

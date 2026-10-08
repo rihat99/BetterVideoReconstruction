@@ -1,4 +1,4 @@
-# FLOORPLANE VARIANT of configs/human_optimization_labvalidation.toml (a full copy — the
+# FLOORPLANE VARIANT of configs/human_optimization_labvalidation.toml (retired 2026-10-08, see git history; a full copy — the
 # loader has no defaults, so a fragment would not work). ONE difference: floor_gate_m = 0.
 #
 # This variant feeds the chain a SYNTHETIC scene cloud instead of the fused VGGT one

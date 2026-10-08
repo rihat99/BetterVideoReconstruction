@@ -379,7 +379,7 @@ contact got 52% longer (17.1 → 26.0 frames). Twelve of thirteen scenes improve
   point. So the honest claim is not "force gives the best F1 on the tuning set"
   — it doesn't — but "force finds contacts the distance signal cannot, at high
   precision, and generalises where the distance signal's tuning does not."
-  (`scripts/diagnostics/contacts_control.py` reproduces all of this.)
+  (`scripts/diagnostics/contacts_control.py` reproduced all of this; script retired 2026-10-08, see git history.)
 - **`sport_climb` is reported separately, always.** The climber is on a rope, and
   a rope force is not in this model — only about a quarter of that scene's
   residual is explainable at all. It must never drive a conclusion.

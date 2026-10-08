@@ -45,12 +45,12 @@ rule that was written for the hands-and-feet rigs.
 
 Output ``processed/out/<clip>/<run>/estimated_forces.mot`` (19 columns at 60 Hz, the
 dataset's header style) and ``estimated_forces.npz`` beside it. ``--run`` names the run
-directory, so a variant chain (``human_optim_labvalidation``) exports its own file.
+directory, so a variant chain (``human_optim_floorplane``) exports its own file.
 
 Usage::
 
     uv run --no-sync python scripts/export_opencap_mot.py
-    uv run --no-sync python scripts/export_opencap_mot.py --run human_optim_labvalidation
+    uv run --no-sync python scripts/export_opencap_mot.py --run human_optim_floorplane
 """
 
 from __future__ import annotations

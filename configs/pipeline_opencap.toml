@@ -1,5 +1,5 @@
 # Stage knobs for the OpenCap LabValidation runs (scripts/run_opencap.py).
-# A copy of configs/pipeline_parkour.toml — the OpenCap clips share the same
+# A copy of configs/pipeline_parkour.toml (retired 2026-10-08, see git history) — the OpenCap clips share the same
 # failure mode (ONE static iPhone, so VGGT depth confidence is uniformly low and
 # the chamfer-based pre-fit is banned; see the [scale] / [fuse] comments).
 # 12 clips, 720x1280 PORTRAIT @ 60 fps, one subject in a MoCap lab with force

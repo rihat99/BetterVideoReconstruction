@@ -29,7 +29,7 @@ Sixteen columns in three families, all pooled over the 68 clips:
   over time, and the load-share error in percentage points, where "the total is right but
   the wrong limb is carrying it" shows up.
 
-  **The angle and share columns follow ``compare_climb_wall_2.py``**, so a number here can
+  **The angle and share columns follow ``compare_climb_wall_2.py``** (retired 2026-10-08, see git history), so a number here can
   be read against that rig: the angle is the MEDIAN (a barely-loaded limb points nowhere
   in particular, and the median ignores it), and the share compares each limb's force
   averaged over the WHOLE CLIP. ``compare_gt_contact.py`` reads both more strictly — mean
@@ -118,7 +118,7 @@ def force_rates(optim_dir: str) -> dict:
 
 
 def _other_conventions(boards: np.ndarray, ours: np.ndarray) -> dict[str, float]:
-    """The same two numbers as ``compare_climb_wall_2.py`` reports them.
+    """The same two numbers as ``compare_climb_wall_2.py`` (retired, see git history) reports them.
 
     That script takes the MEDIAN angle (a near-free limb's direction is noise, and the
     median ignores it) and builds the share from each limb's force averaged over the

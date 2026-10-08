@@ -145,7 +145,7 @@ labels, so nothing downstream — hysteresis, the span merge, the union debounce
 ever sees it. The stage saves every frame's height as `frame_floor_height_m` and
 the value it used as `floor_gate_m`, and prints how many frame-labels it removed.
 
-It is on in `configs/human_optimization_labvalidation.toml` at **0.17 m**, chosen
+It was on in `configs/human_optimization_labvalidation.toml` (retired 2026-10-08, see git history) at **0.17 m**, chosen
 from the OpenCap LabValidation walking clips: over 3290 foot-frame samples taken
 while that foot's force plate was loaded, the frame's height above the fitted
 plane had a median of 6 cm and a 95th percentile of 17 cm, so 0.17 m is the

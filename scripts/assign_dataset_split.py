@@ -10,7 +10,7 @@ videos are too self-similar to make good test material) until test holds about
 Knobs live in ``configs/corpus.toml`` ``[split]``; the CLI takes only
 ``--config`` and ``--dry-run``. Applying writes the labels into ``scenes.db``
 (a deliberate, user-approved write to the upstream DB, alongside the QA
-discard) and saves the applied assignment as JSON next to the run logs.
+discard) and saves the applied assignment as JSON next to ``scenes.db``.
 """
 
 from __future__ import annotations
@@ -111,7 +111,7 @@ def main(argv: list[str] | None = None) -> int:
         return 0
 
     stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-    out = _REPO_ROOT / f"dataset_split_assign_{stamp}.json"
+    out = paths.scenes_db.parent / f"dataset_split_assign_{stamp}.json"
     out.write_text(json.dumps(assign, indent=1, sort_keys=True))
     print(f"assignment saved: {out} (rollback = set these scene_ids back to NULL)")
 

@@ -74,8 +74,7 @@ process: `--source`, `--predictions`, `--save-dir`, stage/scene selection,
   with the corpus overrides), so the two pipelines cannot drift. Selection:
   `--scenes/--sample/--limit`, plus `--dry-run`. DB access in `scripts/scene_db.py`.
 - `scripts/score_frame_contacts.py` scores the stage's contact-frame labels
-  against manual annotations (`score_contacts.py` is the frozen per-joint-era
-  scorer).
+  against manual annotations.
 
 ## The pipeline & `out/<stem>/` contract
 
@@ -163,7 +162,6 @@ BetterVideoReconstruction/
 │   ├── import_bedlam2.py          # BEDLAM2 → the ClimbingVideos layout (pose ground truth)
 │   ├── label_bedlam2.py           # BEDLAM2 masks / boxes / validity / ground contact
 │   ├── score_frame_contacts.py    # contact-frame scoring vs manual annotations
-│   ├── score_contacts.py          # per-joint-era scorer (frozen)
 │   ├── view_3d.py                 # viser viewer
 │   ├── _pym_preload.py            # libstdc++ LD_PRELOAD shim for pymomentum
 │   └── stages/                    # the per-stage CLIs in the table above

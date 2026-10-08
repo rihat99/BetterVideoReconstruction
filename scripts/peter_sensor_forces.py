@@ -63,8 +63,8 @@ NOTE = ("channels are support-cell reactions of one shared structure, not per-li
 # the datasheet's board frame (+x up along the wall, +y the climber's right, +z out
 # toward the climber; wall inclined 16 deg). That frame is LEFT-handed (the author
 # confirmed it), so this is a reflection (det -1), not a rotation. Built from the
-# datasheet (scratch/cw2_wall_datasheet.py, 2026-08-20): up = -gravity from the
-# 3-view floor fit (scratch/cw2_gravity_fit.py), tilt pinned to the spec's EXACT
+# datasheet (<data root>/peter/_provenance/cw2_wall_datasheet.py, 2026-08-20): up = -gravity from the
+# 3-view floor fit (<data root>/peter/_provenance/cw2_gravity_fit.py), tilt pinned to the spec's EXACT
 # 16 deg overhang (z = cos16*h - sin16*up, x = sin16*h + cos16*up), y = x cross z
 # (the climber's right; the camera sees the climber's back, so that is image right),
 # and only the wall's horizontal facing direction h read from the fused-scene
@@ -86,9 +86,9 @@ NOTE_CW2 = ("channels are TRUE per-limb contact forces (one board per limb; "
 # climb_wall_3 (the 2026-09-03 session on the same demonstrator rig): the same
 # board frame, but the camera was moved between the three wall inclinations, so
 # there is one rotation per inclination, keyed by the recording name's middle
-# field (a_16_02_part3 -> "16"). Built by scratch/cw3_wall_datasheet.py exactly
+# field (a_16_02_part3 -> "16"). Built by <data root>/peter/_provenance/cw3_wall_datasheet.py exactly
 # like R_CW2_WALL_TO_WORLD: up = -gravity from that set-up's own 3-view floor fit
-# (scratch/cw3_gravity_fit.py; 0 deg needed a 12 deg tilt gate), tilt pinned to
+# (<data root>/peter/_provenance/cw3_gravity_fit.py; 0 deg needed a 12 deg tilt gate), tilt pinned to
 # the name's 0 / 16 / 32, azimuth from the fused scene's wall normal (the scene
 # normal sat 3-4 deg from the pinned tilt in all three). Left-handed, det -1.
 R_CW3_WALL_TO_WORLD = {

@@ -10,7 +10,7 @@ honest evidence even when the prior is tilted. The caller decides how much
 prior/fit disagreement to accept.
 
 The RANSAC + total-least-squares recipe is the one validated on the climb_wall_2
-rig (``scratch/cw2_gravity_fit.py``, 2026-08-20), where the camera is 16.6° off
+rig (``<data root>/peter/_provenance/cw2_gravity_fit.py``, 2026-08-20), where the camera is 16.6° off
 true down: a simple lowest-band fit collapses onto the wall's bottom edge there,
 while this one recovers the floor to within ~1° of the multi-view ground truth.
 """
