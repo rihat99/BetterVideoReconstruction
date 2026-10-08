@@ -1,6 +1,6 @@
 #!/bin/bash
 # Run one published model over the climb_wall_3_gt clips, on the farm that
-# scripts/peter_gt/prepare_baselines.py builds. Each model lives in its own conda
+# scripts/methods/baseline_farm.py --dataset climb_wall_3 builds. Each model lives in its own conda
 # environment, so the caller picks the model and the GPU and this sorts the rest out.
 #
 #   run_baselines.sh <deco|bstro|gvhmr|prompthmr|interactvlm> <gpu> [extra args...]

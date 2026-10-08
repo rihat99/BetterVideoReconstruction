@@ -22,7 +22,8 @@ Sixteen columns in three families, all pooled over the 68 clips:
   the four limbs, against the board labels. Two of the rows share their labels, so two
   of the rows share these numbers; that is the point of the ablation, not a mistake.
 * **pose** — the WHAM/EMDB set against the three-camera fit, read from the JSON
-  ``score_gt_pose.py`` writes. Run that first, or these columns come up blank.
+  ``score_published_pose.py --benchmark climb_wall_3`` writes. Run that first, or these
+  columns come up blank.
 * **forces** — each run's solved limb force against the measured one: the size error in
   newtons (mean absolute, and root-mean-square which charges a few large misses more),
   the angle between the vectors where both read above 50 N, the correlation of the sizes
@@ -42,7 +43,7 @@ Writes ``../data/peter/benchmark_tables/climb_wall_3_runs_{table.png,metrics.jso
 
 Usage::
 
-    uv run --no-sync python scripts/diagnostics/score_gt_pose.py     # fills the pose columns
+    uv run --no-sync python scripts/diagnostics/score_published_pose.py --benchmark climb_wall_3  # pose columns
     uv run --no-sync python scripts/diagnostics/compare_climb_wall_3_runs.py
 """
 from __future__ import annotations
@@ -59,15 +60,15 @@ for _p in (_REPO, _REPO / "scripts", Path(__file__).resolve().parent):
         sys.path.insert(0, str(_p))
 
 from compare_gt_contact import CONTACT_N, force_metrics, limb_forces, limb_labels  # noqa: E402
-from score_gt_contacts import GT_ROOT, OURS_ROOT, _count, _rates_balanced, clips, ours, truth  # noqa: E402
-from score_prediction_contacts import _render_table  # noqa: E402
+from _common import _render_table  # noqa: E402
+from score_published_contacts import GT_ROOT, OURS_ROOT, _count, _rates_balanced, clips, ours, truth  # noqa: E402
 from tools.human_optim.boards import LIMBS  # noqa: E402
 from tools.paths import PETER  # noqa: E402
 
 POSE_JSON = PETER / "climb_wall_3_gt" / "others" / "gt_pose_metrics.json"
 OUT = PETER / "benchmark_tables"
 
-#: (row label, the run directory under ``<clip>/``, the key ``score_gt_pose`` files it under).
+#: (row label, the run directory under ``<clip>/``, the key ``score_published_pose`` files it under).
 RUNS = (("Full optimization", "human_optim", "ours/kindyn_1"),
         ("+ measured contacts", "human_optim_gt_contact", "ours/gt_contact"),
         ("− per-joint torque weights", "human_optim_flat_torque", "ours/flat_torque"))
@@ -88,7 +89,7 @@ def contact_rates(optim_dir: str) -> dict:
     counts = {limb: dict(tp=0, fp=0, fn=0, tn=0) for limb in LIMBS}
     for clip in clips():
         n = int(np.load(GT_ROOT / clip / "cameras.npz", allow_pickle=True)["num_frames"])
-        _count(counts, ours(clip, 2, n, optim_dir), truth(clip))
+        _count(counts, ours("climb_wall_3", clip, 2, n, optim_dir), truth("climb_wall_3", clip))
     return _rates_balanced({k: sum(counts[limb][k] for limb in LIMBS)
                             for k in ("tp", "fp", "fn", "tn")})
 

@@ -1,7 +1,7 @@
 """Draw the pipeline's own contacts and forces (``kindyn_1``) onto a measured clip.
 
-``render_prediction_overlays.py`` does this for the two external models. This is the
-same picture for **our** reconstruction, so the two read side by side: same discs,
+``render_prediction_overlays.py`` (retired 2026-10-08, see git history) did this for the
+two external models. This is the same picture for **our** reconstruction: same discs,
 same arrows, same five stacked plots, same moving cursor.
 
 Four rigs are covered, and they measure different things:
@@ -9,13 +9,6 @@ Four rigs are covered, and they measure different things:
 ``peter/out_campus_board_single/`` — the campus board, where each limb pulls on its
 own single-axis force plate. So every limb can be compared on its own, and the
 comparable number is the **downward load** on the hold.
-
-``peter/out_climb_wall_single/`` — the climbing wall, where four 3-axis cells hold up
-**one shared structure**. A cell reading is that corner's reaction, not the limb it is
-named after: a left-hand-only touch shows up on all four cells. Only the **sum** of
-the cells is a clean force — the total the climber puts into the wall. So the wall
-gets one comparison, on the total, and because both sides are 3D vectors whose
-sideways direction is not well pinned down, they are compared by **size** alone.
 
 ``peter/out_climb_wall_2_single/`` — the demonstrator wall, where each limb has its
 **own instrumented board**, so a channel IS that limb's contact force (a released
@@ -121,13 +114,14 @@ _REPO_ROOT = _DIAGNOSTICS.parents[1]
 if str(_REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(_REPO_ROOT))
 
-from render_prediction_overlays import (  # noqa: E402
-    CAMPUS_ROOT, LIMBS, PANEL_SIZE, PETER, PLATE_ROOT, WALL_ROOT, WALL_SOURCE,
-    _draw_contact_discs, _fit, _force_panel, _wall_panel, _wired,
+from _common import (  # noqa: E402
+    LIMBS, PANEL_SIZE, _draw_contact_discs, _fit, _force_panel, _limb_load, _limb_members,
+    _wall_panel, _wired,
 )
-from score_pipeline_contacts import _limb_load, _limb_members  # noqa: E402
-from tools.paths import PARKOUR  # noqa: E402
+from tools.paths import PARKOUR, PETER  # noqa: E402
 
+PLATE_ROOT = PETER / "campus_board"
+CAMPUS_ROOT = PETER / "out_campus_board_single"
 WALL2_SOURCE = PETER / "climb_wall_2"
 WALL2_ROOT = PETER / "out_climb_wall_2_single"
 WALL3_SOURCE = PETER / "climb_wall_3"
@@ -227,24 +221,6 @@ def campus_clip(name: str) -> Clip:
     return Clip(name=name, video=plates / "cam_left.mp4", tree=CAMPUS_ROOT / name,
                 plate_contact=truth, plate_newton=forces["forces"],
                 plate_fps=float(forces["fps"]), wired=wired)
-
-
-def wall_clip(name: str) -> Clip:
-    """Describe a climb_wall trial — four cells under one structure, so only a total.
-
-    ``sensor_forces.npz`` is what ``scripts/peter_sensor_forces.py`` wrote: the cell
-    readings rotated into the reconstruction's world frame and flipped to the reaction
-    sense, one row per video frame, so its total is directly comparable to the solve's.
-    Its channels come in ``LIMBS`` order, which is checked rather than assumed — drawing
-    a cell under the wrong limb would be invisible and wrong.
-    """
-    sensor = np.load(WALL_ROOT / name / "human_optim" / "sensor_forces.npz")
-    channels = [str(limb) for limb in sensor["limbs"]]
-    if channels != LIMBS:
-        raise ValueError(f"sensor channels are {channels}, expected {LIMBS}")
-    return Clip(name=name, video=WALL_SOURCE / name / "cam_left.mp4", tree=WALL_ROOT / name,
-                measured_total=np.asarray(sensor["total_world"], float),
-                measured_cell=np.asarray(sensor["reaction_world"], float))
 
 
 def wall2_clip(name: str) -> Clip:

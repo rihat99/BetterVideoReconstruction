@@ -14,7 +14,7 @@ against it here, all on the same clips, the same frames and the same truth:
 * **PhysPT** (Zhang et al., CVPR 2024, ``../other/PhysPT``) — a physics-aware
   transformer that refines a per-frame SMPL motion and infers the ground reaction
   forces behind it. Fed our SAM-3D-Body initialisation in place of its CLIFF front
-  end (``scripts/parkour_physpt_inputs.py``), so it starts from the same body. It
+  end (``scripts/methods/physpt_inputs.py --dataset parkour``), so it starts from the same body. It
   models contact with a fixed ground plane only, so a hand on the bar is a force it
   cannot represent.
 * **Ours, learned** — our contact-anything model (``../contact_anything``, the

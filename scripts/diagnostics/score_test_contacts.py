@@ -61,8 +61,7 @@ _DIAGNOSTICS = Path(__file__).resolve().parent
 if str(_DIAGNOSTICS) not in sys.path:
     sys.path.insert(0, str(_DIAGNOSTICS))
 
-from score_prediction_contacts import (  # noqa: E402
-    _draw_table, _fmt, _rates, _render_table, _table_size)
+from _common import _draw_table, _fmt, _rates, _render_table, _table_size  # noqa: E402
 
 with (_REPO_ROOT / "configs" / "corpus.toml").open("rb") as _fh:
     DATA_ROOT = (_REPO_ROOT / tomllib.load(_fh)["corpus"]["data_root"]).resolve()

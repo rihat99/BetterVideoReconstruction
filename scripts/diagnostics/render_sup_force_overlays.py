@@ -1,9 +1,10 @@
 """Draw the supervised six-group force model (``forces_sup.npz``) onto a measured clip.
 
-``render_prediction_overlays.py`` covers the earlier four-limb force model and
-``render_kindyn_overlays.py`` the pipeline's own solve. This is the same picture for the
-**supervised** model — the one trained directly against the corpus kindyn forces — so all
-three overlays read side by side: same arrows, same five stacked plots, same moving cursor.
+``render_prediction_overlays.py`` (retired 2026-10-08, see git history) covered the earlier
+four-limb force model and ``render_kindyn_overlays.py`` the pipeline's own solve. This is
+the same picture for the **supervised** model — the one trained directly against the
+corpus kindyn forces — so the overlays read side by side: same arrows, same five stacked
+plots, same moving cursor.
 
 The prediction file differs from ``forces.npz`` in two ways this script leans on:
 
@@ -66,13 +67,12 @@ if str(_DIAGNOSTICS) not in sys.path:
     sys.path.insert(0, str(_DIAGNOSTICS))
 
 from render_kindyn_overlays import (  # noqa: E402
-    BOARD_CONTACT_N, MEASURED_RGB, SOLVE_RGB, WALL2_ROOT, WALL3_ROOT, Clip, campus_clip,
-    wall2_clip, wall3_clip, _draw_force_arrows as _draw_limb_arrows, _draw_legend,
+    BOARD_CONTACT_N, CAMPUS_ROOT, MEASURED_RGB, SOLVE_RGB, WALL2_ROOT, WALL3_ROOT, Clip,
+    campus_clip, wall2_clip, wall3_clip, _draw_force_arrows as _draw_limb_arrows, _draw_legend,
     _project,
 )
-from render_prediction_overlays import (  # noqa: E402
-    CAMPUS_ROOT, LIMB_RGB, PANEL_SIZE, _draw_caption, _draw_contact_discs,
-    _fit, _force_panel, _wall_panel,
+from _common import (  # noqa: E402
+    LIMB_RGB, PANEL_SIZE, _draw_caption, _draw_contact_discs, _fit, _force_panel, _wall_panel,
 )
 
 GRAVITY = 9.81

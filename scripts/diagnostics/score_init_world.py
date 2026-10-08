@@ -35,8 +35,7 @@ if str(_REPO) not in sys.path:
     sys.path.insert(0, str(_REPO))
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
-import score_baseline_pose as cv  # noqa: E402
-import score_gt_pose as cw  # noqa: E402
+import score_published_pose as published  # noqa: E402
 from tools.paths import CLIMBING, PETER  # noqa: E402
 
 CV_RESULTS = CLIMBING / "results"
@@ -67,27 +66,27 @@ def climbing_videos() -> dict:
            for line in (CV_RESULTS / "test_scenes.txt").read_text().splitlines() if line}
     rows = []
     for scene in scenes:
-        gj_w, _gv_w, w2c, valid, _check = cv.reference(scene)
-        d = np.load(cv.scene_dir("sam3d", scene) / "smplx_params.npz")
-        pj_c, _ = cv.pose({k: np.nan_to_num(d[k][0]) for k in BODY_KEYS})
+        gj_w, _gv_w, w2c, valid, _check = published.reference("climbingvideos", scene)
+        d = np.load(published.scene_dir("sam3d", scene) / "smplx_params.npz")
+        pj_c, _ = published.pose({k: np.nan_to_num(d[k][0]) for k in BODY_KEYS})
         pj_w = to_world(pj_c, w2c)
         ok = valid & np.asarray(d["valid_mask"][0], bool)
         rate = fps.get(scene, 25.0)
-        rows.append({**cv.world_metrics(pj_w, gj_w, ok), "Jitter": cv.jitter(pj_w, rate, ok)})
+        rows.append({**published.world_metrics(pj_w, gj_w, ok), "Jitter": published.jitter(pj_w, rate, ok)})
         print(f"[init-world] ClimbingVideos {scene} done", flush=True)
     return accumulate(rows)
 
 
 def climb_wall_3() -> dict:
     rows = []
-    for clip, fps in cw.clips():
-        gj_w, _gv_w, w2c, valid, _check = cw.reference(clip)
+    for clip, fps in published.items("climb_wall_3"):
+        gj_w, _gv_w, w2c, valid, _check = published.reference("climb_wall_3", clip)
         n = len(gj_w)
-        d = np.load(cw.OURS_ROOT / clip / "sam3d" / "smplx_params.npz")
-        pj_c, _ = cv.pose({k: np.nan_to_num(d[k][0][:n]) for k in BODY_KEYS})
+        d = np.load(published.OURS_ROOT / clip / "sam3d" / "smplx_params.npz")
+        pj_c, _ = published.pose({k: np.nan_to_num(d[k][0][:n]) for k in BODY_KEYS})
         pj_w = to_world(pj_c, w2c)
         ok = valid & np.asarray(d["valid_mask"][0], bool)[:n]
-        rows.append({**cv.world_metrics(pj_w, gj_w, ok), "Jitter": cv.jitter(pj_w, fps, ok)})
+        rows.append({**published.world_metrics(pj_w, gj_w, ok), "Jitter": published.jitter(pj_w, fps, ok)})
         print(f"[init-world] climb_wall_3 {clip} done", flush=True)
     return accumulate(rows)
 
@@ -108,7 +107,7 @@ if __name__ == "__main__":
     _w2c = np.concatenate([np.concatenate([_r, np.random.default_rng(1).normal(size=(4, 3, 1))], 2),
                            np.tile(np.array([[[0., 0., 0., 1.]]]), (4, 1, 1))], 1)
     _p = np.random.default_rng(2).normal(size=(4, 22, 3))
-    assert np.allclose(to_world(cv.to_camera(_p, _w2c), _w2c), _p, atol=1e-9), "lift is not the inverse"
+    assert np.allclose(to_world(published.to_camera(_p, _w2c), _w2c), _p, atol=1e-9), "lift is not the inverse"
 
     cw_vals = climb_wall_3()
     cv_vals = climbing_videos()

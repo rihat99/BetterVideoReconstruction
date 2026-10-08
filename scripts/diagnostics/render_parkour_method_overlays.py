@@ -40,7 +40,7 @@ if str(_DIAGNOSTICS) not in sys.path:
 import compare_parkour_methods as cmp  # noqa: E402
 from render_kindyn_overlays import (  # noqa: E402
     BOARD_CONTACT_N, MEASURED_RGB, SOLVE_RGB, _draw_force_arrows, _draw_legend, _project)
-from render_prediction_overlays import PANEL_SIZE, _draw_contact_discs, _fit, _wall_panel  # noqa: E402
+from _common import PANEL_SIZE, _draw_contact_discs, _fit, _wall_panel  # noqa: E402
 
 OUT_DIR = cmp.DATASET / "comparison" / "videos"
 #: One clip per technique, in the paper's order.

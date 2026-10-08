@@ -74,7 +74,7 @@ if str(_DIAGNOSTICS) not in sys.path:
 
 from opencap_plates import LOADED_N, cop_free_torque, vertical_free_torque  # noqa: E402
 from opencap_sensor_forces import PROCESSED, world_from_mocap  # noqa: E402
-from score_pipeline_contacts import _limb_members  # noqa: E402
+from _common import _limb_members  # noqa: E402
 from tools.body import load_body  # noqa: E402
 from tools.human_optim.boards import LIMBS  # noqa: E402
 from tools.human_optim.qmath import normalize_q  # noqa: E402

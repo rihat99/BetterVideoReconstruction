@@ -38,7 +38,7 @@ if str(_REPO) not in sys.path:
     sys.path.insert(0, str(_REPO))
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
-from score_prediction_contacts import _render_table  # noqa: E402
+from _common import _render_table  # noqa: E402
 from tools.paths import CLIMBING, PETER  # noqa: E402
 
 

@@ -20,7 +20,7 @@ into the AP axis; it is kept in the npz as ``R_free_fit`` with its tilt for prov
 only. The fit residual is the check that the alignment is real.
 
 **Rate.** The inputs were written at 20 Hz (every third 60 fps video frame), the rate
-PhysPT's released weights assume — see ``opencap_physpt_inputs.py``. Rows therefore land
+PhysPT's released weights assume — see ``physpt_inputs.py``. Rows therefore land
 on video frames 0, 3, 6, … The foot WRENCH (force and its moment about the ground origin,
 the quantity that may be averaged) and the body geometry are linearly resampled onto all
 60 fps video frames, and the plate triple is inverted from the resampled wrench.

@@ -56,7 +56,7 @@ for _p in (str(_REPO_ROOT), str(_DIAGNOSTICS)):
     if _p not in sys.path:
         sys.path.insert(0, _p)
 
-from score_pipeline_contacts import _limb_members  # noqa: E402
+from _common import _limb_members  # noqa: E402
 from tools.human_optim.boards import LIMBS, limb_of_frame  # noqa: E402
 from tools.paths import PETER  # noqa: E402
 
