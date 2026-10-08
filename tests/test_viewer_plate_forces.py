@@ -7,7 +7,7 @@ from pathlib import Path
 
 import numpy as np
 
-from scripts.run_opencap import build_view_farm
+from scripts.run_dataset import build_view_farm
 from tools.viewer.loading import _load_plate_estimate, _load_sensor_forces
 
 _R = np.array([[0.0, 0.0, -1.0], [0.0, -1.0, 0.0], [-1.0, 0.0, 0.0]], np.float32)

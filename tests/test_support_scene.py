@@ -28,13 +28,13 @@ _REPO_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(_REPO_ROOT / "scripts"))
 sys.path.insert(0, str(_REPO_ROOT / "scripts" / "stages"))
 
-import run_opencap  # noqa: E402
+from scripts import run_dataset  # noqa: E402
 from build_support_scene import (  # noqa: E402
     FLOOR_MARGIN_M, PLATEAU_INPLANE_M, PLATEAU_MAX_SPAN_M, PLATEAU_MIN_STILL_S,
     PLATEAU_SIT_BELOW_KNEE_M, SPACING_M,
     detect_plateaus, disc_points, frame_groups, plane_basis, run,
 )
-from run_opencap import VARIANT_CHAINS, VARIANT_STEPS, build_farm, owns_scene  # noqa: E402
+from scripts.run_dataset import VARIANT_CHAINS, VARIANT_STEPS, build_farm, owns_scene  # noqa: E402
 
 from tools.human_optim.losses import scene_signed_distance  # noqa: E402
 
@@ -344,7 +344,13 @@ def test_untracked_frames_carry_no_stillness() -> None:
     assert accepted(detect(points, knee, drift, valid)) == []
 
 
-# ── the variant farm and the run_opencap guards ──────────────────────────────────────
+# ── the variant farm and the run_dataset guards ──────────────────────────────────────
+
+def _point_opencap_at(monkeypatch: pytest.MonkeyPatch, root: Path) -> None:
+    """Make ``--dataset opencap`` read ``root/<clip>/video.mp4`` and write ``root/out/``."""
+    monkeypatch.setitem(run_dataset.DATASETS["opencap"], "root", root)
+    monkeypatch.setitem(run_dataset.DATASETS["opencap"], "out", root / "out")
+
 
 def _fake_clip_root(tmp_path: Path) -> Path:
     """A ``processed/`` root with one clip whose out tree carries a real fused scene."""
@@ -411,9 +417,9 @@ def test_support_steps_cannot_touch_a_farm_that_links_the_real_geometry(
         tmp_path: Path, monkeypatch: pytest.MonkeyPatch, argv: list[str]) -> None:
     """The one destructive mistake: a synthetic scene written over the real fused cloud."""
     out = _fake_clip_root(tmp_path)
-    monkeypatch.setattr(run_opencap, "_OPENCAP", tmp_path)
+    _point_opencap_at(monkeypatch, tmp_path)
     with pytest.raises(SystemExit, match="geometry"):
-        run_opencap.main(argv)
+        run_dataset.main(["--dataset", "opencap", *argv])
     assert (out / "geometry" / "scene.npz").read_bytes() == b"the real fused cloud"
     assert not (out / "_labvalidation").exists()
 
@@ -429,16 +435,16 @@ def test_steps_must_be_this_run_s_chain_in_order(
         tmp_path: Path, monkeypatch: pytest.MonkeyPatch, argv: list[str], message: str) -> None:
     """A chain is an order: a step that writes shared inputs or runs early is refused."""
     _fake_clip_root(tmp_path)
-    monkeypatch.setattr(run_opencap, "_OPENCAP", tmp_path)
+    _point_opencap_at(monkeypatch, tmp_path)
     with pytest.raises(SystemExit, match=message):
-        run_opencap.main(argv)
+        run_dataset.main(["--dataset", "opencap", *argv])
 
 
 def test_human_chain_refuses_to_run_without_the_synthetic_scene(
         tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """Scene terms silently off would look like a finished variant and would not be one."""
     out = _fake_clip_root(tmp_path)
-    monkeypatch.setattr(run_opencap, "_OPENCAP", tmp_path)
+    _point_opencap_at(monkeypatch, tmp_path)
     with pytest.raises(SystemExit, match="scene.npz is missing"):
-        run_opencap.main(["--variant", "floorplane", "--steps", "kinematics_1"])
+        run_dataset.main(["--dataset", "opencap", "--variant", "floorplane", "--steps", "kinematics_1"])
     assert not (out / "_floorplane" / "geometry" / "scene.npz").exists()
