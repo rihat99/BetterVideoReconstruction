@@ -1,4 +1,4 @@
-# STATE — BetterVideoReconstruction (dev worktree) / 2026-10-08_22-50_dev_optim_rewrite (updated 2026-10-09 08:00 Dubai)
+# STATE — BetterVideoReconstruction (dev worktree) / 2026-10-08_22-50_dev_optim_rewrite (updated 2026-10-09 08:30 Dubai)
 
 ## Pointers
 - Task status: PLAN.md final (11 decisions + off-hours assumptions); step 2 DONE + committed (dev 46ebb69 code, a7027b9 notes; report_2 §4 gate PASS); step 3 committed (fffc58a); step 5 awaiting review + G2; REPORT.md not started.
@@ -10,13 +10,13 @@
 
 ## Running jobs
 - Step 3 DONE + committed (dev fffc58a; report_3_optim_port.md final, gate PASS, pytest 233/4 skipped). tests/test_contact_confidence.py fix (uses the new viewer loader) is uncommitted and goes with the viewer commit.
-- Step 5 viewer rebuild DONE (uncommitted; report_5_viewer.md saved; 19 viewer tests pass; screenshots vis/viewer_boulder_1{,_forces}.png). Review agent (mars_aux, brief_5r_viewer_review.md) running: live view_3d process + --bedlam check + adversarial pass → report_5r_viewer_review.md. Launched 01:30 Dubai.
-- Step G2 (mars_top_opus, brief_G2_solid_arrows.md): solid arrow style in BR dev ArrowsLayer (commits on dev/BetterRobot) + BVR tools/viewer/layers.py force/wrench/sensor/gravity/normal arrows switched to it + re-recorded screenshots; report → report_G2_solid_arrows.md. Launched 02:00 Dubai (user asked for clear arrows like before; PLAN decision 12).
-- Steps 3b, 5-review and G2 share the dev working tree (disjoint files) and GPU 2.
+- Step 5 viewer rebuild DONE (uncommitted; report_5_viewer.md saved; 19 viewer tests pass; screenshots vis/viewer_boulder_1{,_forces}.png). Review DONE (report_5r_viewer_review.md: no convention bugs; 3 low bugs, lost contact-shape check, Q1 core→datasets import). Fix pass 5b (mars_top_opus, brief_5b_viewer_fixes.md) RUNNING since 08:30 → report_5b_viewer_fixes.md.
+- Step G2 DONE: BR dev commit 8828842 (ArrowsLayer shaft_radius=/head_radius= solid style, 1674 tests); BVR layers.py uses old radii; screenshots vis/viewer_boulder_1{,_forces,_forces_vs_old,_forces_vs_old_close}.png; report_G2_solid_arrows.md.
+
 
 ## Next steps
 2. Viewer commit waits for BOTH the step-5 review and G2. When they report: fix real bugs (small → myself or a mars_top_opus), then commit ONLY the viewer paths (tools/viewer/*, scripts/view_3d.py, tests/test_viewer_*, tools/geometry/surface.py deletion) as "Dev 3/N: viewer on BetterRobot/BetterHuman layers" (step 3 files may still be dirty — add explicitly).
-3. Then step 4 (bvr/ package, datasets/<name>/ split, retire list, base+override configs, single runner, corpus → datasets/climbingvideos), step 6 (Option C env, docs, adversarial review, REPORT.md), TG ping (TG not configured on this machine: token missing in ~/.config/autoresearch/telegram.env).
+3. Step 4 brief written: brief_4_structure.md (4a package+retire, 4b datasets split, 4c configs+runner; main session commits after each 'SUBSTEP n READY'). Launch (mars_top) after the viewer commit. Then step 4 (bvr/ package, datasets/<name>/ split, retire list, base+override configs, single runner, corpus → datasets/climbingvideos), step 6 (Option C env, docs, adversarial review, REPORT.md), TG ping (TG not configured on this machine: token missing in ~/.config/autoresearch/telegram.env).
 
 ## Assumptions pending user confirmation
 - Regression gate = report_0 recommendation (×3 same-input noise per stage, pooled F1 ±0.01); dev gets an env-var deterministic switch.
