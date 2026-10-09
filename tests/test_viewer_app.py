@@ -13,7 +13,7 @@ from better_robot.viewer import Viewer
 from bvr.body import load_body
 from bvr.viewer.app import App
 from bvr.viewer.layers import _FORCE_SCALE, _TORQUE_SCALE
-from bvr.viewer.loading import VideoFrames, load_clip_data
+from bvr.viewer.loading import FINGER_TOKENS, VideoFrames, load_clip_data
 
 
 class FakeHandle:
@@ -150,7 +150,7 @@ def test_app_draws_every_source_and_hides_invalid_frames(tmp_path, body):
     viewer.show(4)
     assert mesh._mesh.visible
     human = next(item.layer for item in app.items if item.kind == "human")
-    app.kinds["human"].value = True
+    app.controls["human"].value = True
     app._apply()
     viewer.show(2)                                        # ... and a frame without depth points
     assert not human._cloud.visible
@@ -160,12 +160,11 @@ def test_app_draws_every_source_and_hides_invalid_frames(tmp_path, body):
     assert spheres._colors[0, 0, 0] > spheres._colors[0, 0, 1] and spheres._colors[1, 0, 1] > spheres._colors[1, 0, 0]
     assert spheres._colors[0, 2, 1] > spheres._colors[0, 2, 0]       # a frame the artifact does not cover is free
 
-    # The force checkboxes appear only with the dynamics body.
-    assert not app.kinds["joint_forces"].visible
+    # The dynamics folder appears only with the dynamics body.
+    assert not app.dynamics_folder.visible and not app.controls["forces"].visible
     app.source.value = "kindyn_1"
     app._apply()
-    assert app.kinds["joint_forces"].visible and not mesh.visible
-    assert all(item.layer.visible == app.kinds[item.kind].value for item in app.items if item.source == "kindyn_1")
+    assert app.dynamics_folder.visible and app.controls["forces"].visible and not mesh.visible
 
 
 def test_pager_swaps_groups_and_shrinks_the_timeline(tmp_path, body):
@@ -221,5 +220,44 @@ def test_camera_and_root_wrench_follow_the_stored_conventions(tmp_path, body):
     assert np.allclose(camera.position, [-2.0, 1.0, -3.0], atol=1e-6)
     wxyz = np.asarray(camera.wxyz)                        # viser's order
     assert np.allclose(wxyz * np.sign(wxyz[0]), [s, 0.0, 0.0, -s], atol=1e-6)
-    wrench = _items(app, "kindyn_1", "root_wrench")[0].layer.vectors[0]
-    assert np.allclose(wrench, [[0.0, _FORCE_SCALE, 0.0], [-_TORQUE_SCALE, 0.0, 0.0]], atol=1e-7)
+    force, torque = (_items(app, "kindyn_1", kind)[0].layer.vectors[0] for kind in ("root_force", "root_torque"))
+    assert np.allclose(force, [[0.0, _FORCE_SCALE, 0.0]], atol=1e-7)
+    assert np.allclose(torque, [[-_TORQUE_SCALE, 0.0, 0.0]], atol=1e-7)
+
+
+def test_skeleton_sizes_and_dynamics_toggles_match_the_old_viewer(tmp_path, body):
+    """Old sizes: joints 0.028 / bones 0.012 (fingers 0.3x), dynamics joints 0.022; solid 3.6 mm frame links;
+    the dynamics folder sizes joints by torque, shows the fingers and switches per-joint / per-frame forces."""
+    app = App(Viewer(server=FakeServer()), [_write_clip(tmp_path, body, 6)], body=body, video=False)
+    finger = np.array([any(t in n for t in FINGER_TOKENS) for n in body.joint_names])
+    (kinematic,) = (item.layer for item in _items(app, "kinematics", "skeleton"))
+    assert np.allclose(kinematic.radius, np.where(finger, 0.028 * 0.3, 0.028))
+    bones = np.broadcast_to(kinematic.bone_radius, finger.shape)
+    assert np.allclose(bones[finger], 0.012 * 0.3) and np.isclose(bones.max(), 0.012)
+    links = next(item.layer for item in _items(app, "kinematics", "contact_frames") if "links" in item.layer.name)
+    assert links.shaft_radius == pytest.approx(0.0036) and links.head_size == 0.0
+
+    app.source.value = "kindyn_1"
+    app._apply()
+    skeleton = {item.layer.name: item.layer for item in _items(app, "kindyn_1", "skeleton")}
+    shown = lambda layers: sorted(name for name, layer in layers.items() if layer.visible)  # noqa: E731
+    assert shown(skeleton) == ["p00_skeleton"]            # grey, no fingers
+    plain, sized = skeleton["p00_skeleton"], skeleton["p00_skeleton_torque"]
+    assert np.allclose(plain.radius, np.where(finger, 0.0, 0.022))
+    forces = app.data.bodies["kindyn_1"].forces
+    grow = 1.0 + np.minimum(forces["torque"][0] / forces["torque_ref"], 1.0)
+    grow[:, 0] = 1.0                                      # the root keeps its size: its wrench is the root arrows
+    assert np.allclose(sized.radius, 0.022 * grow * ~finger)
+    app.controls["torque"].value = app.controls["fingers"].value = True
+    app._apply()
+    assert shown(skeleton) == ["p00_fingers_torque", "p00_skeleton_torque"]
+    assert np.allclose(skeleton["p00_fingers"].radius, np.where(finger, 0.022 * 0.3, 0.0))
+
+    arrows = {item.layer.name: item.layer for item in _items(app, "kindyn_1", "forces")}
+    assert shown(arrows) == ["p00_joint_forces"]
+    app.controls["force_display"].value = "per-frame"
+    app._apply()
+    assert shown(arrows) == ["p00_frame_forces"]
+    app.controls["forces"].value = False
+    app._apply()
+    assert shown(arrows) == []

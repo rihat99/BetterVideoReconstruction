@@ -1,13 +1,17 @@
 """The BVR viewer app: a BetterRobot ``Viewer`` plus a small sidebar for browsing ``out/<stem>/`` clips.
 
 The sidebar holds a clip pager (when there is more than one clip), BetterRobot's Timeline folder
-(play, step, speed, loop), the video pane, the body-source dropdown, one checkbox per layer kind and
-an info panel. Switching clips reads the new clip first (a clip that fails to read leaves the old one
-on screen), then removes the old clip's groups, so the timeline fits the new clip, and plays at the
-new clip's fps. Every drawing primitive comes from :mod:`bvr.viewer.layers`; this module only adds
-``server.gui`` widgets and frames the browser camera on the person. Clips are read with
+(play, step, speed, loop), the video pane, the body-source dropdown, the "layers" folder (one
+checkbox per layer kind), the collapsed "dynamics" folder (force display, torque sizing, fingers,
+contact forces, root force and torque, a dataset's measured forces; shown while a
+kinematics+dynamics source is active) and an info panel. Switching clips reads the new clip first
+(a clip that fails to read leaves the old one on screen), then removes the old clip's groups, so the
+timeline fits the new clip, and plays at the new clip's fps. Every drawing primitive comes from
+:mod:`bvr.viewer.layers`; this module only adds ``server.gui`` widgets and frames the browser camera
+on the person. Clips are read with
 ``load_clip_data`` unless the caller passes a dataset-aware ``read`` (``scripts/view_3d.py`` does);
-a layer kind no core checkbox knows gets its own checkbox, off by default.
+a layer kind no core checkbox knows (a dataset's force arrows) gets its own checkbox in the
+dynamics folder, off by default.
 """
 from __future__ import annotations
 
@@ -23,7 +27,7 @@ from better_robot.viewer import LIGHT, ImagePanel, Viewer
 
 from bvr.body import Body, load_body
 
-from .layers import KINDS, Item, clip_layers
+from .layers import DYNAMICS, FORCE_DISPLAY, KINDS, Item, clip_layers
 from .loading import ClipData, camera_poses, load_clip_data
 
 _LATE = 1e6          # GUI order that puts a folder after BetterRobot's Timeline folder
@@ -54,7 +58,8 @@ class App:
     """Sidebar and clip switching around one BetterRobot ``Viewer``.
 
     Each clip's layers come from :func:`~bvr.viewer.layers.clip_layers` as :class:`Item` s; a layer
-    is shown when its kind's checkbox is on and it belongs to no body source or to the active one.
+    is shown when its kind's checkbox is on, the controls in its ``when`` hold their values, and it
+    belongs to no body source or to the active one.
     ``read(clip, *, body, human_max_points, video, video_dir) -> ClipData`` reads a clip
     (``load_clip_data``, or a dataset-aware reader that builds on it).
     """
@@ -91,12 +96,17 @@ class App:
                 self.view_menu.on_update(lambda _: self._show_view())
         with gui.add_folder("body", order=_LATE + 1):
             self.source = gui.add_dropdown("source", ("(none)",), initial_value="(none)")
-        self.layers_folder = gui.add_folder("layers", order=_LATE + 2)
-        with self.layers_folder:
-            self.kinds = {key: gui.add_checkbox(label, initial_value=on) for key, (label, on) in KINDS.items()}
-        for control in (self.source, *self.kinds.values()):
+        with gui.add_folder("layers", order=_LATE + 2):
+            self.controls = {key: gui.add_checkbox(label, initial_value=on) for key, (label, on) in KINDS.items()}
+        self.dynamics_folder = gui.add_folder("dynamics", order=_LATE + 3, expand_by_default=False)
+        with self.dynamics_folder:
+            self.controls["force_display"] = gui.add_dropdown("force display", FORCE_DISPLAY,
+                                                              initial_value=FORCE_DISPLAY[0])
+            self.controls |= {key: gui.add_checkbox(label, initial_value=on) for key, (label, on) in DYNAMICS.items()}
+        self.dynamics = {"force_display", *DYNAMICS}    # the controls in the dynamics folder
+        for control in (self.source, *self.controls.values()):
             control.on_update(lambda _: self._apply())
-        self.info = gui.add_markdown("", order=_LATE + 3)
+        self.info = gui.add_markdown("", order=_LATE + 4)
         viewer.server.on_client_connect(self._frame)
         self.load(clips[0])
 
@@ -123,10 +133,11 @@ class App:
             self.cache[clip] = self.data = data
             self.items = clip_layers(data, self.body, **self.draw_opts)
             for kind in dict.fromkeys(item.kind for item in self.items):
-                if kind not in self.kinds:           # a dataset's own layer: its kind is the checkbox label
-                    with self.layers_folder:
-                        self.kinds[kind] = self.viewer.server.gui.add_checkbox(kind, initial_value=False)
-                    self.kinds[kind].on_update(lambda _: self._apply())
+                if kind not in self.controls:        # a dataset's force arrows: its kind is the checkbox label
+                    with self.dynamics_folder:
+                        self.controls[kind] = self.viewer.server.gui.add_checkbox(kind, initial_value=False)
+                    self.controls[kind].on_update(lambda _: self._apply())
+                    self.dynamics.add(kind)
             for item in self.items:
                 item.layer.listed = False            # the app's own checkboxes toggle them
                 self.viewer.add(item.layer, item.group, valid=item.valid)
@@ -154,18 +165,20 @@ class App:
               f"bodies {list(data.bodies)}", flush=True)
 
     def _apply(self) -> None:
-        """Show each layer whose kind is ticked and whose body source is active; hide checkboxes with nothing to toggle."""
+        """Show each layer whose controls are set and whose body source is active; hide unused controls."""
         with self._lock:
             active, present = self.source.value, set()
             for item in self.items:
                 mine = item.source is None or item.source == active
                 if mine:
-                    present.add(item.kind)
-                on = mine and bool(self.kinds[item.kind].value)
+                    present.update((item.kind, *item.when))
+                on = (mine and bool(self.controls[item.kind].value)
+                      and all(self.controls[key].value == value for key, value in item.when.items()))
                 if item.layer.visible != on:
                     self.viewer.set_visible(item.layer, on)
-            for key, checkbox in self.kinds.items():
-                checkbox.visible = key in present
+            for key, control in self.controls.items():
+                control.visible = key in present
+            self.dynamics_folder.visible = bool(present & self.dynamics)
 
     def _show_view(self) -> None:
         with self._lock:

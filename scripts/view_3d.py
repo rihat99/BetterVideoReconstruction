@@ -7,9 +7,9 @@ frustum on its path, or the fixed cameras of a calibrated rig), gravity, the fit
 and every SMPL-X body source — ``original`` (converter output), ``prefit``, ``kinematics``,
 ``kinematics_2``, ``kindyn_1`` — as a skinned mesh with its skeleton, its contact frames (red
 touching, green free) and, for ``kindyn_1``, the solved contact forces, the root's residual wrench
-and the joints coloured by torque. The ``body source`` dropdown picks the source; the ``layers``
-checkboxes toggle each kind; the sidebar video pane plays the source footage in sync
-(``[viewer].video = false`` turns it off). Clips with measured forces (peter rigs, Parkour, OpenCap)
+and, in the ``dynamics`` folder, the joints sized by torque. The ``body source`` dropdown
+picks the source; the ``layers`` checkboxes toggle each kind; the sidebar video pane plays
+the source footage in sync (``[viewer].video = false`` turns it off). Clips with measured forces (peter rigs, Parkour, OpenCap)
 add orange measured arrows, OpenCap clips also our blue plate-format arrows.
 
 ``--scenes`` browses the ClimbingVideos scene DB, ``--bedlam`` the BEDLAM2 ground truth (one

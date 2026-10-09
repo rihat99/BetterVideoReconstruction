@@ -51,7 +51,7 @@ class ForceArrows:
     """Per-frame force arrows a dataset reader adds to a clip (measured forces), drawn like the solved ones."""
 
     name: str
-    kind: str                            #: sidebar checkbox: a ``layers.KINDS`` key, or the dataset's own label (added, off by default)
+    kind: str                            #: sidebar checkbox: a ``layers.DYNAMICS`` key, or the dataset's own label (added to the dynamics folder, off)
     origins: np.ndarray                  #: (T, C, 3) world frame, metres
     vectors: np.ndarray                  #: (T, C, 3) newtons
     color: tuple                         #: RGB in [0, 1]

@@ -147,10 +147,11 @@ plain numpy (`ClipData`), `bvr/viewer/layers.py` turns it into BetterRobot / Bet
 viewer layers (points, arrows, cameras, ground, skinned body, skeleton, spheres), and
 `bvr/viewer/app.py` is the sidebar: the **`body source`** dropdown switches `original`
 (converter) / `prefit` / `kinematics` / `kinematics_2` / `kindyn_1`, each when its file
-exists; the **layer** checkboxes toggle one *kind* each (`layers.KINDS`: SMPL-X body,
-skeleton, contact frames red/green with their normal arrows, contact forces per joint or
-per frame, root force/torque, human points, scene points and normals, cameras, gravity,
-ground plane); the **video pane** plays the source footage in sync (`[viewer].video`).
+exists; the **layers** checkboxes toggle one *kind* each (`layers.KINDS`: SMPL-X body,
+skeleton, contact frames red/green with their normal arrows, human points, scene points
+and normals, cameras, gravity, ground plane); the collapsed **dynamics** folder (shown for
+`kindyn_1`) holds the force display per joint / per frame, joint torques as sphere size,
+fingers, contact forces, root force/torque and any measured forces; the **video pane** plays the source footage in sync (`[viewer].video`).
 Bodies are posed once per clip on the CPU. Dataset readers are composed in
 `scripts/view_3d.py`, not in `bvr/viewer`: measured rig forces (`datasets/_rigs.py`),
 OpenCap plate estimates (`datasets/opencap/viewer.py`), and the two DB browsers —
