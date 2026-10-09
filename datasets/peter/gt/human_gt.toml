@@ -84,14 +84,6 @@ reproj_init         = [30, 5, 5, 5]   # anchor = that camera's SAM-3D-Body 2D (a
 chamfer             = [0, 0, 0, 0]   # GT: no monocular depth cloud
 pose_prior          = [300, 300, 300, 300]
 orient_prior        = [50, 50, 50, 50]
-# Shape (GT, active only where fit_betas trains the betas: kinematics_1 refine + lbfgs).
-# shape_height / shape_mass: squared error of the neutral-pose height (m) and the Dempster-baked
-# mass (kg) to the participant's real values — 1 cm costs 10, 1 kg costs 1. betas_prior: squared
-# distance to the converter mean, a mild tie-breaker for the shape directions the images and the
-# two measurements leave free.
-shape_height        = [0, 1e5, 0, 0]
-shape_mass          = [0, 1, 0, 0]
-betas_prior         = [0, 0.1, 0, 0]
 
 [loss_weights.motion]
 # The tangent differences of q: velocity (1st) → accel (2nd) → jerk (3rd) → snap (4th).
@@ -134,11 +126,6 @@ penetration         = [0, 300, 300, 300]   # GT: 40x below the pipeline's 12000.
                                            # gripping finger is legitimately behind it) flung the whole arm 30-75 cm for a few
                                            # frames, after which the Geman-McClure image terms had saturated and could not pull
                                            # it back — the "sudden jitters" (2026-09-11, 90 spike frames -> 11 over the 6 clips).
-wall_penetration    = [0, 100, 100, 100]   # GT: squared hinge (m²) on every subsampled mesh vertex + contact frame BEHIND the
-                                           # wall PLANE (geometry/wall.npz). Holds stand in front of the plane, so a gripping
-                                           # finger is never penalised, and nothing of the climber can be behind it. Summed
-                                           # over points, averaged over frames: a hand of 30 points 2 cm deep costs 1.2 (a
-                                           # camera term ~0.5); 3e4 per point (v3b) crushed the image terms.
 
 [loss_weights.annotation]
 # Label-driven, and every label lives on the CONTACT FRAMES: kinematics_1 detects them
@@ -170,8 +157,6 @@ force_smooth_dir    = [0, 0, 0, 40]   # smooth the force DIRECTION (may adapt fa
 # 2nd/3rd-order force smoothness: the same magnitude/direction split on the 2nd and 3rd
 # finite differences (force acceleration and jerk), masked to contacts that persist over
 # the whole 3-/4-frame window.
-board_force         = [0, 0, 0, 50]    # GT: Σ_limb ‖Σ_(frames of limb) f − F_board‖², same 0.5·res_scale normalisation as
-                                        # base_wrench (body weights, counted rows) — the boards shape the pose through the dynamics.
 force_accel_mag     = [0, 0, 0, 320]
 force_accel_dir     = [0, 0, 0, 160]
 force_jerk_mag      = [0, 0, 0, 160]
@@ -203,6 +188,23 @@ torque_accel        = [0, 0, 0, 60]
 # adults; Anderson 2007 for hip/knee/ankle, standing-flexion data for shoulder/elbow,
 # wrist-moment and finger-flexor studies for the hand), so a torque costs more the weaker
 # the joint. Legs and trunk = 1; the hand chain is where strength falls off a cliff.
+[loss_weights.multiview]   # the GT chain's own terms (datasets/peter/gt/fit_multiview.py), a group of their own
+# Shape (GT, active only where fit_betas trains the betas: kinematics_1 refine + lbfgs).
+# shape_height / shape_mass: squared error of the neutral-pose height (m) and the Dempster-baked
+# mass (kg) to the participant's real values — 1 cm costs 10, 1 kg costs 1. betas_prior: squared
+# distance to the converter mean, a mild tie-breaker for the shape directions the images and the
+# two measurements leave free.
+shape_height        = [0, 1e5, 0, 0]
+shape_mass          = [0, 1, 0, 0]
+betas_prior         = [0, 0.1, 0, 0]
+wall_penetration    = [0, 100, 100, 100]   # GT: squared hinge (m²) on every subsampled mesh vertex + contact frame BEHIND the
+                                           # wall PLANE (geometry/wall.npz). Holds stand in front of the plane, so a gripping
+                                           # finger is never penalised, and nothing of the climber can be behind it. Summed
+                                           # over points, averaged over frames: a hand of 30 points 2 cm deep costs 1.2 (a
+                                           # camera term ~0.5); 3e4 per point (v3b) crushed the image terms.
+board_force         = [0, 0, 0, 50]    # GT: Σ_limb ‖Σ_(frames of limb) f − F_board‖², same 0.5·res_scale normalisation as
+                                        # base_wrench (body weights, counted rows) — the boards shape the pose through the dynamics.
+
 [torque.multipliers]
 hip = 1.0
 knee = 1.0

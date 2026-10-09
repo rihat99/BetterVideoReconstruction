@@ -10,7 +10,7 @@ still_mps = 0.10           # speed (m/s) at which a point is half in contact; tw
                            #  The speed is BetterRobot's: frame Jacobian x generalised velocity
 enter_m = 0.08             # height above the floor that starts a contact, metres. Wide on purpose:
                            #  BEDLAM2 lifts the whole body by the shoe sole and poses the naked toes
-                           #  5-7 cm up inside a flat shoe (see bvr/bedlam_contacts.ENTER_M)
+                           #  5-7 cm up inside a flat shoe (see datasets/bedlam2/contacts.py ENTER_M)
 exit_m = 0.10              # looser height that holds one (hysteresis, so labels do not blink)
 max_tilt_deg = 55          # the skin at a contact frame must face the floor within this. What keeps
                            #  the ball of a vertical foot (60-75 deg) out of the wide band above while

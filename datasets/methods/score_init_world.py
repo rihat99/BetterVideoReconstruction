@@ -24,6 +24,7 @@ Usage:
 """
 from __future__ import annotations
 
+import argparse
 import json
 from pathlib import Path
 
@@ -98,6 +99,7 @@ def patch(path: Path, values: dict) -> None:
 
 
 if __name__ == "__main__":
+    argparse.ArgumentParser(description=__doc__.splitlines()[0]).parse_args()   # --help only; no knobs
     # A round trip through the two transforms must be the identity.
     _r = np.linalg.qr(np.random.default_rng(0).normal(size=(4, 3, 3)))[0]
     _w2c = np.concatenate([np.concatenate([_r, np.random.default_rng(1).normal(size=(4, 3, 1))], 2),

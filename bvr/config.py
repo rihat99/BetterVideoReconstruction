@@ -17,6 +17,7 @@ optimization phase. Per-stage ``iters`` and the shared knob sections
 
 from __future__ import annotations
 
+import sys
 import tomllib
 from dataclasses import dataclass
 from pathlib import Path
@@ -25,25 +26,45 @@ from types import SimpleNamespace
 from bvr.paths import REPO_ROOT
 
 
-def _merge(base: dict, override: dict) -> dict:
-    """``override`` laid over ``base``, table by table; any other value replaces whole."""
+def _merge(base: dict, override: dict, unknown: list[str], prefix: str = "") -> dict:
+    """``override`` laid over ``base``, table by table; any other value replaces whole.
+
+    A value whose key the base table lacks is appended to ``unknown`` (dotted path): in a
+    delta that is usually a typo of a knob, since the stage would read its default instead.
+    A whole table the base lacks is not reported — dataset-only sections are legitimate.
+    """
     merged = dict(base)
     for key, value in override.items():
         if isinstance(value, dict) and isinstance(merged.get(key), dict):
-            merged[key] = _merge(merged[key], value)
+            merged[key] = _merge(merged[key], value, unknown, f"{prefix}{key}.")
         else:
+            if key not in merged and not isinstance(value, dict):
+                unknown.append(prefix + key)
             merged[key] = value
     return merged
 
 
-def load_config(path: str | Path) -> dict:
-    """Load a TOML file into a plain dictionary, its ``base`` (if any) merged underneath."""
-    with Path(path).open("rb") as config_file:
+def load_config(path: str | Path, _chain: tuple[Path, ...] = ()) -> dict:
+    """Load a TOML file into a plain dictionary, its ``base`` (if any) merged underneath.
+
+    A base cycle raises; a delta key its base has no value for is reported on stderr.
+    """
+    path = Path(path)
+    with path.open("rb") as config_file:
         raw = tomllib.load(config_file)
     base = raw.pop("base", None)
     if base is None:
         return raw
-    return _merge(load_config(REPO_ROOT / base), raw)
+    chain = (*_chain, path.resolve())
+    base_path = REPO_ROOT / base
+    if base_path.resolve() in chain:
+        raise ValueError("config base cycle: " + " -> ".join(str(p) for p in (*chain, base_path.resolve())))
+    unknown: list[str] = []
+    merged = _merge(load_config(base_path, chain), raw, unknown)
+    if unknown:
+        print(f"[config] {path}: {', '.join(unknown)} not in its base {base} — a stage reads "
+              "such a key only if it looks for it (typo?)", file=sys.stderr)
+    return merged
 
 
 def section(cfg: dict, name: str, defaults: dict) -> SimpleNamespace:
@@ -106,6 +127,16 @@ class HumanOptimConfig:
 def load_human_config(path: str | Path) -> HumanOptimConfig:
     """Load a human-optimization TOML into a :class:`HumanOptimConfig`."""
     raw = load_config(path)
+
+    # The general config lists every weight row the stages read; a row it does not have in one
+    # of its groups (a retired or misspelt term) would otherwise be dropped without a word. A
+    # group it lacks is a chain's own terms (the peter GT chain's [loss_weights.multiview]).
+    general = load_config(REPO_ROOT / "configs" / "human_optimization.toml")["loss_weights"]
+    known = {term for table in general.values() for term in table}
+    if unknown := [f"{group}.{term}" for group, table in raw.get("loss_weights", {}).items()
+                   if group in general for term in table if term not in known]:
+        print(f"[config] {path}: loss weight row(s) {', '.join(unknown)} name no term of any "
+              "stage (configs/human_optimization.toml lists them) — ignored", file=sys.stderr)
 
     weights: dict[str, dict[str, float]] = {s: {} for s in STAGE_ORDER}
     for group, table in raw.get("loss_weights", {}).items():

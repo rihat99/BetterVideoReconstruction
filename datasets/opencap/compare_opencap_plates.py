@@ -63,7 +63,7 @@ every number.
 (``(N, 2, 3)`` left / right hip centres), ``foot_points_mocap`` (``(N, 2, 2, 3)`` heel and
 toe per foot), ``valid_mask`` (``(N,)``) and ``total_mass`` — all already in the mocap frame
 — is scored without a ``kindyn_1.npz``; that is how the learned model, PhysPT and Li et al.
-are put on this protocol (``scripts/methods/opencap_*_export.py``).
+are put on this protocol (``datasets/opencap/*_export.py``).
 
 Usage::
 

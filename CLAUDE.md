@@ -100,8 +100,9 @@ changes (a loss-weight column is one value, replaced whole).
   rigs `campus_board`, `climb_wall_2`, `climb_wall_3` → `<out>/<clip>/`, the same
   tree). Every stage command comes from `bvr/runner.py` (`stage_command`,
   `sweep_command` → `python -m bvr.stages.<name>`). The five model stages sweep every
-  clip with one model load; the rest run clip by clip, resumable (a finished step is
-  skipped; `--skip-existing` also leaves out finished sweeps), `--shard i/n` across
+  clip with one model load; the rest run clip by clip. `--skip-existing` resumes (complete
+  per-clip steps and finished sweep items are skipped; a `--source` run recomputes
+  everything without it, a dataset run always resumes its per-clip steps), `--shard i/n` across
   GPUs, `--dry-run` to print the commands. `--variant <name>` re-runs the human chain
   into `<clip>/human_optim_<name>/` (`floorplane`: a synthetic support scene;
   `gt_contact`: the boards' measured contacts); `--views a,b` reconstructs a rig clip
@@ -182,7 +183,7 @@ Knobs in `[bedlam]` and `[bedlam_forces]` of `datasets/bedlam2/configs/bedlam.to
 ```bash
 # Whole chain on one clip (knobs in configs/pipeline.toml, chain = its [steps].run).
 uv run python scripts/pipeline.py --source ../data/examples/data/boulder_1.mp4 --save-dir ../data/examples/out/
-# Batch of clips; resume (a finished per-clip step is skipped; --skip-existing also skips finished sweeps).
+# Batch of clips, resumed: complete per-clip steps and finished sweep items are skipped (without the flag everything reruns).
 uv run python scripts/pipeline.py --source ../data/examples/data/ --save-dir ../data/examples/out/ --skip-existing
 # The standalone human steps after the default chain, in order.
 uv run python scripts/pipeline.py --source ../data/examples/data/ --save-dir ../data/examples/out/ --steps contacts_1,kinematics_2,contacts_2,kindyn_1

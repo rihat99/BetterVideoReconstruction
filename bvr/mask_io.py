@@ -42,7 +42,7 @@ def union_obj_masks(
 ) -> np.ndarray | None:
     """Union per-object masks under ``masks_root``.
 
-    Two layouts are supported (matching :mod:`scripts.stages.track_sam3`):
+    Two layouts are supported (matching :mod:`bvr.stages.track_sam3`):
 
     * Single-image (``frame_filename`` is ``None``): looks at every
       ``masks_root/<obj_id:02d>.png`` directly.

@@ -52,6 +52,7 @@ import os
 for _var in ("OMP_NUM_THREADS", "OPENCV_FOR_THREADS_NUM", "OPENBLAS_NUM_THREADS"):
     os.environ.setdefault(_var, "8")
 
+import argparse
 import json
 import time
 from concurrent.futures import ProcessPoolExecutor
@@ -387,6 +388,7 @@ def run_set(name: str, calib_dir: str, seen: dict, intr: dict, intr_report: dict
 
 
 def main() -> None:
+    argparse.ArgumentParser(description=__doc__.splitlines()[0]).parse_args()   # --help only; no knobs
     calib_dirs = {s: json.loads((GT / s / "frames/frames.json").read_text())["calibration"] for s in SETS}
     print("=== detection ===", flush=True)
     seen = run_detection(calib_dirs)

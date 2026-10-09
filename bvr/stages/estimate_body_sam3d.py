@@ -505,6 +505,8 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     )
     p.add_argument("--config", type=Path, default=REPO_ROOT / "configs" / "pipeline.toml",
                    help="pipeline TOML (default: configs/pipeline.toml)")
+    p.add_argument("--skip-existing", action="store_true",
+                   help="skip items whose outputs already exist (overrides the config key)")
     cli = p.parse_args(argv)
     cfg = load_config(cli.config)
     args = section(cfg, "sam3d", {
@@ -519,6 +521,7 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     args.device = section(cfg, "runtime", {"device": "cuda"}).device
     args.source, args.predictions, args.config = cli.source, cli.predictions, cli.config
     args.save_dir = cli.save_dir
+    args.skip_existing = args.skip_existing or cli.skip_existing
     args.obj_ids = (_parse_obj_ids(args.obj_ids) if isinstance(args.obj_ids, str)
                     else list(args.obj_ids) or None)
     args.fps = float(args.fps) if args.fps != "" else None

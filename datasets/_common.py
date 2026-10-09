@@ -205,27 +205,6 @@ def _fit(source: tuple[int, int], height: int) -> tuple[int, int]:
     return width, height
 
 
-def _draw_caption(frame: np.ndarray, entries: list[tuple[tuple[int, int, int] | None, str]]) -> None:
-    """Draw a translucent caption box in the top-left corner.
-
-    Each entry is a colour swatch plus its text; a ``None`` colour writes the
-    text alone, for the heading lines.
-    """
-    font, scale, weight, row_h, pad = cv2.FONT_HERSHEY_SIMPLEX, 0.5, 1, 24, 10
-    measure = lambda size: max(cv2.getTextSize(text, font, size, weight)[0][0] for _, text in entries)  # noqa: E731
-    room = frame.shape[1] - 4 * pad - 12
-    if measure(scale) > room:  # a portrait pane is too narrow for the caption at full size
-        scale = max(0.26, scale * room / measure(scale))
-    widths = [cv2.getTextSize(text, font, scale, weight)[0][0] for _, text in entries]
-    box = frame[pad:pad + 2 * pad + row_h * len(entries), pad:pad + 3 * pad + max(widths) + 12]
-    box[:] = (0.35 * box + 0.65 * np.array([25, 25, 25])).astype(np.uint8)
-    for row, (colour, text) in enumerate(entries):
-        baseline = 2 * pad + row_h * row + 6
-        if colour is not None:
-            cv2.circle(frame, (2 * pad + 4, baseline - 5), 7, colour, -1, cv2.LINE_AA)
-        cv2.putText(frame, text, (3 * pad + 6, baseline), font, scale, (245, 245, 245), weight, cv2.LINE_AA)
-
-
 def _draw_contact_discs(frame: np.ndarray, pixels: np.ndarray, model: np.ndarray,
                         truth: np.ndarray | None) -> None:
     """Stamp one marker per limb onto an RGB frame, in place.

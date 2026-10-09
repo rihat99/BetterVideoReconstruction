@@ -55,6 +55,9 @@ cones = true             # confine every contact force to a friction pyramid abo
                          # witness uses. A patch of skin can then only push the way it faces. false =
                          # free bilateral forces everywhere (the pre-2026-08 behaviour).
 overlay = false          # reprojected-keypoint debug overlay → human_optim/kindyn_1_overlay.mp4
+mass_kg = 0              # the subject's measured mass in kg; 0 = the mass the body shape implies
+edge_speed_m_s = 0.0     # force_edge weight × 1/(1+(v/edge_speed)²), v = the root's vertical speed at a
+                         # contact onset/release; 0 = the plain weight (see the OpenCap floorplane_edgev config)
 
 #                       root  kin1  kin2   dyn  kindyn1
 [loss_weights.kinematic]
@@ -146,6 +149,7 @@ force_accel_mag     = [0, 0, 0, 640]
 force_accel_dir     = [0, 0, 0, 320]
 force_jerk_mag      = [0, 0, 0, 400]
 force_jerk_dir      = [0, 0, 0, 200]
+force_edge          = [0, 0, 0, 0]     # penalise the force on the first/last frame of every contact interval (ramp in/out); off
 # Joint-torque terms (2026-09-06), all weighted per joint by [torque.multipliers] and read
 # in body-weight units at a 1 m lever (τ / body weight). torque_magnitude is the effort
 # cost that resolves the statically indeterminate hands-vs-feet split — a load the body
@@ -335,6 +339,7 @@ min_span_s = 0.1       # min contact/release span (seconds; frames = ceil(s·fps
 max_dist_m = 0.10
 conf_thresh = 0.1      # residual absolute floor (VGGT conf ≥~1 ⇒ non-binding)
 conf_drop_q = 0.1      # quantile gate at scene load: drop the lowest-confidence scene voxels
+floor_gate_m = 0.0     # a FOOT frame may only be labelled this high above the fitted ground plane; 0 = off
 # A contact frame's own normal is NOT a gate — scene points and pose are too noisy to veto on.
 # It is used in one place only, with no knob: when both toe frames of a foot are candidates,
 # the one looking more into the wall wins and the other is dropped (the sole-side toe frame —

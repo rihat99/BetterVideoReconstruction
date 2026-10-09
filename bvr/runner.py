@@ -24,6 +24,8 @@ from __future__ import annotations
 import sys
 from pathlib import Path
 
+from bvr.config import load_config
+
 #: manifest step → (stage module under bvr.stages, the output that means a clip is done).
 #: These five sweep every clip in one process; the rest run per clip.
 MANIFEST_STEPS: dict[str, tuple[str, str]] = {
@@ -66,17 +68,48 @@ FARM_LINKS = ("sam3", "vggt", "sapiens", "sam3d", "geometry", "geocalib")
 #: whose scale stage pre-fit the body have one).
 GEOMETRY_LINKS = ("transform.npz", "scale.npz", "human.npz", "prefit.npz")
 
-#: Human-optimization steps → the ``--stages`` they dispatch (root + kinematics_1 share one call).
-_HUMAN_STAGES = {"kinematics_1": "root,kinematics_1", "kinematics_2": "kinematics_2",
-                 "kindyn_1": "kindyn_1"}
+#: Human-optimization steps → the ``--stages`` they dispatch; ``kinematics_1`` dispatches the
+#: human config's ``[stages].run`` (``root,kinematics_1`` by default: the two share one call).
+_HUMAN_STAGES = {"kinematics_1": None, "kinematics_2": "kinematics_2", "kindyn_1": "kindyn_1"}
 _CONTACT_BODIES = {"contacts_1": "kinematic_1", "contacts_2": "kinematic_2"}
 
 
-def sweep_command(step: str, manifest: Path, out_root: Path, pipeline_config: Path) -> list[str]:
-    """Argv of one model stage over a JSON manifest of clips (the model loads once)."""
+def sweep_command(step: str, manifest: Path, out_root: Path, pipeline_config: Path, *,
+                  skip_existing: bool = False) -> list[str]:
+    """Argv of one model stage over a JSON manifest of clips (the model loads once).
+
+    :param skip_existing: let the stage skip the clips it has finished (its own knob, forced on).
+    """
     module, _ = MANIFEST_STEPS[step]
     return [sys.executable, "-m", f"bvr.stages.{module}", "--source", str(manifest),
-            "--save-dir", str(out_root), "--config", str(pipeline_config)]
+            "--save-dir", str(out_root), "--config", str(pipeline_config),
+            *(["--skip-existing"] if skip_existing else [])]
+
+
+def step_done(step: str, clip_root: Path) -> bool:
+    """Is this per-clip step's output complete under ``clip_root``?
+
+    Existence of :data:`CLIP_OUTPUT`, except for ``scale``, which the stage itself judges
+    more strictly: the world must be metric (a re-fused ``transform.npz`` resets the flag, and
+    a stale ``scale.npz`` must not hide that) and a pre-fit scale needs its ``prefit.npz``.
+    """
+    output = CLIP_OUTPUT.get(step)
+    if output is None or not (clip_root / output).exists():
+        return False
+    if step != "scale":
+        return True
+    import numpy as np
+
+    transform_path = clip_root / "geometry" / "transform.npz"
+    if not transform_path.exists():
+        return False
+    with np.load(transform_path) as transform:
+        if not ("metric" in transform.files and bool(transform["metric"])):
+            return False
+    with np.load(clip_root / output) as scale:
+        if "method" in scale.files and str(scale["method"]) == "prefit-dual":
+            return (clip_root / "geometry" / "prefit.npz").exists()
+    return True
 
 
 def stage_command(step: str, clip_root: Path, *, videos: list[Path], pipeline_config: Path,
@@ -120,8 +153,10 @@ def stage_command(step: str, clip_root: Path, *, videos: list[Path], pipeline_co
         return [sys.executable, "-m", "bvr.stages.estimate_contacts", *common,
                 "--bodies", bodies, "--config", str(human_config)]
     if step in _HUMAN_STAGES:
+        stages = _HUMAN_STAGES[step] or ",".join(
+            load_config(human_config).get("stages", {}).get("run", ("root", "kinematics_1")))
         return [sys.executable, "-m", "bvr.stages.human_optimization", *common,
-                "--stages", _HUMAN_STAGES[step], "--config", str(human_config)]
+                "--stages", stages, "--config", str(human_config)]
     raise ValueError(f"unknown per-clip step {step!r}; known: {ALL_STEPS}")
 
 

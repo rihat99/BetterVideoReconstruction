@@ -26,6 +26,7 @@ Usage:
 """
 from __future__ import annotations
 
+import argparse
 import warnings
 from pathlib import Path
 
@@ -113,6 +114,7 @@ def procrustes_errors(predicted: np.ndarray, truth: np.ndarray) -> np.ndarray:
 
 
 def main() -> int:
+    argparse.ArgumentParser(description=__doc__.splitlines()[0]).parse_args()   # --help only; no knobs
     clips = sorted(d for d in (PARKOUR / "out").iterdir()
                    if (d / "human_optim" / "kinematic_1.npz").exists())
     truth = {c.name: np.load(PARKOUR / c.name / "joints_3d.npz") for c in clips}

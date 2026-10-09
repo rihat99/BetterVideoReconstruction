@@ -152,7 +152,7 @@ def geodesic_endeffector_weights(vertices_template, faces, lbs_weights, joint_na
     Convenience for the chosen field: geodesic distance to the nearest hand / foot
     seed, a ``kind`` falloff of scale ``radius`` (m), log-mapped to ``[lo, hi]``
     (default **linear · r1.0**, core ÷10 … tip ×10). Pose-invariant, so both
-    :mod:`scripts.stages.estimate_scale` and the chamfer term build it once from the
+    :mod:`bvr.stages.estimate_scale` and the chamfer term build it once from the
     SMPL-X-mid template and index it per frame.
     """
     geo = geodesic_endeffector_field(vertices_template, faces, lbs_weights, joint_names,

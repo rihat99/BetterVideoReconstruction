@@ -17,13 +17,14 @@ pymomentum ``_pym_preload`` re-exec happens cleanly — and the command line of 
 ``bvr.runner`` (``python -m bvr.stages.<name>``, the same stages run standalone).
 
 The five model stages run as ONE manifest sweep each (the model loads once and sweeps every
-clip); the rest run one subprocess per clip, clip by clip. Every step is resumable: a
-per-clip step whose output exists is skipped, a sweep skips finished items through the
-stage's own ``skip_existing`` knob, and ``--skip-existing`` leaves out a sweep every selected
-clip has finished, so no model is loaded for nothing. A clip that fails is reported and
-skipped — one bad clip never kills the batch. ``--shard i/n`` takes every n-th clip, so n
-runs on n GPUs fill one output tree; the manifest is named after the clip selection, so the
-shards never read each other's.
+clip); the rest run one subprocess per clip, clip by clip. ``--skip-existing`` resumes: a
+per-clip step whose outputs are complete is skipped, the sweeps skip the clips they have
+finished, and a sweep every selected clip has finished is not launched at all, so no model is
+loaded for nothing. A ``--source`` run recomputes every selected step without it; a dataset
+run always skips complete per-clip steps (its pipeline config lets the sweeps skip too), the
+flag only adds the sweep check. A clip that fails is reported and skipped — one bad clip never
+kills the batch. ``--shard i/n`` takes every n-th clip, so n runs on n GPUs fill one output
+tree; the manifest is named after the clip selection, so the shards never read each other's.
 
 ``--views`` (rigs only) says which cameras to reconstruct. One view — the default, the
 rig's first camera — is the single-view experiment, the whole chain into ``out``. Any
@@ -70,7 +71,7 @@ from bvr.config import load_config
 from bvr.paths import DATA_ROOT, REPO_ROOT
 from bvr.runner import (
     ALL_STEPS, CLIP_OUTPUT, GEOMETRY_STEPS, MANIFEST_STEPS, SUPPORT_STEPS, VARIANT_STEPS,
-    build_farm, build_view_farm, stage_command, sweep_command,
+    build_farm, build_view_farm, stage_command, step_done, sweep_command,
 )
 from bvr.source import IMAGE_EXTS, VIDEO_EXTS
 
@@ -196,7 +197,8 @@ def _track_extra_views(out_root: Path, clips: list[Clip], views: list[str], conf
                     "out_dir": str(view_root / name),
                 } for name, videos in clips], indent=2))
             started = time.monotonic()
-            rc = _run(sweep_command("sam3", manifest, view_root, config), dry_run)
+            rc = _run(sweep_command("sam3", manifest, view_root, config, skip_existing=skip_existing),
+                      dry_run)
             print(f"[pipeline] sam3 {view}: rc={rc} in {(time.monotonic() - started) / 60:.1f} min")
             if rc != 0:
                 continue   # a dangling link would look like masks that are simply empty
@@ -275,8 +277,10 @@ def main(argv: list[str] | None = None) -> int:
                         help="comma-separated cameras of a rig dataset; several reconstruct the "
                              "clip from all of them at once (default: the rig's first camera)")
     parser.add_argument("--skip-existing", action="store_true",
-                        help="also leave out a model sweep every selected clip has finished (the "
-                             "stages skip finished items anyway, but only after loading the model)")
+                        help="resume: skip a per-clip step whose outputs are complete, let the model "
+                             "sweeps skip finished clips, and leave out a sweep every selected clip has "
+                             "finished (a --source run recomputes everything without it; a --dataset "
+                             "run always skips complete per-clip steps, the flag adds the sweep checks)")
     parser.add_argument("--dry-run", action="store_true",
                         help="print the commands and touch nothing")
     parser.add_argument("--view-farm", action="store_true",
@@ -397,7 +401,8 @@ def main(argv: list[str] | None = None) -> int:
             if step == "sam3" and views and views[0] == rig_views[0] and not args.dry_run:
                 _reuse_masks(dataset["out"], out_root, clips)   # the first camera is never tracked twice
             started = time.monotonic()
-            rc = _run(sweep_command(step, manifest, out_root, pipeline_config), args.dry_run)
+            rc = _run(sweep_command(step, manifest, out_root, pipeline_config,
+                                    skip_existing=args.skip_existing), args.dry_run)
             print(f"[pipeline] {step}: rc={rc} in {(time.monotonic() - started) / 60:.1f} min")
         if step == "sam3" and views:
             _track_extra_views(out_root, clips, views, pipeline_config,
@@ -406,6 +411,7 @@ def main(argv: list[str] | None = None) -> int:
                 _report_people(out_root, clips, views)
 
     clip_steps = [s for s in steps if s not in MANIFEST_STEPS]
+    resume = args.skip_existing or dataset is not None
     failures: list[tuple[str, str]] = []
     for index, (name, videos) in enumerate(clips, 1):
         if not clip_steps:
@@ -428,7 +434,7 @@ def main(argv: list[str] | None = None) -> int:
         print(f"\n########## [{index}/{len(clips)}] {name} ##########", flush=True)
         for step in clip_steps:
             done = CLIP_OUTPUT.get(step)
-            if done and (clip_dir / done).exists():
+            if resume and step_done(step, clip_dir):
                 print(f"[pipeline] {name}/{step}: exists, skipping")
                 continue
             command = stage_command(step, clip_dir, videos=videos, pipeline_config=pipeline_config,

@@ -111,8 +111,8 @@ def _init_worker(data_root: str, device: str, knobs: dict, workers: int) -> None
     from bvr.body import load_body
 
     dev = torch.device(device if torch.cuda.is_available() else "cpu")
-    if dev.type == "cpu":
-        torch.set_num_threads(max(1, (os.cpu_count() or 1) // workers))
+    if dev.type == "cpu":   # a fair share of the cores, capped: 192 threads a worker only thrash
+        torch.set_num_threads(min(16, max(1, (os.cpu_count() or 1) // workers)))
     _STATE.update(paths=scene_db.ScenePaths(Path(data_root)), device=dev,
                   body=load_body(device=dev), knobs=knobs)
 

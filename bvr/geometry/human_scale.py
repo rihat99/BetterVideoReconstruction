@@ -1,6 +1,6 @@
 """Robust aggregation of per-frame log-scales into one metric scale.
 
-The human-body ruler stage (:mod:`scripts.stages.estimate_scale`) turns VGGT's
+The human-body ruler stage (:mod:`bvr.stages.estimate_scale`) turns VGGT's
 single up-to-scale factor into a metric one by comparing the SAM-3D-Body SMPL-X
 body (which carries real metric size) against VGGT's relative depth over the
 person. Per frame it reduces the per-vertex log-ratios ``log(d_metric) −

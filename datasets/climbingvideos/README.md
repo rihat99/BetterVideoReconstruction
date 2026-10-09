@@ -12,5 +12,5 @@ into a stage-first feature tree; the contact-label confidence and the train/test
   per-stage overrides, `[split]`) on top of `configs/pipeline.toml` + `configs/human_optimization.toml`.
 - **Curate:** `assign_dataset_split.py [--dry-run]` assigns `dataset_split` per source video (`[split]`);
   `calibrate_contact_confidence.py --config <toml …> --contacts 1|2 [--write]` fits `[contact_confidence]` on the annotated scenes.
-- **View / files:** `scripts/view_3d.py --scenes` pages the DB (`viewer.py`; selection from `[viewer]` in `configs/pipeline.toml`);
+- **View / files:** `scripts/view_3d.py --scenes` pages the DB (`viewer.py`; selection from `[viewer]` in `configs/corpus.toml`);
   `scene_db.py` (DB access, feature layout, row selection), `tests/test_corpus.py`.
