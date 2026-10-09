@@ -10,3 +10,8 @@ Worktree /home/rikhat.akizhanov/better/dev/BetterVideoReconstruction (dev HEAD =
 4. Verify at the end: pytest; the `--help` sweep (artifacts/dev4/help_*_final.log list, adjusted); `scripts/<runner> --dry-run` for one dataset; kinematics_1 on 9RvrpYoWDoo_0001 bit-identical to human_optim_dev3 (compare_runs.py) — item 2's `source_labels` removal will show as a missing key: say so explicitly and show every other key identical.
 
 Report → subagents/report_6_env_docs.md: what changed per item (one line each), the pyproject dependency block, the verification results, anything you could not declare in pyproject and why, open questions. Under 100 lines.
+
+## Addendum (after 4c, dev HEAD 28f023e)
+- 4c moved scripts/run_dataset.py INTO scripts/pipeline.py (one runner, `--source/--save-dir` or `--dataset`), configs/datasets.toml → datasets/<name>/configs/dataset.toml, viewer DB keys → datasets/climbingvideos/configs/corpus.toml + datasets/bedlam2/configs/bedlam.toml. Read report_4_structure.md's 4c section for the loader/runner shapes before writing docs.
+- Extra cleanups for item 2: README.md:64-66 stale "manual kinematics_2 mode" sentence; the `[contact_confidence].fit` note stored inside the contacts npz provenance string carries a calibrator path — drop the path from the stored string (it changes on every rename; compare_runs then shows 70/70 again).
+- Item 4's regression: compare against human_optim_dev3 — expect every key identical except `source_labels` (removed) and the provenance string (path dropped); state both explicitly.

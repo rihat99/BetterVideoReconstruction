@@ -1,8 +1,8 @@
-# STATE — BetterVideoReconstruction (dev worktree) / 2026-10-08_22-50_dev_optim_rewrite (updated 2026-10-09 10:10 Dubai)
+# STATE — BetterVideoReconstruction (dev worktree) / 2026-10-08_22-50_dev_optim_rewrite (updated 2026-10-09 10:55 Dubai)
 
 ## Pointers
-- Task status: PLAN.md final (11 decisions + off-hours assumptions); step 2 DONE + committed (dev 46ebb69 code, a7027b9 notes; report_2 §4 gate PASS); step 3 committed (fffc58a); step 5 committed (9796bba); 4a/4b committed (e2e7bb7, d282814), 4c running; REPORT.md not started.
-- Worktree: /home/rikhat.akizhanov/better/dev/BetterVideoReconstruction (branch dev: d282814 4b ← e2e7bb7 4a ← 9796bba step 5 ← fffc58a step 3 ← 46ebb69 step 2 ← main 4e2c152; 4c edits uncommitted). Own .venv (torch 2.8.0+cu129, editable dev/BetterRobot + dev/BetterHuman); env doc agent_notes/docs/dev_env.md. Use `uv run --no-sync`, CUDA_VISIBLE_DEVICES=2, BVR_DATA_ROOT=/home/rikhat.akizhanov/better/data_dev.
+- Task status: PLAN.md final (11 decisions + off-hours assumptions); step 2 DONE + committed (dev 46ebb69 code, a7027b9 notes; report_2 §4 gate PASS); step 3 committed (fffc58a); step 5 committed (9796bba); step 4 committed (28f023e), step 6 running; REPORT.md not started.
+- Worktree: /home/rikhat.akizhanov/better/dev/BetterVideoReconstruction (branch dev: 28f023e 4c ← d282814 4b ← e2e7bb7 4a ← 9796bba step 5 ← fffc58a step 3 ← 46ebb69 step 2 ← main 4e2c152; step 6 edits uncommitted). Own .venv (torch 2.8.0+cu129, editable dev/BetterRobot + dev/BetterHuman); env doc agent_notes/docs/dev_env.md. Use `uv run --no-sync`, CUDA_VISIBLE_DEVICES=2, BVR_DATA_ROOT=/home/rikhat.akizhanov/better/data_dev.
 - Key docs (all under the task folder /home/rikhat.akizhanov/better/dev/BetterVideoReconstruction/agent_notes/tasks/2026-10-08_22-50_dev_optim_rewrite/):
   PLAN.md; subagents/inv_A_br_optim.md (BR optim API, bit-exact parity probe via TorchOptim+scalar terms); inv_B_bh_env.md (BH API delta table, env); inv_C_bvr_map.md (generic/dataset map, loss inventory, retire list); inv_D_viewer.md (BR viewer vs BVR viewer); report_0_reference.md (main refs A/B in data_dev, noise floor, GATE + tolerances); report_1_env.md; report_G_br_gaps.md (BR dev commits 72a7d02 0c3d167 b6602aa 64d3fb5 2dd0a9d 1f3fbe3 4b7b1da: per-term diagnostics, valid masks, timeline shrink, ImagePanel, per-step colours, tilted ground, set_fps); brief_2_api_migration.md; brief_3_optim_port.md + brief_5_viewer.md written (ready to launch after step 2 commit).
   compare_runs.py (task folder) compares two out roots; artifacts/ref/ has run scripts + det_wrapper.py (deterministic mode).
@@ -15,7 +15,7 @@
 
 
 ## Next steps
-1. 4a DONE (e2e7bb7), 4b DONE (d282814: datasets/<name>/ split, 8 READMEs, pytest 234/4, 48/48 --help). 4c (mars_top: base+override configs, one runner, [viewer] DB keys → climbingvideos, full 4-clip regression bit-identical to human_optim_dev3, F1 0.912/0.931) RUNNING since 10:10 → 'SUBSTEP 4c READY' → commit 'Dev 6/N'. One agent per sub-step; successors on context limit (handoff in report_4).
+1. Step 4 DONE: 4a e2e7bb7, 4b d282814, 4c 28f023e (base+override configs, bvr/runner.py + one scripts/pipeline.py, full 4-clip chain bit-identical to human_optim_dev3, F1 0.912/0.931, pytest 234/4, 57/57 --help). Step 6 (mars_top, brief_6_env_docs.md + addendum: Option C env, cleanups, docs) RUNNING since 10:55 → report_6_env_docs.md → commit 'Dev 7/N'. Then adversarial review (mars_aux) of the whole dev branch vs main, fixes, REPORT.md, drop index line.
 2. Then step 4 (bvr/ package, datasets/<name>/ split, retire list, base+override configs, single runner, corpus → datasets/climbingvideos), step 6 (Option C env, docs, adversarial review, REPORT.md), TG ping (TG not configured on this machine: token missing in ~/.config/autoresearch/telegram.env).
 
 ## Assumptions pending user confirmation
