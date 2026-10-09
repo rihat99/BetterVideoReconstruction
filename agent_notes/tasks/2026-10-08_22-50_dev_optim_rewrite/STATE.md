@@ -1,4 +1,4 @@
-# STATE — BetterVideoReconstruction (dev worktree) / 2026-10-08_22-50_dev_optim_rewrite (updated 2026-10-09 12:05 Dubai)
+# STATE — BetterVideoReconstruction (dev worktree) / 2026-10-08_22-50_dev_optim_rewrite (updated 2026-10-09 13:10 Dubai)
 
 ## Pointers
 - Task status: PLAN.md final (11 decisions + off-hours assumptions); step 2 DONE + committed (dev 46ebb69 code, a7027b9 notes; report_2 §4 gate PASS); step 3 committed (fffc58a); step 5 committed (9796bba); all code steps committed (last 69d338b); REPORT.md drafted; REPORT.md not started.
@@ -15,8 +15,10 @@
 
 
 ## Next steps
-1. Step 4 DONE: 4a e2e7bb7, 4b d282814, 4c 28f023e (base+override configs, bvr/runner.py + one scripts/pipeline.py, full 4-clip chain bit-identical to human_optim_dev3, F1 0.912/0.931, pytest 234/4, 57/57 --help). Step 6 DONE + committed (ba64306: path deps, renames, docs; pytest 229/4; report_6_env_docs.md). Adversarial review part 1 DONE (artifacts/review_R.md: runner --source resume semantics changed [real regression], load_config silent merge, BEDLAM2 forces main vs dev close-not-identical (max 20 N of 390), stale text, orphans); part 2 (mars_aux) RUNNING since 11:40: prefit/converter/label_amass/floorplane/fit_betas checks. Step 7 DONE (ebf3c99); review part 2 DONE (review_R.md Part 2: converter/floorplane bit-identical, fit_betas rounding, prefit drift 3rd round, amass/bedlam forces drift); user decisions 13 (keep FORCE_METHOD, accept prefit drift; prefit chain check stopped, scratch trashed to main trash/prefit_dev_data_dev). REPORT.md §5 filled. Unused import fix 69d338b. Investigation F (mars_top_opus, brief_F_force_diff.md) RUNNING since 12:30: exact causal chain for the force differences (user asked for details) → artifacts/force_diff/report_F.md → add to REPORT §4 → notes commit → drop index line.
-2. Then step 4 (bvr/ package, datasets/<name>/ split, retire list, base+override configs, single runner, corpus → datasets/climbingvideos), step 6 (Option C env, docs, adversarial review, REPORT.md), TG ping (TG not configured on this machine: token missing in ~/.config/autoresearch/telegram.env).
+1. When step 5c (viewer look) hands back: read its report (save to subagents/report_5c_viewer_look.md if returned as text), check tests/test_viewer_* + screenshots vis/viewer_boulder_1{,_forces,_torque}.png, commit viewer files as "Dev 9/N: viewer sidebar and skeleton look as before" (+ BR dev commit hash in the message), then RESTART the user's viewer: kill pid 2670485, relaunch `cd dev worktree; nohup env BVR_DATA_ROOT=/home/rikhat.akizhanov/better/data CUDA_VISIBLE_DEVICES=2 uv run --no-sync python scripts/view_3d.py /home/rikhat.akizhanov/better/data/examples/out > <scratchpad>/viewer/view_3d.log 2>&1 &`, curl 200, tell the user (http://10.67.33.41:8082) and ask what else looks off.
+2. When investigation F hands back: save artifacts/force_diff/report_F.md if needed; give the user the causal chain in plain language with the numbers (they asked "exactly why we have difference in forces, more details"); add a §4 paragraph to REPORT.md.
+3. Then finalize REPORT.md (commit table incl. Dev 9/N), commit agent_notes, drop the task line from the index (/home/rikhat.akizhanov/better/BetterVideoReconstruction/.git/autoresearch/STATE.md), tell the user. TG not configured.
+4. Leave running for the user: the viewer process. Kill it when they say so.
 
 ## Assumptions pending user confirmation
 - Regression gate = report_0 recommendation (×3 same-input noise per stage, pooled F1 ±0.01); dev gets an env-var deterministic switch.

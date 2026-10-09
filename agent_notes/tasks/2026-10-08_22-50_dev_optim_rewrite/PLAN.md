@@ -16,6 +16,7 @@ Investigations: subagents/inv_A_br_optim.md (BR optim API, parity probe bit-exac
 10. Viewer rebuilt on BR/BH dev layers; visual changes accepted.
 12. (2026-10-09 02:00) Force arrows must be clear solid arrows as in the old viewer (user saw the rebuilt viewer's cone-on-hairline arrows). → BR dev gets a solid ArrowsLayer style (step G2); BVR force/wrench/sensor/gravity/normal arrows use it.
 13. (2026-10-09 ~12:00, user) Keep FORCE_METHOD unchanged although bedlam2/amass force labels drift slightly from main (record in the report only). Accept the scale pre-fit drift (dev runs one more round on 9Rvrp) without the dev-prefit chain check; check stopped.
+14. (2026-10-09 ~13:00, user, overrides 10 for these points) Viewer must keep the old sidebar (separate `layers` + `dynamics` folders with the old toggles incl. joint torques on/off, fingers/palm, force display) and the old skeleton look: thin finger bones, solid thin frame→parent links, torque shown as sphere SIZE (plus yellow) not colour only. Step 5c.
 11. Dev runs never write into main's trees: BVR_DATA_ROOT=/home/rikhat.akizhanov/better/data_dev (scratch copy of the regression clips' upstream outputs).
 
 ## Steps (one commit each on dev; agents do not commit unless the brief says so)
