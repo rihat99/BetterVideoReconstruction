@@ -44,6 +44,7 @@ import numpy as np  # noqa: E402
 import torch  # noqa: E402
 from scipy.spatial import cKDTree  # noqa: E402
 
+from tools import determinism  # noqa: E402
 from tools.body import load_body  # noqa: E402
 from tools.config import load_toml  # noqa: E402
 from tools.human_optim import paths  # noqa: E402
@@ -168,6 +169,7 @@ def run(predictions_dir: str | Path, config_path: str | Path, *,
 
 
 def main(argv: list[str] | None = None) -> int:
+    determinism.apply()
     ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     ap.add_argument("--predictions", required=True)
     ap.add_argument("--bodies", default="kinematic_1", choices=["kinematic_1", "kinematic_2"],

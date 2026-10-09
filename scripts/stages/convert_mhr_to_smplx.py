@@ -70,6 +70,7 @@ from tqdm import tqdm  # noqa: E402
 
 _REPO_ROOT = _HERE.parents[2]
 sys.path.insert(0, str(_REPO_ROOT))  # repo root for tools.*
+from tools import determinism  # noqa: E402
 from tools.config import load_toml, section  # noqa: E402
 from tools.precompute_runner import InputItem, SkipItem, run_batch  # noqa: E402
 _MAPPING_NPZ = (
@@ -517,6 +518,7 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
 
 
 def main(argv: list[str] | None = None) -> int:
+    determinism.apply()
     args = _parse_args(argv)
 
     # Batch / manifest mode: precompute_runner Step (build converter once, sweep).

@@ -55,6 +55,7 @@ import cv2  # noqa: E402
 import numpy as np  # noqa: E402
 import torch  # noqa: E402
 
+from tools import determinism  # noqa: E402
 from tools.config import load_toml, section  # noqa: E402
 from tools.precompute_runner import (  # noqa: E402
     InputItem,
@@ -425,6 +426,7 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
 
 
 def main(argv: list[str] | None = None) -> int:
+    determinism.apply()
     args = _parse_args(argv)
     return run_sapiens(args)
 

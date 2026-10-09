@@ -39,13 +39,14 @@ from dataclasses import dataclass
 
 import numpy as np
 import torch
+from better_robot.optim import Phase, Problem, run
 
 from tools.geometry.human_scale import weighted_median
-from tools.optim import Phase, Problem, State, run_phases
 
 from .keypoints import Correspondence
 from .losses import geman_mcclure, pose_prior_loss, root_orient_prior_loss, sapiens_reprojection_gm
 from .qmath import normalize_q
+from .solve import State, adam, add_term, phase_weights, term_logger
 from .visibility import front_facing_mask, vertex_normals
 
 # Joints 22..51 are the fingers (mid.joint_names); their quaternion blocks are
@@ -244,18 +245,19 @@ def prefit_person_round(
     device = q_init.device
     identity = torch.eye(4, device=device).expand(num_frames, 4, 4)
 
-    def _forward() -> State:
+    def _forward(q, log_s) -> State:
         st = State()
-        q_norm = normalize_q(q, num_joints)
+        q_norm = normalize_q(q[0], num_joints)
         out = mid.forward(betas, q_norm)
         st.put("qn", q_norm)
         st.put("vertices", out.vertices)                          # (T, V, 3)
         st.put("joints", out.joints_world.tensor()[..., :3])      # (T, J, 3)
+        st.put("log_s", log_s[0])
         return st
 
-    problem = Problem(_forward)
-    q = problem.add_leaf("q", q_init)
-    log_s = problem.add_leaf("log_s", torch.tensor([float(np.log(s0))], device=device))
+    problem = Problem({"q": q_init[None], "log_s": torch.tensor([[float(np.log(s0))]], device=device)},
+                      time=("q",))
+    problem.cached(_forward, name="st", reads=("q", "log_s"))
 
     with torch.no_grad():
         out0 = mid.forward(betas, normalize_q(q_init, num_joints))
@@ -269,17 +271,17 @@ def prefit_person_round(
         # rewards shrinking the world regardless of evidence — s slides down a
         # few % on every clip (measured). In cloud units the noise cost is
         # s-invariant and only the real size/depth signals move the scale.
-        s = torch.exp(log_s)
+        s = torch.exp(st["log_s"])
         return cloud_chamfer(
             st["vertices"][:, sub] / s, front, cloud, cloud_valid,
             gm_scale_m=weights.gm_chamfer_m / float(s.detach()), chunk=chunk,
             frame_weights=cloud_frame_weights)
 
-    problem.add_term("chamfer", _chamfer)
-    problem.add_term("reproj", lambda st: sapiens_reprojection_gm(
+    add_term(problem, "chamfer", _chamfer)
+    add_term(problem, "reproj", lambda st: sapiens_reprojection_gm(
         st["joints"], st["vertices"], identity, K_orig, target_kp, scores, corr,
         frame_vertex_ids, score_thresh=weights.score_thresh, gm_scale_px=weights.gm_reproj_px))
-    problem.add_term("pose", lambda st: pose_prior_loss(st["qn"], q0n, num_joints))
+    add_term(problem, "pose", lambda st: pose_prior_loss(st["qn"], q0n, num_joints))
     # The root gets GENTLE pulls toward the converter placement, not hard locks.
     # Orientation: on weak frames a ~180° flip is otherwise nearly free once the
     # robust data terms saturate. Translation: depth along the ray is the poorly
@@ -287,19 +289,20 @@ def prefit_person_round(
     # over ±5% depth, and with nothing anchoring it the body (and s with it)
     # wanders that valley. A quadratic pull in metres is negligible for the
     # cm-scale corrections the pre-fit exists for and firm against metre wander.
-    problem.add_term("orient", lambda st: root_orient_prior_loss(st["qn"], q0n))
-    problem.add_term("transl", lambda st: (st["qn"][..., :3] - q0n[..., :3])
-                     .square().sum(-1).mean())
-    problem.add_term("smooth", lambda st: joint_velocity_loss(st["joints"], joints0, pairs))
+    add_term(problem, "orient", lambda st: root_orient_prior_loss(st["qn"], q0n))
+    add_term(problem, "transl", lambda st: (st["qn"][..., :3] - q0n[..., :3])
+             .square().sum(-1).mean())
+    add_term(problem, "smooth", lambda st: joint_velocity_loss(st["joints"], joints0, pairs))
 
     wcol = {"chamfer": weights.chamfer, "reproj": weights.reproj,
             "pose": weights.pose, "orient": weights.orient,
             "transl": weights.transl, "smooth": weights.smooth}
-    mask = {"q": finger_freeze_mask(q_init.shape[-1], device)}
+    free = {"q": finger_freeze_mask(q_init.shape[-1], device).bool()}
     if freeze_scale:
-        mask["log_s"] = torch.zeros(1, device=device)
-    run_phases(problem, [Phase("prefit", iters, wcol, grad_mask=mask)], lr=lr)
-    return normalize_q(q, num_joints).detach(), float(torch.exp(log_s.detach()))
+        free["log_s"] = torch.zeros(1, dtype=torch.bool, device=device)
+    fit = run(problem, [Phase(adam(lr, iters), iters, name="prefit", weights=phase_weights(problem, wcol),
+                              free=free, on_step=term_logger("prefit", iters), stop_every=0)]).x
+    return normalize_q(fit["q"][0], num_joints), float(torch.exp(fit["log_s"]))
 
 
 def measure_person_scale(

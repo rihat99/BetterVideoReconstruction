@@ -22,6 +22,8 @@ from typing import Any
 
 import numpy as np
 import torch
+from better_robot.optim import Phase, Problem, TorchOptim, run
+from torch.optim.lr_scheduler import MultiStepLR
 from tqdm import tqdm
 
 
@@ -184,12 +186,14 @@ class MhrToSmplxConverter:
         )                                                  # (B, 1, 3)
         target_centered = target - target_center
 
-        betas = torch.zeros(B, 10, device=dev, requires_grad=True)
-        body_pose = torch.zeros(B, self.NUM_BODY_JOINTS * 3, device=dev, requires_grad=True)
-        global_orient = torch.zeros(B, 3, device=dev, requires_grad=True)
-        transl = torch.zeros(B, 3, device=dev)
-        lh_pose = torch.zeros(B, self.NUM_HAND_JOINTS * 3, device=dev, requires_grad=True)
-        rh_pose = torch.zeros(B, self.NUM_HAND_JOINTS * 3, device=dev, requires_grad=True)
+        # One batched Problem over the B frames: variables (1, B, k), losses averaged
+        # over the batch exactly as the reference does.
+        zeros = lambda k: torch.zeros(1, B, k, device=dev)  # noqa: E731
+        problem = Problem({
+            "betas": zeros(10), "body_pose": zeros(self.NUM_BODY_JOINTS * 3),
+            "global_orient": zeros(3), "transl": zeros(3),
+            "lh_pose": zeros(self.NUM_HAND_JOINTS * 3), "rh_pose": zeros(self.NUM_HAND_JOINTS * 3),
+        })
 
         edges = self.smplx_edges
         target_edges = (
@@ -197,85 +201,73 @@ class MhrToSmplxConverter:
             - target_centered[:, edges[:, 0], :]
         )
 
-        def fwd():
+        def fwd(betas, body_pose, global_orient, transl, lh_pose, rh_pose):
             return self._smplx_forward(
-                smplx, betas, body_pose, global_orient, transl, lh_pose, rh_pose,
+                smplx, betas[0], body_pose[0], global_orient[0], transl[0], lh_pose[0], rh_pose[0],
             )
 
+        problem.cached(fwd, name="verts")
+        edge_on = {"v": True}   # the fine stage drops the edge loss after its 50th epoch
+
         def edge_loss(verts):
+            if not edge_on["v"]:
+                return verts.new_zeros(())
             pred_edges = verts[:, edges[:, 1], :] - verts[:, edges[:, 0], :]
             return (pred_edges - target_edges).abs().mean()
 
-        # Stage A — only global_orient: align gross orientation against the
-        # T-pose body before any pose parameters move.
-        opt = torch.optim.Adam([global_orient], lr=lr_coarse)
-        for _ in range(40):
-            opt.zero_grad()
-            edge_loss(fwd()).backward()
-            opt.step()
+        problem.scalar("edge", edge_loss)
+        problem.scalar("vertex", lambda verts: (verts - target_centered).square().mean(), weight=0.0)
 
-        # Stage B — + body_pose + betas: gives the body 80 iters (Meta's
-        # default) so shoulders/elbows have time to settle before hand
-        # joints start fighting them. With only 40 iters here, our previous
-        # converter stranded the chain in symmetric local minima
-        # (left-wrist 235° on core_workout_man).
-        opt = torch.optim.Adam([global_orient, body_pose, betas], lr=lr_coarse)
-        for _ in range(80):
-            opt.zero_grad()
-            edge_loss(fwd()).backward()
-            opt.step()
+        def frozen(*names):
+            return {n: torch.zeros(problem.variables[n][0].numel(), dtype=torch.bool, device=dev)
+                    for n in names}
 
-        # Stage C — + hands: hand-pose channels are decoupled from body
-        # rotations once shoulders are roughly right.
-        opt = torch.optim.Adam(
-            [global_orient, body_pose, betas, lh_pose, rh_pose], lr=lr_coarse,
-        )
-        for _ in range(40):
-            opt.zero_grad()
-            edge_loss(fwd()).backward()
-            opt.step()
+        def center_transl(view, x):
+            # Initialize translation so the centered prediction overlaps the
+            # centered target before the fine stage fits everything to vertices.
+            with torch.no_grad():
+                return {**x, "transl": x["transl"] + (target_centered - fwd(**x)).mean(dim=1)[None]}
 
-        # Initialize translation so the centered prediction overlaps the
-        # centered target, then fine-tune everything against vertex loss.
-        with torch.no_grad():
-            transl = transl + (target_centered - fwd()).mean(dim=1)
-        transl = transl.detach().requires_grad_(True)
-
-        opt = torch.optim.Adam(
-            [global_orient, body_pose, betas, transl, lh_pose, rh_pose], lr=lr_fine,
-        )
-        sched = torch.optim.lr_scheduler.MultiStepLR(
-            opt, milestones=[num_iters // 3, 2 * num_iters // 3], gamma=0.1,
-        )
-        for epoch in range(num_iters):
-            verts = fwd()
-            edge_weight = 1.0 if epoch < 50 else 0.0
-            e = edge_loss(verts) if edge_weight > 0 else verts.new_zeros(())
-            v = (verts - target_centered).square().mean()
-            loss = edge_weight * e + v
-            opt.zero_grad()
-            loss.backward()
-            opt.step()
-            sched.step()
+        coarse = TorchOptim(torch.optim.Adam, lr=lr_coarse)
+        fine = TorchOptim(torch.optim.Adam, lr=lr_fine, scheduler=lambda opt: MultiStepLR(
+            opt, milestones=[num_iters // 3, 2 * num_iters // 3], gamma=0.1))
+        fit = run(problem, [
+            # Stage A — only global_orient: align gross orientation against the
+            # T-pose body before any pose parameters move.
+            Phase(coarse, 40, free=frozen("betas", "body_pose", "transl", "lh_pose", "rh_pose")),
+            # Stage B — + body_pose + betas: gives the body 80 iters (Meta's
+            # default) so shoulders/elbows have time to settle before hand
+            # joints start fighting them. With only 40 iters here, our previous
+            # converter stranded the chain in symmetric local minima
+            # (left-wrist 235° on core_workout_man).
+            Phase(coarse, 80, free=frozen("transl", "lh_pose", "rh_pose")),
+            # Stage C — + hands: hand-pose channels are decoupled from body
+            # rotations once shoulders are roughly right.
+            Phase(coarse, 40, free=frozen("transl")),
+            # Stage D — everything against the vertex loss, the edge loss kept for
+            # the first 50 epochs.
+            Phase(fine, num_iters, weights={"vertex": 1.0}, on_start=center_transl,
+                  on_step=lambda view, state: edge_on.__setitem__("v", state.it < 50)),
+        ]).x
 
         # Move the fitted body back into the original frame: translation
         # was learned in the centered frame, so we add the center back.
         with torch.no_grad():
-            transl_world = transl + target_center.squeeze(1)
+            transl_world = fit["transl"][0] + target_center.squeeze(1)
             verts = self._smplx_forward(
-                smplx, betas, body_pose, global_orient, transl_world,
-                lh_pose, rh_pose,
+                smplx, fit["betas"][0], fit["body_pose"][0], fit["global_orient"][0], transl_world,
+                fit["lh_pose"][0], fit["rh_pose"][0],
             )
             fit_err = ((verts - target) ** 2).sum(-1).sqrt().mean(dim=1)
 
         return {
-            "betas": betas.detach(),
-            "body_pose": body_pose.detach(),
-            "global_orient": global_orient.detach(),
-            "transl": transl_world.detach(),
-            "left_hand_pose": lh_pose.detach(),
-            "right_hand_pose": rh_pose.detach(),
-            "fit_error": fit_err.detach(),
+            "betas": fit["betas"][0],
+            "body_pose": fit["body_pose"][0],
+            "global_orient": fit["global_orient"][0],
+            "transl": transl_world,
+            "left_hand_pose": fit["lh_pose"][0],
+            "right_hand_pose": fit["rh_pose"][0],
+            "fit_error": fit_err,
         }
 
     # -- public entry point -------------------------------------------------

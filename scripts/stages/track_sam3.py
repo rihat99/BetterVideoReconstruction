@@ -89,6 +89,7 @@ import numpy as np
 import torch
 from PIL import Image
 
+from tools import determinism
 from tools.config import load_toml, section
 from tools.mask_io import union_obj_masks, write_mask_png
 from tools.precompute_runner import InputItem, SkipItem, add_standard_args, run_batch
@@ -930,6 +931,7 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
 
 
 def main(argv: list[str] | None = None) -> int:
+    determinism.apply()
     args = _parse_args(argv)
     return run_batch(Sam3ObjectTracker(args), args)
 

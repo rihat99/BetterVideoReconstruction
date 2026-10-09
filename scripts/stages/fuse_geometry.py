@@ -79,6 +79,7 @@ import cv2
 import numpy as np
 import torch
 
+from tools import determinism
 from tools.config import load_toml, section
 from tools.geometry.backproject import backproject
 from tools.geometry.camera_motion import image_motion, is_static
@@ -461,6 +462,7 @@ def fuse(args: argparse.Namespace) -> None:
 
 
 def main(argv: list[str] | None = None) -> int:
+    determinism.apply()
     p = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     p.add_argument("--source", required=True,
                    help="clip video / folder of frames (RGB, for per-point colour); "

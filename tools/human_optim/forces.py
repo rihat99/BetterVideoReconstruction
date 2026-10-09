@@ -46,6 +46,8 @@ from dataclasses import dataclass
 
 import numpy as np
 import torch
+from better_robot.optim import Phase, Problem, TorchOptim, run
+from torch.optim.lr_scheduler import ExponentialLR
 
 from .friction import cone_generators
 from .qmath import normalize_q
@@ -221,7 +223,6 @@ def solve_frame_forces(dyn: FrameDynamics, *, valid: np.ndarray, drift_m: torch.
     # unreachable at finite parameters and the optimized problem nonconvex, for nothing.)
     generators = cone_generators(dyn.cone_axes,
                                  math.tan(math.radians(knobs.half_angle_deg))).detach()
-    coefficients = torch.zeros((num_steps, num_frames, 4), device=device, requires_grad=True)
     active = candidate.to(torch.float32)[..., None]
 
     # NaN-drift steps were excluded from candidacy above; zeroing their (unused) price
@@ -243,7 +244,7 @@ def solve_frame_forces(dyn: FrameDynamics, *, valid: np.ndarray, drift_m: torch.
     row_scale = torch.ones(dyn.jacobians.shape[-1], device=device)
     row_scale[3:] = 1.0 / TORQUE_LENGTH_M
 
-    def compose() -> torch.Tensor:
+    def compose(coefficients: torch.Tensor) -> torch.Tensor:
         """Contact force per ``(step, frame)``, in units of body weight."""
         return active * torch.einsum("tfg,tfgd->tfd", coefficients, generators)
 
@@ -256,22 +257,20 @@ def solve_frame_forces(dyn: FrameDynamics, *, valid: np.ndarray, drift_m: torch.
         loss = loss + 0.5 * ((speed / knobs.stillness_vstar_mps).pow(2) * squared).sum()
         return loss + 0.5 * ((gap / knobs.gap_dstar_m).pow(2) * squared).sum()
 
-    # Projected Adam with a decaying step. The decay is what makes the KKT check
-    # meaningful: at a fixed step size Adam orbits the optimum and the gradient never
-    # settles, so "converged" could not be distinguished from "still moving".
-    optimizer = torch.optim.Adam([coefficients], lr=0.05)
-    schedule = torch.optim.lr_scheduler.ExponentialLR(
-        optimizer, gamma=(1e-3) ** (1.0 / max(int(knobs.iters), 1)))
-    for _ in range(int(knobs.iters)):
-        optimizer.zero_grad()
-        loss_of(compose()).backward()
-        optimizer.step()
-        schedule.step()
-        with torch.no_grad():
-            coefficients.clamp_(min=0.0)                   # projection onto λ ≥ 0
+    # Projected Adam (the bound λ ≥ 0 is clamped after every step) with a decaying step.
+    # The decay is what makes the KKT check meaningful: at a fixed step size Adam orbits
+    # the optimum and the gradient never settles, so "converged" could not be
+    # distinguished from "still moving".
+    problem = Problem({"lam": torch.zeros((1, num_steps, num_frames, 4), device=device)},
+                      bounds={"lam": (torch.zeros((), device=device),
+                                      torch.full((), float("inf"), device=device))})
+    problem.scalar("witness", lambda lam: loss_of(compose(lam[0])))
+    solver = TorchOptim(torch.optim.Adam, lr=0.05, scheduler=lambda opt: ExponentialLR(
+        opt, gamma=(1e-3) ** (1.0 / max(int(knobs.iters), 1))))
+    coefficients = run(problem, [Phase(solver, int(knobs.iters), stop_every=0)]).x["lam"][0]
 
     with torch.no_grad():
-        force = compose() * weight                                    # back to newtons
+        force = compose(coefficients) * weight                        # back to newtons
         before = dyn.tau
         after = before - torch.einsum("tfkn,tfk->tn", dyn.jacobians, force)
     to_numpy = lambda t: t.detach().cpu().numpy().astype(np.float32)  # noqa: E731

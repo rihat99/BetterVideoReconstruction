@@ -38,6 +38,7 @@ if str(_REPO_ROOT) not in sys.path:
 
 import argparse  # noqa: E402
 
+from tools import determinism  # noqa: E402
 from tools.human_optim.config import STAGE_ORDER, load_config  # noqa: E402
 from tools.human_optim.kindyn import run_kindyn  # noqa: E402
 from tools.human_optim.stages import run_kinematic, run_kinematics_2  # noqa: E402
@@ -83,6 +84,7 @@ def run(source, predictions_dir, config_path, *, stages=None, annotations=None) 
 
 
 def main(argv=None) -> int:
+    determinism.apply()
     ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     ap.add_argument("--source", default=None,
                     help="original video / frames — needed for overlays and kinematics_2 "

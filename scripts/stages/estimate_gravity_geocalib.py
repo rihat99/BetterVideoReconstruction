@@ -81,6 +81,7 @@ import cv2
 import numpy as np
 import torch
 
+from tools import determinism
 from tools.adapters.geocalib import DEFAULT_WEIGHTS, infer_gravity, load_geocalib
 from tools.config import load_toml, section
 from tools.geometry.ground import fit_ground_plane
@@ -353,6 +354,7 @@ def estimate_gravity(args: argparse.Namespace) -> None:
 
 
 def main(argv: list[str] | None = None) -> int:
+    determinism.apply()
     p = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     p.add_argument("--source", required=True,
                    help="video / folder of frames (same source used for the rest of the clip)")

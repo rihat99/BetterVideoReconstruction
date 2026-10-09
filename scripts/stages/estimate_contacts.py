@@ -77,6 +77,7 @@ import json  # noqa: E402
 import numpy as np  # noqa: E402
 import torch  # noqa: E402
 
+from tools import determinism  # noqa: E402
 from tools.body import frame_normals, load_body  # noqa: E402
 from tools.config import load_toml  # noqa: E402
 from tools.geometry.normals import load_scene_cloud  # noqa: E402
@@ -660,6 +661,7 @@ def run(source: str | Path, predictions_dir: str | Path, config_path: str | Path
 
 
 def main(argv: list[str] | None = None) -> int:
+    determinism.apply()
     ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     ap.add_argument("--source", required=True)
     ap.add_argument("--predictions", required=True)

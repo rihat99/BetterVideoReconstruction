@@ -39,6 +39,7 @@ from pathlib import Path
 
 import numpy as np
 import torch
+from better_robot.optim import Phase, Problem, run
 
 from tools.body import frame_normals
 
@@ -50,6 +51,7 @@ from .friction import cone_generators
 from .motion import velocity_acceleration_from_trajectory
 from .optimizer import PhaseSpec, optimize_person
 from .qmath import normalize_q
+from .solve import State, add_term, lbfgs, phase_weights
 from .stages import (
     _ALL_DOF, _body_context, _load_scene, _new_out, _append_classic,
     _person_visual_inputs, _save_body, annotation_frame_labels, load_frame_contacts,
@@ -278,14 +280,22 @@ class DynamicsSpec:
         d_par = (d * u).sum(-1, keepdim=True) * u
         return d_par, d - d_par
 
-    def populate(self, st, f_free: torch.Tensor, gen_u: torch.Tensor | None) -> None:
+    def populate(self, st, f_free: torch.Tensor, gen_u: torch.Tensor | None, torques=None) -> None:
         """Add the per-iteration lazy RNEA products to the shared :class:`State`.
 
         The state's ``"f_world"`` is the COMPOSED force (newtons) — the cone parametrization
         is applied once, here, so every dynamics term (smoothness included) sees forces and
-        never raw pyramid activations."""
+        never raw pyramid activations. ``"dyn"`` is ``(tau, f_eff)``: the RNEA at the state's
+        current pose ``"qn"``, or — given ``torques`` (the frozen-pose affine map ``f_eff -> tau``
+        of :meth:`frozen_dynamics`) — the warm start's physics, which reads no pose."""
         st.put_lazy("f_world", lambda: self.compose_forces(f_free, gen_u))
-        st.put_lazy("dyn", lambda: self.forward(st["qn"], st["f_world"]))
+        if torques is None:
+            st.put_lazy("dyn", lambda: self.forward(st["qn"], st["f_world"]))
+        else:
+            def frozen():
+                f_eff = st["f_world"] * self.mask[..., None]
+                return torques(f_eff), f_eff
+            st.put_lazy("dyn", frozen)
         st.put_lazy("dyn_split", lambda: self.force_split(st["f_world"]))
         st.put_lazy("dyn_split2", lambda: self.force_split(st["f_world"], 2))
         st.put_lazy("dyn_split3", lambda: self.force_split(st["f_world"], 3))
@@ -338,19 +348,19 @@ class DynamicsSpec:
             d2tau = tau[2:, 6:] - 2.0 * tau[1:-1, 6:] + tau[:-2, 6:]
             return half * (self.dyn_trip[:, None] * self.torque_sq(d2tau)).sum()
 
-        problem.add_term("base_wrench", _base)
-        problem.add_term("base_wrench_ang", _base_ang)
-        problem.add_term("force_magnitude", _fmag)
-        problem.add_term("force_edge", _fedge)
-        problem.add_term("force_smooth_mag", _smooth("dyn_split", 0, self.fpair))
-        problem.add_term("force_smooth_dir", _smooth("dyn_split", 1, self.fpair))
-        problem.add_term("force_accel_mag", _smooth("dyn_split2", 0, self.ftrip))
-        problem.add_term("force_accel_dir", _smooth("dyn_split2", 1, self.ftrip))
-        problem.add_term("force_jerk_mag", _smooth("dyn_split3", 0, self.fquad))
-        problem.add_term("force_jerk_dir", _smooth("dyn_split3", 1, self.fquad))
-        problem.add_term("torque_magnitude", _tmag)
-        problem.add_term("torque_smooth", _tsmooth)
-        problem.add_term("torque_accel", _taccel)
+        add_term(problem, "base_wrench", _base)
+        add_term(problem, "base_wrench_ang", _base_ang)
+        add_term(problem, "force_magnitude", _fmag)
+        add_term(problem, "force_edge", _fedge)
+        add_term(problem, "force_smooth_mag", _smooth("dyn_split", 0, self.fpair))
+        add_term(problem, "force_smooth_dir", _smooth("dyn_split", 1, self.fpair))
+        add_term(problem, "force_accel_mag", _smooth("dyn_split2", 0, self.ftrip))
+        add_term(problem, "force_accel_dir", _smooth("dyn_split2", 1, self.ftrip))
+        add_term(problem, "force_jerk_mag", _smooth("dyn_split3", 0, self.fquad))
+        add_term(problem, "force_jerk_dir", _smooth("dyn_split3", 1, self.fquad))
+        add_term(problem, "torque_magnitude", _tmag)
+        add_term(problem, "torque_smooth", _tsmooth)
+        add_term(problem, "torque_accel", _taccel)
 
     def torque_sq(self, tau_joint: torch.Tensor) -> torch.Tensor:
         """``(T, nv-6)`` squared joint torques (or torque differences), each DOF times its
@@ -387,14 +397,15 @@ class DynamicsSpec:
         (an unsupported body is in freefall). A short L-BFGS on the forces alone —
         pose detached — seeds them near their sequential optimum, so the joint
         phase starts from a physically-reasonable point for both ``q`` and ``f``.
-        Both leaves are solved (free force AND pyramid activations) so the returned
+        Both variables are solved (free force AND pyramid activations) so the returned
         values seed the joint phase coherently. Returns ``(f_free (T, 12, 3),
         gen_u (T, 12, 4) or None)``, detached; the before/after base wrench lands
         on :attr:`base_wrench_before` / :attr:`base_wrench_warm`.
 
-        The physics is the frozen affine form of :meth:`frozen_dynamics`, computed once.
+        The objective is the joint solve's own dynamics terms (:meth:`register`) on a
+        second Problem over the force variables, with the physics in the frozen affine
+        form of :meth:`frozen_dynamics`, computed once.
         """
-        w = self.weights
         with torch.no_grad():
             qn = qn_init.detach()
             tau_free, jac = self.frozen_dynamics(qn)
@@ -403,61 +414,34 @@ class DynamicsSpec:
         def torques(f_eff: torch.Tensor) -> torch.Tensor:
             return tau_free - torch.einsum("tcdn,tcd->tn", jac, f_eff)
 
-        f = self.zero_forces().requires_grad_(True)
-        gen_u = self.zero_generators()
-        if gen_u is not None:
-            gen_u.requires_grad_(True)
-        opt = torch.optim.LBFGS(
-            [f] if gen_u is None else [f, gen_u],
-            lr=float(self.dyn_opt["lr"]), max_iter=int(self.dyn_opt["max_iter"]),
-            history_size=int(self.dyn_opt["history_size"]),
-            tolerance_grad=float(self.dyn_opt["tolerance_grad"]),
-            tolerance_change=float(self.dyn_opt["tolerance_change"]), line_search_fn="strong_wolfe")
+        variables = {"f_free": self.zero_forces()[None]}
+        gen0 = self.zero_generators()
+        if gen0 is not None:
+            variables["gen_u"] = gen0[None]
 
-        half = 0.5 * self.res_scale
+        def forward(f_free, gen_u=None) -> State:
+            st = State()
+            self.populate(st, f_free[0], None if gen_u is None else gen_u[0], torques=torques)
+            return st
 
-        smooth_orders = ((1, "force_smooth_mag", "force_smooth_dir", self.fpair),
-                         (2, "force_accel_mag", "force_accel_dir", self.ftrip),
-                         (3, "force_jerk_mag", "force_jerk_dir", self.fquad))
-
-        def closure():
-            opt.zero_grad()
-            f_world = self.compose_forces(f, gen_u)
-            f_eff = f_world * self.mask[..., None]
-            tau = torques(f_eff)
-            loss = (w["base_wrench"] * half * (self.dyn_row[:, None] * tau[:, :3].pow(2)).sum()
-                    + w.get("base_wrench_ang", 0.0) * half
-                    * (self.dyn_row[:, None] * tau[:, 3:6].pow(2)).sum()
-                    + w["force_magnitude"] * half * f_eff.pow(2).sum()
-                    + w.get("force_edge", 0.0) * half
-                    * (self.fedge[..., None] * f_eff.pow(2)).sum())
-            for order, key_mag, key_dir, mask in smooth_orders:
-                if f.shape[0] > order and (w.get(key_mag, 0.0) or w.get(key_dir, 0.0)):
-                    d_par, d_perp = self.force_split(f_world, order)
-                    loss = loss + w.get(key_mag, 0.0) * half * (mask[..., None] * d_par.pow(2)).sum()
-                    loss = loss + w.get(key_dir, 0.0) * half * (mask[..., None] * d_perp.pow(2)).sum()
-            loss = loss + w.get("torque_magnitude", 0.0) * half * (
-                self.dyn_row[:, None] * self.torque_sq(tau[:, 6:])).sum()
-            if f.shape[0] > 1:
-                dtau = tau[1:, 6:] - tau[:-1, 6:]
-                loss = loss + w["torque_smooth"] * half * (
-                    self.dyn_pair[:, None] * self.torque_sq(dtau)).sum()
-            if f.shape[0] > 2:
-                d2tau = tau[2:, 6:] - 2.0 * tau[1:-1, 6:] + tau[:-2, 6:]
-                loss = loss + w.get("torque_accel", 0.0) * half * (
-                    self.dyn_trip[:, None] * self.torque_sq(d2tau)).sum()
-            loss.backward()
-            return loss
-
-        if bool(self.mask.any()):
-            opt.step(closure)
+        problem = Problem(variables)
+        problem.cached(forward, name="st", reads=tuple(variables))
+        self.register(problem)
+        x = problem.variables
+        if problem.terms:                    # no contact labels: nothing to solve, forces stay zero
+            o = self.dyn_opt
+            solver = lbfgs(int(o["max_iter"]), lr=float(o["lr"]), history=int(o["history_size"]),
+                           tolerance_grad=float(o["tolerance_grad"]),
+                           tolerance_change=float(o["tolerance_change"]))
+            x = run(problem, [Phase(solver, 1, weights=phase_weights(problem, self.weights),
+                                    stop_every=0)]).x
+        f, gen_u = x["f_free"][0], None if gen0 is None else x["gen_u"][0]
         with torch.no_grad():
-            f_world = self.compose_forces(f, gen_u)
-            base1 = self.wrench_rms(torques(f_world * self.mask[..., None]))
+            base1 = self.wrench_rms(torques(self.compose_forces(f, gen_u) * self.mask[..., None]))
         self.base_wrench_before, self.base_wrench_warm = base0, base1
         print(f"    [kindyn warm-start] base wrench {base0:.1f}→{base1:.2f} N/frame RMS "
               f"(forces only, q frozen)")
-        return f.detach(), None if gen_u is None else gen_u.detach()
+        return f, gen_u
 
     def extract(self, qn: torch.Tensor, f_free: torch.Tensor, gen_u: torch.Tensor | None,
                 body) -> dict:

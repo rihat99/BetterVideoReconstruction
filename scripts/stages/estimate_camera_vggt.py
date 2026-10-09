@@ -69,6 +69,7 @@ import cv2
 import numpy as np
 import torch
 
+from tools import determinism
 from tools.adapters.vggt_omega import (
     DEFAULT_CHECKPOINT_REPO,
     DEFAULT_IMAGE_RESOLUTION,
@@ -218,6 +219,7 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
 
 
 def main(argv: list[str] | None = None) -> int:
+    determinism.apply()
     args = _parse_args(argv)
     return run_batch(CameraVggtStep(args), args)
 

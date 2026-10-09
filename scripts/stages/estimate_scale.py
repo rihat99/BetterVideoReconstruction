@@ -63,6 +63,7 @@ import argparse  # noqa: E402
 import numpy as np  # noqa: E402
 import torch  # noqa: E402
 
+from tools import determinism  # noqa: E402
 from tools.body import load_body  # noqa: E402
 from tools.config import load_toml, section  # noqa: E402
 from tools.geometry.depth_smear import alongray_smear, smear_weight  # noqa: E402
@@ -616,6 +617,7 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
 
 
 def main(argv: list[str] | None = None) -> int:
+    determinism.apply()
     estimate_scale(_parse_args(argv))
     return 0
 

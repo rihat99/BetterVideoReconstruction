@@ -66,6 +66,7 @@ import numpy as np  # noqa: E402
 import torch  # noqa: E402
 from tqdm import tqdm  # noqa: E402
 
+from tools import determinism  # noqa: E402
 from tools.config import load_toml, section  # noqa: E402
 from tools.geometry.intrinsics import denormalize_K  # noqa: E402
 from tools.precompute_runner import InputItem, SkipItem, run_batch  # noqa: E402
@@ -530,6 +531,7 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
 
 
 def main(argv: list[str] | None = None) -> int:
+    determinism.apply()
     args = _parse_args(argv)
 
     # Batch / manifest mode: precompute_runner Step (load model once, sweep scenes).
