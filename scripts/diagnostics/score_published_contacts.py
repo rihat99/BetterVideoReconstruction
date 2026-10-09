@@ -74,7 +74,7 @@ for _p in (_REPO, _REPO / "scripts", Path(__file__).resolve().parent):
 
 from _common import _fmt, _rates, _render_table  # noqa: E402
 from score_frame_contacts import _FOLD_10, _FOLD_14, metrics as _metrics  # noqa: E402
-from tools.paths import CLIMBING, PETER  # noqa: E402
+from bvr.paths import CLIMBING, PETER  # noqa: E402
 
 FEATURES, RESULTS = CLIMBING.resolve() / "features", CLIMBING.resolve() / "results"
 GT_ROOT = PETER / "climb_wall_3_gt" / "human"

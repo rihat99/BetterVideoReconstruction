@@ -55,7 +55,7 @@ from export_opencap_mot import floor_y, plate_triple  # noqa: E402
 from opencap_learned_export import GRAVITY, HIP_JOINTS, covered_span, fill_gaps  # noqa: E402
 from opencap_plates import LOADED_N  # noqa: E402
 from opencap_sensor_forces import PROCESSED, world_from_mocap  # noqa: E402
-from tools.npz_io import atomic_savez  # noqa: E402
+from bvr.npz_io import atomic_savez  # noqa: E402
 
 FEET = ("left_foot", "right_foot")
 

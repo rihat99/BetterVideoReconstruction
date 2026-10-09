@@ -50,8 +50,8 @@ for _p in (str(_REPO), str(_REPO / "scripts")):
 
 from export_opencap_mot import floor_y, plate_triple  # noqa: E402
 from opencap_plates import LOADED_N  # noqa: E402
-from tools.npz_io import atomic_savez  # noqa: E402
-from tools.paths import LABVALIDATION  # noqa: E402
+from bvr.npz_io import atomic_savez  # noqa: E402
+from bvr.paths import LABVALIDATION  # noqa: E402
 
 PROCESSED = (LABVALIDATION / "processed").resolve()
 PHYSPT = (_REPO.parent / "other" / "PhysPT").resolve()

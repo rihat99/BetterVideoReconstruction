@@ -8,7 +8,7 @@ user-labelled operating point, 2026-08-24). The metric columns:
   scene-to-camera distance. A hallucinated dolly (VGGT turning a tripod pan+zoom
   into metres of travel, e.g. high_jump) reads ≫ 1; a static camera ~0.
 * **smear med / >2.5** — the per-frame human-cloud along-ray smear
-  (:mod:`tools.geometry.depth_smear`): median and the fraction of frames above
+  (:mod:`bvr.geometry.depth_smear`): median and the fraction of frames above
   2.5. The pommel_horse failure (person streaked along the view ray) reads
   median ~8; every clean climbing clip reads median < 1, fraction 0.
 * **scale mad** — the scale stage's per-frame log-scale spread (``scale.npz``);
@@ -19,7 +19,7 @@ user-labelled operating point, 2026-08-24). The metric columns:
   witness, in body weights (~1 BW before is normal support; ≫1 before AND after
   = the kinematics are garbage no force can explain).
 * **f-conf** — whole-body force confidence of the kindyn_1 solve
-  (:mod:`tools.human_optim.force_confidence`), mean over valid frames. Computed
+  (:mod:`bvr.human_optim.force_confidence`), mean over valid frames. Computed
   from the saved wrench + forces, so it also works on kindyn files written
   before the field existed.
 
@@ -41,8 +41,8 @@ import argparse  # noqa: E402
 
 import numpy as np  # noqa: E402
 
-from tools.geometry.quality import cam_motion_ratio, quality_flag, smear_stats  # noqa: E402
-from tools.human_optim.force_confidence import force_confidence  # noqa: E402
+from bvr.geometry.quality import cam_motion_ratio, quality_flag, smear_stats  # noqa: E402
+from bvr.human_optim.force_confidence import force_confidence  # noqa: E402
 
 _GRAVITY_MAG = 9.81
 
@@ -96,7 +96,7 @@ def clip_row(pred: Path) -> dict | None:
 
 def flag_of(row: dict, q: dict) -> str:
     """The calibrated verdicts, recomputed at the CURRENT [quality] thresholds via the
-    same :func:`tools.geometry.quality.quality_flag` the contacts stage saves — the
+    same :func:`bvr.geometry.quality.quality_flag` the contacts stage saves — the
     table and the pipeline cannot drift in logic, only in threshold snapshots."""
     return quality_flag(row["cam_ratio"], row["res_before"], row["smear_med"],
                         cam_depth_max=float(q["cam_depth_max"]),
@@ -105,7 +105,7 @@ def flag_of(row: dict, q: dict) -> str:
 
 
 def main(argv: list[str] | None = None) -> int:
-    from tools.config import load_toml
+    from bvr.config import load_toml
 
     ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     ap.add_argument("--predictions", nargs="+", required=True,

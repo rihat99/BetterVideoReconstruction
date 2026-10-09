@@ -16,7 +16,7 @@ orange measured and blue plate-format arrows.
 ``ground truth`` source, contact labels and forces where ``scripts/label_bedlam2.py`` ran, video on);
 both alias the selected scenes into a throwaway ``out/``-shaped symlink farm. Knobs live in the
 config's ``[viewer]`` section. This script is where the dataset readers
-(``tools/viewer/datasets_layers.py``) are plugged into the generic viewer.
+(``bvr/viewer/datasets_layers.py``) are plugged into the generic viewer.
 
 Usage::
 
@@ -36,7 +36,7 @@ _REPO_ROOT = Path(__file__).resolve().parents[1]
 if str(_REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(_REPO_ROOT))
 
-from tools.config import load_toml, section  # noqa: E402
+from bvr.config import load_toml, section  # noqa: E402
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -59,8 +59,8 @@ def main(argv: list[str] | None = None) -> int:
         "limit": "", "seed": 0,
     })
 
-    from tools.viewer import datasets_layers, view_3d
-    from tools.viewer.app import CLIP_MARKERS
+    from bvr.viewer import datasets_layers, view_3d
+    from bvr.viewer.app import CLIP_MARKERS
 
     # The footage and the ground-truth body are what a BEDLAM2 scene is checked against.
     view = partial(view_3d, port=args.port, up=args.up, point_size=args.point_size,

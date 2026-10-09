@@ -61,24 +61,24 @@ if str(_REPO) not in sys.path:
 
 from scipy.spatial import cKDTree  # noqa: E402
 
-from tools.human_optim.camera import fold_root_to_world, world_from_cam  # noqa: E402
-from tools.human_optim.boards import (  # noqa: E402
+from bvr.human_optim.camera import fold_root_to_world, world_from_cam  # noqa: E402
+from bvr.human_optim.boards import (  # noqa: E402
     LIMBS, frame_contact as board_frame_contact, limb_contact, limb_of_frame,
 )
-from tools.human_optim.config import load_config  # noqa: E402
-from tools.human_optim.force_confidence import force_confidence  # noqa: E402
-from tools.human_optim.keypoints import smooth_tracks  # noqa: E402
-from tools.human_optim.kindyn import _GRAVITY_MAG, build_dynamics_spec  # noqa: E402
-from tools.human_optim.losses import init_reprojection_gm, sapiens_reprojection_gm  # noqa: E402
-from tools.human_optim.optimizer import PhaseSpec, optimize_person  # noqa: E402
-from tools.human_optim.prefit import smooth_finger_quats  # noqa: E402
-from tools.human_optim.qmath import normalize_q  # noqa: E402
-from tools.human_optim.stages import (  # noqa: E402
+from bvr.config import load_human_config  # noqa: E402
+from bvr.human_optim.force_confidence import force_confidence  # noqa: E402
+from bvr.human_optim.keypoints import smooth_tracks  # noqa: E402
+from bvr.human_optim.kindyn import _GRAVITY_MAG, build_dynamics_spec  # noqa: E402
+from bvr.human_optim.losses import init_reprojection_gm, sapiens_reprojection_gm  # noqa: E402
+from bvr.human_optim.optimizer import PhaseSpec, optimize_person  # noqa: E402
+from bvr.human_optim.prefit import smooth_finger_quats  # noqa: E402
+from bvr.human_optim.qmath import normalize_q  # noqa: E402
+from bvr.human_optim.stages import (  # noqa: E402
     _ALL_DOF, _ROOT_DOF, _append_classic, _body_context, _fill_invalid_frames, _load_scene,
     _new_out, _save_body, load_frame_contacts,
 )
-from tools.npz_io import atomic_savez  # noqa: E402
-from tools.paths import PETER  # noqa: E402
+from bvr.npz_io import atomic_savez  # noqa: E402
+from bvr.paths import PETER  # noqa: E402
 
 HUMAN_ROOT = PETER / "climb_wall_3_gt/human"
 SHAPES = HUMAN_ROOT / "_shapes"
@@ -417,7 +417,7 @@ def readout_extras(before: dict, after: dict) -> dict:
 # ───────────────────────────── stage: fit ─────────────────────────────
 
 def run_fit(clip: str, device: str) -> None:
-    cfg = load_config(CONFIG)
+    cfg = load_human_config(CONFIG)
     knobs = cfg.knobs
     data = load_clip(clip, device)
     views, n, fps = data["views"], data["n"], data["fps"]
@@ -496,7 +496,7 @@ def run_fit(clip: str, device: str) -> None:
         target_kp=targets["cam_left"]["kp"], scores=targets["cam_left"]["scores"],   # readout only (weight 0)
         corr=corr, frame_vertex_ids=fvids, sub=sub, knobs=knobs, phases=phases,
         scene_pts=scene_pts, scene_normals=scene_normals, scene_conf=scene_conf, fps=fps,
-        contact_labels=labels, contact_axis="frames",
+        contact_labels=labels,
         chamfer_weights=chamfer_w, frame_valid=frame_valid, cam_centers=None,
         freeze_fingers=bool(cfg.stage_opts["kinematics_1"].get("freeze_fingers", True)),
         extra_terms=terms, fit_betas=fit_betas)
@@ -552,7 +552,7 @@ def run_shape(clip: str, device: str) -> None:
     if not fitted:
         raise SystemExit(f"[shape] no clip of participant {who['name']} has a fitted shape yet")
     betas = np.mean(fitted, 0)
-    cfg = load_config(CONFIG)
+    cfg = load_human_config(CONFIG)
     mid, *_ = _body_context(cfg.knobs, device)
     with torch.no_grad():
         h, m = (float(x) for x in shape_of(mid, torch.as_tensor(betas, device=device)))
@@ -566,7 +566,7 @@ def run_shape(clip: str, device: str) -> None:
 # ─────────────────────────── stage: contacts ───────────────────────────
 
 def run_contacts(clip: str, device: str) -> None:
-    cfg = load_config(CONFIG)
+    cfg = load_human_config(CONFIG)
     boards = gt_section("boards")
     enter_n, exit_n, near_m = float(boards["force_enter_n"]), float(boards["force_exit_n"]), float(boards["near_scene_m"])
     clip_dir = HUMAN_ROOT / clip
@@ -630,7 +630,7 @@ def run_contacts(clip: str, device: str) -> None:
 
 def run_kin2(clip: str, device: str) -> None:
     """The pipeline's kinematics_2 (contact-patch repair) on the board labels."""
-    cfg = load_config(CONFIG)
+    cfg = load_human_config(CONFIG)
     knobs = cfg.knobs
     data = load_clip(clip, device)
     views, n, fps = data["views"], data["n"], data["fps"]
@@ -675,7 +675,7 @@ def run_kin2(clip: str, device: str) -> None:
         target_kp=targets["cam_left"]["kp"], scores=targets["cam_left"]["scores"],
         corr=corr, frame_vertex_ids=fvids, sub=sub, knobs=knobs, phases=phases,
         scene_pts=scene_pts, scene_normals=scene_normals, scene_conf=scene_conf, fps=fps,
-        contact_labels=contact_labels, contact_axis="frames", image_hw=(left["size"][1], left["size"][0]),
+        contact_labels=contact_labels, image_hw=(left["size"][1], left["size"][0]),
         chamfer_weights=chamfer_w, frame_valid=torch.as_tensor(valid, device=device), cam_centers=None,
         extra_terms=terms)
     print(f"    before: {before}\n    after:  {after}")
@@ -721,7 +721,7 @@ def board_force_term(spec, frame_limb: list, measured: np.ndarray, valid: np.nda
 
 
 def run_kindyn(clip: str, device: str) -> None:
-    cfg = load_config(CONFIG)
+    cfg = load_human_config(CONFIG)
     knobs = cfg.knobs
     kd = cfg.stage_opts["kindyn_1"]
     data = load_clip(clip, device)
@@ -797,7 +797,7 @@ def run_kindyn(clip: str, device: str) -> None:
         target_kp=targets["cam_left"]["kp"], scores=targets["cam_left"]["scores"],
         corr=corr, frame_vertex_ids=fvids, sub=sub, knobs=knobs, phases=phases,
         scene_pts=scene_pts, scene_normals=scene_normals, scene_conf=scene_conf, fps=fps,
-        contact_labels=contact_labels, contact_axis="frames", image_hw=(left["size"][1], left["size"][0]),
+        contact_labels=contact_labels, image_hw=(left["size"][1], left["size"][0]),
         chamfer_weights=chamfer_w, frame_valid=torch.as_tensor(valid, device=device),
         cam_centers=None, dynamics=spec, extra_terms=terms)
     print(f"    before: {before}\n    after:  {after}")
@@ -897,7 +897,7 @@ def run_sync(clip: str, device: str, apply: bool) -> None:
     """
     from prepare_human import CALIB_REF, GT_SCENE
 
-    cfg = load_config(CONFIG)
+    cfg = load_human_config(CONFIG)
     clip_dir = HUMAN_ROOT / clip
     cams = dict(np.load(clip_dir / "cameras.npz", allow_pickle=True))
     data = load_clip(clip, device, frame_offset=np.zeros(3, int))    # measure on the raw clock

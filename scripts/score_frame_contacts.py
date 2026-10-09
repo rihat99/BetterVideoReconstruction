@@ -35,8 +35,8 @@ _REPO_ROOT = Path(__file__).resolve().parents[1]
 if str(_REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(_REPO_ROOT))
 
-from tools.human_optim.stages import _ANN_TO_SMPLX, _ANN_TO_SMPLX_14  # noqa: E402
-from tools.paths import EXAMPLES  # noqa: E402
+from bvr.human_optim.stages import _ANN_TO_SMPLX, _ANN_TO_SMPLX_14  # noqa: E402
+from bvr.paths import EXAMPLES  # noqa: E402
 
 # Which contact frames fold onto which annotated coarse joint, per annotation schema.
 # Names cover BOTH frame sets — the legacy 12-frame set (toe_under) and the full-body
@@ -81,7 +81,7 @@ def fold_for_schema(ann_names: list[str]) -> tuple[dict[str, tuple[str, ...]], i
     """Pick the frame→coarse-joint fold for one annotation, by EXACT joint-name set.
 
     Returns ``(fold, schema)`` where ``schema`` is 10 or 14. Raises on any other name set
-    rather than silently dropping joints (same rule as :func:`tools.human_optim.stages._ann_mapping`).
+    rather than silently dropping joints (same rule as :func:`bvr.human_optim.stages._ann_mapping`).
     """
     names = set(ann_names)
     if names == set(_ANN_TO_SMPLX):
@@ -131,7 +131,7 @@ def metrics(counts: dict[str, int]) -> dict[str, float | int | None]:
 def score_scene(scene_dir: Path, tag: str) -> dict:
     """Score one ``out/<scene>/`` against ``../data/examples/data/<scene>.npz``.
 
-    Reads ``human_optim/contacts_<tag>.npz`` (``frame_contact (P,N,12)``, ``valid_mask (P,N)``,
+    Reads ``human_optim/contacts_<tag>.npz`` (``frame_contact (P,N,F)``, ``valid_mask (P,N)``,
     ``object_ids (P,)``) and the annotation ``contacts (P_ann,J_ann,N_ann)`` — note the
     annotation's time axis is LAST. Returns the per-joint counts pooled over the scored people.
     """
@@ -141,7 +141,7 @@ def score_scene(scene_dir: Path, tag: str) -> dict:
         raise FileNotFoundError(f"no manual annotation at {ann_path}")
     ann = np.load(ann_path, allow_pickle=True)
 
-    frame_contact = pred["frame_contact"].astype(bool)          # (P, N, 12)
+    frame_contact = pred["frame_contact"].astype(bool)          # (P, N, F)
     valid_mask = pred["valid_mask"].astype(bool)                # (P, N)
     pred_ids = [int(o) for o in pred["object_ids"]]
     frame_idx = {str(n): i for i, n in enumerate(pred["contact_frame_names"])}

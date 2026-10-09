@@ -5,7 +5,7 @@ from __future__ import annotations
 import pytest
 import torch
 
-from tools.body import load_body
+from bvr.body import load_body
 
 # Dempster's segment densities (kg/m³) as shipped in BetterHuman's body_densities.json.
 _DEMPSTER = {"pelvis": 1010.0, "left_hip": 1050.0, "spine2": 920.0, "head": 1110.0,

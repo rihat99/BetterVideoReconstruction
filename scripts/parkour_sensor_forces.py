@@ -4,7 +4,7 @@ The Parkour rig measures what the peter climbing boards measure — one 3D conta
 per limb, per video frame — but ``scripts/import_parkour.py`` stores it as a 6D wrench
 with a capture mask (``processed/<clip>/forces.npz``). The contact stages read
 ``sensor_forces.npz``: the linear part alone, ``(N, 4, 3)`` in
-:data:`~tools.human_optim.boards.LIMBS` order, in the reaction-on-the-person sense.
+:data:`~bvr.human_optim.boards.LIMBS` order, in the reaction-on-the-person sense.
 This script is that translation, so ``measure_contacts_boards.py`` and the comparison
 run on Parkour with no changes of their own.
 
@@ -37,7 +37,7 @@ if str(_REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(_REPO_ROOT))
 
 from tools import paths  # noqa: E402
-from tools.human_optim.boards import LIMBS  # noqa: E402
+from bvr.human_optim.boards import LIMBS  # noqa: E402
 
 PARKOUR = paths.PARKOUR / "processed"
 

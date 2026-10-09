@@ -107,7 +107,7 @@ if str(_REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(_REPO_ROOT))
 
 from opencap_plates import LOADED_N, cop_free_torque, origin_moment  # noqa: E402
-from tools.paths import LABVALIDATION  # noqa: E402
+from bvr.paths import LABVALIDATION  # noqa: E402
 
 SRC = LABVALIDATION
 DST = SRC / "processed"

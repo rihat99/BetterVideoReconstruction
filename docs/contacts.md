@@ -41,7 +41,7 @@ sits on:
 
 The set is authored in
 `BetterHuman/studio_data/frames/smplx_neutral/better_contacts.json` and baked on
-by `tools/body.py` (the legacy 12-frame set lives next to it in
+by `bvr/body.py` (the legacy 12-frame set lives next to it in
 `contacts.json`). Because the fingertip frames hang off finger joints, those
 joints must exist in the optimized body — but their pose is **frozen**: at depth
 and keypoint resolution there is nothing to fit a finger with, so the fingers
@@ -280,7 +280,7 @@ rules and the toe rule, with the measured evidence and its caveats.
 
 ## One detector, two callers
 
-`tools/human_optim/contacts.py::detect_frame_contacts` is the only place these
+`bvr/human_optim/contacts.py::detect_frame_contacts` is the only place these
 gates are implemented, and both users call it:
 
 - **`kinematics_1`**, inside the fit. Labels are detected **once**, from the
@@ -291,7 +291,7 @@ gates are implemented, and both users call it:
   freezing is what keeps contact detection from feeding back into the fit. The
   labels land in `kinematic_1.npz` as `auto_labels`, and the drift they were
   gated on as `drift_pre`.
-- **`scripts/stages/estimate_contacts.py`**, the standalone readout. It poses a
+- **`bvr/stages/estimate_contacts.py`**, the standalone readout. It poses a
   finished body, runs the same detector, merges spans and writes
   `contacts_<tag>.npz`. `--bodies kinematic_1` → `contacts_1.npz`.
 
@@ -359,12 +359,12 @@ witness).
 Plus every knob echoed as a scalar, and `source_body` / `source_scene` /
 `source_transform` with their sha256, so a stale artifact is detectable.
 
-The overlay `contacts_<tag>_overlay.mp4` draws the 12 projected points, red in
+The overlay `contacts_<tag>_overlay.mp4` draws the projected contact frames, red in
 contact, green free.
 
 Cost, measured on `boulder_1` (445 frames, one person, one GPU): 12 s end to end
 including the overlay. The frame poses come free with forward kinematics and the
-nearest-neighbour search is over 12 points per frame instead of 10 475 vertices,
+nearest-neighbour search is over a few dozen points per frame instead of 10 475 vertices,
 so the readout is essentially free — the overlay is most of the wall time.
 
 ## What this replaced, and why
@@ -387,11 +387,10 @@ The frame model removes the reason they were needed:
   carries its normal, and the window separates them.
 - Lifting per-vertex contacts to joints smeared them: a whole hand became "wrist",
   and a heel on a hold landed on the ankle or the foot depending on rest-pose
-  geometry. Twelve named points need no lifting at all.
+  geometry. Named points need no lifting at all.
 
 Dropped with the old model, on this branch: completion and prediction fusion
-(`completion.py` and `fusion.py` are deleted; `docs/contact_fusion.md` is the
-design record). The per-label **confidence** stayed, but is no longer built by
+(`completion.py` and `fusion.py` are deleted). The per-label **confidence** stayed, but is no longer built by
 hand: the frame labels fold onto report joints (hands at the wrist), and each
 folded label carries a probability fitted against the manual annotations. Its
 old witnesses — the ray-cast body-occlusion test and the depth-fit trust — were

@@ -11,9 +11,9 @@ from __future__ import annotations
 
 import numpy as np
 
-from tools.viewer.app import CLIP_MARKERS, _discover_clips, _is_clip
-from tools.viewer.datasets_layers import BEDLAM_MARKER, _bedlam_gravity
-from tools.viewer.layers import _GROUND_GRID_MULT
+from bvr.viewer.app import CLIP_MARKERS, _discover_clips, _is_clip
+from bvr.viewer.datasets_layers import BEDLAM_MARKER, _bedlam_gravity
+from bvr.viewer.layers import _GROUND_GRID_MULT
 
 _FLOOR_Y = -0.015           # BEDLAM2's ground_height: up is -y, so the floor is just below 0
 _UP = np.array([0.0, -1.0, 0.0], np.float32)

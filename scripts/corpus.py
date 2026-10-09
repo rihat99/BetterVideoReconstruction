@@ -32,25 +32,24 @@ if str(_HERE.parent) not in sys.path:
 import scene_db  # noqa: E402  (scripts/ on path)
 from scene_db import ScenePaths, select_targets  # noqa: E402
 
-_STAGES_DIR = _REPO_ROOT / "scripts" / "stages"
+_STAGES_DIR = _REPO_ROOT / "bvr" / "stages"
 _DEFAULT_CONFIG = _REPO_ROOT / "configs" / "corpus.toml"
-_CONTACTS_CLI = _STAGES_DIR / "estimate_contacts.py"
-# Pinned copy of scripts/stages/estimate_contacts.py's schema/method (kept literal
+# Pinned copy of bvr/stages/estimate_contacts.py's schema/method (kept literal
 # so the driver stays torch-free); update together with that stage.
 _CONTACT_LABEL_SCHEMA = 2
 _CONTACT_LABEL_METHOD = "frames-v4"
 # The modules the contacts stage actually executes: a code fix in any of them must
 # invalidate --skip-existing even when the artifact schema is unchanged.
 _IMPLEMENTATION_INPUTS = (
-    _CONTACTS_CLI,
-    _REPO_ROOT / "tools" / "human_optim" / "contacts.py",
-    _REPO_ROOT / "tools" / "human_optim" / "forces.py",
-    _REPO_ROOT / "tools" / "human_optim" / "friction.py",
-    _REPO_ROOT / "tools" / "human_optim" / "qmath.py",
-    _REPO_ROOT / "tools" / "body.py",
-    _REPO_ROOT / "tools" / "geometry" / "normals.py",
-    _REPO_ROOT / "tools" / "geometry" / "quality.py",
-    _REPO_ROOT / "tools" / "geometry" / "depth_smear.py",
+    _STAGES_DIR / "estimate_contacts.py",
+    _REPO_ROOT / "bvr" / "human_optim" / "contacts.py",
+    _REPO_ROOT / "bvr" / "human_optim" / "forces.py",
+    _REPO_ROOT / "bvr" / "human_optim" / "friction.py",
+    _REPO_ROOT / "bvr" / "human_optim" / "qmath.py",
+    _REPO_ROOT / "bvr" / "body.py",
+    _REPO_ROOT / "bvr" / "geometry" / "normals.py",
+    _REPO_ROOT / "bvr" / "geometry" / "quality.py",
+    _REPO_ROOT / "bvr" / "geometry" / "depth_smear.py",
 )
 
 InvocationMode = Literal[
@@ -63,7 +62,7 @@ class StageSpec:
     """The stage-specific hooks used by the shared orchestrator and worker."""
 
     mode: InvocationMode
-    cli: Path | None
+    cli: str | None          # the stage module under ``bvr.stages`` (subprocess stages)
     out_stage: str
     out_check: str
     manifest_dependencies: tuple[str, ...] = ()
@@ -77,7 +76,7 @@ class StageSpec:
 STAGES: dict[str, StageSpec] = {
     "sam3": StageSpec(
         mode="manifest_subprocess",
-        cli=_STAGES_DIR / "track_sam3.py",
+        cli="track_sam3",
         out_stage="sam3",
         out_check="bboxes.npz",
         config_sections=("sam3",),
@@ -86,7 +85,7 @@ STAGES: dict[str, StageSpec] = {
     ),
     "vggt": StageSpec(
         mode="manifest_subprocess",
-        cli=_STAGES_DIR / "estimate_camera_vggt.py",
+        cli="estimate_camera_vggt",
         out_stage="vggt",
         out_check="camera.npz",
         config_sections=("vggt",),
@@ -94,7 +93,7 @@ STAGES: dict[str, StageSpec] = {
     ),
     "sapiens": StageSpec(
         mode="manifest_subprocess",
-        cli=_STAGES_DIR / "estimate_sapiens.py",
+        cli="estimate_sapiens",
         out_stage="sapiens",
         out_check="pose.npz",
         manifest_dependencies=("bboxes",),
@@ -104,7 +103,7 @@ STAGES: dict[str, StageSpec] = {
     ),
     "sam3d": StageSpec(
         mode="manifest_subprocess",
-        cli=_STAGES_DIR / "estimate_body_sam3d.py",
+        cli="estimate_body_sam3d",
         out_stage="sam3d",
         out_check="params.npz",
         manifest_dependencies=("bboxes", "camera"),
@@ -114,7 +113,7 @@ STAGES: dict[str, StageSpec] = {
     ),
     "smplx": StageSpec(
         mode="manifest_subprocess",
-        cli=_STAGES_DIR / "convert_mhr_to_smplx.py",
+        cli="convert_mhr_to_smplx",
         out_stage="sam3d",
         out_check="smplx_params.npz",
         manifest_dependencies=("params",),
@@ -167,7 +166,7 @@ STAGES: dict[str, StageSpec] = {
     ),
     "contacts": StageSpec(
         mode="farm_subprocess_per_scene",
-        cli=_CONTACTS_CLI,
+        cli="estimate_contacts",
         out_stage="human_optim",
         out_check="contacts_{tag}.npz",
         farm_inputs=("human_optim", "geometry"),
@@ -679,7 +678,8 @@ def _manifest_args(spec: StageSpec, manifest: Path, save_dir: Path, config: Path
     assert spec.cli is not None
     return [
         sys.executable,
-        str(spec.cli),
+        "-m",
+        f"bvr.stages.{spec.cli}",
         "--source",
         str(manifest),
         "--save-dir",
@@ -703,16 +703,15 @@ def _run_farm_worker(
     stage: str, spec: StageSpec, manifest: Path, config_path: Path, skip_existing: bool
 ) -> int:
     """Run a geometry or human-optimization shard in-process, isolating scene failures."""
-    sys.path.insert(0, str(_STAGES_DIR))
     import torch  # noqa: E402  (worker-only; the orchestrator stays torch-free)
 
     if stage == "geometry":
-        import estimate_scale as scale_stage  # noqa: E402
-        import fuse_geometry as fuse_stage  # noqa: E402
+        from bvr.stages import estimate_scale as scale_stage  # noqa: E402
+        from bvr.stages import fuse_geometry as fuse_stage  # noqa: E402
     elif stage == "gravity":
-        import estimate_gravity_geocalib as gravity_stage  # noqa: E402
+        from bvr.stages import estimate_gravity_geocalib as gravity_stage  # noqa: E402
     else:
-        import human_optimization as human_stage  # noqa: E402
+        from bvr.stages import human_optimization as human_stage  # noqa: E402
 
     entries = json.loads(manifest.read_text())
     farms_root = manifest.parent / "farms"
@@ -830,7 +829,8 @@ def _run_contacts_worker(
                     (farm / "geocalib").symlink_to(geocalib.resolve())
                 cmd = [
                     sys.executable,
-                    str(_CONTACTS_CLI),
+                    "-m",
+                    "bvr.stages.estimate_contacts",
                     "--source",
                     entry["clip"],
                     "--predictions",

@@ -1,6 +1,6 @@
 # The fusion stage: building the point clouds
 
-`scripts/stages/fuse_geometry.py` — runs after the SMPL-X conversion and **before**
+`bvr/stages/fuse_geometry.py` — runs after the SMPL-X conversion and **before**
 `estimate_scale`. Needs the VGGT stage run with depth saving on.
 
 This doc explains how the 3D world is built from VGGT's output. One thing to hold

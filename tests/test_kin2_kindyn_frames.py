@@ -1,13 +1,13 @@
 """The frames-era kin2 / kindyn_1 chain: frame labels, the label loader, the force wrenches.
 
 Three things this file pins down, all of which changed when contact moved off the 52
-joints and onto the 12 contact frames:
+joints and onto the contact frames:
 
 * ``annotation_frame_labels`` — the manual per-joint annotation spread onto the frames
   each joint covers (and the 10- vs 14-joint schema difference on the heel);
 * ``load_frame_contacts`` — the AUTO label source refuses a stale or mismatched
   ``contacts_<tag>.npz`` instead of silently refining against the wrong body;
-* :class:`~tools.human_optim.kindyn.DynamicsSpec` — a contact-frame force becomes the
+* :class:`~bvr.human_optim.kindyn.DynamicsSpec` — a contact-frame force becomes the
   right wrench on its parent joint (force + lever moment, accumulated when two frames
   share a joint), and the friction pyramid cannot be left.
 """
@@ -21,11 +21,11 @@ import numpy as np
 import pytest
 import torch
 
-from tools.human_optim.forces import cone_generators
-from tools.human_optim.kindyn import DynamicsSpec
-from tools.human_optim.stages import annotation_frame_labels, load_frame_contacts
+from bvr.human_optim.forces import cone_generators
+from bvr.human_optim.kindyn import DynamicsSpec
+from bvr.human_optim.stages import annotation_frame_labels, load_frame_contacts
 
-# The 12 contact frames in their stored order — note slots 10/11 are RIGHT then LEFT.
+# The legacy 12-frame climbing set in its stored order — note slots 10/11 are RIGHT then LEFT.
 _FRAME_NAMES = ["toe_under_left", "toe_under_right", "heel_left", "heel_right",
                 "toe_above_left", "toe_above_right", "knee_left", "knee_right",
                 "palm_left", "palm_right", "finger_right", "finger_left"]
@@ -363,7 +363,7 @@ def test_edge_weight_falls_with_the_body_speed_across_the_switch():
 
 
 def test_fps_scaling_treats_force_accel_and_jerk_as_orders_two_and_three():
-    from tools.human_optim.config import fps_scaled_weights
+    from bvr.config import fps_scaled_weights
 
     scaled = fps_scaled_weights({"force_smooth_mag": 1.0, "force_accel_dir": 1.0,
                                  "force_jerk_mag": 1.0, "base_wrench_ang": 1.0}, 60.0)
@@ -376,7 +376,7 @@ def test_fps_scaling_treats_force_accel_and_jerk_as_orders_two_and_three():
 # ───────────────────────── per-joint torque multipliers ─────────────────────────
 
 def test_joint_group_strips_side_and_index():
-    from tools.human_optim.kindyn import joint_group
+    from bvr.human_optim.kindyn import joint_group
 
     assert joint_group("left_hip") == "hip"
     assert joint_group("spine2") == "spine"
@@ -385,8 +385,8 @@ def test_joint_group_strips_side_and_index():
 
 
 def test_torque_multipliers_land_on_each_joints_dof_rows():
-    from tools.body import load_body
-    from tools.human_optim.kindyn import joint_group, torque_multipliers
+    from bvr.body import load_body
+    from bvr.human_optim.kindyn import joint_group, torque_multipliers
 
     body = load_body(device="cpu")
     model = body.shaped(torch.zeros(10)).model
@@ -404,8 +404,8 @@ def test_torque_multipliers_land_on_each_joints_dof_rows():
 
 
 def test_torque_multipliers_reject_an_uncovered_joint():
-    from tools.body import load_body
-    from tools.human_optim.kindyn import torque_multipliers
+    from bvr.body import load_body
+    from bvr.human_optim.kindyn import torque_multipliers
 
     body = load_body(device="cpu")
     model = body.shaped(torch.zeros(10)).model
@@ -424,7 +424,7 @@ def test_torque_terms_read_the_weighted_square():
 
 
 def test_fps_scaling_treats_torque_accel_as_order_two():
-    from tools.human_optim.config import fps_scaled_weights
+    from bvr.config import fps_scaled_weights
 
     scaled = fps_scaled_weights({"torque_magnitude": 1.0, "torque_smooth": 1.0,
                                  "torque_accel": 1.0}, 60.0)

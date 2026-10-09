@@ -38,12 +38,3 @@ seed = 0                      # Deterministic draw among the small new videos.
 
 [contacts_run]
 bodies = "kinematic_1"      # Body artifact to score; produces contacts_1.npz (or use kinematic_2).
-
-[score]
-device = "cuda"             # Torch device for offline scoring.
-ref_close = 0.02            # Per-joint reference close-threshold cell, metres.
-ref_still = 0.025           # Per-joint reference stillness cell, metres.
-exclude_from_pool = ["sport_climb"] # Clip names reported but excluded from pooled metrics.
-merge_dist = ""             # Empty keeps mode defaults; otherwise span-merge distance in metres.
-gate_source = ""            # Empty keeps mode defaults; otherwise "final" or "pre".
-allow_frame_trim = false     # Permit min-overlap scoring when body/annotation lengths differ.

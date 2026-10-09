@@ -1,5 +1,5 @@
 """Force-plate loading for the viewer: measured plates keep their centre of pressure and
-our ``estimated_forces.npz`` comes back in the world frame (``tools.viewer.datasets_layers``)."""
+our ``estimated_forces.npz`` comes back in the world frame (``bvr.viewer.datasets_layers``)."""
 
 from __future__ import annotations
 
@@ -8,7 +8,7 @@ from pathlib import Path
 import numpy as np
 
 from scripts.run_dataset import build_view_farm
-from tools.viewer.datasets_layers import load_plate_estimate, load_sensor_forces
+from bvr.viewer.datasets_layers import load_plate_estimate, load_sensor_forces
 
 _R = np.array([[0.0, 0.0, -1.0], [0.0, -1.0, 0.0], [-1.0, 0.0, 0.0]], np.float32)
 _T = np.array([1.0, 2.0, 3.0], np.float32)

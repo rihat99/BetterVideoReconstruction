@@ -14,7 +14,7 @@ a ~0.3 m-deep body into a streak of metres pointing at the camera (pommel_horse:
 body toward garbage — the chamfer data term drags the fit into the streak, and
 the metric-scale ruler sizes the whole world to it (the "human huge" scenes).
 
-The detector is one number per frame (`tools/geometry/depth_smear.py`):
+The detector is one number per frame (`bvr/geometry/depth_smear.py`):
 
     smear = (depth extent along the view ray) / (largest lateral extent)
 
@@ -50,7 +50,7 @@ raw metrics behind it (`quality_cam_ratio`, `quality_smear_med`,
 `quality_res_before_bw`), so every consumer of the contact labels can see
 whether to trust them. Thresholds live in `[quality]` of
 `configs/human_optimization.toml`; the shared logic in
-`tools/geometry/quality.py`. `scripts/diagnostics/scene_quality.py` prints one
+`bvr/geometry/quality.py`. `scripts/diagnostics/scene_quality.py` prints one
 row of raw metrics per `out/<stem>/` tree plus the same **`flag`** column
 (recomputed with the same functions, so table and pipeline cannot drift):
 
@@ -88,7 +88,7 @@ The thresholds were set on 23 labelled clips; revisit them as the dataset grows.
 
 Contact forces are solved for the whole body at once — every limb balances the
 same root residual — so their trustworthiness is a property of the **body per
-frame**, never of one joint. `tools/human_optim/force_confidence.py` scores it
+frame**, never of one joint. `bvr/human_optim/force_confidence.py` scores it
 from the physics alone; the kindyn stage saves it as `force_confidence (P, N)`
 plus the per-clip mean `force_confidence_clip (P,)`.
 

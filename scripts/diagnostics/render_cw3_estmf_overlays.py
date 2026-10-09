@@ -32,7 +32,7 @@ _REPO = Path(__file__).resolve().parents[2]
 if str(_REPO) not in sys.path:
     sys.path.insert(0, str(_REPO))
 
-from tools.paths import ESTMF, PETER  # noqa: E402
+from bvr.paths import ESTMF, PETER  # noqa: E402
 
 ESTIMATOR = ESTMF
 PREDICTIONS = ESTIMATOR / "validation" / "results" / "climb_wall_3" / "run" / "evaluation"

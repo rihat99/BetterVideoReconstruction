@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import numpy as np
 
-from tools.viewer.loading import _load_view_cameras, fov_y_rad
+from bvr.viewer.loading import _load_view_cameras, fov_y_rad
 
 
 def _pixel_k(fx: float, fy: float, w: int, h: int) -> np.ndarray:

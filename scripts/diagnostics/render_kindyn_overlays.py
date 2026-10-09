@@ -116,7 +116,7 @@ from _common import (  # noqa: E402
     LIMBS, PANEL_SIZE, _draw_contact_discs, _fit, _force_panel, _limb_load, _limb_members,
     _wall_panel, _wired,
 )
-from tools.paths import PARKOUR, PETER  # noqa: E402
+from bvr.paths import PARKOUR, PETER  # noqa: E402
 
 PLATE_ROOT = PETER / "campus_board"
 CAMPUS_ROOT = PETER / "out_campus_board_single"

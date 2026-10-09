@@ -36,7 +36,7 @@ if str(_REPO) not in sys.path:
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 import score_published_pose as published  # noqa: E402
-from tools.paths import CLIMBING, PETER  # noqa: E402
+from bvr.paths import CLIMBING, PETER  # noqa: E402
 
 CV_RESULTS = CLIMBING / "results"
 CW_RESULTS = PETER / "climb_wall_3_gt" / "others"

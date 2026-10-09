@@ -52,7 +52,7 @@ inverse question: *which points on the body can explain it?*
 
 ## Step 2: which points, and how a force at a point counts
 
-We only consider the twelve contact frames — the named points on the skin
+We only consider the contact frames — the named points on the skin
 (toes, heels, knees, palms, fingertips) that the contact stage already tracks.
 
 A force `f` applied to the world at contact frame `i` contributes `Jᵢᵀ f` to
@@ -419,9 +419,9 @@ frames exempted from having a cone at all, and force smoothing.
 
 ## Where the code is
 
-- `tools/human_optim/forces.py` — the solve (`solve_person_forces`), the cones,
+- `bvr/human_optim/forces.py` — the solve (`solve_person_forces`), the cones,
   and the label rules (`force_labels`, `resolve_toe_conflicts`, `hysteresis`,
   `min_span`, `close_gaps`).
-- `scripts/stages/estimate_contacts.py` — the stage that runs it, unions the two
+- `bvr/stages/estimate_contacts.py` — the stage that runs it, unions the two
   readouts and writes `contacts_<tag>.npz`.
 - `tests/test_forces.py` — cone feasibility, the toe rule, the span rules.

@@ -39,7 +39,7 @@ if str(_REPO) not in sys.path:
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from _common import _render_table  # noqa: E402
-from tools.paths import CLIMBING, PETER  # noqa: E402
+from bvr.paths import CLIMBING, PETER  # noqa: E402
 
 
 def rate(value: float | None) -> str:

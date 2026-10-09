@@ -40,12 +40,11 @@ from scipy.spatial import cKDTree
 _REPO = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(_REPO))
 
-from tools.geometry.backproject import backproject  # noqa: E402
-from tools.geometry.intrinsics import denormalize_K  # noqa: E402
-from tools.paths import PETER  # noqa: E402
+from bvr.geometry.backproject import backproject  # noqa: E402
+from bvr.geometry.intrinsics import denormalize_K  # noqa: E402
+from bvr.paths import PETER  # noqa: E402
 
 GT_ROOT = PETER / "climb_wall_3_gt/scene"
-STAGE = _REPO / "scripts/stages/estimate_camera_vggt.py"
 CONFIG = _REPO / "scripts/peter_gt/vggt_gt.toml"
 SETS = ["00", "16", "16b", "16c", "32"]
 VIEW_NAMES = ["cam_left", "cam_right", "cam_3"]
@@ -88,7 +87,7 @@ def run_vggt(names: list[str], cam3: str, subdir: str) -> None:
         })
     manifest = GT_ROOT / f"_vggt_manifest_{cam3}.json"
     manifest.write_text(json.dumps(entries, indent=2))
-    cmd = [sys.executable, str(STAGE), "--source", str(manifest),
+    cmd = [sys.executable, "-m", "bvr.stages.estimate_camera_vggt", "--source", str(manifest),
            "--save-dir", str(GT_ROOT), "--config", str(CONFIG)]
     print("[vggt] " + " ".join(cmd), flush=True)
     subprocess.run(cmd, cwd=_REPO, check=True)

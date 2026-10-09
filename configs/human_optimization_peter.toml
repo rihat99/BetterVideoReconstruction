@@ -10,8 +10,8 @@
 # human_optimization — one config, four stages.
 # Loss-weight rows are per-stage arrays, columns = [root, kinematics_1, kinematics_2, kindyn_1].
 # Scene/annotation terms apply from a stage's refine phase (the body seats first) — except
-# kinematics_2, which runs them from its root phase so the contact-patch repair (ann_acquisition
-# + ann_seating) acts from the start and the rigid root phase pushes the body toward the wall.
+# kinematics_2, which runs them from its root phase so the contact-patch repair (ann_acquisition)
+# acts from the start and the rigid root phase pushes the body toward the wall.
 # kindyn_1 = joint kinematics + dynamics: its kinematic columns copy kinematics_2, and it
 # turns on the dynamics terms too. kindyn_1 weights are LINEAR (0.5·Σresidual² times the
 # weight, like every engine term).
@@ -27,7 +27,6 @@ iters = { root = 150 }
 # frozen, then drive the attraction (ann_attraction). ann_attraction[kin1]=0 gives a pure visual fit.
 iters = { full = 300, refine = 200, lbfgs = 30 }
 overlay = false          # reprojected-keypoint debug overlay → human_optim/kinematic_1_overlay.mp4
-labels = "auto"          # the only supported source: the geometric contact-frame detector above.
 freeze_fingers = true    # pin the 30 finger quaternions at their converter values — the finger
                          # joints carry the two fingertip contact frames but are not fitted.
                          # Set false to FIT the hand pose; only meaningful together with
@@ -38,9 +37,9 @@ finger_smooth_s = 0.2    # Gaussian sigma (SECONDS) for smoothing that frozen fi
                          # and leaves the body fit and the fingertip 2D residual unchanged. 0 = off.
 
 [stages.kinematics_2]
-# Contact-patch repair. In "auto" mode the repair instances ARE the 12 contact frames: each
-# labelled frame is pulled toward the patch of wall it appears on — one point per label, the
-# same points contact is detected on and forces are solved at. Both knobs matter: the
+# Contact-patch repair. The repair instances ARE the contact frames: each labelled frame is
+# pulled toward the patch of wall it appears on — one point per label, the same points
+# contact is detected on and forces are solved at. Both knobs matter: the
 # acquisition WEIGHT sets the pull's force balance against reproj/priors (its far gradient is
 # weight·delta_m), while ITERS set how far the body can travel per phase (Adam step budget).
 # So root ↑ (rigid push toward the wall) then full ↑ before the refine polish. L-BFGS OFF
@@ -48,7 +47,6 @@ finger_smooth_s = 0.2    # Gaussian sigma (SECONDS) for smoothing that frozen fi
 # invalidates strong-Wolfe curvature.
 iters = { root = 100, full = 200, refine = 250, lbfgs = 0 }
 overlay = false          # debug overlay → human_optim/kinematic_2_overlay.mp4
-labels = "auto"          # contact labels: "auto" (contacts_1's 12 contact frames — the pipeline default) | "manual" (data/<stem>.npz per-joint annotations; metrics only)
 
 [stages.kindyn_1]
 # Joint kinematics + dynamics. Starts from a converged body + its contact labels and optimizes
@@ -60,7 +58,6 @@ labels = "auto"          # contact labels: "auto" (contacts_1's 12 contact frame
 # co-adapt N-scale forces to a moving pose; the wrench spikes and the motion wrecks).
 iters = { lbfgs = 150 }  # one joint L-BFGS polish (pose + forces); Adam can't co-adapt N-scale forces
 bodies = "kinematic_2"   # which refined body to start from (kinematic_2 | kinematic_1 — for chains that skip kinematics_2); picks the matching contacts_<n> too
-labels = "auto"          # contact labels: "auto" (the contacts_<n> of `bodies` — the pipeline default) | "manual" (data/<stem>.npz, spread onto the frames each joint covers; metrics only)
 cones = true             # confine every contact force to a friction pyramid about that frame's own
                          # CONTACT NORMAL (its negated outward skin normal) at [friction].half_angle_deg,
                          # frozen at the warm-start pose — the same cone the contact readout's force
@@ -85,9 +82,6 @@ orient_prior        = [50, 50, 50, 50]
 # (2026-08-22) to stiffen the kin2 repair and collapse 60 fps contact recall.
 # A difference row is dropped where its stencil touches an untracked frame — that frame's
 # pose is HELD from its neighbour, so the step across the gap is an artefact, not motion.
-velocity_root       = [0, 0, 0, 0]   # OFF — a direct penalty on q̇ damps real motion,
-velocity_joint      = [0, 0, 0, 0]   # not just jitter. Measured at 24/48: jitter only
-                                                        # -2.3% and contact F1 .578 -> .575. Wired; leave at 0.
 # kin1 accel by sweep on 6 scenes (x1 / x4 / x16.7 / x41.7): joint-angle jitter 2.752 ->
 # 2.688 -> 2.528 -> 2.354 deg/frame, Cartesian joint accel 7.93 -> 6.88 mm/frame², contact
 # F1 flat at .578-.579 and reproj_sapiens +0.05 px. Monotone, no saturation, no cost — the
@@ -111,23 +105,19 @@ snap_joint          = [500, 500, 500, 500]
 radial_velocity     = [0, 400, 100, 100]
 
 [loss_weights.scene]
-# Acts on the 12 CONTACT FRAMES, not on the 1000 subsampled verts (the loss is a mean over
-# active points, so ~83× fewer points changed the scale). 12000 by sweep on 4 scenes: residual
+# Acts on the CONTACT FRAMES, not on the 1000 subsampled verts (the loss is a mean over
+# active points, so far fewer points changed the scale). 12000 by sweep on 4 scenes: residual
 # frame penetration 2.3–3.5 → 0.9–1.2 cm (the term's own 1 cm dead-zone edge, i.e. it now
 # actually reaches equilibrium) for +0.03…+0.5 px reproj_sapiens vs 4000.
 penetration         = [0, 12000, 12000, 12000]   # push the contact frames out of geometry/scene.npz (reported, not a fit gate)
 
 [loss_weights.annotation]
-# Label-driven, and in the default chain every label lives on the 12 CONTACT FRAMES:
-# kinematics_1 detects them itself (frozen at the refine phase), kinematics_2 + kindyn_1 read
-# them from contacts_1 / contacts_2. So these terms act on the contact-frame POINTS. Only the
-# metrics-only `labels = "manual"` paths put per-joint labels on the joints and their vertices.
-ann_attraction      = [0, 10, 0, 20]   # pull labelled points onto the wall. OFF in kinematics_2 — its mean-over-active-points pull BURIED the body (the front of a limb crosses the wall while the rest keeps pulling); replaced there by ann_acquisition + ann_seating.
+# Label-driven, and every label lives on the CONTACT FRAMES: kinematics_1 detects them
+# itself (frozen at the refine phase), kinematics_2 + kindyn_1 read them from contacts_1 /
+# contacts_2. So these terms act on the contact-frame POINTS.
+ann_attraction      = [0, 10, 0, 20]   # pull labelled points onto the wall. OFF in kinematics_2 — its mean-over-active-points pull BURIED the body (the front of a limb crosses the wall while the rest keeps pulling); replaced there by ann_acquisition.
 ann_acquisition     = [0, 0, 1000, 0]   # kinematics_2: per positive (video frame, contact frame) instance, long-range bounded pull of that ONE point toward a target patch of wall points. 1000 chosen by sweep (per-joint era): seats floaters (gtIGgs euclid med 40.8→5.4 cm) at reproj_sap 9.3→28.8 px; 300 under-seats, 3000 buys little for +6 px.
-ann_seating         = [0, 0, 0, 0]   # OFF (2026-07-26): its −5 mm target was itself the burial mechanism — on boulder_1/3 removing it cut mean penetration 2.03→0.51 / 0.93→0.26 mm with TP wall distances matching the manual chain; acquisition's fading pull + the penetration term already seat. Wired, raise to re-enable.
-ann_repulsion       = [0, 0, 4000, 4000]   # push no-contact points off — inert unless the labels carry 0s, i.e. `labels = "manual"` only (frame labels are positive-only; arming them via contacts_1 negatives was tried 2026-07-26 and only added jitter)
 ann_velocity        = [0, 500, 4000, 4000]   # damp the labelled points' linear + angular velocity — the contact readout gates on pre-enforcement drift_pre, so this cannot vote for its own labels
-ann_acceleration    = [0, 0, 0, 0]   # OFF — near-redundant with a strong ann_velocity (a still joint is already low-accel); wired + ready, raise to damp in-contact joints' Cartesian (LOCAL_WORLD_ALIGNED) acceleration if ann_velocity is lowered to allow slow sliding contacts
 
 # The physics terms of kindyn_1's joint engine. All-LINEAR weights; every residual is
 # first divided by BODY WEIGHT and averaged over the counted frames — so these numbers are
@@ -271,11 +261,10 @@ conf_thresh = 0.1
 band_m = 0.30
 max_dist_m = 0.30
 
-# kinematics_2 contact-patch repair (ann_acquisition + ann_seating). A contact label means SOME
-# surface point of the group touches the wall, so per positive (frame, annotation-group) instance
-# ONE closest vertex is pulled — not the whole Voronoi patch. Patches are built once per phase:
-# scene points whose projection lands within radius_px of the group's member-vertex pixel
-# footprint (confident, in front of camera), the patch_k nearest in 3D.
+# kinematics_2 contact-patch repair (ann_acquisition): per positive (frame, contact frame)
+# instance the frame is pulled toward its own patch of wall. Patches are built once per phase:
+# scene points whose projection lands within radius_px of the frame's pixel footprint
+# (confident, in front of camera), the patch_k nearest in 3D.
 [ann_acquisition]
 radius_px = 60         # target-patch pixel footprint around the group's member verts
 patch_k = 64           # target points kept per instance (nearest in 3D to the member centroid)
@@ -286,20 +275,6 @@ conf_thresh = 0.1      # scene-point confidence floor for a patch point
 # so weighting kills exactly the repair this stage exists for (body stays 30 cm off the wall) —
 # while boulder_1's FALSE positives sit at confidence .92 and keep pulling anyway.
 
-# Near-field seat: drive the acquisition vertex's patch-plane signed distance to target_m
-# (slight penetration), symmetric so it pushes back out after overshoot; active within ±band_m.
-[ann_seating]
-target_m = -0.005      # seat 5 mm inside the wall (slight penetration per spec)
-band_m = 0.10          # seating engages only within this of the surface (acquisition owns beyond)
-huber_m = 0.01         # Huber knee on |s - target_m|
-
-[ann_repulsion]
-conf_thresh = 0.1
-clearance_m = 0.03
-max_dist_m = 0.15
-max_pen_m = 0.10
-huber_m = 0.02
-
 # Contact velocity damper. The ann_velocity weight damps an in-contact joint's LINEAR
 # world velocity; angular_weight adds its ANGULAR velocity (world-orientation change) at
 # this fraction of the linear weight. A gripping joint should not twist, but holding
@@ -309,7 +284,7 @@ huber_m = 0.02
 angular_weight = 0.1
 
 # kin1 auto-contact frozen-label DETECTOR + attraction pull band (looser enter/exit than the readout).
-# Detection runs on the 12 CONTACT FRAMES (toes/heels/knees/palms/fingertips), never on joints.
+# Detection runs on the CONTACT FRAMES (toes/heels/knees/palms/fingertips), never on joints.
 # GUARD: max_dist_m must exceed band_m AND detect_exit_m, and prune_margin_m >= max_dist_m, or detections die silently.
 [auto_contact]
 detect_thresh_m = 0.08   # enter: a still contact frame within this of the wall becomes a label
@@ -369,13 +344,13 @@ merge_sdf_m = 0.08     # re-grip guard: it stayed within this signed distance of
 # near the scene; when the reconstruction puts the body in the wrong place that never
 # happens and the contact is lost. So the stage also asks physics: with the pose frozen,
 # inverse dynamics says what force the body still needs to move the way it does, and the
-# solve finds the world forces at the 12 contact frames that explain it — each one confined
+# solve finds the world forces at the contact frames that explain it — each one confined
 # to a 45 degree friction cone about that patch of skin, so a frame can only explain what it
 # is oriented to explain. A frame that has to carry theta_bw of the body's weight is called
 # in contact, and that label is UNIONED onto the geometric one (add-only, never removes).
 # Everything else about the solve is a fixed, measured choice in the code, not a knob.
 # Contact labels MEASURED by the force boards, for the instrumented rigs
-# (scripts/stages/measure_contacts_boards.py — the drop-in replacement for the
+# (bvr/stages/measure_contacts_boards.py — the drop-in replacement for the
 # estimated contacts above). One three-axis board per limb says which limb is loaded
 # and when; near_scene_m decides which of that limb's contact frames carries the label.
 # Same numbers as the three-camera ground-truth chain, so the two trees are comparable.

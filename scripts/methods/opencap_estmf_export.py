@@ -69,8 +69,8 @@ for _p in (str(_REPO_ROOT), str(_REPO_ROOT / "scripts")):
 from export_opencap_mot import floor_y, plate_triple  # noqa: E402
 from opencap_plates import LOADED_N  # noqa: E402
 from opencap_sensor_forces import PROCESSED, world_from_mocap  # noqa: E402
-from tools.npz_io import atomic_savez  # noqa: E402
-from tools.paths import ESTMF  # noqa: E402
+from bvr.npz_io import atomic_savez  # noqa: E402
+from bvr.paths import ESTMF  # noqa: E402
 
 ESTIMATOR = ESTMF.resolve()
 RESULTS = ESTIMATOR / "validation" / "results" / "opencap"

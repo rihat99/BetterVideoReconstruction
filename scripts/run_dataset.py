@@ -55,22 +55,18 @@ import time
 import tomllib
 from pathlib import Path
 
-_REPO_ROOT = Path(__file__).resolve().parents[1]
-_STAGES_DIR = _REPO_ROOT / "scripts" / "stages"
-_CONFIGS = _REPO_ROOT / "configs"
-if str(_REPO_ROOT) not in sys.path:
-    sys.path.insert(0, str(_REPO_ROOT))
+from bvr.paths import DATA_ROOT, REPO_ROOT
 
-from tools.paths import DATA_ROOT  # noqa: E402
+_CONFIGS = REPO_ROOT / "configs"
 
-# step → (stage script, output path relative to the clip's output tree).
+# step → (stage module under bvr.stages, output path relative to the clip's output tree).
 # These five sweep every clip in one process; the rest run per clip.
 MANIFEST_STEPS: dict[str, tuple[str, str]] = {
-    "sam3":    ("track_sam3.py",           "sam3/bboxes.npz"),
-    "vggt":    ("estimate_camera_vggt.py", "vggt/camera.npz"),
-    "sapiens": ("estimate_sapiens.py",     "sapiens/pose.npz"),
-    "sam3d":   ("estimate_body_sam3d.py",  "sam3d/params.npz"),
-    "smplx":   ("convert_mhr_to_smplx.py", "sam3d/smplx_params.npz"),
+    "sam3":    ("track_sam3",           "sam3/bboxes.npz"),
+    "vggt":    ("estimate_camera_vggt", "vggt/camera.npz"),
+    "sapiens": ("estimate_sapiens",     "sapiens/pose.npz"),
+    "sam3d":   ("estimate_body_sam3d",  "sam3d/params.npz"),
+    "smplx":   ("convert_mhr_to_smplx", "sam3d/smplx_params.npz"),
 }
 #: per-clip step → the file that means it is done.
 CLIP_OUTPUT: dict[str, str] = {
@@ -215,41 +211,40 @@ def _clip_command(step: str, videos: list[Path], clip_dir: Path, pipeline_config
         takes more than the first.
     :param boards: measure the contacts on the force boards instead of estimating them.
     """
-    stage = lambda name: str(_STAGES_DIR / name)  # noqa: E731
     common = ["--source", str(videos[0]), "--predictions", str(clip_dir)]
     if step in SUPPORT_STEPS:
         bodies = SUPPORT_STEPS[step]
-        return [sys.executable, stage("build_support_scene.py"),
+        return [sys.executable, "-m", "bvr.stages.build_support_scene",
                 "--predictions", str(clip_dir), "--config", str(human_config),
                 *(["--bodies", bodies] if bodies else [])]
     if step == "overlay":
         # The renderer is pointed at the run directory, not the farm: it reads the clip's
         # real video and geometry off the tree and draws the run it is given.
         run_dir = clip_dir.parent / f"human_optim_{variant}" if variant else clip_dir / "human_optim"
-        return [sys.executable, str(_REPO_ROOT / "scripts" / "diagnostics" / "render_kindyn_overlays.py"),
+        return [sys.executable, str(REPO_ROOT / "scripts" / "diagnostics" / "render_kindyn_overlays.py"),
                 str(run_dir)]
     if step == "fuse":
-        return [sys.executable, stage("fuse_geometry.py"),
+        return [sys.executable, "-m", "bvr.stages.fuse_geometry",
                 "--source", ",".join(str(v) for v in videos),
                 "--predictions", str(clip_dir), "--config", str(pipeline_config)]
     if step == "scale":
-        return [sys.executable, stage("estimate_scale.py"),
+        return [sys.executable, "-m", "bvr.stages.estimate_scale",
                 "--predictions", str(clip_dir), "--config", str(pipeline_config)]
     if step == "gravity":
-        return [sys.executable, stage("estimate_gravity_geocalib.py"), *common,
+        return [sys.executable, "-m", "bvr.stages.estimate_gravity_geocalib", *common,
                 "--config", str(pipeline_config)]
     if step in {"contacts_1", "contacts_2"}:
         bodies = "kinematic_1" if step == "contacts_1" else "kinematic_2"
         if boards:
-            return [sys.executable, stage("measure_contacts_boards.py"),
+            return [sys.executable, "-m", "bvr.stages.measure_contacts_boards",
                     "--predictions", str(clip_dir), "--config", str(human_config),
                     "--bodies", bodies]
-        return [sys.executable, stage("estimate_contacts.py"), *common,
+        return [sys.executable, "-m", "bvr.stages.estimate_contacts", *common,
                 "--bodies", bodies, "--config", str(human_config)]
     stages_arg = {"kinematics_1": "root,kinematics_1",
                   "kinematics_2": "kinematics_2",
                   "kindyn_1": "kindyn_1"}[step]
-    return [sys.executable, stage("human_optimization.py"), *common,
+    return [sys.executable, "-m", "bvr.stages.human_optimization", *common,
             "--stages", stages_arg, "--config", str(human_config)]
 
 
@@ -335,7 +330,7 @@ def _track_extra_views(out_root: Path, clips: list[Path], views: list[str], conf
                     "out_dir": str(view_root / clip.name),
                 } for clip in clips], indent=2))
             started = time.monotonic()
-            rc = _run([sys.executable, str(_STAGES_DIR / "track_sam3.py"),
+            rc = _run([sys.executable, "-m", "bvr.stages.track_sam3",
                        "--source", str(manifest), "--save-dir", str(view_root),
                        "--config", str(config)], dry_run)
             print(f"[run_dataset] sam3 {view}: rc={rc} in {(time.monotonic() - started) / 60:.1f} min")
@@ -490,14 +485,14 @@ def main(argv: list[str] | None = None) -> int:
           f"[run_dataset] steps: {steps}{'  (dry run)' if args.dry_run else ''}")
 
     for step in sweeps:
-        script, output = MANIFEST_STEPS[step]
+        module, output = MANIFEST_STEPS[step]
         if step in finished:
             print(f"[run_dataset] {step}: every clip has {output}, skipping the sweep")
         else:
             if step == "sam3" and views and views[0] == rig_views[0] and not args.dry_run:
                 _reuse_masks(dataset["out"], out_root, clips)   # the first camera is never tracked twice
             started = time.monotonic()
-            rc = _run([sys.executable, str(_STAGES_DIR / script),
+            rc = _run([sys.executable, "-m", f"bvr.stages.{module}",
                        "--source", str(manifest), "--save-dir", str(out_root),
                        "--config", str(pipeline_config)], args.dry_run)
             print(f"[run_dataset] {step}: rc={rc} in {(time.monotonic() - started) / 60:.1f} min")
@@ -521,7 +516,7 @@ def main(argv: list[str] | None = None) -> int:
             clip_dir = build_farm(clip_dir, args.variant, synthetic_scene=owns_scene(args.variant),
                                   inherit=tuple(recipe.get("inherit", ())), dry_run=args.dry_run)
         # A synthetic-scene variant that has not built its scene yet would run the whole human
-        # chain with the scene terms silently off (tools.human_optim.stages._load_scene prints
+        # chain with the scene terms silently off (bvr.human_optim.stages._load_scene prints
         # a note and carries on), which looks like a finished variant and is not one.
         if (owns_scene(args.variant) and clip_steps[0] not in SUPPORT_STEPS
                 and not (clip_dir / "geometry" / "scene.npz").exists()):

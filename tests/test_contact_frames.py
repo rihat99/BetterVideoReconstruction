@@ -8,12 +8,12 @@ import pytest
 import torch
 from better_robot.lie import so3
 
-from tools.body import frame_normals
-from tools.human_optim.contacts import (
+from bvr.body import frame_normals
+from bvr.human_optim.contacts import (
     detect_frame_contacts, frame_guarded_sdf, frame_scene_signals, joint_drift,
     merge_contact_spans, toe_side_slots)
 
-# The 12 contact frames in their stored order — note slots 10/11 are RIGHT then LEFT.
+# The legacy 12-frame climbing set in its stored order — note slots 10/11 are RIGHT then LEFT.
 _FRAME_NAMES = ("toe_under_left", "toe_under_right", "heel_left", "heel_right",
                 "toe_above_left", "toe_above_right", "knee_left", "knee_right",
                 "palm_left", "palm_right", "finger_right", "finger_left")
@@ -383,7 +383,7 @@ def test_a_one_frame_hover_is_still_flicker_even_with_the_override():
 
 
 def test_drift_is_measured_the_same_way_on_frames_as_on_joints():
-    """The detector is K-generic: 12 contact frames use the same drift as 52 joints."""
+    """The detector is K-generic: contact frames use the same drift as 52 joints."""
     positions = torch.zeros(9, 2, 3)
     positions[:, 0, 0] = torch.linspace(0.0, 0.8, 9)     # a sweeping point
     drift = joint_drift(positions, fps=30.0, window_s=0.2)
@@ -418,7 +418,7 @@ def test_frame_normals_follows_a_rotation_about_x(angle_deg: float, expected: fl
 
 def test_floor_gate_blocks_a_foot_frame_above_the_plane_and_nothing_else():
     """A foot frame above ``floor_gate_m`` is refused; a hand frame at the same height is not."""
-    from scripts.stages.estimate_contacts import floor_gate
+    from bvr.stages.estimate_contacts import floor_gate
 
     centroid = torch.tensor([1.0, 2.0, 3.0])          # the plane need not pass the origin
     up = torch.tensor([0.0, 0.0, 1.0])
@@ -434,7 +434,7 @@ def test_floor_gate_blocks_a_foot_frame_above_the_plane_and_nothing_else():
 
 def test_floor_gate_measures_height_along_up_not_along_z():
     """The plane can be tilted: height is the signed distance along ``up_world``."""
-    from scripts.stages.estimate_contacts import floor_gate
+    from bvr.stages.estimate_contacts import floor_gate
 
     up = torch.tensor([0.0, math.sin(math.radians(30.0)), math.cos(math.radians(30.0))])
     centroid = torch.zeros(3)

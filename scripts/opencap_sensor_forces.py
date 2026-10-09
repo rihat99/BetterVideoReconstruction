@@ -3,7 +3,7 @@
 ``scripts/import_opencap.py`` stores each clip's plate ground truth per video frame in
 the dataset's own OpenSim ground frame (right-handed, **Y up**, floor at y≈0):
 ``processed/<clip>/forces.npz`` with ``force``/``cop``/``free_torque`` ``(N, 4, 3)`` in
-:data:`~tools.human_optim.boards.LIMBS` order plus a ``captured (N, 4)`` mask. The
+:data:`~bvr.human_optim.boards.LIMBS` order plus a ``captured (N, 4)`` mask. The
 contact stages and the force comparison read ``sensor_forces.npz`` instead — the same
 vectors in the reconstruction's world frame. This script is that rotation.
 
@@ -59,9 +59,9 @@ _REPO_ROOT = Path(__file__).resolve().parents[1]
 if str(_REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(_REPO_ROOT))
 
-from tools.human_optim.boards import LIMBS  # noqa: E402
-from tools.npz_io import atomic_savez  # noqa: E402
-from tools.paths import LABVALIDATION  # noqa: E402
+from bvr.human_optim.boards import LIMBS  # noqa: E402
+from bvr.npz_io import atomic_savez  # noqa: E402
+from bvr.paths import LABVALIDATION  # noqa: E402
 
 #: Where ``scripts/import_opencap.py`` writes the clips and the pipeline writes its runs.
 PROCESSED = LABVALIDATION / "processed"

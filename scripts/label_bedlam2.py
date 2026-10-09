@@ -20,13 +20,13 @@ does not state, writing them next to it in the same directory:
     Which of the 35 body contact frames are on the floor, per person per frame, in
     the label schema the viewer already draws, plus the three measurements behind every
     decision (``frame_height_m``, ``frame_speed_mps``, ``frame_tilt_deg``) so a label can
-    be audited without posing anything again. See :mod:`tools.bedlam_contacts` for why
+    be audited without posing anything again. See :mod:`bvr.bedlam_contacts` for why
     height, stillness and facing are the three measurements, and for the cases where
     they are not enough.
 
 ``gt/forces.npz``
     The force every labelled contact frame carries, solved at the frozen ground-truth
-    pose by the ``kindyn_1`` force objective (:mod:`tools.bedlam_forces`): world
+    pose by the ``kindyn_1`` force objective (:mod:`bvr.bedlam_forces`): world
     newtons per contact frame, their sums per joint, the joint torques and the root
     wrench that stays unexplained. The same fields as ``kindyn_1.npz``, so the viewer
     draws them the same way. Needs ``contacts.npz``.
@@ -83,7 +83,7 @@ if str(_REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(_REPO_ROOT))
 
 import scene_db  # noqa: E402  (scripts/ is this file's own directory)
-from tools.bedlam_contacts import (  # noqa: E402
+from bvr.bedlam_contacts import (  # noqa: E402
     ENTER_M,
     EXIT_M,
     MAX_TILT_DEG,
@@ -95,10 +95,10 @@ from tools.bedlam_contacts import (  # noqa: E402
     save_contacts,
     scene_contacts,
 )
-from tools.bedlam_forces import save_forces, scene_forces  # noqa: E402
-from tools.bedlam_masks import save_boxes, scene_masks  # noqa: E402
-from tools.config import load_toml, section  # noqa: E402
-from tools.human_optim.config import load_config  # noqa: E402
+from bvr.bedlam_forces import save_forces, scene_forces  # noqa: E402
+from bvr.bedlam_masks import save_boxes, scene_masks  # noqa: E402
+from bvr.config import load_toml, section  # noqa: E402
+from bvr.config import load_human_config  # noqa: E402
 
 _STATE: dict = {}
 
@@ -109,7 +109,7 @@ def _init_worker(data_root: str, device: str, knobs: dict, workers: int) -> None
 
     import torch
 
-    from tools.body import load_body
+    from bvr.body import load_body
 
     dev = torch.device(device if torch.cuda.is_available() else "cpu")
     if dev.type == "cpu":
@@ -298,7 +298,7 @@ def main(argv: list[str] | None = None) -> int:
         "device": "cpu"})
     # The force solve's objective is kindyn_1's; the worker pool gets the parsed config.
     knobs = {"contacts": contact_knobs,
-             "forces": {"config": load_config(_REPO_ROOT / forces.config),
+             "forces": {"config": load_human_config(_REPO_ROOT / forces.config),
                         "weight_overrides": {k: float(v) for k, v in forces.weights.items()},
                         "edge_speed_m_s": float(forces.edge_speed_m_s)}}
     device = section(cfg, "runtime", {"device": "cuda"}).device

@@ -37,7 +37,7 @@ down direction in the camera frame (the estimator hard-wires gravity to the came
 which is down only for a level camera, and these cameras look up at a wall), and the
 calibrated **principal point** rather than the centre of the frame.
 
-**OpenCap: how the 12 contact frames become the recogniser's 9 joints.** Our labels are
+**OpenCap: how the contact frames become the recogniser's 9 joints.** Our labels are
 per contact frame (heel / ball_inner / ball_outer / big_toe / toe_above per foot, plus the
 two sit frames); the recogniser speaks of ``l_ankle`` — the *sole*, four contact points
 the estimator pins flat on its ground plane — and ``l_toes``, a single point that can

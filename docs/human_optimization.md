@@ -1,6 +1,6 @@
 # Human optimization: the body refinement stages
 
-`scripts/stages/human_optimization.py` — one dispatcher over the
+`bvr/stages/human_optimization.py` — one dispatcher over the
 body-refinement stages: `root`, `kinematics_1`, `kinematics_2`, and `kindyn_1`
 (joint kinematics + dynamics). One config,
 `configs/human_optimization.toml`.
@@ -15,15 +15,15 @@ kinematics_1 → contacts_1 → kinematics_2 → contacts_2 → kindyn_1
 
 Each contact readout measures the body it is given; each later stage consumes
 the labels of the readout before it. No manual annotation is needed anywhere in
-that chain — manual labels stay available for evaluation and via the
-`labels = "manual"` switches.
+that chain — manual labels are used only for evaluation
+(`scripts/score_frame_contacts.py`).
 
 This doc explains the optimization problem each stage solves, every loss term,
 and the decisions behind them.
 
 ## The engine
 
-All fitting stages share one small engine, `tools/optim.py`. A stage describes its fit
+All fitting stages share one small engine, `bvr/optim.py`. A stage describes its fit
 as a **Problem**: the tensors being optimized (for kinematics, the per-frame body
 configuration `q`), one `forward` that poses the body once per iteration, and a set of
 named **loss terms** that read the posed body. **Phases** then drive the fit: each
@@ -199,11 +199,10 @@ Only `kinematics_1` reads the knob.
 The static scene cloud from fusion enters only after the body has settled. A point
 finds its nearest scene point and gets a signed distance (negative = behind the
 surface). Under the frame-level labels the whole chain now uses, that point set is
-the **12 contact frames**, and one nearest-neighbour pass per iteration serves both
-scene terms; only the manual per-joint mode runs the same pass over 1000 subsampled
-mesh vertices instead.
+the **contact frames**, and one nearest-neighbour pass per iteration serves both
+scene terms.
 
-- **`penetration`** — pushes the 12 contact frames out of the wall. A 1 cm dead zone
+- **`penetration`** — pushes the contact frames out of the wall. A 1 cm dead zone
   tolerates soft tissue and noise; a Huber ramp keeps one deeply-buried point from
   dominating; matches to far or low-confidence scene points are ignored. It acts on
   the contact frames rather than on mesh vertices because those points are where
@@ -211,11 +210,10 @@ mesh vertices instead.
   meaningless signed distance, and this term keeps the signals honest. Note what it
   does *not* do: the dead zone (1 cm) sits inside the contact band (3 cm), so
   penetration never decides *which* frames read as touching — the distance and
-  stillness gates do. With ~12 points instead of ~1000 the penalty (a mean over active
+  stillness gates do. With a few dozen points instead of ~1000 the penalty (a mean over active
   points) is much more concentrated, so its weight is correspondingly larger.
 - **`ann_attraction`** — the inverse: pulls the labelled points *onto* the wall
-  (contact frames under the frame labels; near-contact vertices under manual
-  per-joint labels). Attraction owns the region just outside the surface,
+  (the labelled contact frames). Attraction owns the region just outside the surface,
   penetration the region behind it — they partition the signed-distance axis and never
   fight. This term exists because nothing else pulls the body toward the *scene*
   (chamfer targets the person's own depth, penetration only pushes).
@@ -224,13 +222,6 @@ mesh vertices instead.
   `[ann_velocity].angular_weight`). A gripping hand should hold both its place and its
   facing. A point's world position/orientation differenced over time already *is* its
   LOCAL_WORLD_ALIGNED velocity, so no Jacobian is needed.
-- **`ann_acceleration`** — the same idea one derivative up: damps the world *acceleration*
-  of the in-contact points (steady, jerk-free holds). Off by default — a point already held
-  still by `ann_velocity` is already low-acceleration, so it only earns its keep if
-  `ann_velocity` is lowered to let a contact slide slowly.
-- **`ann_repulsion`** — pushes points labeled *not in contact* out past the contact
-  threshold. Only meaningful with the manual per-joint annotation; every automatic label
-  source is positives-only, so this term is inert in the pipeline chain.
 
 Where do the labels come from in `kinematics_1`? **Auto-contact**: at the start of the
 refine phase, the contact readout (same machinery as `estimate_contacts`) runs once on
@@ -244,10 +235,7 @@ contact. The stillness measured *before* the attraction acted (`drift_pre`) is s
 into the output, because the readout later must not be gamed by the very damping this
 stage applied — that circularity was observed and is the reason for the rule.
 
-The geometric detector is the only label source (`labels = "auto"`; anything else is
-an error). An earlier per-joint-era recipe could swap in an external image model's
-predictions (`labels = "predicted"`, see [contact_fusion.md](contact_fusion.md)) —
-that wiring was retired with the per-joint machinery and lives in git history.
+The geometric detector is the only label source.
 
 ## The phase plan
 
@@ -278,10 +266,8 @@ wall.
 `contacts_1.npz`, one label per **contact frame** per video frame, positives
 only. That is the same axis contact is detected on, forced at and measured on
 everywhere else, so nothing has to be translated on the way in. Manual
-annotations (`../data/examples/data/<stem>.npz`, 10- or 14-joint schema) remain available via
-`[stages.kinematics_2] labels = "manual"` but are metrics-only in the pipeline;
-they label coarse joints, so in that mode the labels reach the mesh through each
-vertex's nearest joint, exactly as they always did.
+annotations (`../data/examples/data/<stem>.npz`, 10- or 14-joint schema) are
+metrics-only (`scripts/score_frame_contacts.py`).
 
 **Why the labels are not confidence-gated.** On a floating body every witness
 honestly reports near-zero confidence, so gating on confidence would veto
@@ -305,27 +291,21 @@ appears in the image (projecting within `radius_px` of it, confidence-gated, the
 `patch_k` nearest kept). Pulling toward the wall *seen at that pixel* keeps the
 pull nearly reprojection-neutral. An instance with no such wall points is
 reported unresolved and simply not pulled — a missing hold cannot be repaired
-honestly. Two terms act on the instance's point:
+honestly. One term acts on the instance's point:
 
 - **`ann_acquisition`** — a pseudo-Huber pull on the distance to the patch: a
   bounded, roughly constant force from far away that fades out at contact. One
   point per label, and it is the contact frame itself — the labeled toe, heel,
   knee, palm or fingertip. A contact label says *that patch of skin* touches, so
   that is what gets pulled, not the whole hand.
-- **`ann_seating`** — **off by default since 2026-07-26.** It used to drive
-  that vertex a few millimetres *inside* the wall, on the theory that its
-  symmetric push-back was the anti-burial guard. Measured on boulder_1/3, the
-  opposite was true: the −5 mm target was itself the main source of penetration
-  (it applies to every instance, including the labels that are wrong), and
-  removing it cut mean vertex penetration 2.03 → 0.51 and 0.93 → 0.26 mm while
-  the true contacts still ended up at the same wall distance as the
-  manual-annotation chain. Acquisition's fading pull plus the ordinary
-  penetration term seat the limb on their own. The term stays wired; raise its
-  weight to re-enable. Propagated over all 13 `out/` scenes (2026-07-26), the
-  change plus the cones-off default moved the mean kindyn_1 body from
-  14.2 → 12.5 mm jitter and 2.1 → 1.0 mm mean penetration, improving every
-  scene's penetration and 12/13 scenes' jitter, with the contacts_2 labels
-  unchanged (pooled F1 .833 before and after).
+
+A second term used to drive that point a few millimetres *inside* the wall
+as an anti-burial guard. Measured on boulder_1/3 (2026-07-26)
+it was itself the main source of penetration (it applied to every instance,
+wrong labels included); removing it cut mean penetration 2.03 → 0.51 and
+0.93 → 0.26 mm with the true contacts at the same wall distance. Acquisition's
+fading pull plus the ordinary penetration term seat the limb on their own, so
+the term is gone.
 
 **Why one point, not the whole limb.** An earlier version simply strengthened
 `ann_attraction`, which pulls *all* of a group's vertices. It buried the body
@@ -380,10 +360,8 @@ the physics residual can push back on the motion.
 
 **What it optimizes.** It starts from the converged `kinematics_2` body and its
 contact labels — by default `contacts_2.npz`, the readout measured on that very
-body. (`[stages.kindyn_1] labels = "manual"` switches back to the annotation,
-whose coarse joints are spread onto the contact frames each one covers;
-`bodies = "kinematic_1"` starts from `kinematic_1` + `contacts_1` for chains
-that skip `kinematics_2`.) The objective is the full `kinematics_2` objective —
+body (`bodies = "kinematic_1"` starts from `kinematic_1` + `contacts_1` for
+chains that skip `kinematics_2`). The objective is the full `kinematics_2` objective —
 reprojection, priors, motion smoothness, scene penetration, the annotation
 terms — **plus** the physics terms (`base_wrench` + `base_wrench_ang`,
 `force_magnitude`, the force smoothness family at three difference orders
@@ -404,9 +382,9 @@ part is weighed at its own tissue density from Dempster's segment table
 pelvis and feet, 1110 for the head, 1160 for hands and fingers, and so on), so
 the RNEA model has the right mass distribution and not just the right total.
 `total_mass` in `kindyn_1.npz` is the sum. Other tables (Clauser, Chandler) or a
-single uniform density are one word away in `tools/body.py` (`load_body`).
+single uniform density are one word away in `bvr/body.py` (`load_body`).
 
-**Where the forces are applied.** At the 12 contact frames, not at joints — the
+**Where the forces are applied.** At the contact frames, not at joints — the
 same points the labels and the contact readout's force witness use. A world
 force `f` at a contact frame reaches RNEA as an external wrench on that frame's
 **parent joint**: the force itself plus the moment `r × f` of its lever arm from
@@ -420,7 +398,7 @@ wrenches rather than overwriting each other.
 friction pyramid about that frame's own **contact normal** — its outward skin
 normal, negated, because a touching patch of skin faces *into* the surface and
 the surface pushes back the other way. It is the same axis and the same
-construction the force witness uses (`tools/human_optim/forces.py`): the force
+construction the force witness uses (`bvr/human_optim/forces.py`): the force
 is a nonnegative combination of the pyramid's four edge directions, so it cannot
 leave the cone and there is no penalty weight to tune. A patch of skin can then
 only push the way it faces. `[stages.kindyn_1] cones = false` gives every frame

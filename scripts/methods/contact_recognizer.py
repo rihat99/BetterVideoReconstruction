@@ -42,7 +42,7 @@ _REPO = Path(__file__).resolve().parents[2]
 if str(_REPO) not in sys.path:
     sys.path.insert(0, str(_REPO))
 
-from tools import paths  # noqa: E402
+from bvr import paths  # noqa: E402
 
 ESTMF = paths.ESTMF.resolve()
 RECOGNIZER = (Path(__file__).resolve().parents[2].parent / "other" / "contact-recognizer").resolve()

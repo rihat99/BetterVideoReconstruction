@@ -67,7 +67,7 @@ if str(_REPO) not in sys.path:
     sys.path.insert(0, str(_REPO))
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from _common import _render_table  # noqa: E402
-from tools.paths import CLIMBING, PETER  # noqa: E402
+from bvr.paths import CLIMBING, PETER  # noqa: E402
 
 FEATURES, RESULTS = CLIMBING.resolve() / "features", CLIMBING.resolve() / "results"
 GT_ROOT = PETER / "climb_wall_3_gt" / "human"

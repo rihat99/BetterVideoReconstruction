@@ -9,11 +9,11 @@ import numpy as np
 import pytest
 import torch
 
-from scripts.stages.estimate_scale import _metricize_geometry
-from scripts.stages.fuse_geometry import _build_geometry, _merge_scene, _View, _visible_mask
-from tools.geometry.camera_motion import image_motion, is_static
-from tools.geometry.voxel import voxel_downsample
-from tools.human_optim.prefit import (
+from bvr.stages.estimate_scale import _metricize_geometry
+from bvr.stages.fuse_geometry import _build_geometry, _merge_scene, _View, _visible_mask
+from bvr.geometry.camera_motion import image_motion, is_static
+from bvr.geometry.voxel import voxel_downsample
+from bvr.human_optim.prefit import (
     cloud_chamfer, finger_freeze_mask, joint_velocity_loss, smooth_finger_quats)
 
 
@@ -151,7 +151,7 @@ def test_build_geometry_second_view_feeds_only_the_scene(tmp_path):
 
 
 def test_estimate_point_normals_edge_cases():
-    from tools.geometry.normals import estimate_point_normals
+    from bvr.geometry.normals import estimate_point_normals
 
     cams = torch.zeros((1, 3))
     empty = estimate_point_normals(torch.zeros((0, 3)), cams)
@@ -261,7 +261,7 @@ def test_cloud_chamfer_matches_only_visible_vertices():
 
 
 def test_kinematic_init_prefers_matching_prefit(tmp_path):
-    from tools.human_optim.stages import _init_params
+    from bvr.human_optim.stages import _init_params
 
     sp = {"num_frames": np.int32(4), "object_ids": np.array([2], np.int32),
           "transl": np.zeros((1, 4, 3), np.float32)}

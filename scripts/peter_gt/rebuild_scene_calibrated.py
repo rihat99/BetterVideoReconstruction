@@ -70,9 +70,9 @@ from reconstruct_vggt import (  # noqa: E402
     content_window,
     write_ply,
 )
-from tools.geometry.backproject import backproject  # noqa: E402
-from tools.geometry.clean import clean_depth  # noqa: E402
-from tools.paths import PETER  # noqa: E402
+from bvr.geometry.backproject import backproject  # noqa: E402
+from bvr.geometry.clean import clean_depth  # noqa: E402
+from bvr.paths import PETER  # noqa: E402
 
 HUMAN_ROOT = PETER / "climb_wall_3_gt/human"
 #: One prepared clip per inclination — its gravity says which way is down.

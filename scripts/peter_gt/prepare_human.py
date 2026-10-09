@@ -46,9 +46,9 @@ sys.path.insert(0, str(_REPO))
 sys.path.insert(0, str(_REPO / "scripts"))
 
 from peter_sensor_forces import R_CW3_WALL_TO_WORLD, per_frame  # noqa: E402
-from tools.geometry.intrinsics import normalize_K  # noqa: E402
-from tools.geometry.normals import estimate_point_normals  # noqa: E402
-from tools.paths import PETER  # noqa: E402
+from bvr.geometry.intrinsics import normalize_K  # noqa: E402
+from bvr.geometry.normals import estimate_point_normals  # noqa: E402
+from bvr.paths import PETER  # noqa: E402
 
 from extract_frames import SETS  # noqa: E402  (scripts/peter_gt on sys.path via __main__ dir)
 

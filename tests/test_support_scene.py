@@ -1,6 +1,6 @@
 """The synthetic support scene: the floor lattice, the plateau rule, and the variant farm.
 
-``scripts/stages/build_support_scene.py`` replaces the fused cloud with a scene built from
+``bvr/stages/build_support_scene.py`` replaces the fused cloud with a scene built from
 the fitted ground plane plus one patch per surface the body was found resting on. Nothing
 downstream knows it is synthetic, so the file has to satisfy the same contract the fuse
 stage's ``geometry/scene.npz`` does — checked here by handing the written cloud straight to
@@ -17,7 +17,6 @@ Everything is float32, the dtype the pipeline carries scene geometry in.
 
 from __future__ import annotations
 
-import sys
 from pathlib import Path
 
 import numpy as np
@@ -25,18 +24,16 @@ import pytest
 import torch
 
 _REPO_ROOT = Path(__file__).resolve().parents[1]
-sys.path.insert(0, str(_REPO_ROOT / "scripts"))
-sys.path.insert(0, str(_REPO_ROOT / "scripts" / "stages"))
 
 from scripts import run_dataset  # noqa: E402
-from build_support_scene import (  # noqa: E402
+from bvr.stages.build_support_scene import (  # noqa: E402
     FLOOR_MARGIN_M, PLATEAU_INPLANE_M, PLATEAU_MAX_SPAN_M, PLATEAU_MIN_STILL_S,
     PLATEAU_SIT_BELOW_KNEE_M, SPACING_M,
     detect_plateaus, disc_points, frame_groups, plane_basis, run,
 )
 from scripts.run_dataset import VARIANT_CHAINS, VARIANT_STEPS, build_farm, owns_scene  # noqa: E402
 
-from tools.human_optim.losses import scene_signed_distance  # noqa: E402
+from bvr.human_optim.losses import scene_signed_distance  # noqa: E402
 
 FLOORPLANE_CONFIG = _REPO_ROOT / "configs" / "human_optimization_floorplane.toml"
 

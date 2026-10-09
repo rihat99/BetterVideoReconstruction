@@ -57,8 +57,8 @@ for _p in (str(_REPO_ROOT), str(_DIAGNOSTICS)):
         sys.path.insert(0, _p)
 
 from _common import _limb_members  # noqa: E402
-from tools.human_optim.boards import LIMBS, limb_of_frame  # noqa: E402
-from tools.paths import PETER  # noqa: E402
+from bvr.human_optim.boards import LIMBS, limb_of_frame  # noqa: E402
+from bvr.paths import PETER  # noqa: E402
 
 #: A board above this is loaded — the same rule the climb_wall_2 comparison uses.
 CONTACT_N = 50.0

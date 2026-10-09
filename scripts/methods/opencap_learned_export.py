@@ -71,9 +71,9 @@ for _p in (str(_REPO_ROOT), str(_REPO_ROOT / "scripts")):
 from export_opencap_mot import floor_y, plate_triple  # noqa: E402
 from opencap_plates import LOADED_N  # noqa: E402
 from opencap_sensor_forces import PROCESSED, world_from_mocap  # noqa: E402
-from tools.body import load_body  # noqa: E402
-from tools.human_optim.qmath import normalize_q  # noqa: E402
-from tools.npz_io import atomic_savez  # noqa: E402
+from bvr.body import load_body  # noqa: E402
+from bvr.human_optim.qmath import normalize_q  # noqa: E402
+from bvr.npz_io import atomic_savez  # noqa: E402
 
 GRAVITY = 9.81
 
@@ -176,7 +176,7 @@ def contact_frame_points(prediction: dict, chunk: int = 64) -> tuple[np.ndarray,
     """``((N, 4, 3) world heel / big-toe points, the posing residual in metres)``.
 
     The refined body is re-posed from its ``q_cam`` + ``betas`` on our own SMPL-X body
-    (:func:`~tools.body.load_body`), exactly as ``export_opencap_mot.frame_positions``
+    (:func:`~bvr.body.load_body`), exactly as ``export_opencap_mot.frame_positions``
     poses ours, but with no global scale — the learned body carries none. The posed body
     lands in the camera frame, so it is put into the model's world by the rigid map from
     its posed joints onto the ``joints_world`` the prediction file carries; the returned

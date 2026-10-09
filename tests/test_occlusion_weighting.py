@@ -13,10 +13,10 @@ from __future__ import annotations
 
 import torch
 
-from tools.human_optim.keypoints import Correspondence, visibility_weights
-from tools.human_optim.losses import (
+from bvr.human_optim.keypoints import Correspondence, visibility_weights
+from bvr.human_optim.losses import (
     init_reprojection_gm, pose_prior_loss, sapiens_reprojection_gm)
-from tools.human_optim.optimizer import _valid_diff_rows
+from bvr.human_optim.optimizer import _valid_diff_rows
 
 # A toy body: root -> shoulder -> elbow -> hand, plus a torso joint no keypoint watches.
 _PARENTS = [-1, 0, 1, 2, 0]

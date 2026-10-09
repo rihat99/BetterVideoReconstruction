@@ -1,6 +1,6 @@
 # The scale stage: making the world metric
 
-`scripts/stages/estimate_scale.py` — runs **after** `fuse_geometry`, before the
+`bvr/stages/estimate_scale.py` — runs **after** `fuse_geometry`, before the
 kinematic refinement.
 
 This doc explains how the one number that turns VGGT's world into metres is
@@ -87,7 +87,7 @@ Then the per-frame numbers are pooled into one clip scale:
 `prefit = true` in `[scale]` (the default). The dual refinement alternates two
 moves until they agree, starting from the ruler's `s`:
 
-1. **The body move** (`tools/human_optim/prefit.py`). Every person's per-frame
+1. **The body move** (`bvr/human_optim/prefit.py`). Every person's per-frame
    pose `q` is refined so the body sits on its fused depth points — **and the
    scale moves with it**: `log s` is a variable of the same optimization, so
    the cloud enters the fit as `s ×` its unscaled points. This matters because
@@ -128,7 +128,7 @@ than 0.1% — typically after round 2 or 3. The per-frame scale spread (MAD)
 after the pre-fit is typically several times tighter than the ruler's — the
 frames agree about the scale once the bodies actually sit on their depth.
 
-The body move's loss terms (run by the shared engine in `tools/optim.py`):
+The body move's loss terms (run by the shared engine in `bvr/optim.py`):
 
 | term | weight | what it does |
 |---|---|---|

@@ -8,7 +8,7 @@ from __future__ import annotations
 
 import torch
 
-from tools.human_optim.visibility import front_facing_mask, vertex_normals
+from bvr.human_optim.visibility import front_facing_mask, vertex_normals
 
 
 def _reference_vertex_normals(vertices: torch.Tensor, faces: torch.Tensor) -> torch.Tensor:

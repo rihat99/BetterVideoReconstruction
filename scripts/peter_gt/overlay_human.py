@@ -26,9 +26,9 @@ _REPO = Path(__file__).resolve().parents[2]
 if str(_REPO) not in sys.path:
     sys.path.insert(0, str(_REPO))
 
-from tools.body import load_body  # noqa: E402
-from tools.human_optim.qmath import normalize_q  # noqa: E402
-from tools.paths import PETER  # noqa: E402
+from bvr.body import load_body  # noqa: E402
+from bvr.human_optim.qmath import normalize_q  # noqa: E402
+from bvr.paths import PETER  # noqa: E402
 
 HUMAN_ROOT = PETER / "climb_wall_3_gt/human"
 CONFIG = Path(__file__).resolve().parent / "human_gt.toml"

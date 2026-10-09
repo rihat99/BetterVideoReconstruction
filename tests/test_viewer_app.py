@@ -10,10 +10,10 @@ import numpy as np
 import pytest
 from better_robot.viewer import Viewer
 
-from tools.body import load_body
-from tools.viewer.app import App
-from tools.viewer.layers import _FORCE_SCALE, _TORQUE_SCALE
-from tools.viewer.loading import VideoFrames, load_clip_data
+from bvr.body import load_body
+from bvr.viewer.app import App
+from bvr.viewer.layers import _FORCE_SCALE, _TORQUE_SCALE
+from bvr.viewer.loading import VideoFrames, load_clip_data
 
 
 class FakeHandle:

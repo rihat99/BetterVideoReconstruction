@@ -1,36 +1,20 @@
 """Write world-frame wall-sensor forces into the peter climb_wall out trees.
 
-The climb_wall rig records four 3-axis load cells at ~98.85 Hz
-(``peter/climb_wall/<clip>/forces.npz``, one channel per limb name). The cells
-are the SUPPORTS of one shared structure — a force applied anywhere shows up on
-all four (verified on the first-touch events, where a left-hand-only touch
-registers up to 260 N on the "right foot" cell). So a single channel is a
-support reaction, not that limb's contact force; only the channel SUM is a
-clean physical quantity (the total force the climber applies to the wall).
-
-One fixed rotation maps the sensor frame to the reconstruction world frame
-(world = cam_left, identical in every clip). It was fit once by Kabsch between
-the per-video-frame channel sum and the kindyn_1 predicted total wall force,
-pooled over the 8 clips where the sensor total is trustworthy — and the SAME
-rotation fits the tilted-wall trials (01-09) to within 5 degrees: the cells
-sit in the rig's base and do NOT tilt with the climbing surface. Median
-sensor-vs-predicted total angle on the calibration clips: 11-15 degrees,
-magnitude ratio 0.86-1.14. Fit script: scratchpad ``wall_total_fit.py``
-(session bafd5529, 2026-07-26).
+The climb_wall_2 / climb_wall_3 demonstrator rigs record four 3-axis force
+boards at ~98.85 Hz (``peter/<rig>/<clip>/forces.npz``, one channel per limb
+name). The four channels ARE per-limb contact forces (one board per limb,
+verified independent), logged in the board frame the datasheet documents (+x up
+along the wall plane, +y right, +z out of the wall toward the climber; wall
+inclined ~16 deg). The rotation below comes from that DATASHEET, not from any
+fit: true gravity (3-view floor fit) plus an exact overhang tilt determine the
+frame up to its horizontal facing direction (azimuth), the one scalar a
+datasheet cannot contain — that comes from the fused scene's wall normal.
+Nothing touches our predictions, which makes the measured-vs-predicted
+comparison fully independent.
 
 Output ``<tree>/<clip>/human_optim/sensor_forces.npz`` per video frame, in the
 REACTION sense (force on the climber, comparable to the predicted contact
 forces): ``reaction_world (N, 4, 3)`` per channel and ``total_world (N, 3)``.
-
-The climb_wall_2 demonstrator rig is different: its four channels ARE per-limb
-contact forces (one board per limb, verified independent), logged in the board
-frame the datasheet documents (+x up along the wall plane, +y right, +z out of
-the wall toward the climber; wall inclined ~16 deg). Its rotation below comes
-from that DATASHEET, not from any fit: true gravity (3-view floor fit) plus an
-exact 16 deg overhang tilt determine the frame up to its horizontal facing
-direction (azimuth), the one scalar a datasheet cannot contain — that comes
-from the fused scene's wall normal. Nothing touches our predictions, which
-makes the measured-vs-predicted comparison fully independent.
 
 Usage:
     uv run python scripts/peter_sensor_forces.py --tree out_climb_wall_2_single
@@ -48,20 +32,7 @@ REPO = Path(__file__).resolve().parent.parent
 if str(REPO) not in sys.path:
     sys.path.insert(0, str(REPO))
 
-from tools.paths import PETER  # noqa: E402
-
-# Sensor frame -> world (cam_left) rotation, columns = world images of the
-# sensor x/y/z axes. Data-derived constant (see module docstring).
-R_SENSOR_TO_WORLD = np.array([
-    [-0.9801, -0.1768, +0.0907],
-    [-0.0956, +0.8197, +0.5647],
-    [-0.1742, +0.5448, -0.8203],
-], dtype=np.float32)
-
-CALIB_CLIPS = ["trial_10", "trial_11", "trial_12", "trial_13", "trial_14_part1",
-               "trial_01", "trial_02", "trial_03"]
-NOTE = ("channels are support-cell reactions of one shared structure, not per-limb "
-        "contact forces; only total_world is a clean physical force")
+from bvr.paths import PETER  # noqa: E402
 
 # climb_wall_2 (the 2026-08 demonstrator rig): channels ARE per-limb forces, in
 # the datasheet's board frame (+x up along the wall, +y the climber's right, +z out

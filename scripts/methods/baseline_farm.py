@@ -39,7 +39,7 @@ for _p in (str(_REPO), str(_REPO / "scripts")):
         sys.path.insert(0, _p)
 
 from scene_db import shard  # noqa: E402
-from tools.paths import PARKOUR, PETER  # noqa: E402
+from bvr.paths import PARKOUR, PETER  # noqa: E402
 
 PARKOUR_ROOT = (PARKOUR / "processed").resolve()
 CW3_VIDEOS = PETER / "climb_wall_3"                  # original, distorted videos

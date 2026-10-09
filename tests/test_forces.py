@@ -8,11 +8,11 @@ import numpy as np
 import pytest
 import torch
 
-from tools.human_optim.forces import (
+from bvr.human_optim.forces import (
     NO_SCENE_M, ForceKnobs, close_gaps, far_still_veto, force_labels, hysteresis, min_span,
     resolve_toe_conflicts, solve_mute,
 )
-from tools.human_optim.friction import cone_generators
+from bvr.human_optim.friction import cone_generators
 
 _TOE_NAMES = ("toe_under_left", "toe_above_left", "toe_under_right", "toe_above_right")
 
@@ -352,7 +352,7 @@ def test_nan_drift_steps_are_not_candidates_and_never_poison_the_solve() -> None
     """A step with NaN pre-enforcement drift has no stillness evidence: it carries
     exactly zero force, while the finite-drift steps still balance gravity — the
     9/361 corpus scenes with tracking gaps must produce a witness, not a NaN loss."""
-    from tools.human_optim.forces import solve_frame_forces
+    from bvr.human_optim.forces import solve_frame_forces
 
     steps = 6
     dyn = _StubDyn(steps)

@@ -9,9 +9,9 @@ from __future__ import annotations
 import pytest
 import torch
 
-from tools.human_optim.config import fps_scaled_weights
-from tools.human_optim.contacts import min_span_frames
-from tools.human_optim.motion import velocity_acceleration_from_trajectory
+from bvr.config import fps_scaled_weights
+from bvr.human_optim.contacts import min_span_frames
+from bvr.human_optim.motion import velocity_acceleration_from_trajectory
 
 
 def test_fps_scaled_weights_identity_at_or_below_reference():
@@ -22,10 +22,10 @@ def test_fps_scaled_weights_identity_at_or_below_reference():
 
 
 def test_fps_scaled_weights_scales_by_difference_order():
-    w = {"velocity_joint": 1.0, "accel_root": 1.0, "jerk_joint": 1.0,
+    w = {"radial_velocity": 1.0, "accel_root": 1.0, "jerk_joint": 1.0,
          "snap_root": 1.0, "force_smooth_mag": 1.0, "base_wrench": 100.0}
     out = fps_scaled_weights(w, 60.0)          # s = 2
-    assert out["velocity_joint"] == pytest.approx(4.0)      # (2)^2
+    assert out["radial_velocity"] == pytest.approx(4.0)     # (2)^2
     assert out["force_smooth_mag"] == pytest.approx(4.0)
     assert out["accel_root"] == pytest.approx(16.0)         # (2)^4
     assert out["jerk_joint"] == pytest.approx(64.0)         # (2)^6

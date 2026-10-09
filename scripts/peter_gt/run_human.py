@@ -39,11 +39,10 @@ from pathlib import Path
 
 _REPO = Path(__file__).resolve().parents[2]
 _HERE = Path(__file__).resolve().parent
-_STAGES = _REPO / "scripts/stages"
 if str(_REPO) not in sys.path:
     sys.path.insert(0, str(_REPO))
 
-from tools.paths import PETER  # noqa: E402
+from bvr.paths import PETER  # noqa: E402
 
 HUMAN_ROOT = PETER / "climb_wall_3_gt/human"
 VIEW_NAMES = ["cam_left", "cam_right", "cam_3"]
@@ -113,15 +112,15 @@ def main() -> None:
         rc = run([py, _HERE / "prepare_human.py", "--clips", ",".join(clips), "--skip-existing"], env)
         if rc != 0:
             raise SystemExit(f"[run_human] prepare failed (rc={rc}); nothing else runs")
-    for step, script in (("sam3", "track_sam3.py"), ("sapiens", "estimate_sapiens.py"),
-                         ("sam3d", "estimate_body_sam3d.py"),
-                         ("smplx", "convert_mhr_to_smplx.py")):
+    for step, module in (("sam3", "track_sam3"), ("sapiens", "estimate_sapiens"),
+                         ("sam3d", "estimate_body_sam3d"),
+                         ("smplx", "convert_mhr_to_smplx")):
         if step not in steps:
             continue
         for view in views:
             manifest = view_manifest(clips, view, step)
             started = time.monotonic()
-            rc = run([py, _STAGES / script, "--source", manifest, "--save-dir", manifest.parent,
+            rc = run([py, "-m", f"bvr.stages.{module}", "--source", manifest, "--save-dir", manifest.parent,
                       "--config", PIPELINE_CONFIG], env)
             print(f"[run_human] {step} {view}: rc={rc} in {(time.monotonic() - started) / 60:.1f} min",
                   flush=True)

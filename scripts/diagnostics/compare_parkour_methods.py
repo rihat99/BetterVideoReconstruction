@@ -75,15 +75,15 @@ _REPO = Path(__file__).resolve().parents[2]
 if str(_REPO) not in sys.path:
     sys.path.insert(0, str(_REPO))
 
-from tools.body import load_body  # noqa: E402
+from bvr.body import load_body  # noqa: E402
 
 _DIAGNOSTICS = Path(__file__).resolve().parent
 if str(_DIAGNOSTICS) not in sys.path:
     sys.path.insert(0, str(_DIAGNOSTICS))
 from score_parkour_pose import predicted_joints as _init_joints  # noqa: E402
-from tools.human_optim.boards import LIMBS, limb_of_frame  # noqa: E402
-from tools.human_optim.qmath import normalize_q  # noqa: E402
-from tools.paths import ESTMF, PARKOUR  # noqa: E402
+from bvr.human_optim.boards import LIMBS, limb_of_frame  # noqa: E402
+from bvr.human_optim.qmath import normalize_q  # noqa: E402
+from bvr.paths import ESTMF, PARKOUR  # noqa: E402
 
 DATASET = PARKOUR.resolve()
 TREE = DATASET / "processed"

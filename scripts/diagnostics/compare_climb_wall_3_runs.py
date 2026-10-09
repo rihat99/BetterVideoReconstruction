@@ -62,8 +62,8 @@ for _p in (_REPO, _REPO / "scripts", Path(__file__).resolve().parent):
 from compare_gt_contact import CONTACT_N, force_metrics, limb_forces, limb_labels  # noqa: E402
 from _common import _render_table  # noqa: E402
 from score_published_contacts import GT_ROOT, OURS_ROOT, _count, _rates_balanced, clips, ours, truth  # noqa: E402
-from tools.human_optim.boards import LIMBS  # noqa: E402
-from tools.paths import PETER  # noqa: E402
+from bvr.human_optim.boards import LIMBS  # noqa: E402
+from bvr.paths import PETER  # noqa: E402
 
 POSE_JSON = PETER / "climb_wall_3_gt" / "others" / "gt_pose_metrics.json"
 OUT = PETER / "benchmark_tables"

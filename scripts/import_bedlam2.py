@@ -113,7 +113,7 @@ _REPO_ROOT = Path(__file__).resolve().parents[1]
 if str(_REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(_REPO_ROOT))
 
-from tools.paths import DATA_ROOT  # noqa: E402
+from bvr.paths import DATA_ROOT  # noqa: E402
 
 SRC = DATA_ROOT / "BEDLAM2"
 DST = DATA_ROOT / "BEDLAM2_our"
@@ -520,7 +520,7 @@ def get_body():
 
         torch.set_num_threads(1)
         sys.path.insert(0, str(_REPO_ROOT))
-        from tools.body import load_body
+        from bvr.body import load_body
 
         _BODY = load_body(device="cpu")
         model = np.load(LOCKED_HEAD, allow_pickle=True)

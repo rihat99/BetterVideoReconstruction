@@ -115,7 +115,7 @@ drops `detectron2` (it is not in the lock file).
 
 ## Sapiens2 checkpoints
 
-`scripts/stages/estimate_sapiens.py` runs Meta's Sapiens2-5B for pose /
+`bvr/stages/estimate_sapiens.py` runs Meta's Sapiens2-5B for pose /
 pointmap / normal. The 5B `.safetensors` weights (~10 GB per task) auto-download
 from HuggingFace into the standard HF cache on first use:
 
@@ -129,7 +129,7 @@ layout is `<root>/<task>/sapiens2_5b_<task>.safetensors`.
 
 ## VGGT-Omega checkpoints
 
-`scripts/stages/estimate_camera_vggt.py` runs VGGT-Omega multi-view camera +
+`bvr/stages/estimate_camera_vggt.py` runs VGGT-Omega multi-view camera +
 depth (active; in the default pipeline right after `sam3`). Its checkpoints are
 HuggingFace **access-gated**: request access at
 <https://huggingface.co/facebook/VGGT-Omega>, then either
@@ -145,7 +145,7 @@ grows with frame count (~43 GB for 500 frames @ 512 on an A100, per the upstream
 benchmark). The stage caps at `--max-frames` (default 500, uniformly
 subsampled); lower it or `--image-resolution` if you hit OOM. The
 256-resolution text-aligned checkpoint pairs with `--image-resolution 256` (and
-`VGGTOmega(enable_alignment=True)`). See `tools/adapters/vggt_omega.py`.
+`VGGTOmega(enable_alignment=True)`). See `bvr/adapters/vggt_omega.py`.
 
 ## Notes
 

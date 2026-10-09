@@ -1,8 +1,8 @@
-"""The calibrated per-clip quality flags (tools/geometry/quality.py)."""
+"""The calibrated per-clip quality flags (bvr/geometry/quality.py)."""
 
 from __future__ import annotations
 
-from tools.geometry.quality import quality_flag
+from bvr.geometry.quality import quality_flag
 
 _KNOBS = dict(cam_depth_max=0.4, res_before_bw_max=2.5, smear_med_max=2.0)
 

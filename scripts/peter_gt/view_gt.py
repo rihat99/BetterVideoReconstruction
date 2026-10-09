@@ -24,7 +24,7 @@ _REPO = Path(__file__).resolve().parents[2]
 if str(_REPO) not in sys.path:
     sys.path.insert(0, str(_REPO))
 
-from tools.paths import PETER  # noqa: E402
+from bvr.paths import PETER  # noqa: E402
 
 GT_ROOT = PETER / "climb_wall_3_gt/scene"
 VIEW_NAMES = ["cam_left", "cam_right", "cam_3"]

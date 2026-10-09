@@ -16,10 +16,10 @@ from __future__ import annotations
 import numpy as np
 import torch
 
-from tools.bedlam_masks import MAX_OUT_OF_FRAME, out_of_frame_ratio
-from tools.bedlam_contacts import contact_from_floor, frame_positions
-from tools.body import load_body
-from tools.geometry.rasterize import NEAR_M, instance_map
+from bvr.bedlam_masks import MAX_OUT_OF_FRAME, out_of_frame_ratio
+from bvr.bedlam_contacts import contact_from_floor, frame_positions
+from bvr.body import load_body
+from bvr.geometry.rasterize import NEAR_M, instance_map
 
 _UP = torch.tensor([0.0, -1.0, 0.0])          # BEDLAM2's world up
 _FLOOR = torch.tensor([0.0, 0.0, 0.0])

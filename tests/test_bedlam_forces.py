@@ -12,11 +12,11 @@ from __future__ import annotations
 import numpy as np
 import torch
 
-from tools.bedlam_forces import person_forces
-from tools.body import load_body
-from tools.human_optim.config import load_config
-from tools.human_optim.kindyn import build_dynamics_spec
-from tools.human_optim.qmath import normalize_q
+from bvr.bedlam_forces import person_forces
+from bvr.body import load_body
+from bvr.config import load_human_config
+from bvr.human_optim.kindyn import build_dynamics_spec
+from bvr.human_optim.qmath import normalize_q
 
 _GRAVITY = np.array([0.0, -1.0, 0.0], np.float32)     # the rest pose stands y-up
 _FPS = 30.0
@@ -40,7 +40,7 @@ def _sole_labels(body, frames: int) -> np.ndarray:
 
 
 def _solve(body, q, contact):
-    cfg = load_config("configs/human_optimization.toml")
+    cfg = load_human_config("configs/human_optimization.toml")
     return person_forces(
         body, np.zeros(10, np.float32), q, contact, gravity_world=_GRAVITY, fps=_FPS,
         device="cpu", weights={**cfg.weights_for("kindyn_1"), "force_edge": 3000.0},
@@ -86,7 +86,7 @@ def test_the_frozen_affine_dynamics_are_the_rnea_with_external_wrenches():
         axis = axis / axis.norm()
         q[:, 7 + 4 * (joint - 1): 7 + 4 * joint] = torch.cat(
             [axis * half_angle.sin(), half_angle.cos()[None]])
-    cfg = load_config("configs/human_optimization.toml")
+    cfg = load_human_config("configs/human_optimization.toml")
     labels = torch.ones(frames, len(body.contact_frame_names), dtype=torch.int8)
     spec = build_dynamics_spec(
         body, torch.zeros(10), labels, np.ones(frames, bool), _GRAVITY,

@@ -1,11 +1,11 @@
-"""``sole_offsets``: a contact frame is pushed out along its outward normal (``tools.body``)."""
+"""``sole_offsets``: a contact frame is pushed out along its outward normal (``bvr.body``)."""
 
 from __future__ import annotations
 
 import pytest
 import torch
 
-from tools.body import frame_normals, load_body
+from bvr.body import frame_normals, load_body
 
 _FEET = ["heel_left", "heel_right", "big_toe_left", "big_toe_right"]
 

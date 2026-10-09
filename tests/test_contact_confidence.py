@@ -7,8 +7,8 @@ import numpy as np
 import pytest
 import torch
 
-from tools.config import load_toml
-from tools.human_optim.confidence import (
+from bvr.config import load_toml
+from bvr.human_optim.confidence import (
     CONTACT_CONFIDENCE_METHOD,
     confidence_coefficients,
     fold_contacts,
@@ -17,7 +17,7 @@ from tools.human_optim.confidence import (
     label_confidence,
     transition_seconds,
 )
-from tools.viewer.loading import body_source, contact_labels
+from bvr.viewer.loading import body_source, contact_labels
 
 _REPO_ROOT = Path(__file__).resolve().parents[1]
 
@@ -149,67 +149,11 @@ def test_the_shipped_coefficients_read_drift_the_way_the_two_classes_need():
     assert shipped["free"]["log_transition"] > 0.0
 
 
-# ── the recompute script writes what the stage would write ─────────────────
-
-
-def test_recompute_reproduces_the_stage_fields(tmp_path):
-    from scripts.recompute_contact_confidence import recompute
-
-    joint_names = np.asarray(["pelvis", "left_wrist", "left_index1", "left_foot"])
-    parents = np.asarray([-1, 0, 1, 0], np.int32)
-    frame_parent = np.asarray([2, 1, 3], np.int64)          # fingertip, palm, foot
-    report_joint = frame_report_joints(frame_parent, list(joint_names), parents)
-    frame_contact = np.zeros((1, 5, 3), bool)
-    frame_contact[0, 1:4, 0] = True                          # the fingertip touches
-    frame_drift = np.full((1, 5, 3), 0.04, np.float32)
-    frame_drift[0, 2, 1] = 0.01
-    valid = np.ones((1, 5), bool)
-    valid[0, 4] = False
-
-    path = tmp_path / "contacts_1.npz"
-    np.savez(path, joint_names=joint_names, parents=parents, frame_parent_joint=frame_parent,
-             frame_contact=frame_contact, frame_drift_m=frame_drift, valid_mask=valid,
-             fps=np.float32(30.0), object_ids=np.asarray([0], np.int32),
-             frame_depth_trust=np.ones((1, 5, 3), np.float32),   # a retired witness
-             confidence_method=np.str_("source-conditional-v1"))
-    recompute(path, _COEFFS)
-
-    saved = dict(np.load(path, allow_pickle=True))
-    joint_contact = fold_contacts(frame_contact, report_joint, len(parents))
-    expected = label_confidence(
-        joint_contact[0], fold_drift(frame_drift, report_joint, len(parents))[0],
-        valid[0], 30.0, list(joint_names), _COEFFS)
-
-    np.testing.assert_array_equal(saved["joint_contact"], joint_contact)
-    np.testing.assert_allclose(saved["joint_label_confidence"][0], expected,
-                               rtol=1e-6, equal_nan=True)
-    np.testing.assert_allclose(saved["frame_label_confidence"][0], expected[:, report_joint],
-                               rtol=1e-6, equal_nan=True)
-    assert "frame_depth_trust" not in saved
-    assert str(saved["confidence_method"]) == CONTACT_CONFIDENCE_METHOD
-    np.testing.assert_array_equal(saved["frame_contact"], frame_contact)   # labels untouched
-
-
-def test_recompute_refuses_an_artifact_whose_fold_does_not_match(tmp_path):
-    from scripts.recompute_contact_confidence import recompute
-
-    joint_names = np.asarray(["pelvis", "left_wrist"])
-    path = tmp_path / "contacts_1.npz"
-    np.savez(path, joint_names=joint_names, parents=np.asarray([-1, 0], np.int32),
-             frame_parent_joint=np.asarray([1], np.int64),
-             frame_contact=np.zeros((1, 3, 1), bool),
-             joint_contact=np.ones((1, 3, 2), bool),          # disagrees with the OR fold
-             frame_drift_m=np.full((1, 3, 1), 0.02, np.float32),
-             valid_mask=np.ones((1, 3), bool), fps=np.float32(30.0))
-    with pytest.raises(ValueError, match="does not reproduce"):
-        recompute(path, _COEFFS)
-
-
 # ── unchanged neighbours: the drift window and the viewer's contact reader ──
 
 
 def test_joint_drift_rejects_invalid_window_endpoints():
-    from tools.human_optim.contacts import joint_drift
+    from bvr.human_optim.contacts import joint_drift
 
     joints = torch.arange(5, dtype=torch.float32).view(5, 1, 1).expand(-1, -1, 3)
     valid = torch.tensor([True, False, True, True, True])

@@ -11,7 +11,7 @@ The number is fitted, not designed. `scripts/calibrate_contact_confidence.py`
 compares the automatic labels with the manual annotations on the corpus scenes
 that have them and fits a tiny model; the fitted numbers live in
 `[contact_confidence]` in `configs/human_optimization.toml`. The code is
-`tools/human_optim/confidence.py`.
+`bvr/human_optim/confidence.py`.
 
 ## The unit: a report joint
 
@@ -119,7 +119,7 @@ above.
 Two of them were also circular: the scene distance and the stillness *are* how
 the geometric arm decides, so letting them certify the label would be the label
 endorsing itself. The ray-cast body-occlusion witness and the depth-fit trust
-were removed outright (`tools/human_optim/depth_fit.py` is deleted), which also
+were removed outright (`bvr/human_optim/depth_fit.py` is deleted), which also
 removes the most expensive part of the stage.
 
 The honest reading of that result: the annotations say no image or depth
@@ -136,9 +136,8 @@ uv run --no-sync python scripts/calibrate_contact_confidence.py \
 It reads every `features/annotation/<shard>/<scene>/annotation.npz` in the
 ClimbingVideos DB together with that scene's `contacts_1.npz`, folds both the
 same way, fits, prints the tables above, and replaces the `[contact_confidence]`
-section of each config given. Existing artifacts do not need the stage re-run —
-`scripts/recompute_contact_confidence.py` rewrites the confidence inside them
-from fields they already store.
+section of each config given. Existing artifacts pick the new numbers up when
+the contacts stage is re-run.
 
 The coefficients in the configs were fitted on 2026-09-12, after the manual
 labels had been checked; the `fit` string in the TOML says so. Refit after any

@@ -1,6 +1,6 @@
 # Orchestrator config for scripts/pipeline.py (file-based, small-batch).
 # Per-stage knobs + step selection. Each stage is also runnable standalone
-# (see scripts/stages/); standalone CLIs read their knobs from this file.
+# (see bvr/stages/); standalone CLIs read their knobs from this file.
 
 [steps]
 # Active stages, in order; the chain ends at human_optimization (four-stage SMPL-X
@@ -122,13 +122,13 @@ skip_existing = false      # skip when geocalib/gravity.npz exists
 
 [bedlam]                    # scripts/label_bedlam2.py ground-contact readout → gt/contacts.npz
                            # (masks / boxes / validity have no knobs beyond the 1/3-out-of-frame
-                           #  rule baked into tools/bedlam_masks.py)
+                           #  rule baked into bvr/bedlam_masks.py)
 window_s = 0.20            # seconds the contact-frame speed is averaged over (a tenth either side)
 still_mps = 0.10           # speed (m/s) at which a point is half in contact; twice this kills a label.
                            #  The speed is BetterRobot's: frame Jacobian x generalised velocity
 enter_m = 0.08             # height above the floor that starts a contact, metres. Wide on purpose:
                            #  BEDLAM2 lifts the whole body by the shoe sole and poses the naked toes
-                           #  5-7 cm up inside a flat shoe (see tools/bedlam_contacts.ENTER_M)
+                           #  5-7 cm up inside a flat shoe (see bvr/bedlam_contacts.ENTER_M)
 exit_m = 0.10              # looser height that holds one (hysteresis, so labels do not blink)
 max_tilt_deg = 55          # the skin at a contact frame must face the floor within this. What keeps
                            #  the ball of a vertical foot (60-75 deg) out of the wide band above while
@@ -140,7 +140,7 @@ touch_m = 0.01             # lowest MESH vertex within this of the floor = the b
                            #  (reporting only; measured on the mesh so the support check is not circular)
 
 [bedlam_forces]             # scripts/label_bedlam2.py --step forces → gt/forces.npz: the kindyn_1
-                           # force solve at the frozen ground-truth pose (tools/bedlam_forces.py)
+                           # force solve at the frozen ground-truth pose (bvr/bedlam_forces.py)
 config = "configs/human_optimization.toml"   # the kindyn_1 dynamics column, [torque.multipliers],
                                              #  [friction] and [dynamics_optimizer] come from here
 edge_speed_m_s = 0.8       # force_edge × 1/(1+(v/0.8)²), v = the body's vertical speed across the

@@ -25,7 +25,7 @@ REPO = Path(__file__).resolve().parents[2]
 if str(REPO) not in sys.path:
     sys.path.insert(0, str(REPO))
 
-from tools.paths import PETER  # noqa: E402
+from bvr.paths import PETER  # noqa: E402
 
 ORIG = PETER / "climb_wall_3_orig"
 OUT = PETER / "climb_wall_3_gt/scene"

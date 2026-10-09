@@ -12,7 +12,7 @@ in the stages that need it.
 Stages run in the **listed order**. The model **precompute** stages (``sam3``,
 ``vggt``, ``sapiens``) run once over ``--source`` — given a *folder* of videos
 they load each model once and sweep the whole batch
-(``tools/precompute_runner`` semantics). The **per-clip** stages (``sam3d``,
+(``bvr/precompute_runner`` semantics). The **per-clip** stages (``sam3d``,
 ``smplx``, ``fuse``, ``scale``, ``human_optimization``) loop over each clip's
 ``<save-dir>/<stem>/``. ``fuse`` builds the point clouds in VGGT's up-to-scale
 world; ``scale`` (``estimate_scale``) then anchors the metric factor to the
@@ -26,7 +26,7 @@ subset of the chain.
 Per-stage knobs and the step selection live in ``configs/pipeline.toml``; the
 CLI only takes ``--source``, ``--save-dir``, ``--config``, ``--steps``,
 and ``--skip-existing``. Each stage is also runnable standalone
-(see ``scripts/stages/``).
+(``python -m bvr.stages.<name>``).
 
 Usage::
 
@@ -41,14 +41,10 @@ import subprocess
 import sys
 from pathlib import Path
 
-_HERE = Path(__file__).resolve()
-_REPO_ROOT = _HERE.parents[1]
-sys.path.insert(0, str(_REPO_ROOT))
+from bvr.config import load_toml
+from bvr.paths import REPO_ROOT
+from bvr.source import IMAGE_EXTS, VIDEO_EXTS
 
-from tools.config import load_toml  # noqa: E402
-from tools.source import IMAGE_EXTS, VIDEO_EXTS  # noqa: E402
-
-_STAGES_DIR = _HERE.parent / "stages"
 _MEDIA_EXTS = IMAGE_EXTS | VIDEO_EXTS
 
 # Canonical order. "precompute" stages operate on --source / --save-dir; "perclip"
@@ -103,7 +99,7 @@ def _perclip_output(step: str, clip_dir: Path, cfg: dict) -> Path:
     if step == "human_optimization":  # skip-check the LAST configured sub-stage's body
         ho_path = Path(cfg["human_optimization"]["config"])
         if not ho_path.is_absolute():
-            ho_path = _REPO_ROOT / ho_path
+            ho_path = REPO_ROOT / ho_path
         st = list(load_toml(ho_path).get("stages", {}).get("run", ["root", "kinematics_1"]))
         name = ("kindyn_1" if "kindyn_1" in st
                 else "kinematic_2" if "kinematics_2" in st
@@ -150,20 +146,20 @@ def _build_perclip_args(step: str, cfg: dict, clip: Path, clip_dir: Path,
     raise ValueError(step)
 
 
-_SCRIPTS = {
-    "sam3": "track_sam3.py",
-    "sapiens": "estimate_sapiens.py",
-    "vggt": "estimate_camera_vggt.py",
-    "scale": "estimate_scale.py",
-    "fuse": "fuse_geometry.py",
-    "sam3d": "estimate_body_sam3d.py",
-    "smplx": "convert_mhr_to_smplx.py",
-    "human_optimization": "human_optimization.py",
+_MODULES = {
+    "sam3": "track_sam3",
+    "sapiens": "estimate_sapiens",
+    "vggt": "estimate_camera_vggt",
+    "scale": "estimate_scale",
+    "fuse": "fuse_geometry",
+    "sam3d": "estimate_body_sam3d",
+    "smplx": "convert_mhr_to_smplx",
+    "human_optimization": "human_optimization",
 }
 
 
 def _run(step: str, extra_args: list[str]) -> None:
-    cmd = [sys.executable, str(_STAGES_DIR / _SCRIPTS[step]), *extra_args]
+    cmd = [sys.executable, "-m", f"bvr.stages.{_MODULES[step]}", *extra_args]
     print(f"\n=== [{step}] {' '.join(cmd[1:])} ===", flush=True)
     rc = subprocess.run(cmd).returncode
     if rc != 0:
@@ -210,7 +206,7 @@ def main(argv: list[str] | None = None) -> int:
                    help="video file or folder of video files (each a clip)")
     p.add_argument("--save-dir", required=True, type=Path,
                    help="per-clip outputs land in <save-dir>/<stem>/")
-    p.add_argument("--config", type=Path, default=_REPO_ROOT / "configs" / "pipeline.toml",
+    p.add_argument("--config", type=Path, default=REPO_ROOT / "configs" / "pipeline.toml",
                    help="orchestrator TOML (default: configs/pipeline.toml)")
     p.add_argument("--steps", default=None,
                    help="comma-separated subset of steps to run (default: config's [steps].run)")

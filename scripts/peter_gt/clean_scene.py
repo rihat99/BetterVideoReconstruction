@@ -6,7 +6,7 @@ Four passes on ``scene.npz`` (per set, written by ``reconstruct_vggt.py``):
    VGGT depth pixels;
 2. depth edges — drop pixels on a depth discontinuity (the "flying" points that
    bridge a foreground object and the wall behind it), with the same utils3d
-   edge test the fuse stage uses (``tools.geometry.clean.clean_depth``);
+   edge test the fuse stage uses (``bvr.geometry.clean.clean_depth``);
 3. side camera inside the front pair's view — ``cam_3`` looks along the wall at
    a grazing angle, and its depth there is smeared over a metre; wherever a
    point of it projects into ``cam_left`` or ``cam_right`` those cameras see the
@@ -31,7 +31,7 @@ _REPO = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(_REPO))
 sys.path.insert(0, str(_REPO / "scripts/peter_gt"))
 from reconstruct_vggt import GT_ROOT, SETS, VIEW_NAMES, content_window, write_ply  # noqa: E402
-from tools.geometry.clean import clean_depth  # noqa: E402
+from bvr.geometry.clean import clean_depth  # noqa: E402
 
 CONF_QUANTILE = 0.4    # per view, the least confident 40 % goes
 EDGE_RTOL = 0.04       # depth-edge relative tolerance (fuse stage default)

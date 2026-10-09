@@ -1,9 +1,9 @@
 """Contacts and forces for raw AMASS SMPL-X motions, by the BEDLAM2 readout.
 
 BEDLAM2's bodies are AMASS motions, so the two measurements ``scripts/label_bedlam2.py``
-makes apply to an AMASS ``*_stageii.npz`` as they are: :mod:`tools.bedlam_contacts`
+makes apply to an AMASS ``*_stageii.npz`` as they are: :mod:`bvr.bedlam_contacts`
 labels the 35 contact frames against a floor plane (height, stillness, which way the
-skin faces) and :mod:`tools.bedlam_forces` solves the force every labelled frame
+skin faces) and :mod:`bvr.bedlam_forces` solves the force every labelled frame
 carries at the frozen pose with ``kindyn_1``'s force objective. The knobs are the same
 too — ``[bedlam]`` and ``[bedlam_forces]`` in ``configs/pipeline.toml``. The pose goes
 in the way ``scripts/import_bedlam2.py`` brings it in: 16 locked-head betas truncated
@@ -53,13 +53,13 @@ _REPO_ROOT = Path(__file__).resolve().parents[1]
 if str(_REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(_REPO_ROOT))
 
-from tools.bedlam_contacts import (  # noqa: E402
+from bvr.bedlam_contacts import (  # noqa: E402
     CONTACT_LABEL_METHOD, ENTER_M, EXIT_M, MAX_TILT_DEG, MIN_SPAN_S, STILL_MPS, WINDOW_S,
     calm_speed, contact_from_floor, frame_positions)
-from tools.bedlam_forces import FORCE_METHOD, person_forces  # noqa: E402
-from tools.body import load_body  # noqa: E402
-from tools.config import load_toml, section  # noqa: E402
-from tools.human_optim.config import FPS_REF, load_config  # noqa: E402
+from bvr.bedlam_forces import FORCE_METHOD, person_forces  # noqa: E402
+from bvr.body import load_body  # noqa: E402
+from bvr.config import load_toml, section  # noqa: E402
+from bvr.config import FPS_REF, load_human_config  # noqa: E402
 
 LOCKED_HEAD = Path("/home/rikhat.akizhanov/better/BetterHuman/models/smplx_lockedhead/SMPLX_NEUTRAL.npz")
 NUM_BETAS = 10
@@ -158,7 +158,7 @@ def com_force_needed(body, betas: np.ndarray, q: np.ndarray, fps: float, device)
     """
     from better_robot.dynamics import center_of_mass
 
-    from tools.human_optim.qmath import normalize_q
+    from bvr.human_optim.qmath import normalize_q
 
     model = body.shaped(torch.as_tensor(betas, device=device)).model
     with torch.no_grad():
@@ -367,7 +367,7 @@ def main(argv: list[str] | None = None) -> int:
     forces = section(cfg, "bedlam_forces", {
         "config": "configs/human_optimization.toml", "edge_speed_m_s": 0.0, "weights": {},
         "device": "cpu"})
-    hoc = load_config(_REPO_ROOT / forces.config)
+    hoc = load_human_config(_REPO_ROOT / forces.config)
     force_knobs = {
         "device": torch.device(forces.device),
         "weights": {**hoc.weights_for("kindyn_1"),

@@ -91,8 +91,8 @@ for _p in (str(_REPO_ROOT), str(_DIAGNOSTICS), str(_REPO_ROOT / "scripts")):
 
 from opencap_plates import LOADED_N  # noqa: E402
 from _common import _limb_members  # noqa: E402
-from tools.human_optim.boards import LIMBS  # noqa: E402
-from tools.paths import LABVALIDATION  # noqa: E402
+from bvr.human_optim.boards import LIMBS  # noqa: E402
+from bvr.paths import LABVALIDATION  # noqa: E402
 
 PROCESSED = LABVALIDATION / "processed"
 

@@ -35,8 +35,8 @@ if str(_REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(_REPO_ROOT))
 
 from scripts.score_frame_contacts import fold_for_schema  # noqa: E402
-from tools.config import load_toml  # noqa: E402
-from tools.human_optim.confidence import (  # noqa: E402
+from bvr.config import load_toml  # noqa: E402
+from bvr.human_optim.confidence import (  # noqa: E402
     CONTACT_CONFIDENCE_METHOD, GROUP_NAMES, REPORT_GROUPS, fold_contacts, fold_drift,
     frame_report_joints, transition_seconds, witness_features,
 )

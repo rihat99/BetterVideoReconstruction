@@ -260,7 +260,7 @@ residual, and a low residual bought that way is flattery, not physics.
 ## Shared with the ground-truth chain
 
 The reading itself lives in
-[`tools/human_optim/boards.py`](../tools/human_optim/boards.py) and is used by
+[`bvr/human_optim/boards.py`](../bvr/human_optim/boards.py) and is used by
 two callers: this single-view stage, and the three-camera ground-truth chain in
 `scripts/peter_gt/fit_multiview.py`, which has always labelled from the boards.
 One implementation, so the two cannot drift into disagreeing about what the

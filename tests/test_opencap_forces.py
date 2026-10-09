@@ -27,7 +27,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts"))
 from export_opencap_mot import COLUMNS, plate_triple, write_mot  # noqa: E402
 from opencap_plates import LOADED_N, cop_free_torque, origin_moment  # noqa: E402
 from opencap_sensor_forces import main as sensor_forces_main  # noqa: E402
-from tools.paths import LABVALIDATION  # noqa: E402
+from bvr.paths import LABVALIDATION  # noqa: E402
 
 #: A plate triple that has no COP does not need a fallback point; pass an unused one.
 NO_FALLBACK = None
@@ -167,7 +167,7 @@ def _rotation(axis: list[float], degrees: float) -> np.ndarray:
 
 def test_sensor_forces_rotates_the_plates_and_masks_the_unseen(tmp_path: Path) -> None:
     """The plate vectors land in our world, uncaptured limb-frames land as NaN."""
-    from tools.human_optim.boards import LIMBS
+    from bvr.human_optim.boards import LIMBS
 
     rotation = _rotation([0.3, 1.0, 0.2], 118.0) @ _rotation([1.0, 0.0, 0.0], 168.0)
     translation = np.array([0.42, 1.31, 4.05])
