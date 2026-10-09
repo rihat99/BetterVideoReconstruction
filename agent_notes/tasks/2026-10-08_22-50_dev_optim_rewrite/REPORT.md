@@ -18,7 +18,8 @@ Eight code commits on `dev` (list below). BVR no longer has an optimizer: every 
 | d282814 | 4b | `datasets/<name>/` split (examples, climbingvideos, peter, opencap, parkour, bedlam2, amass, methods) with READMEs | dry-runs identical; 48/48 --help |
 | 28f023e | 4c | base+override configs (deltas 12–42 lines instead of 145–528), `bvr/runner.py` + one `scripts/pipeline.py` | merge proven identical leaf by leaf; 25 dry-run cases identical; full chain bit-identical; F1 0.912/0.931 |
 | ba64306 | 6 | pyproject path deps on dev BR/BH (`uv sync` rebuilds the env), rig-neutral names, docs rewritten | 229 tests; 57/57 --help |
-| (step 7) | 7 | review fixes: runner resume semantics restored for `--source`, config loader warnings, stale text, orphans | see §5 |
+| ebf3c99 | 7 | review fixes: runner resume semantics restored for `--source`, config loader warnings, stale text, orphans | 229 tests; 60/60 --help; 25 dry-run cases unchanged; kin_1 bit-identical |
+| (final) | — | unused test import dropped; notes | 16/16 contact tests |
 BR dev commits used: 72a7d02 (per-term diagnostics), 0c3d167, b6602aa, 64d3fb5, 2dd0a9d, 1f3fbe3, 4b7b1da (viewer gaps), 8828842 (solid arrows). BR suite 1674 passed.
 
 ## 1. Baseline and regression gate (subagents/report_0_reference.md)
@@ -38,14 +39,23 @@ Timing: kindyn_1 faster (one FK per evaluation); kinematics_1 +20–30 % on the 
 
 ## 4. Known differences and open items
 - BEDLAM2 `label_bedlam2 --step forces` (kindyn warm start) main vs dev on CPU: max 15–21 N on forces up to 390 N, mean 0.04–0.07 N, base-wrench RMS 26.28→26.27 / 35.57→35.48 N (review_R.md). Same class as the kindyn_1 chain differences; `FORCE_METHOD` not bumped.
-- `--source` runs: resume semantics (restored in step 7, see §5).
 - kinematics_1 slowdown vs main (above) — profile BH dev body load + HumanState memoisation.
 - L-BFGS phases log one line per phase (BR's closure is private); a BR `TorchOptim(on_closure=)` hook would restore the every-5th-closure lines.
-- Not exercised numerically on dev: fit_multiview `fit_betas` path, label_amass, OpenCap floorplane/build_support_scene (review part 2 — see §5).
 - Leftovers for the user: `/tmp/bvr_view_*` symlink farms from viewer checks (trash refuses /tmp); scratchpad venv `s6/venv_c` (5 GB); `data_dev` (reference runs, ~2 GB) can go when the branch is accepted.
 
-## 5. Review and fixes
-(filled in after step 7 and review part 2)
+## 5. Adversarial review (artifacts/review_R.md, two read-only passes on the committed tree) and fixes (step 7, ebf3c99)
+Optimizer port: parity confirmed by reading (summation and weight order, free masks ≡ main's 0/1 gradient masks, on_start before each fresh optimizer, L-BFGS budget and tolerances, scheduler milestones, prefit `log_s` freeze, witness clamp after the step, warm start skipped without labels). Numeric checks main vs dev, each run twice to show the noise floor is zero on both sides:
+| path | result |
+|---|---|
+| MHR→SMPL-X converter, boulder_1 (445 fr, GPU, deterministic) | 22/22 keys bit-identical |
+| build_support_scene (OpenCap floorplane), subject10_DJ1_cam1 | scene.npz 38/38 bit-identical; with bodies, same plateaus, coords ≤1.2e-7 m |
+| fit_multiview with `fit_betas`, climb_wall_3 a_00_01_part6 (tiny iters) | betas 7.8e-7, q ≤6.4e-5, mass 7.6e-6 kg (forward-model rounding) |
+| label_bedlam2 --step forces, scenes 00000000/00000001 (CPU) | labels identical; forces max 15–21 N of ≤390 N, mean 0.04–0.07 N; base-wrench RMS 26.28→26.27, 35.57→35.48 N |
+| label_amass, CMU 49_06 (CPU) | labels/floor/mass identical; forces median 0.57 N, p99 8.9 N, max 18.8 N (2.7 %BW) |
+| estimate_scale pre-fit, 9Rvrp (CPU) | dev runs a 3rd round (stop rule `|log(s'/s)|<1e-3` flips on 150-step Adam rounding): s 0.9991 → 1.0000 (0.085 %), prefit body_pose max 0.50 rad (one ankle, frame 91), p99 0.11 rad, transl max 4.6 cm. Main's own GPU prefit differs from main CPU by more (1.29 rad at the same joint). |
+Decisions (user, 2026-10-09, PLAN decision 13): keep `FORCE_METHOD` unchanged (force drift recorded here only); accept the pre-fit drift without re-gating the chain from a dev pre-fit (the gate's kinematics_1 started from main's prefit.npz; a dev-prefit chain check was started and stopped on the user's call).
+Fixed in step 7 (report_7): `--source` runs recompute unless `--skip-existing` (main's rule), scale "done" requires a metric transform + prefit file, sweeps get `--skip-existing`, kinematics_1 follows the human config's `[stages].run` as main's local runner did; `load_config` base-cycle guard + warning for delta keys without a base value (base now carries mass_kg, edge_speed_m_s, force_edge, floor_gate_m defaults) + unknown weight-row warning (peter GT rows moved to `[loss_weights.multiview]`); stale docstrings/READMEs; three no-argparse scripts no longer run on `--help`; label_bedlam2 threads capped at 16/worker; one new orphan removed (four pre-existing orphans on main left and listed in report_7 §4).
+Not fixed, by design: L-BFGS progress lines are one per phase (BR's closure is private); `view_3d --scenes` reads its selection from corpus.toml, not `--config`; `measure_contacts --config` is required; subject mass is `[stages.kindyn_1].mass_kg` per config (the meta.json reader is gone; feature was off everywhere).
 
 ## Pointers
 Task folder: `/home/rikhat.akizhanov/better/dev/BetterVideoReconstruction/agent_notes/tasks/2026-10-08_22-50_dev_optim_rewrite/` — PLAN.md, STATE.md, subagents/{inv_A..D, report_0..7, report_G, G2, 5r, 5b, briefs}, compare_runs.py, artifacts/{ref,dev2,dev3,dev4,dev6}/ (logs, gate tables, dry-run diffs, merge proofs), artifacts/review_R.md, vis/ (viewer screenshots). Env doc: `agent_notes/docs/dev_env.md`.
