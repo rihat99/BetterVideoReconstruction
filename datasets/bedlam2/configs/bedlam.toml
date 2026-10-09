@@ -1,0 +1,35 @@
+# The BEDLAM2 ground-truth readouts of datasets/bedlam2/label_bedlam2.py (and datasets/amass/label_amass.py):
+# the ground-contact labels ([bedlam]) and the force solve at the frozen pose ([bedlam_forces]).
+# Relative paths are resolved from the repository root.
+
+[bedlam]                    # datasets/bedlam2/label_bedlam2.py ground-contact readout → gt/contacts.npz
+                           # (masks / boxes / validity have no knobs beyond the 1/3-out-of-frame
+                           #  rule baked into datasets/bedlam2/masks.py)
+window_s = 0.20            # seconds the contact-frame speed is averaged over (a tenth either side)
+still_mps = 0.10           # speed (m/s) at which a point is half in contact; twice this kills a label.
+                           #  The speed is BetterRobot's: frame Jacobian x generalised velocity
+enter_m = 0.08             # height above the floor that starts a contact, metres. Wide on purpose:
+                           #  BEDLAM2 lifts the whole body by the shoe sole and poses the naked toes
+                           #  5-7 cm up inside a flat shoe (see bvr/bedlam_contacts.ENTER_M)
+exit_m = 0.10              # looser height that holds one (hysteresis, so labels do not blink)
+max_tilt_deg = 55          # the skin at a contact frame must face the floor within this. What keeps
+                           #  the ball of a vertical foot (60-75 deg) out of the wide band above while
+                           #  a kneeling patella (45 deg) and the sacrum (46 deg) stay in
+min_span_s = 0.10          # shortest contact that is not flicker, seconds
+suspect_m = 0.15           # top of the band the readout is blind to (too high to label, too low to
+                           #  be airborne); its share is reported per scene as "plane suspect"
+touch_m = 0.01             # lowest MESH vertex within this of the floor = the body is touching it
+                           #  (reporting only; measured on the mesh so the support check is not circular)
+
+[bedlam_forces]             # datasets/bedlam2/label_bedlam2.py --step forces → gt/forces.npz: the kindyn_1
+                           # force solve at the frozen ground-truth pose (datasets/bedlam2/forces.py)
+config = "configs/human_optimization.toml"   # the kindyn_1 dynamics column, [torque.multipliers],
+                                             #  [friction] and [dynamics_optimizer] come from here
+edge_speed_m_s = 0.8       # force_edge × 1/(1+(v/0.8)²), v = the body's vertical speed across the
+                           #  contact switch: a landing may step to full load, a heel strike may not
+device = "cpu"             # the solve is a few hundred tiny L-BFGS steps — launch-bound on a GPU,
+                           #  where workers just queue; on the cores it scales with --workers
+
+[bedlam_forces.weights]    # laid over the kindyn_1 column above
+force_edge = 3000          # the force on the first/last frame of every contact interval — loads
+                           #  ramp in and out instead of stepping (the OpenCap validation term)

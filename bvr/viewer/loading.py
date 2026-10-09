@@ -51,7 +51,7 @@ class ForceArrows:
     """Per-frame force arrows a dataset reader adds to a clip (measured forces), drawn like the solved ones."""
 
     name: str
-    kind: str                            #: sidebar checkbox key (``layers.KINDS``)
+    kind: str                            #: sidebar checkbox: a ``layers.KINDS`` key, or the dataset's own label (added, off by default)
     origins: np.ndarray                  #: (T, C, 3) world frame, metres
     vectors: np.ndarray                  #: (T, C, 3) newtons
     color: tuple                         #: RGB in [0, 1]
@@ -189,10 +189,10 @@ def _hold_valid(q: np.ndarray, valid: np.ndarray) -> np.ndarray:
 
 
 def body_source(path: Path, n_frames: int, *, valid: np.ndarray | None = None) -> BodySource:
-    """A world-frame body npz (``human_optim/kinematic_*.npz``, ``kindyn_*.npz``, BEDLAM2 ``smplx.npz``).
+    """A world-frame body npz (``human_optim/kinematic_*.npz``, ``kindyn_*.npz``, or a dataset's ground truth in that schema).
 
-    ``valid (P, N)`` replaces the file's own ``valid_mask``: BEDLAM2 stores visibility there, not
-    whether a pose exists.
+    ``valid (P, N)`` replaces the file's own ``valid_mask`` (a dataset that stores visibility there,
+    not whether a pose exists, passes its own).
     """
     d = np.load(path, allow_pickle=True)
     q = np.asarray(d["q"], np.float32)                                    # (P, N, 211)
@@ -242,7 +242,7 @@ def classic_source(path: Path, body: Body, extr: np.ndarray) -> BodySource:
 def contact_labels(path: Path, body: Body, src: BodySource, *, artifact: bool = True) -> np.ndarray | None:
     """``frame_contact (P, T, F)`` in the body's frame order, from a contact artifact or a self-labelled body.
 
-    ``artifact`` (``contacts_*.npz``, BEDLAM2 ``gt/contacts.npz``) must carry the current label
+    ``artifact`` (``contacts_*.npz``, or a dataset's ground-truth labels in that schema) must carry the current label
     schema; a kinematics+dynamics body writes ``frame_contact`` next to ``q`` itself (``False``).
     The labels must be shaped (people, frames, names) like the body file and the file's own frame
     names (a subset of the body's contact frames is expanded by name). Anything older, of another
@@ -275,7 +275,7 @@ def contact_labels(path: Path, body: Body, src: BodySource, *, artifact: bool = 
 
 
 def load_forces(path: Path, body: Body, n_frames: int) -> dict | None:
-    """Forces and torques of a kinematics+dynamics body (``kindyn_1.npz``, BEDLAM2 ``gt/forces.npz``).
+    """Forces and torques of a kinematics+dynamics body (``kindyn_1.npz``, or a dataset's ground-truth forces in that schema).
 
     ``joint_forces (P, T, J, 3)`` are the per-joint contact forces with each hand's finger forces
     summed onto its wrist (one arrow per gripping hand); ``frame_forces (P, T, F, 3)`` are the same

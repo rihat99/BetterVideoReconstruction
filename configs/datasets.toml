@@ -1,7 +1,7 @@
 # The datasets scripts/run_dataset.py runs the chain over, and the variant chains.
 #
 # Paths are relative to the data root (bvr/paths.py: ../data, or $BVR_DATA_ROOT);
-# configs are file names under configs/. A dataset has one video per clip
+# configs are paths relative to the repo root. A dataset has one video per clip
 # (`clips`: the glob that finds them, <root>/<clip>/video.mp4) or is a camera rig
 # (`views`: the cameras, <root>/<clip>/<view>.mp4). On a rig the first view is the one
 # the single-view tree `out` was built from; any other `--views` selection goes to
@@ -9,21 +9,21 @@
 # `steps` is the chain, in order: the first five are manifest sweeps (the model loads
 # once and sweeps every clip), the rest run per clip.
 
-[datasets.parkour]            # LAAS Parkour (scripts/import_parkour.py), one static lab camera
+[datasets.parkour]            # LAAS Parkour (datasets/parkour/import_parkour.py), one static lab camera
 root = "Parkour-dataset/processed"
 clips = "*/video.mp4"
 out = "Parkour-dataset/processed/out"
-pipeline_config = "pipeline_peter.toml"
-human_config = "human_optimization_peter.toml"
+pipeline_config = "datasets/peter/configs/pipeline_peter.toml"
+human_config = "datasets/peter/configs/human_optimization_peter.toml"
 steps = ["sam3", "vggt", "sapiens", "sam3d", "smplx", "fuse", "scale", "gravity",
          "kinematics_1", "contacts_1", "kinematics_2", "contacts_2", "kindyn_1"]
 
-[datasets.opencap]            # OpenCap LabValidation (scripts/import_opencap.py), one static iPhone
+[datasets.opencap]            # OpenCap LabValidation (datasets/opencap/import_opencap.py), one static iPhone
 root = "LabValidation_withVideos/processed"
 clips = "*/video.mp4"
 out = "LabValidation_withVideos/processed/out"
-pipeline_config = "pipeline_opencap.toml"
-human_config = "human_optimization_peter.toml"
+pipeline_config = "datasets/opencap/configs/pipeline_opencap.toml"
+human_config = "datasets/peter/configs/human_optimization_peter.toml"
 steps = ["sam3", "vggt", "sapiens", "sam3d", "smplx", "fuse", "scale", "gravity",
          "kinematics_1", "contacts_1", "kinematics_2", "contacts_2", "kindyn_1"]
 
@@ -35,8 +35,8 @@ views = ["cam_left", "cam_right"]
 out = "peter/out_campus_board_single"
 out_multi = "peter/out_campus_board_multi"
 multi_steps = ["sam3", "vggt", "fuse"]
-pipeline_config = "pipeline_peter.toml"
-human_config = "human_optimization_peter.toml"
+pipeline_config = "datasets/peter/configs/pipeline_peter.toml"
+human_config = "datasets/peter/configs/human_optimization_peter.toml"
 steps = ["sam3", "vggt", "sapiens", "sam3d", "smplx", "fuse", "scale",
          "kinematics_1", "contacts_1", "kinematics_2", "contacts_2", "kindyn_1"]
 
@@ -46,8 +46,8 @@ views = ["cam_left", "cam_right", "cam_3"]
 out = "peter/out_climb_wall_2_single"
 out_multi = "peter/out_climb_wall_2_multi"
 multi_steps = ["sam3", "vggt", "fuse"]
-pipeline_config = "pipeline_peter.toml"
-human_config = "human_optimization_peter.toml"
+pipeline_config = "datasets/peter/configs/pipeline_peter.toml"
+human_config = "datasets/peter/configs/human_optimization_peter.toml"
 steps = ["sam3", "vggt", "sapiens", "sam3d", "smplx", "fuse", "scale",
          "kinematics_1", "contacts_1", "kinematics_2", "contacts_2", "kindyn_1"]
 
@@ -57,8 +57,8 @@ views = ["cam_left", "cam_right", "cam_3"]
 out = "peter/out_climb_wall_3_single"
 out_multi = "peter/out_climb_wall_3_multi"
 multi_steps = ["sam3", "vggt", "fuse"]
-pipeline_config = "pipeline_peter.toml"
-human_config = "human_optimization_peter.toml"
+pipeline_config = "datasets/peter/configs/pipeline_peter.toml"
+human_config = "datasets/peter/configs/human_optimization_peter.toml"
 steps = ["sam3", "vggt", "sapiens", "sam3d", "smplx", "fuse", "scale",
          "kinematics_1", "contacts_1", "kinematics_2", "contacts_2", "kindyn_1"]
 
@@ -76,18 +76,18 @@ steps = ["sam3", "vggt", "sapiens", "sam3d", "smplx", "fuse", "scale",
 [variants.floorplane]         # a synthetic support scene replaces the fused cloud
 steps = ["support_scene_floor", "kinematics_1", "support_scene_plateaus",
          "contacts_1", "kinematics_2", "contacts_2", "kindyn_1"]
-config = "human_optimization_floorplane.toml"
+config = "datasets/opencap/configs/human_optimization_floorplane.toml"
 
 # The plain chain with the edgev kindyn knobs on the clip's REAL fused cloud. The edgev
 # runs on disk were kindyn-only reruns inside the floorplane farm (geometry and the
 # kinematics/contacts linked from human_optim_floorplane); no committed code builds that
 # layout, so this variant does not reproduce them.
 [variants.floorplane_edgev]
-config = "human_optimization_floorplane_edgev.toml"
+config = "datasets/opencap/configs/human_optimization_floorplane_edgev.toml"
 
 [variants.gt_contact]         # the contact-consuming chain on MEASURED board contacts
 steps = ["contacts_1", "kinematics_2", "contacts_2", "kindyn_1", "overlay"]
-config = "human_optimization_peter.toml"
+config = "datasets/peter/configs/human_optimization_peter.toml"
 inherit = ["kinematic_1.npz", "sensor_forces.npz"]
 contacts = "boards"
 requires = "human_optim/sensor_forces.npz"

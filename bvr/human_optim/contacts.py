@@ -48,6 +48,10 @@ import torch
 #: fps-aware (:func:`min_span_frames`) runs in ``estimate_contacts`` after the welding.
 DETECT_MIN_FRAMES = 3
 
+#: Contact-frame name stems (``<stem>_<side>``) that belong to a hand / to a foot.
+HAND_FRAMES = ("palm", "palm_distal", "finger", "thumb")
+FOOT_FRAMES = ("heel", "ball_inner", "ball_outer", "big_toe", "toe_above")
+
 
 def min_span_frames(min_span_s: float, fps: float) -> int:
     """``[contacts].min_span_s`` (seconds) → the frame count the POST-WELD span rule uses.

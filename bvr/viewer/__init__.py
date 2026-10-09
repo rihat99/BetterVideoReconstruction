@@ -2,8 +2,8 @@
 
 * :mod:`bvr.viewer.loading` — one clip's numpy (scene, cameras, gravity, body sources, video),
 * :mod:`bvr.viewer.layers` — the adapter that turns it into BetterRobot layers,
-* :mod:`bvr.viewer.datasets_layers` — readers for one dataset (BEDLAM2, force plates, wall
-  sensors, the scene DB); the core never imports it, ``scripts/view_3d.py`` plugs it in,
+* the datasets' readers (``datasets/<name>/viewer.py``, ``datasets/_rigs.py``): the core never
+  imports them, ``scripts/view_3d.py`` composes them into the ``read`` it hands the app,
 * :mod:`bvr.viewer.app` — the sidebar and clip switching, and :func:`view_3d`.
 
 ``scripts/view_3d.py`` is the CLI.

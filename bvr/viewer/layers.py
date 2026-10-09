@@ -39,8 +39,6 @@ KINDS = {
     "joint_forces": ("contact forces (per joint)", True),
     "frame_forces": ("contact forces (per frame)", False),
     "root_wrench": ("root force / torque", True),
-    "sensor": ("sensor forces (measured)", False),
-    "plate": ("estimated forces (plate format)", False),
     "human": ("human points", False),
     "scene": ("scene points", True),
     "normals": ("scene normals", False),

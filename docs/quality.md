@@ -50,7 +50,7 @@ raw metrics behind it (`quality_cam_ratio`, `quality_smear_med`,
 `quality_res_before_bw`), so every consumer of the contact labels can see
 whether to trust them. Thresholds live in `[quality]` of
 `configs/human_optimization.toml`; the shared logic in
-`bvr/geometry/quality.py`. `scripts/diagnostics/scene_quality.py` prints one
+`bvr/geometry/quality.py`. `scripts/scene_quality.py` prints one
 row of raw metrics per `out/<stem>/` tree plus the same **`flag`** column
 (recomputed with the same functions, so table and pipeline cannot drift):
 

@@ -23,7 +23,7 @@ Two run modes (like ``estimate_body_sam3d``):
   * **batch / manifest** — ``--source manifest.json`` with ``[smplx].save_dir`` (a
     ``precompute_runner`` Step): builds the MHR→SMPL-X converter once and sweeps
     every scene, each manifest ``out_dir`` being that scene's sam3d feature dir.
-    This is how ``scripts/corpus.py`` fans the stage across the
+    This is how ``datasets/climbingvideos/corpus.py`` fans the stage across the
     ClimbingVideos scene DB.
 
 Run from CLI::

@@ -427,13 +427,13 @@ smear_med_max = 2.0        # median along-ray human-cloud smear above this = "de
 
 # Label confidence — P(the label agrees with a human annotator), one logistic head per label
 # class over three witnesses: the joint group, its drift over the readout window, and the time
-# to the nearest change of its own label. Fitted by scripts/calibrate_contact_confidence.py on
+# to the nearest change of its own label. Fitted by datasets/climbingvideos/calibrate_contact_confidence.py on
 # the annotated corpus scenes (docs/contact_confidence.md). `intercept` is 0 by construction:
 # each group term IS that group's intercept. Do not hand-edit the numbers.
 [contact_confidence]
 drift_floor_m = 0.005         # log(drift + floor)
 transition_cap_s = 1.0        # seconds to the nearest label change, capped
-fit = "2026-09-12 — annotated ClimbingVideos scenes after the manual-label check (scripts/calibrate_contact_confidence.py --write)"
+fit = "2026-09-12 — annotated ClimbingVideos scenes after the manual-label check (datasets/climbingvideos/calibrate_contact_confidence.py --write)"
 
 [contact_confidence.contact]    # the label says contact
 intercept = 0.000000

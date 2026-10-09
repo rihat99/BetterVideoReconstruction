@@ -32,7 +32,6 @@ entry point is :func:`run_kindyn`, driven by
 from __future__ import annotations
 
 import dataclasses
-import json
 import math
 from dataclasses import dataclass
 from pathlib import Path
@@ -681,7 +680,7 @@ def _kindyn_phases(cfg: HumanOptimConfig) -> list[PhaseSpec]:
 
 def run_kindyn(source, pred: Path, cfg: HumanOptimConfig, device: str, *,
                overlay: bool = False, bodies: str = "kinematic_2", cones: bool = True,
-               mass_from_meta: bool = False, edge_speed_scale: float = 0.0) -> Path:
+               mass_kg: float | None = None, edge_speed_scale: float = 0.0) -> Path:
     """Joint kinematics + dynamics refinement of a refined body → ``human_optim/kindyn_1.npz``.
 
     Starts from a converged body and that body's contact labels, and optimizes the pose
@@ -691,20 +690,13 @@ def run_kindyn(source, pred: Path, cfg: HumanOptimConfig, device: str, *,
     — ``'kinematic_2'`` (default) or ``'kinematic_1'`` when the chain skips kinematics_2 —
     and with it the matching contact readout (``contacts_2`` / ``contacts_1``), measured
     on the very body this stage starts from. ``cones`` confines every contact force to a 45° friction pyramid
-    about its frame's contact normal. ``mass_from_meta`` reads the subject's measured
-    ``mass_kg`` from the ``meta.json`` beside the source video and solves with it
-    instead of the shape-baked mass (see :func:`build_dynamics_spec`), and
+    about its frame's contact normal. ``mass_kg`` is the subject's measured mass, solved
+    with instead of the shape-baked one (see :func:`build_dynamics_spec`), and
     ``edge_speed_scale`` (m/s) is its speed-dependent ``force_edge`` knob.
     """
     knobs = cfg.knobs
     pred = Path(pred)
     tag = "human_optim/kindyn_1"
-    mass_kg = None
-    if mass_from_meta:
-        meta_path = Path(source).parent / "meta.json"
-        mass_kg = float(json.loads(meta_path.read_text())["mass_kg"])
-        print(f"[{tag}] body mass from {meta_path}: {mass_kg:.1f} kg")
-
     if bodies not in ("kinematic_1", "kinematic_2"):
         raise SystemExit(f"[{tag}] [stages.kindyn_1].bodies must be 'kinematic_1' or "
                          f"'kinematic_2', got {bodies!r}")
@@ -854,7 +846,7 @@ def run_kindyn(source, pred: Path, cfg: HumanOptimConfig, device: str, *,
         cones=np.bool_(cones), cone_half_angle_deg=np.float32(half_angle),
         source_bodies=np.array(bodies, dtype="U16"),
         source_labels=np.array("auto", dtype="U8"),
-        mass_source=np.array("meta" if mass_from_meta else "shape", dtype="U8"),
+        mass_source=np.array("config" if mass_kg is not None else "shape", dtype="U8"),
         edge_speed_scale=np.float32(edge_speed_scale),
     )
     # Carry kinematics_1's pre-enforcement drift through, for the same reason kinematics_2

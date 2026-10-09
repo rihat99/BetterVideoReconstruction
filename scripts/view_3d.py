@@ -9,14 +9,14 @@ and every SMPL-X body source — ``original`` (converter output), ``prefit``, ``
 touching, green free) and, for ``kindyn_1``, the solved contact forces, the root's residual wrench
 and the joints coloured by torque. The ``body source`` dropdown picks the source; the ``layers``
 checkboxes toggle each kind; the sidebar video pane plays the source footage in sync
-(``[viewer].video = false`` turns it off). Clips with measured forces (peter rigs, OpenCap) add
-orange measured and blue plate-format arrows.
+(``[viewer].video = false`` turns it off). Clips with measured forces (peter rigs, Parkour, OpenCap)
+add orange measured arrows, OpenCap clips also our blue plate-format arrows.
 
 ``--scenes`` browses the ClimbingVideos scene DB, ``--bedlam`` the BEDLAM2 ground truth (one
-``ground truth`` source, contact labels and forces where ``scripts/label_bedlam2.py`` ran, video on);
-both alias the selected scenes into a throwaway ``out/``-shaped symlink farm. Knobs live in the
-config's ``[viewer]`` section. This script is where the dataset readers
-(``bvr/viewer/datasets_layers.py``) are plugged into the generic viewer.
+``ground truth`` source, contact labels and forces where ``datasets/bedlam2/label_bedlam2.py`` ran,
+video on); both alias the selected scenes into a throwaway ``out/``-shaped symlink farm. Knobs live
+in the config's ``[viewer]`` section. This script is where the dataset readers
+(``datasets/<name>/viewer.py``, ``datasets/_rigs.py``) are composed into the generic viewer.
 
 Usage::
 
@@ -32,11 +32,8 @@ import sys
 from functools import partial
 from pathlib import Path
 
-_REPO_ROOT = Path(__file__).resolve().parents[1]
-if str(_REPO_ROOT) not in sys.path:
-    sys.path.insert(0, str(_REPO_ROOT))
-
-from bvr.config import load_toml, section  # noqa: E402
+from bvr.config import load_toml, section
+from bvr.paths import REPO_ROOT
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -47,7 +44,7 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--bedlam", action="store_true",
                    help="browse the BEDLAM2 ground truth (video pane on); every scene unless "
                         "[viewer].scene_ids / sample / limit picks a set")
-    p.add_argument("--config", type=Path, default=_REPO_ROOT / "configs" / "pipeline.toml",
+    p.add_argument("--config", type=Path, default=REPO_ROOT / "configs" / "pipeline.toml",
                    help="pipeline TOML (default: configs/pipeline.toml)")
     cli = p.parse_args(sys.argv[1:] if argv is None else argv)
     if cli.scenes and cli.bedlam:
@@ -59,22 +56,35 @@ def main(argv: list[str] | None = None) -> int:
         "limit": "", "seed": 0,
     })
 
-    from bvr.viewer import datasets_layers, view_3d
+    from bvr.viewer import view_3d
     from bvr.viewer.app import CLIP_MARKERS
+    from bvr.viewer.loading import ClipData, load_clip_data
+    from datasets import _rigs
+    from datasets.bedlam2 import viewer as bedlam2
+    from datasets.climbingvideos import viewer as climbingvideos
+    from datasets.opencap import viewer as opencap
+
+    def read_clip(pred: Path, *, body, **opts) -> ClipData:
+        """``load_clip_data`` with the datasets plugged in: a BEDLAM2 scene reads its ``gt/``; any
+        other clip gets its measured forces (the rigs) and our plate-format forces (OpenCap)."""
+        if (pred / bedlam2.BEDLAM_MARKER).exists():
+            return bedlam2.load_bedlam_data(pred, body=body, video=opts["video"], video_dir=opts["video_dir"])
+        data = load_clip_data(pred, body=body, **opts)
+        data.extras += _rigs.measured_forces(pred, data, body) + opencap.plate_forces(pred, data)
+        return data
 
     # The footage and the ground-truth body are what a BEDLAM2 scene is checked against.
     view = partial(view_3d, port=args.port, up=args.up, point_size=args.point_size,
                    human_point_size=args.human_point_size, camera_scale=args.camera_scale,
                    show_smplx=args.smplx or cli.bedlam, human_max_points=args.human_max_points,
-                   video=args.video or cli.bedlam, read=datasets_layers.read_clip,
-                   markers=(*CLIP_MARKERS, datasets_layers.BEDLAM_MARKER))
+                   video=args.video or cli.bedlam, read=read_clip,
+                   markers=(*CLIP_MARKERS, bedlam2.BEDLAM_MARKER))
     if cli.scenes or cli.bedlam:
-        args.scenes = "bedlam" if cli.bedlam else "climbing"
         args.data_root = Path(args.data_root) if args.data_root else None
         args.scene_ids = args.scene_ids or None
         args.sample = int(args.sample) if args.sample != "" else None
         args.limit = int(args.limit) if args.limit != "" else None
-        datasets_layers.run_scene_db(args, view)
+        (bedlam2 if cli.bedlam else climbingvideos).run_scene_db(args, view)
         return 0
     if cli.target is None:
         p.error("give a predictions dir (out/ or out/<stem>/) or use --scenes / --bedlam")

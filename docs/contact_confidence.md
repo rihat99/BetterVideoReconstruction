@@ -7,7 +7,7 @@ often a label like this one turns out to be what a human annotator would have
 written. A learner uses it to weight its training loss. It never changes the
 label itself.
 
-The number is fitted, not designed. `scripts/calibrate_contact_confidence.py`
+The number is fitted, not designed. `datasets/climbingvideos/calibrate_contact_confidence.py`
 compares the automatic labels with the manual annotations on the corpus scenes
 that have them and fits a tiny model; the fitted numbers live in
 `[contact_confidence]` in `configs/human_optimization.toml`. The code is
@@ -129,7 +129,7 @@ stillness and its distance to a flip already say.
 ## Refitting
 
 ```bash
-uv run --no-sync python scripts/calibrate_contact_confidence.py \
+uv run --no-sync python datasets/climbingvideos/calibrate_contact_confidence.py \
     --config configs/human_optimization.toml --write
 ```
 

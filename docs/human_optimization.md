@@ -16,7 +16,7 @@ kinematics_1 → contacts_1 → kinematics_2 → contacts_2 → kindyn_1
 Each contact readout measures the body it is given; each later stage consumes
 the labels of the readout before it. No manual annotation is needed anywhere in
 that chain — manual labels are used only for evaluation
-(`scripts/score_frame_contacts.py`).
+(`datasets/examples/score_frame_contacts.py`).
 
 This doc explains the optimization problem each stage solves, every loss term,
 and the decisions behind them.
@@ -267,7 +267,7 @@ wall.
 only. That is the same axis contact is detected on, forced at and measured on
 everywhere else, so nothing has to be translated on the way in. Manual
 annotations (`../data/examples/data/<stem>.npz`, 10- or 14-joint schema) are
-metrics-only (`scripts/score_frame_contacts.py`).
+metrics-only (`datasets/examples/score_frame_contacts.py`).
 
 **Why the labels are not confidence-gated.** On a floating body every witness
 honestly reports near-zero confidence, so gating on confidence would veto

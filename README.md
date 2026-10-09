@@ -58,13 +58,13 @@ Off the default chain, each runs on a single clip's `out/<stem>/` dir:
 
 ### Dataset pipelines
 
-For the large scene database, `scripts/corpus.py` seeds SAM 3 from the per-scene
+For the large scene database, `datasets/climbingvideos/corpus.py` seeds SAM 3 from the per-scene
 YOLO track and sweeps every corpus stage over the batch (shared helpers in
-`scripts/scene_db.py`).
+`datasets/climbingvideos/scene_db.py`).
 Manual annotations are not used by `kinematics_1` or by `estimate_contacts`.
 They are used by the optional manual `kinematics_2` mode and offline to fit the
 label-confidence coefficients
-(`scripts/calibrate_contact_confidence.py`, whose numbers then live in the TOML).
+(`datasets/climbingvideos/calibrate_contact_confidence.py`, whose numbers then live in the TOML).
 
 For the measured datasets (LAAS Parkour, OpenCap LabValidation, the peter climbing
 rigs), `scripts/run_dataset.py --dataset <name>` runs the same chain over every clip;

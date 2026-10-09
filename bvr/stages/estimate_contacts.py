@@ -85,7 +85,7 @@ from bvr.human_optim import (
     project, transform_points, world_from_cam,
 )
 from bvr.human_optim import paths
-from bvr.human_optim.boards import FOOT_FRAMES
+from bvr.human_optim.contacts import FOOT_FRAMES
 from bvr.human_optim.confidence import (
     CONTACT_CONFIDENCE_METHOD, confidence_coefficients, fold_contacts, fold_drift,
     frame_report_joints, label_confidence,
@@ -152,7 +152,7 @@ def _load_config(path: Path) -> dict:
     # than saying so.
     if "contact_confidence" not in cfg:
         raise SystemExit(f"[estimate_contacts] {path} has no [contact_confidence] section — "
-                         "run scripts/calibrate_contact_confidence.py --write on it")
+                         "run datasets/climbingvideos/calibrate_contact_confidence.py --write on it")
     cfg["contact_confidence"] = confidence_coefficients(cfg["contact_confidence"])
     cfg.setdefault("runtime", {}).setdefault("device", "cuda")
     return cfg

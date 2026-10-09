@@ -73,7 +73,7 @@ older system libstdc++ (e.g. Ubuntu 22.04 GCC 12, which only exports up to
 `GLIBCXX_3.4.30`), mixing the two at runtime segfaults inside
 `Character.with_blend_shape` (see [momentum#939](https://github.com/facebookresearch/momentum/issues/939)).
 
-Every pymomentum-using script in `scripts/` imports `_pym_preload` first, which
+Every pymomentum-using stage in `bvr/stages/` imports `_pym_preload` first, which
 re-execs the interpreter with `LD_PRELOAD` pointed at the bundled libstdc++. If
 you invoke pymomentum outside these scripts, set it yourself:
 

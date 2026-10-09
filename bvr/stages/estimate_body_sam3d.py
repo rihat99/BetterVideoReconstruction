@@ -19,7 +19,7 @@ Two run modes:
   * **batch / manifest** — ``--source manifest.json`` with ``[sam3d].save_dir`` (a
     ``precompute_runner`` Step): loads SAM-3D-Body once and sweeps every scene,
     taking each scene's ``bboxes`` / ``camera`` paths from the manifest. This is
-    how ``scripts/corpus.py`` fans the stage across the ClimbingVideos
+    how ``datasets/climbingvideos/corpus.py`` fans the stage across the ClimbingVideos
     scene DB, where ``sam3`` / ``vggt`` live in their own feature trees.
 
 Run from CLI::

@@ -33,10 +33,10 @@ Runnable standalone and idempotent — it reads only ``geocalib/gravity.npz`` an
 so re-running rewrites the same cloud over the one it wrote before::
 
     uv run --no-sync python bvr/stages/build_support_scene.py \\
-        --predictions out/<clip>/_floorplane --config configs/human_optimization_floorplane.toml
+        --predictions out/<clip>/_floorplane --config datasets/opencap/configs/human_optimization_floorplane.toml
     uv run --no-sync python bvr/stages/build_support_scene.py \\
         --predictions out/<clip>/_floorplane --bodies kinematic_1 \\
-        --config configs/human_optimization_floorplane.toml
+        --config datasets/opencap/configs/human_optimization_floorplane.toml
 
 Writes::
 

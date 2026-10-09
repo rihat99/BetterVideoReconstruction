@@ -24,7 +24,7 @@ One logistic head per label class (the label says contact / the label says free)
     conf    = 1 / (1 + exp(-logit))
 
 The coefficients live in ``[contact_confidence]`` in the human-optimization TOML and
-are refitted by ``scripts/calibrate_contact_confidence.py``. See
+are refitted by ``datasets/climbingvideos/calibrate_contact_confidence.py``. See
 ``docs/contact_confidence.md``.
 
 Everything else was tried and dropped. On the annotated corpus rows — one per
@@ -197,7 +197,7 @@ def confidence_coefficients(section: dict) -> dict:
     for head in ("contact", "free"):
         if head not in section:
             raise ValueError(f"contact_confidence.{head} head is missing — "
-                             "run scripts/calibrate_contact_confidence.py --write")
+                             "run datasets/climbingvideos/calibrate_contact_confidence.py --write")
         values = {}
         for key in _HEAD_KEYS:
             if key not in section[head]:

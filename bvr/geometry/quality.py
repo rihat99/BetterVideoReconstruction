@@ -17,7 +17,7 @@ and balance_beam passes):
 
 Computed and saved by ``estimate_contacts`` (the earliest stage where all three
 signals exist — the residual comes from its force witness); the
-``scripts/diagnostics/scene_quality.py`` table imports the same functions.
+``scripts/scene_quality.py`` table imports the same functions.
 """
 
 from __future__ import annotations

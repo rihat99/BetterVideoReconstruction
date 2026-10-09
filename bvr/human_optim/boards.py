@@ -1,17 +1,18 @@
-"""Contact labels MEASURED by the force boards instead of estimated from the video.
+"""Contact labels MEASURED by a force rig instead of estimated from the video.
 
-The peter climbing rigs put one three-axis force board under each limb's hold, so on
-those clips contact is a measurement: a limb touches while its board reads a force.
-The boards say *which limb* and *when*. They cannot say which part of a hand or foot
-is touching, and the optimization puts its contact points on the finer contact
+A rig with one force sensor per limb — the peter climbing boards, a lab's force plates —
+measures contact: a limb touches while its sensor reads a force. The dataset's own script
+writes ``sensor_forces.npz`` (``reaction_world (N, 4, 3)`` in :data:`LIMBS` order, the
+reaction sense: force on the person). The sensors say *which limb* and *when*. They
+cannot say which part of a hand or foot is touching, and the optimization puts its contact points on the finer contact
 *frames* (palm, thumb, heel, big toe, ...). This module closes that gap in two steps:
 :func:`limb_contact` reads the measured force into a per-limb on/off series, and
 :func:`frame_contact` picks the frames of a loaded limb that the body actually holds
 against the wall.
 
-Shared by the three-camera ground-truth chain (``scripts/peter_gt/fit_multiview.py``)
-and the single-view variant stage (``bvr/stages/measure_contacts_boards.py``) so
-the two readings cannot drift apart.
+Shared by the single-view stage (``bvr/stages/measure_contacts_boards.py``) and the peter
+three-camera ground-truth chain (``datasets/peter/gt/fit_multiview.py``) so the two readings
+cannot drift apart.
 """
 
 from __future__ import annotations
@@ -20,12 +21,10 @@ from pathlib import Path
 
 import numpy as np
 
-#: Board channel order — every rig writes ``sensor_forces.npz`` in this order.
-LIMBS = ["left_hand", "right_hand", "left_foot", "right_foot"]
+from bvr.human_optim.contacts import FOOT_FRAMES, HAND_FRAMES
 
-#: Contact-frame name stems that belong to a hand / to a foot.
-HAND_FRAMES = ("palm", "palm_distal", "finger", "thumb")
-FOOT_FRAMES = ("heel", "ball_inner", "ball_outer", "big_toe", "toe_above")
+#: Sensor channel order — every rig writes ``sensor_forces.npz`` in this order.
+LIMBS = ["left_hand", "right_hand", "left_foot", "right_foot"]
 
 #: A loaded limb's frame must sit within ``near_m`` of the wall for at least this
 #: fraction of the span to carry the label (see :func:`frame_contact`).

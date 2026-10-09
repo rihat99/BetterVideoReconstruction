@@ -6,7 +6,8 @@ an info panel. Switching clips reads the new clip first (a clip that fails to re
 on screen), then removes the old clip's groups, so the timeline fits the new clip, and plays at the
 new clip's fps. Every drawing primitive comes from :mod:`bvr.viewer.layers`; this module only adds
 ``server.gui`` widgets and frames the browser camera on the person. Clips are read with
-``load_clip_data`` unless the caller passes a dataset-aware ``read`` (``scripts/view_3d.py`` does).
+``load_clip_data`` unless the caller passes a dataset-aware ``read`` (``scripts/view_3d.py`` does);
+a layer kind no core checkbox knows gets its own checkbox, off by default.
 """
 from __future__ import annotations
 
@@ -90,7 +91,8 @@ class App:
                 self.view_menu.on_update(lambda _: self._show_view())
         with gui.add_folder("body", order=_LATE + 1):
             self.source = gui.add_dropdown("source", ("(none)",), initial_value="(none)")
-        with gui.add_folder("layers", order=_LATE + 2):
+        self.layers_folder = gui.add_folder("layers", order=_LATE + 2)
+        with self.layers_folder:
             self.kinds = {key: gui.add_checkbox(label, initial_value=on) for key, (label, on) in KINDS.items()}
         for control in (self.source, *self.kinds.values()):
             control.on_update(lambda _: self._apply())
@@ -120,6 +122,11 @@ class App:
                 frames.close()                           # its panels are gone: free the decoder
             self.cache[clip] = self.data = data
             self.items = clip_layers(data, self.body, **self.draw_opts)
+            for kind in dict.fromkeys(item.kind for item in self.items):
+                if kind not in self.kinds:           # a dataset's own layer: its kind is the checkbox label
+                    with self.layers_folder:
+                        self.kinds[kind] = self.viewer.server.gui.add_checkbox(kind, initial_value=False)
+                    self.kinds[kind].on_update(lambda _: self._apply())
             for item in self.items:
                 item.layer.listed = False            # the app's own checkboxes toggle them
                 self.viewer.add(item.layer, item.group, valid=item.valid)
@@ -207,8 +214,9 @@ def info_markdown(data: ClipData) -> str:
     gtext, ground = "-", ""
     if gravity is not None:
         g = gravity["g"]
-        tag = {"ground": "ground plane", "bedlam2_gt": "BEDLAM2 ground truth", "fallback_down": "default down"}.get(
-            gravity["source"], f"GeoCalib, spread {gravity['spread']:.1f}°")
+        source = gravity["source"]            # a dataset's own tag (ground-truth gravity) prints as it is
+        tag = {"ground": "ground plane", "geocalib": f"GeoCalib, spread {gravity['spread']:.1f}°",
+               "fallback_down": "default down"}.get(source, source)
         gtext = f"[{g[0]:+.2f} {g[1]:+.2f} {g[2]:+.2f}] ({tag})"
         if gravity["ground"] is not None:
             ground = f" · ground ∠prior {gravity['ground']['angle_deg']:.1f}°"

@@ -1,10 +1,11 @@
-"""Contact labels MEASURED by the force boards, for the peter climbing rigs.
+"""Contact labels MEASURED by a force rig (``sensor_forces.npz``) instead of estimated.
 
-The drop-in replacement for ``estimate_contacts.py`` on a clip whose holds are
-instrumented: instead of inferring contact from how near and how still a body part
-is, it reads the contact state off the rig. Each of the four limbs has its own
-three-axis force board, so the boards say exactly which limb is loaded and when —
-ground truth for everything downstream that consumes contact labels.
+The drop-in replacement for ``estimate_contacts.py`` on a clip with a force sensor under
+each limb (the peter boards, the Parkour and OpenCap plates): instead of inferring contact
+from how near and how still a body part is, it reads the contact state off the rig. The
+dataset's own script writes ``human_optim/sensor_forces.npz`` in :mod:`bvr.human_optim.boards`
+schema, so the sensors say exactly which limb is loaded and when — ground truth for
+everything downstream that consumes contact labels.
 
 What the boards cannot say is *which part* of a hand or foot is touching, and the
 optimization's contact points are the finer contact **frames** (palm, thumb, heel,
@@ -19,9 +20,9 @@ The artifact is the same schema-2 contacts file the pipeline's ``kinematics_2`` 
 
 Run from CLI::
 
-    .venv/bin/python bvr/stages/measure_contacts_boards.py \\
+    python -m bvr.stages.measure_contacts_boards \\
         --predictions out/clip/ --bodies kinematic_1 \\
-        --config configs/human_optimization_peter.toml
+        --config datasets/peter/configs/human_optimization_peter.toml
 
 Reads:  human_optim/<bodies>.npz, human_optim/sensor_forces.npz,
         geometry/scene.npz, geometry/transform.npz
@@ -40,15 +41,12 @@ import torch
 from scipy.spatial import cKDTree
 
 from bvr import determinism
-from bvr.paths import REPO_ROOT
 from bvr.body import load_body
 from bvr.config import load_toml
 from bvr.human_optim import paths
 from bvr.human_optim.boards import LIMBS, frame_contact, limb_contact, limb_of_frame
 from bvr.human_optim.qmath import normalize_q
 from bvr.npz_io import atomic_savez
-
-_DEFAULT_CONFIG = REPO_ROOT / "configs" / "human_optimization_peter.toml"
 
 #: What the labels mean, stamped into the artifact. Shared verbatim with the
 #: three-camera ground-truth chain so the two trees are directly comparable.
@@ -171,7 +169,8 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--bodies", default="kinematic_1", choices=["kinematic_1", "kinematic_2"],
                     help="which refined body the frame choice is read on (its contacts tag "
                          "follows: kinematic_1 -> contacts_1, kinematic_2 -> contacts_2)")
-    ap.add_argument("--config", type=Path, default=_DEFAULT_CONFIG)
+    ap.add_argument("--config", type=Path, required=True,
+                    help="the dataset's human-optimization TOML ([boards] thresholds + [contacts] frames)")
     args = ap.parse_args(argv)
     run(args.predictions, args.config, bodies=args.bodies)
     return 0

@@ -69,7 +69,7 @@ def run(source, predictions_dir, config_path, *, stages=None) -> None:
                    overlay=bool(kd.get("overlay", False)),
                    bodies=str(kd.get("bodies", "kinematic_2")),
                    cones=bool(kd.get("cones", True)),
-                   mass_from_meta=bool(kd.get("mass_from_meta", False)),
+                   mass_kg=float(kd["mass_kg"]) if kd.get("mass_kg") else None,
                    edge_speed_scale=float(kd.get("edge_speed_m_s", 0.0)))
 
 

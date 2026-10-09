@@ -57,8 +57,6 @@ from pathlib import Path
 
 from bvr.paths import DATA_ROOT, REPO_ROOT
 
-_CONFIGS = REPO_ROOT / "configs"
-
 # step → (stage module under bvr.stages, output path relative to the clip's output tree).
 # These five sweep every clip in one process; the rest run per clip.
 MANIFEST_STEPS: dict[str, tuple[str, str]] = {
@@ -104,7 +102,7 @@ GEOMETRY_LINKS = ("transform.npz", "scale.npz", "human.npz", "prefit.npz")
 
 def _load_datasets() -> tuple[dict[str, dict], dict[str, dict]]:
     """``configs/datasets.toml``, every data path made absolute under ``DATA_ROOT``."""
-    with open(_CONFIGS / "datasets.toml", "rb") as handle:
+    with open(REPO_ROOT / "configs" / "datasets.toml", "rb") as handle:
         config = tomllib.load(handle)
     for dataset in config["datasets"].values():
         for key in ("root", "out", "out_multi"):
@@ -221,8 +219,7 @@ def _clip_command(step: str, videos: list[Path], clip_dir: Path, pipeline_config
         # The renderer is pointed at the run directory, not the farm: it reads the clip's
         # real video and geometry off the tree and draws the run it is given.
         run_dir = clip_dir.parent / f"human_optim_{variant}" if variant else clip_dir / "human_optim"
-        return [sys.executable, str(REPO_ROOT / "scripts" / "diagnostics" / "render_kindyn_overlays.py"),
-                str(run_dir)]
+        return [sys.executable, "-m", "datasets.peter.render_kindyn_overlays", str(run_dir)]
     if step == "fuse":
         return [sys.executable, "-m", "bvr.stages.fuse_geometry",
                 "--source", ",".join(str(v) for v in videos),
@@ -372,7 +369,7 @@ def main(argv: list[str] | None = None) -> int:
                         help="'i/n': process every n-th clip, so n runs share one output tree")
     parser.add_argument("--variant", default=None,
                         help=f"re-run {'/'.join(VARIANT_STEPS)} into <clip>/human_optim_<variant>/ "
-                             "with human_optimization_<variant>.toml, leaving human_optim/ intact; "
+                             "with configs/human_optimization_<variant>.toml, leaving human_optim/ intact; "
                              f"{'/'.join(VARIANT_CHAINS)} run their own chain (configs/datasets.toml)")
     parser.add_argument("--views", default=None,
                         help="comma-separated cameras of a rig dataset; several reconstruct the "
@@ -407,9 +404,9 @@ def main(argv: list[str] | None = None) -> int:
         print(f"[run_dataset] viewer root: {build_view_farm(out_root, args.variant, dry_run=args.dry_run)}"
               f"{'  (dry run)' if args.dry_run else ''}")
         return 0
-    pipeline_config = _CONFIGS / dataset["pipeline_config"]
-    human_config = _CONFIGS / (recipe.get("config", f"human_optimization_{args.variant}.toml")
-                               if args.variant else dataset["human_config"])
+    pipeline_config = REPO_ROOT / dataset["pipeline_config"]
+    human_config = REPO_ROOT / (recipe.get("config", f"configs/human_optimization_{args.variant}.toml")
+                                if args.variant else dataset["human_config"])
 
     root = dataset["root"]
     if not root.is_dir():
