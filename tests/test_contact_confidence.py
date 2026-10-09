@@ -9,7 +9,6 @@ import torch
 
 from bvr.config import load_config
 from bvr.human_optim.confidence import (
-    CONTACT_CONFIDENCE_METHOD,
     confidence_coefficients,
     fold_contacts,
     fold_drift,
