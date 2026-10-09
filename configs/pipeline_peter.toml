@@ -11,7 +11,7 @@
 run = ["sam3", "vggt", "sapiens", "sam3d", "smplx", "fuse", "scale", "human_optimization"]
 
 [runtime]
-device = "cuda"             # compute device shared by stages and the viewer
+device = "cuda"             # compute device of the stages (the viewer poses bodies on the CPU)
 
 [sam3]                      # SAM 3 video tracker → sam3/ (per-object masks + bboxes.npz)
 text = "person"             # grounding prompt for frame-0 detection
@@ -128,7 +128,6 @@ port = 8082                # viser server port
 point_size = 0.02          # scene point radius in metres
 human_point_size = 0.01    # human point radius in metres
 camera_scale = 0.1         # initial camera-frustum size in metres
-camera_stride = 1          # show every Nth camera frustum
 up = "-y"                  # viewer up direction
 smplx = true               # load fitted SMPL-X bodies
 human_max_points = 6000    # max human points per frame and climber; 0 keeps all

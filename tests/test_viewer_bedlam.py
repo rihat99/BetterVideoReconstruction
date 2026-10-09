@@ -11,9 +11,9 @@ from __future__ import annotations
 
 import numpy as np
 
-from tools.viewer.app import _discover_clips, _is_clip
-from tools.viewer.loading import _bedlam_gravity
-from tools.viewer.scene import _GROUND_GRID_MULT
+from tools.viewer.app import CLIP_MARKERS, _discover_clips, _is_clip
+from tools.viewer.datasets_layers import BEDLAM_MARKER, _bedlam_gravity
+from tools.viewer.layers import _GROUND_GRID_MULT
 
 _FLOOR_Y = -0.015           # BEDLAM2's ground_height: up is -y, so the floor is just below 0
 _UP = np.array([0.0, -1.0, 0.0], np.float32)
@@ -34,10 +34,8 @@ def _write_gravity(tmp_path, floor_y: float = _FLOOR_Y):
 
 
 def _person(pelvis: np.ndarray):
-    """One entry of the ``people`` list; only joint 0 (the pelvis) is read."""
-    bone_pos = np.zeros((len(pelvis), 52, 3), np.float32)
-    bone_pos[:, 0, :] = pelvis
-    return {"bone_pos": bone_pos}
+    """One entry of the ``pelvis`` list: a person's pelvis track over their posed frames."""
+    return np.asarray(pelvis, np.float32)
 
 
 def _walk(origin, steps: int = 60, span: float = 2.0):
@@ -107,7 +105,7 @@ def test_gravity_is_the_unit_down_of_the_ground_truth(tmp_path):
 
 
 def test_people_that_never_pose_are_skipped(tmp_path):
-    """``people`` carries ``None`` for anyone with no valid frame."""
+    """``pelvis`` carries ``None`` for anyone with no valid frame."""
     gt = _write_gravity(tmp_path)
     centers = np.zeros((3, 3), np.float32)
     pelvis = _walk([4.0, -1.0, 0.0])
@@ -128,9 +126,11 @@ def test_a_fused_tree_and_a_bedlam_scene_are_both_clips(tmp_path):
     empty = tmp_path / "nothing"
     (empty / "gt").mkdir(parents=True)          # a gt/ dir alone is not enough
 
-    assert _is_clip(fused)
-    assert _is_clip(bedlam)
-    assert not _is_clip(empty)
-    assert _discover_clips(tmp_path) == [bedlam, fused]      # sorted by name
-    assert _discover_clips(bedlam) == [bedlam]               # pointed at one scene
-    assert _discover_clips(empty) == []
+    markers = (*CLIP_MARKERS, BEDLAM_MARKER)                  # what scripts/view_3d.py passes
+    assert _is_clip(fused, markers)
+    assert _is_clip(bedlam, markers)
+    assert not _is_clip(bedlam)                              # the generic viewer alone does not read BEDLAM2
+    assert not _is_clip(empty, markers)
+    assert _discover_clips(tmp_path, markers) == [bedlam, fused]      # sorted by name
+    assert _discover_clips(bedlam, markers) == [bedlam]               # pointed at one scene
+    assert _discover_clips(empty, markers) == []

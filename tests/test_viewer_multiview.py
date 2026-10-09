@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import numpy as np
 
-from tools.viewer.loading import _fov_y_rad, _load_view_cameras
+from tools.viewer.loading import _load_view_cameras, fov_y_rad
 
 
 def _pixel_k(fx: float, fy: float, w: int, h: int) -> np.ndarray:
@@ -17,7 +17,7 @@ def test_fov_comes_straight_from_vggt_when_recorded(tmp_path):
              intrinsics_px_orig=np.stack([_pixel_k(900.0, 900.0, 1920, 1080)] * 2),
              image_height=np.int32(1080))
     with np.load(path) as t:
-        np.testing.assert_allclose(np.degrees(_fov_y_rad(t)), [40.0, 50.0], atol=1e-5)
+        np.testing.assert_allclose(np.degrees(fov_y_rad(t)), [40.0, 50.0], atol=1e-5)
 
 
 def test_fov_falls_back_to_the_pixel_focal_length(tmp_path):
@@ -26,7 +26,7 @@ def test_fov_falls_back_to_the_pixel_focal_length(tmp_path):
     np.savez(path, intrinsics_px_orig=np.stack([_pixel_k(900.0, 540.0, 1920, 1080)] * 3),
              image_height=np.int32(1080))
     with np.load(path) as t:
-        np.testing.assert_allclose(np.degrees(_fov_y_rad(t)), [90.0] * 3, atol=1e-5)
+        np.testing.assert_allclose(np.degrees(fov_y_rad(t)), [90.0] * 3, atol=1e-5)
 
 
 def test_no_cameras_npz_is_not_a_multi_view_clip(tmp_path):

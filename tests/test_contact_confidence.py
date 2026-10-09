@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+from types import SimpleNamespace
 
 import numpy as np
 import pytest
@@ -16,7 +17,7 @@ from tools.human_optim.confidence import (
     label_confidence,
     transition_seconds,
 )
-from tools.viewer.loading import _load_skeleton
+from tools.viewer.loading import body_source, contact_labels
 
 _REPO_ROOT = Path(__file__).resolve().parents[1]
 
@@ -221,65 +222,76 @@ def test_joint_drift_rejects_invalid_window_endpoints():
 
 _JOINT_NAMES = np.asarray(["pelvis", "left_wrist", "right_wrist"])
 _FRAME_NAMES = np.asarray(["palm_left", "palm_right"])
+# The reader only asks the posed body which contact frames it reports, so a stand-in replaces the model.
+_BODY = SimpleNamespace(contact_frame_names=tuple(_FRAME_NAMES))
 
 
-def _viewer_clip(tmp_path, *, contacts: dict | None) -> None:
-    """A minimal ``out/<stem>/`` tree for the viewer loader: a body npz + contacts."""
+def _viewer_clip(tmp_path, *, contacts: dict | None):
+    """A minimal ``out/<stem>/`` tree for the viewer loader: a body npz + contacts.
+
+    Returns the contact artifact's path and the body source the labels are read for."""
     human = tmp_path / "human_optim"
     human.mkdir()
-    np.savez(
-        human / "kinematic_1.npz", parents=np.asarray([-1, 0, 0], np.int32),
-        joint_names=_JOINT_NAMES, object_ids=np.asarray([0], np.int32),
-        num_frames=np.int32(2),
-    )
+    np.savez(human / "kinematic_1.npz", q=np.zeros((1, 2, 211), np.float32),
+             betas=np.zeros((1, 10), np.float32), valid_mask=np.ones((1, 2), bool),
+             object_ids=np.asarray([0], np.int32))
     if contacts is not None:
         np.savez(human / "contacts_1.npz", **contacts)
+    return human / "contacts_1.npz", body_source(human / "kinematic_1.npz", 2)
 
 
 def test_viewer_reads_contact_frame_labels(tmp_path):
     contact = np.asarray([[[True, False], [False, False]]])          # (P=1, N=2, F=2)
-    _viewer_clip(tmp_path, contacts=dict(
+    path, src = _viewer_clip(tmp_path, contacts=dict(
         contact_label_schema=np.int32(2), contact_label_method=np.str_("frames-v1"),
         frame_contact=contact, contact_frame_names=_FRAME_NAMES,
         frame_parent_joint=np.asarray([1, 2], np.int64),
         joint_names=_JOINT_NAMES, object_ids=np.asarray([0], np.int32)))
 
-    loaded = _load_skeleton(tmp_path, frame_names=list(_FRAME_NAMES))
-    assert loaded["joint_names"] == list(_JOINT_NAMES)
-    assert np.array_equal(loaded["frame_contact"], contact)
-    assert loaded["frame_names"] == list(_FRAME_NAMES)
-    assert np.array_equal(loaded["frame_parent"], [1, 2])
-    assert np.array_equal(loaded["contact_oids"], [0])
+    assert src.q.shape == (1, 2, 211) and np.array_equal(src.object_ids, [0])
+    assert np.array_equal(contact_labels(path, _BODY, src), contact)
 
 
 def test_viewer_drops_contact_labels_for_a_different_frame_set(tmp_path):
-    _viewer_clip(tmp_path, contacts=dict(
+    path, src = _viewer_clip(tmp_path, contacts=dict(
         contact_label_schema=np.int32(2), contact_label_method=np.str_("frames-v1"),
         frame_contact=np.zeros((1, 2, 2), bool), contact_frame_names=_FRAME_NAMES,
         frame_parent_joint=np.asarray([1, 2], np.int64),
         joint_names=_JOINT_NAMES, object_ids=np.asarray([0], np.int32)))
 
-    with pytest.warns(RuntimeWarning, match="incompatible contact artifact"):
-        loaded = _load_skeleton(tmp_path, frame_names=["heel_left", "heel_right"])
-    assert loaded["frame_contact"] is None
-    assert loaded["joint_names"] == list(_JOINT_NAMES)   # the skeleton still loads
+    feet = SimpleNamespace(contact_frame_names=("heel_left", "heel_right"))
+    with pytest.warns(RuntimeWarning, match="ignoring contact labels"):
+        assert contact_labels(path, feet, src) is None
+    assert src.valid.all()                                   # the body itself still loads
 
 
-def test_viewer_ignores_legacy_per_joint_contact_file(tmp_path):
-    _viewer_clip(tmp_path, contacts=dict(
+def test_viewer_ignores_legacy_or_stale_contact_files(tmp_path):
+    path, src = _viewer_clip(tmp_path, contacts=dict(
         joint_contact=np.zeros((1, 2, 3), bool), label_confidence=np.ones((1, 2, 3), np.float32),
         contact_label_schema=np.int32(1), joint_names=_JOINT_NAMES,
         object_ids=np.asarray([0], np.int32)))
+    assert contact_labels(path, _BODY, src) is None          # per-joint era: no frame labels at all
 
-    with pytest.warns(RuntimeWarning, match="label schema 1"):
-        loaded = _load_skeleton(tmp_path)
-    assert loaded["frame_contact"] is None
-    assert loaded["joint_names"] == list(_JOINT_NAMES)   # the skeleton still loads
+    np.savez(path, contact_label_schema=np.int32(1), frame_contact=np.zeros((1, 2, 2), bool),
+             contact_frame_names=_FRAME_NAMES, object_ids=np.asarray([0], np.int32))
+    with pytest.warns(RuntimeWarning, match="schema 1"):
+        assert contact_labels(path, _BODY, src) is None      # frame labels of an older schema
 
 
-def test_viewer_skeleton_without_a_contact_file(tmp_path):
-    _viewer_clip(tmp_path, contacts=None)
+def test_viewer_refuses_contact_labels_shaped_for_another_body(tmp_path):
+    labels = dict(contact_label_schema=np.int32(2), contact_frame_names=_FRAME_NAMES,
+                  object_ids=np.asarray([0], np.int32))
+    path, src = _viewer_clip(tmp_path, contacts=dict(labels, frame_contact=np.zeros((1, 3, 2), bool)))
+    with pytest.warns(RuntimeWarning, match="incompatible contact artifact"):
+        assert contact_labels(path, _BODY, src) is None      # 3 frames for a 2-frame body
 
-    loaded = _load_skeleton(tmp_path)
-    assert loaded["frame_contact"] is None
-    assert np.array_equal(loaded["parents"], [-1, 0, 0])
+    np.savez(path, **labels, frame_contact=np.zeros((1, 2, 1), bool))
+    with pytest.warns(RuntimeWarning, match="incompatible contact artifact"):
+        assert contact_labels(path, _BODY, src) is None      # 1 column for 2 frame names
+
+
+def test_viewer_body_without_a_contact_file(tmp_path):
+    path, src = _viewer_clip(tmp_path, contacts=None)
+
+    assert contact_labels(path, _BODY, src) is None
+    assert src.q.shape == (1, 2, 211) and src.valid.shape == (1, 2)
