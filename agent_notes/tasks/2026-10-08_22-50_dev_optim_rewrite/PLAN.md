@@ -14,6 +14,7 @@ Investigations: subagents/inv_A_br_optim.md (BR optim API, parity probe bit-exac
 8. Layout: `bvr/` installable package (problems/, residuals, contacts, geometry, body, viewer, stages); pipeline.py + run_dataset.py → one clip-root runner on configs/datasets.toml; corpus.py → datasets/climbingvideos.
 9. Configs: base + overrides loader; datasets keep only their delta; one loader path.
 10. Viewer rebuilt on BR/BH dev layers; visual changes accepted.
+12. (2026-10-09 02:00) Force arrows must be clear solid arrows as in the old viewer (user saw the rebuilt viewer's cone-on-hairline arrows). → BR dev gets a solid ArrowsLayer style (step G2); BVR force/wrench/sensor/gravity/normal arrows use it.
 11. Dev runs never write into main's trees: BVR_DATA_ROOT=/home/rikhat.akizhanov/better/data_dev (scratch copy of the regression clips' upstream outputs).
 
 ## Steps (one commit each on dev; agents do not commit unless the brief says so)
