@@ -29,7 +29,7 @@ limb forces pointing against each other partially cancel in it.
 ``peter/out_climb_wall_3_single/`` — the same demonstrator wall, 2026-09 session
 (two climbers, wall at 0 / 16 / 32 degrees, the camera moved between the three).
 Read exactly like climb_wall_2: ``sensor_forces.npz`` written by
-``datasets/peter/peter_sensor_forces.py`` with that inclination's own datasheet rotation.
+``datasets/peter/sensor_forces.py`` with that inclination's own datasheet rotation.
 
 ``peter/climb_wall_3_gt/human/`` — the climb_wall_3 clips reconstructed from all THREE
 calibrated cameras (the ground-truth chain, ``datasets/peter/gt/``). Drawn on the

@@ -29,7 +29,7 @@ The clips are ``estmf_inputs.py``'s, per dataset:
   (``--step 3``): exactly 20 Hz, no resampling, the rate the weights assume. ``--step 1``
   feeds all 60 fps frames instead and then ``constants.dt`` must be set to 1/60 by hand.
   The video frame each row came from is written into the json as ``video_frames`` so
-  ``opencap_physpt_export.py`` can put the forces back on the video's timeline.
+  ``datasets/opencap/physpt_export.py`` can put the forces back on the video's timeline.
   ``--step`` / ``--offset`` apply to OpenCap only.
 
 Writes ``../other/PhysPT/<dataset>/<clip>_sam3d.json``. Run with the BVR environment::

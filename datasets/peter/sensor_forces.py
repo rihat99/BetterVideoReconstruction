@@ -17,8 +17,8 @@ REACTION sense (force on the climber, comparable to the predicted contact
 forces): ``reaction_world (N, 4, 3)`` per channel and ``total_world (N, 3)``.
 
 Usage:
-    uv run python datasets/peter/peter_sensor_forces.py --tree out_climb_wall_2_single
-    uv run python datasets/peter/peter_sensor_forces.py [--tree out_climb_wall_3_single]
+    uv run python datasets/peter/sensor_forces.py --tree out_climb_wall_2_single
+    uv run python datasets/peter/sensor_forces.py [--tree out_climb_wall_3_single]
 """
 from __future__ import annotations
 
@@ -104,7 +104,7 @@ def main() -> None:
     dataset = args.tree.removeprefix("out_").removesuffix("_single").removesuffix("_multi")
     gt = PETER / dataset
     if dataset not in RIGS:
-        raise SystemExit(f"[peter_sensor_forces] no rig calibration for {dataset!r}")
+        raise SystemExit(f"[sensor_forces] no rig calibration for {dataset!r}")
     rotation, method, calib_clips, note = RIGS[dataset]
     clips = sorted(p.name for p in gt.iterdir() if p.is_dir() and (p / "forces.npz").exists())
     for clip in clips:

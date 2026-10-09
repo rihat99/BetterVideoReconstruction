@@ -18,7 +18,7 @@ For every selected clip of ``peter/climb_wall_3/`` this writes
 * ``geocalib/gravity.npz`` — the inclination's gravity (copied from the
   single-view run: same world, the cam_left camera frame).
 * ``sensor_forces.npz`` — the four boards' measured forces per video frame,
-  rotated into the world (``datasets/peter/peter_sensor_forces.py``'s per-inclination
+  rotated into the world (``datasets/peter/sensor_forces.py``'s per-inclination
   board-to-world map).
 
 The camera set (cam_3 pose) follows the recording, see
@@ -41,7 +41,7 @@ import numpy as np
 import torch
 
 
-from datasets.peter.peter_sensor_forces import R_CW3_WALL_TO_WORLD, per_frame
+from datasets.peter.sensor_forces import R_CW3_WALL_TO_WORLD, per_frame
 from bvr.geometry.intrinsics import normalize_K
 from bvr.geometry.normals import estimate_point_normals
 from bvr.paths import REPO_ROOT

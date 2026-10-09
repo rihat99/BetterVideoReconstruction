@@ -2,7 +2,7 @@
 
 Two plates under a laboratory floor, filtered and already assigned per foot, and a
 calibration chain that reaches our world without a single fitted parameter
-(``datasets/opencap/opencap_sensor_forces.py``). Nothing in the reconstruction ever sees a plate,
+(``datasets/opencap/sensor_forces.py``). Nothing in the reconstruction ever sees a plate,
 so every number below is an out-of-sample measurement of the force solve.
 
 Per clip and pooled over all of them, both feet, over the frames the plates saw and the
@@ -26,7 +26,7 @@ reconstruction called valid:
   frames where the plate total clears :data:`CONTACT_N`. Below that there is no measured
   split to compare against: normalising a zero total turns any estimate into a flat 50 pp.
 * **phantom** — mean of OUR vertical foot force over the frames where that foot's plate
-  was watching and read under :data:`~opencap_plates.LOADED_N`. Support we invented: a
+  was watching and read under :data:`~plates.LOADED_N`. Support we invented: a
   swing foot the contact labels kept in contact. It never enters ``share err``, so it gets
   its own column.
 * **hand |F|** / **hand max** — mean and max size of our two hand forces. The ground truth
@@ -83,9 +83,9 @@ import matplotlib.pyplot as plt  # noqa: E402
 import numpy as np
 
 
-from datasets.opencap.opencap_plates import LOADED_N
+from datasets.opencap.plates import LOADED_N
 from datasets._common import _limb_members
-from bvr.human_optim.boards import LIMBS
+from bvr.human_optim.measured_contacts import LIMBS
 from datasets.opencap.paths import LABVALIDATION
 
 PROCESSED = LABVALIDATION / "processed"

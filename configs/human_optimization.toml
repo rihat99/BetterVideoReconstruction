@@ -433,7 +433,7 @@ smear_med_max = 2.0        # median along-ray human-cloud smear above this = "de
 [contact_confidence]
 drift_floor_m = 0.005         # log(drift + floor)
 transition_cap_s = 1.0        # seconds to the nearest label change, capped
-fit = "2026-09-12 — annotated ClimbingVideos scenes after the manual-label check (datasets/climbingvideos/calibrate_contact_confidence.py --write)"
+fit = "2026-09-12 — annotated ClimbingVideos scenes after the manual-label check"
 
 [contact_confidence.contact]    # the label says contact
 intercept = 0.000000

@@ -23,12 +23,14 @@ and the decisions behind them.
 
 ## The engine
 
-All fitting stages share one small engine, `bvr/optim.py`. A stage describes its fit
-as a **Problem**: the tensors being optimized (for kinematics, the per-frame body
-configuration `q`), one `forward` that poses the body once per iteration, and a set of
-named **loss terms** that read the posed body. **Phases** then drive the fit: each
-phase has its own iteration budget, optimizer (Adam or L-BFGS), weight column, and a
-mask saying which degrees of freedom may move.
+All fitting stages run on BetterRobot's optimizer (`better_robot.optim`), through
+the small glue in `bvr/human_optim/solve.py`. A stage describes its fit as a
+**Problem**: the tensors being optimized (for kinematics, the per-frame body
+configuration `q`), one cached `forward` that poses the body once per iteration into a
+lazy `State`, and a set of named scalar **loss terms** that read it. **Phases** then
+drive the fit (`better_robot.optim.run`): each phase has its own iteration budget,
+optimizer (Adam or L-BFGS), weight column, and a mask saying which degrees of freedom
+may move.
 
 A term is active in a phase exactly when its weight there is non-zero — so the weight
 tables in the TOML *are* the objective, and turning a term off means writing a zero,

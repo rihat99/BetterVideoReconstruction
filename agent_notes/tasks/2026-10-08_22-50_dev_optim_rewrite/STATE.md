@@ -1,4 +1,4 @@
-# STATE — BetterVideoReconstruction (dev worktree) / 2026-10-08_22-50_dev_optim_rewrite (updated 2026-10-09 10:55 Dubai)
+# STATE — BetterVideoReconstruction (dev worktree) / 2026-10-08_22-50_dev_optim_rewrite (updated 2026-10-09 11:40 Dubai)
 
 ## Pointers
 - Task status: PLAN.md final (11 decisions + off-hours assumptions); step 2 DONE + committed (dev 46ebb69 code, a7027b9 notes; report_2 §4 gate PASS); step 3 committed (fffc58a); step 5 committed (9796bba); step 4 committed (28f023e), step 6 running; REPORT.md not started.
@@ -15,7 +15,7 @@
 
 
 ## Next steps
-1. Step 4 DONE: 4a e2e7bb7, 4b d282814, 4c 28f023e (base+override configs, bvr/runner.py + one scripts/pipeline.py, full 4-clip chain bit-identical to human_optim_dev3, F1 0.912/0.931, pytest 234/4, 57/57 --help). Step 6 (mars_top, brief_6_env_docs.md + addendum: Option C env, cleanups, docs) RUNNING since 10:55 → report_6_env_docs.md → commit 'Dev 7/N'. Then adversarial review (mars_aux) of the whole dev branch vs main, fixes, REPORT.md, drop index line.
+1. Step 4 DONE: 4a e2e7bb7, 4b d282814, 4c 28f023e (base+override configs, bvr/runner.py + one scripts/pipeline.py, full 4-clip chain bit-identical to human_optim_dev3, F1 0.912/0.931, pytest 234/4, 57/57 --help). Step 6 (mars_top, brief_6_env_docs.md + addendum: Option C env, cleanups, docs) RUNNING since 10:55 → report_6_env_docs.md → commit 'Dev 7/N'. Adversarial review part 1 DONE (artifacts/review_R.md: runner --source resume semantics changed [real regression], load_config silent merge, BEDLAM2 forces main vs dev close-not-identical (max 20 N of 390), stale text, orphans); part 2 (mars_aux) RUNNING since 11:40: prefit/converter/label_amass/floorplane/fit_betas checks. Then step 7 (brief_7_review_fixes.md, mars_top after step 6 commits) → commit 'Dev 8/N' → REPORT.md → drop index line.
 2. Then step 4 (bvr/ package, datasets/<name>/ split, retire list, base+override configs, single runner, corpus → datasets/climbingvideos), step 6 (Option C env, docs, adversarial review, REPORT.md), TG ping (TG not configured on this machine: token missing in ~/.config/autoresearch/telegram.env).
 
 ## Assumptions pending user confirmation

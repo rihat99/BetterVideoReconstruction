@@ -1,96 +1,96 @@
 # BetterVideoReconstruction
 
-Reconstruct a **per-person SMPL-X body trajectory** from a monocular video.
-Given a clip, the pipeline tracks everyone in it, recovers the camera, fits a 3D
-body every frame for each tracked person, converts each to SMPL-X, fuses the
-up-to-scale point clouds, anchors the scene's metric scale to the human body
-(rescaling the fused geometry in place), and runs a
-**visually-guided kinematic refinement** (2D reprojection + depth chamfer + pose
-prior + acceleration/jerk smoothness). Standalone SMPL-X stages then add scene
-contact, world-frame gravity, and per-contact-joint **forces** via inverse dynamics
-(RNEA).
+Reconstruct a **per-person SMPL-X body trajectory** from one monocular video,
+and the **contact forces** acting on it.
 
-It is the video-focused sibling of
-[`BetterImageReconstruction`](../BetterImageReconstruction) (image/scene) and
-[`BetterHumanForce`](../BetterHumanForce) (the original research repo this was
-split from). All three sit next to the [`BetterRobot`](../BetterRobot)
-PyTorch-native robotics library, which provides the kinematics, RNEA, and
-optimization residuals used here.
-
-## Pipeline
-
-The default chain (`scripts/pipeline.py --source`) runs these stages in order:
+Given a clip, the chain tracks everyone in it (SAM 3), recovers the camera and
+depth (VGGT-Omega), fits a 3D body to every tracked person in every frame
+(SAM-3D-Body), converts it to SMPL-X, fuses the depth into a scene point cloud,
+anchors the scene's metric scale to the human body, and refines the bodies
+against the video (**visually-guided kinematic refinement**: 2D keypoints, depth
+chamfer, pose prior, smoothness). Standalone stages then detect scene contact on
+the refined bodies, estimate gravity, and solve pose and per-contact forces
+together by inverse dynamics (`kindyn_1`).
 
 ```
 video ─▶ sam3 ─▶ vggt ─▶ sapiens ─▶ sam3d ─▶ smplx ─▶ fuse ─▶ scale ─▶ kinematics_1
+                                   ─▶ contacts_1 ─▶ kinematics_2 ─▶ contacts_2 ─▶ kindyn_1
 ```
 
-| Stage | Model | Output (under `out/<stem>/`) |
-|-------|-------|--------|
-| sam3 | SAM 3 (video) | per-person masks + bbox tracks |
-| vggt | VGGT-Omega | multi-view cameras + depth (≤500 frames; records the VGGT inference resolution) |
-| sapiens | Sapiens2-5B | Goliath-308 keypoint pose |
-| sam3d | SAM-3D-Body | per-frame MHR body params (all tracked people) |
-| smplx | MHR→SMPL-X fit | per-frame SMPL-X params |
-| fuse | point-cloud fuse | up-to-scale scene + per-frame human point clouds (`geometry/`) |
-| scale | human-body ruler + pre-fit | metric scale anchored to the body, refined by a dual scale+body alignment; rescales the fused geometry in place (`geometry/scale.npz`, `geometry/prefit.npz`) |
-| human_optimization | Adam + L-BFGS | visually-guided kinematic refinement (`human_optim/kinematic_1.npz`) |
+| Stage | What it does | Output (under `out/<stem>/`) |
+|-------|--------------|------------------------------|
+| sam3 | SAM 3 video tracker | per-person masks + bbox tracks (`sam3/`) |
+| vggt | VGGT-Omega | multi-view cameras + depth (`vggt/camera.npz`, `vggt/depth/`) |
+| sapiens | Sapiens2-5B | Goliath-308 keypoints (`sapiens/pose.npz`) |
+| sam3d | SAM-3D-Body | per-frame MHR body for every person (`sam3d/params.npz`) |
+| smplx | MHR → SMPL-X fit | per-frame SMPL-X parameters (`sam3d/smplx_params.npz`) |
+| fuse | point-cloud fuse | up-to-scale scene + per-frame human points (`geometry/`) |
+| scale | human-body ruler + pre-fit | metric scale, rescales `geometry/` in place (`geometry/scale.npz`, `prefit.npz`) |
+| kinematics_1 | Adam + L-BFGS | the refined world-frame bodies (`human_optim/kinematic_1.npz`) |
+| contacts_1/2 | contact readout | per-contact-frame labels + confidence (`human_optim/contacts_<tag>.npz`) |
+| kinematics_2 | contact-patch repair | each labelled contact pulled onto the surface it touches (`human_optim/kinematic_2.npz`) |
+| kindyn_1 | kinematics + dynamics | pose and per-contact-frame forces solved together (`human_optim/kindyn_1.npz`) |
 
-**VGGT-Omega** runs right after the tracker as the multi-view camera/geometry
-stage; it writes `vggt/camera.npz` (cross-frame extrinsics + depth, plus the
-inference resolution) and the body stage reads that camera directly. Its
-access-gated checkpoints are not bundled (see [`INSTALL.md`](INSTALL.md)).
+The optimization runs on [`BetterRobot`](../BetterRobot) (kinematics, inverse
+dynamics, the optimizer) with [`BetterHuman`](../BetterHuman) bodies; both are
+installed editable from the checkouts next to this repo.
 
-**Metric scale** is recovered by `scale` (`estimate_scale`), which uses the
-SAM-3D-Body human as a ruler against the fused human points, so it runs after
-`fuse` and rescales the saved geometry in place.
+## Install
 
-### Standalone SMPL-X stages
+See [`INSTALL.md`](INSTALL.md): `uv sync` builds the environment from the lock,
+then three manual steps (detectron2, the `sam-3d-body` path, the MHR assets) and
+the model checkpoints. Data lives outside the repo in `../data` (`BVR_DATA_ROOT`
+moves it).
 
-Off the default chain, each runs on a single clip's `out/<stem>/` dir:
-
-| Stage | Output |
-|-------|--------|
-| `human_optimization --stages kinematics_2` | optional annotation- or auto-contact-guided refinement (`human_optim/kinematic_2.npz`) |
-| `estimate_contacts` | contact-frame scene contact + its per-joint label confidence (`human_optim/contacts_1.npz` + overlay) |
-| `estimate_gravity_geocalib` | world-frame gravity (`geocalib/gravity.npz`) |
-| `human_optimization --stages kindyn_1` | joint kinematics + dynamics: pose and per-contact-frame forces solved together (`human_optim/kindyn_1.npz`) |
-
-### Dataset pipelines
-
-For the large scene database, `datasets/climbingvideos/corpus.py` seeds SAM 3 from the per-scene
-YOLO track and sweeps every corpus stage over the batch (shared helpers in
-`datasets/climbingvideos/scene_db.py`).
-Manual annotations are not used by `kinematics_1` or by `estimate_contacts`.
-They are used by the optional manual `kinematics_2` mode and offline to fit the
-label-confidence coefficients
-(`datasets/climbingvideos/calibrate_contact_confidence.py`, whose numbers then live in the TOML).
-
-For the measured datasets (LAAS Parkour, OpenCap LabValidation, the peter climbing
-rigs), `scripts/pipeline.py --dataset <name>` runs the same chain over every clip;
-the datasets and their variant chains live in `datasets/<name>/configs/dataset.toml`.
-
-## Quick start
+## Run one clip
 
 ```bash
-# See INSTALL.md for env + submodule + checkpoint setup first.
-uv run --no-sync python scripts/pipeline.py --source ../data/examples/data/boulder_1.mp4 --save-dir ../data/examples/out/
-
-# Then view the fused scene + refined SMPL-X bodies in a viser web viewer:
-uv run --no-sync python scripts/view_3d.py ../data/examples/out/boulder_1/
+uv run python scripts/pipeline.py --source ../data/examples/data/boulder_1.mp4 --save-dir ../data/examples/out/
+# then the contact / force stages on it
+uv run python scripts/pipeline.py --source ../data/examples/data/boulder_1.mp4 --save-dir ../data/examples/out/ --steps contacts_1,kinematics_2,contacts_2,kindyn_1
 ```
 
-Outputs land under `out/<stem>/` (per clip). Each stage is also runnable on its
-own; behavior knobs live in `configs/*.toml` (CLIs only take targets). See
-[`CLAUDE.md`](CLAUDE.md) for the full stage table, the `out/<stem>/` contract,
-and conventions.
+Every behaviour knob lives in a TOML (`configs/pipeline.toml`,
+`configs/human_optimization.toml`); the CLI takes only targets. A finished step
+is skipped on a re-run; `--dry-run` prints the commands without running them.
+Each stage is also runnable on its own as `python -m bvr.stages.<name>`.
+
+## View it
+
+```bash
+uv run python scripts/view_3d.py ../data/examples/out/boulder_1/
+```
+
+A viser web viewer: the fused scene, the cameras, every body source
+(`original` / `prefit` / `kinematics` / `kinematics_2` / `kindyn_1`) as a skinned
+mesh with its skeleton, the contact frames (red touching, green free), the
+solved forces, and the video in sync. Point it at `../data/examples/out/` to page
+through every clip.
+
+## Run a dataset
+
+```bash
+uv run python scripts/pipeline.py --dataset parkour --dry-run
+uv run python scripts/pipeline.py --dataset climb_wall_3 --variant gt_contact
+uv run python datasets/climbingvideos/corpus.py --stage geometry --limit 10 --dry-run
+```
+
+The measured datasets (LAAS Parkour, OpenCap LabValidation, the peter climbing
+rigs) are tables in `datasets/<name>/configs/dataset.toml`: the same chain over
+every clip, plus variant chains (`gt_contact`: contacts measured by the rig's
+force sensors; `floorplane`: a synthetic support scene). The ClimbingVideos
+scene DB runs any stage through `datasets/climbingvideos/corpus.py`. Each
+`datasets/<name>/README.md` says what the data is, where it lives, and how to
+import, run and score it.
 
 ## Documentation
 
 - [`INSTALL.md`](INSTALL.md) — environment, submodules, model assets.
-- [`CLAUDE.md`](CLAUDE.md) — architecture, pipeline contract, conventions.
+- [`CLAUDE.md`](CLAUDE.md) — architecture, the `out/<stem>/` contract, configs, layout, conventions.
 - [`docs/scale.md`](docs/scale.md) — the metric scale + in-place metricization.
 - [`docs/fusion.md`](docs/fusion.md) — the point clouds + the relative two-pass voxel merge.
 - [`docs/human_optimization.md`](docs/human_optimization.md) — the four-stage refinement, every loss term.
-- [`docs/contacts.md`](docs/contacts.md) — per-joint contact detection.
+- [`docs/contacts.md`](docs/contacts.md) — per-contact-frame contact detection.
 - [`docs/contact_confidence.md`](docs/contact_confidence.md) — how much a contact label can be trusted, and how that number is fitted.
+- [`docs/force_contacts.md`](docs/force_contacts.md) — contact detection by inverse dynamics, end to end.
+- [`docs/quality.md`](docs/quality.md) — depth-smear downweighting, the scene-quality table, force confidence.

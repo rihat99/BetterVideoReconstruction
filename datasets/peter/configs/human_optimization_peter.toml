@@ -2,7 +2,7 @@
 # (bvr.config.load_config). [contacts].frames restricts the contact frames to the hands and feet:
 # the peter demonstrator rigs only instrument a board/plate under each limb, so contact detected on
 # knees / elbows / torso would route force where nothing measures it. The kinematic chamfer is OFF
-# as well (see its line), and [boards] holds the thresholds measure_contacts_boards reads. Also used
+# as well (see its line), and [measured_contacts] holds the thresholds measure_contacts reads. Also used
 # for the LAAS Parkour clips (one static camera, plates + bar).
 base = "configs/human_optimization.toml"
 
@@ -21,11 +21,11 @@ frames = [
                        # stage), so the restriction hits detection, labels and forces in one move.
 
 # Contact labels MEASURED by the force boards, for the instrumented rigs
-# (bvr/stages/measure_contacts_boards.py — the drop-in replacement for the estimated contacts).
+# (bvr/stages/measure_contacts.py — the drop-in replacement for the estimated contacts).
 # One three-axis board per limb says which limb is loaded and when; near_scene_m decides which of
 # that limb's contact frames carries the label. Same numbers as the three-camera ground-truth
 # chain, so the two trees are comparable.
-[boards]
+[measured_contacts]
 force_enter_n = 50       # a limb is in contact from this measured |F| ...
 force_exit_n = 30        # ... until it drops below this (hysteresis)
 near_scene_m = 0.05      # its contact frames within this of the wall get the label; none -> its nearest

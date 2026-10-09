@@ -5,7 +5,7 @@ triple, and the triple is only right if the inversion in
 :func:`datasets.opencap.export_opencap_mot.cop_free_torque` is right sign for sign. Two checks:
 synthetically, that any wrench survives triple → wrench → triple; and on the DATASET's own
 force files, that its shipped triples come back to themselves. A third covers the other
-direction of the same calibration — ``datasets/opencap/opencap_sensor_forces.py`` carrying the
+direction of the same calibration — ``datasets/opencap/sensor_forces.py`` carrying the
 plates into our world.
 
 Everything here is float64 on purpose: the code under test is CPU numpy that parses text
@@ -23,8 +23,8 @@ import pytest
 
 
 from datasets.opencap.export_opencap_mot import COLUMNS, plate_triple, write_mot
-from datasets.opencap.opencap_plates import LOADED_N, cop_free_torque, origin_moment
-from datasets.opencap.opencap_sensor_forces import main as sensor_forces_main
+from datasets.opencap.plates import LOADED_N, cop_free_torque, origin_moment
+from datasets.opencap.sensor_forces import main as sensor_forces_main
 from datasets.opencap.paths import LABVALIDATION
 
 #: A plate triple that has no COP does not need a fallback point; pass an unused one.
@@ -165,7 +165,7 @@ def _rotation(axis: list[float], degrees: float) -> np.ndarray:
 
 def test_sensor_forces_rotates_the_plates_and_masks_the_unseen(tmp_path: Path) -> None:
     """The plate vectors land in our world, uncaptured limb-frames land as NaN."""
-    from bvr.human_optim.boards import LIMBS
+    from bvr.human_optim.measured_contacts import LIMBS
 
     rotation = _rotation([0.3, 1.0, 0.2], 118.0) @ _rotation([1.0, 0.0, 0.0], 168.0)
     translation = np.array([0.42, 1.31, 4.05])

@@ -5,7 +5,7 @@ per scene, ``predictions/<run>/forces_sup.npz`` (``forces_world (1, N, 35, 3)`` 
 units in OUR world, ``anchor_cam (1, N, 35, 3)`` = the refined body's contact-frame points in
 the camera, ``limbs`` = the 35 frame names, ``contact_probs``, ``valid_mask``, ``stride``) and
 ``predictions/<run>/smplx.npz`` (``joints_world (1, N, 52, 3)``, ``covered``). This is the
-35-slot twin of ``opencap_learned_export.py`` (six groups); the helpers are shared.
+35-slot twin of ``learned_export.py`` (six groups); the helpers are shared.
 
 **A foot's wrench.** The plates measure one wrench per foot. A foot here is every slot whose
 parent is the foot or the ankle of that side — heel, big toe, inner / outer ball, toe-above —
@@ -32,7 +32,7 @@ Writes ``processed/out/<clip>/<--run>/estimated_forces.npz`` plus a copy of the 
 
 Usage::
 
-    uv run --no-sync python datasets/opencap/opencap_frames35_export.py \
+    uv run --no-sync python datasets/opencap/frames35_export.py \
         --pred-dir bedlam_frames35 --run method_bedlam_frames35 \
         --clips /…/processed/out/_methods/clips_natural.txt
 """
@@ -47,9 +47,9 @@ import numpy as np
 
 
 from datasets.opencap.export_opencap_mot import floor_y, plate_triple
-from datasets.opencap.opencap_learned_export import GRAVITY, HIP_JOINTS, covered_span, fill_gaps
-from datasets.opencap.opencap_plates import LOADED_N
-from datasets.opencap.opencap_sensor_forces import PROCESSED, world_from_mocap
+from datasets.opencap.learned_export import GRAVITY, HIP_JOINTS, covered_span, fill_gaps
+from datasets.opencap.plates import LOADED_N
+from datasets.opencap.sensor_forces import PROCESSED, world_from_mocap
 from bvr.npz_io import atomic_savez
 
 FEET = ("left_foot", "right_foot")
@@ -243,7 +243,7 @@ def main(argv: list[str] | None = None) -> int:
               f"({stats['predicted']:4d} predicted), {stats['loaded_rows']:4d} foot-rows "
               f"loaded, peak Fy {stats['peak_v_n']:7.1f} N ({stats['peak_v_bw']:5.1f} %BW "
               f"measured), {stats['undefined']} CoP-free rows")
-    print(f"\n[opencap_frames35_export] {written} clip(s) -> {args.run}/estimated_forces.npz"
+    print(f"\n[frames35_export] {written} clip(s) -> {args.run}/estimated_forces.npz"
           + (f"; {len(missing)} without predictions: {missing}" if missing else ""))
     return 1 if missing else 0
 

@@ -6,7 +6,7 @@ evaluate on this dataset (Uhlrich 2023, Miller 2025, Gilon 2026, Tan 2026) all s
 ground-reaction-force (GRF) estimates on that triple with the same small metric set.
 This script follows their protocol. Our per-frame contact forces are first folded into
 the same triple per foot by ``datasets/opencap/export_opencap_mot.py``
-(``human_optim*/estimated_forces.npz``; the algebra is in ``datasets/opencap/opencap_plates.py``)
+(``human_optim*/estimated_forces.npz``; the algebra is in ``datasets/opencap/plates.py``)
 and compared in the OpenSim ground frame: ``x`` anterior–posterior (AP), ``y`` vertical
 (V, up), ``z`` medio-lateral (ML).
 
@@ -40,7 +40,7 @@ and compared in the OpenSim ground frame: ``x`` anterior–posterior (AP), ``y``
 * **r V** — Pearson correlation of the vertical force over stance (shape and timing).
 * **peak V err** — error of the clip's peak vertical force, %BW (Tan 2026).
 * **CoP** — mean and median Euclidean distance on the floor, mm, on frames where BOTH
-  sides carry more than :data:`~opencap_plates.LOADED_N` (a CoP does not exist
+  sides carry more than :data:`~plates.LOADED_N` (a CoP does not exist
   otherwise). Three flavours, because our world is registered to the mocap frame through
   the dataset's calibration, whose translation carries a 0.1–0.3 m residual, on top of
   our own body-placement error: ``raw``; ``hip-aligned`` (one translation per clip,
@@ -85,8 +85,8 @@ from scipy.signal import butter, filtfilt
 
 
 from datasets.opencap.export_opencap_mot import frame_positions
-from datasets.opencap.opencap_plates import LOADED_N
-from bvr.human_optim.boards import LIMBS
+from datasets.opencap.plates import LOADED_N
+from bvr.human_optim.measured_contacts import LIMBS
 from datasets.opencap.paths import LABVALIDATION
 
 PROCESSED = LABVALIDATION / "processed"

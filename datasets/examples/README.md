@@ -11,5 +11,5 @@ annotation on coarse joints (a legacy 10-joint or the 14-joint schema; per frame
 - **Score:** `uv run --no-sync python datasets/examples/score_frame_contacts.py --predictions ../data/examples/out/ --contacts 1|2 [--json f]`
   folds `out/<clip>/human_optim/contacts_<tag>.npz` onto the annotated joints (hand ← palm | finger, foot ← toe/ball frames,
   ankle ← heel, knee ← knee) and reports per-joint precision / recall / F1 against `examples/data/<clip>.npz`.
-- **Files:** `annotations.py` (the joint schemas `ANN_TO_SMPLX` / `ANN_TO_SMPLX_14`, `ann_mapping`, the frame map),
-  `score_frame_contacts.py`, `tests/test_annotations.py`. View a result: `scripts/view_3d.py ../data/examples/out/<clip>/`.
+- **Files:** `annotations.py` (the joint schemas `ANN_TO_SMPLX` / `ANN_TO_SMPLX_14`, `ann_mapping`),
+  `score_frame_contacts.py`. View a result: `scripts/view_3d.py ../data/examples/out/<clip>/`.

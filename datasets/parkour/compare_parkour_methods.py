@@ -74,7 +74,7 @@ import torch
 from bvr.body import load_body
 
 from datasets.parkour.score_parkour_pose import predicted_joints as _init_joints
-from bvr.human_optim.boards import LIMBS, limb_of_frame
+from bvr.human_optim.measured_contacts import LIMBS, limb_of_frame
 from bvr.human_optim.qmath import normalize_q
 from bvr.paths import REPO_ROOT
 from datasets.methods.paths import ESTMF

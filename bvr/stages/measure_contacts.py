@@ -3,13 +3,13 @@
 The drop-in replacement for ``estimate_contacts.py`` on a clip with a force sensor under
 each limb (the peter boards, the Parkour and OpenCap plates): instead of inferring contact
 from how near and how still a body part is, it reads the contact state off the rig. The
-dataset's own script writes ``human_optim/sensor_forces.npz`` in :mod:`bvr.human_optim.boards`
+dataset's own script writes ``human_optim/sensor_forces.npz`` in :mod:`bvr.human_optim.measured_contacts`
 schema, so the sensors say exactly which limb is loaded and when — ground truth for
 everything downstream that consumes contact labels.
 
 What the boards cannot say is *which part* of a hand or foot is touching, and the
 optimization's contact points are the finer contact **frames** (palm, thumb, heel,
-big toe, ...). :mod:`bvr.human_optim.boards` closes that gap: measured force with
+big toe, ...). :mod:`bvr.human_optim.measured_contacts` closes that gap: measured force with
 hysteresis gives the per-limb on/off, then each loaded span is put on the frames of
 that limb the body holds near the wall (a span with no such frame falls back to its
 nearest one, flagged ``frame_rescued`` — which is how a limb the reconstruction put
@@ -20,7 +20,7 @@ The artifact is the same schema-2 contacts file the pipeline's ``kinematics_2`` 
 
 Run from CLI::
 
-    python -m bvr.stages.measure_contacts_boards \\
+    python -m bvr.stages.measure_contacts \\
         --predictions out/clip/ --bodies kinematic_1 \\
         --config datasets/peter/configs/human_optimization_peter.toml
 
@@ -44,7 +44,7 @@ from bvr import determinism
 from bvr.body import load_body
 from bvr.config import load_config
 from bvr.human_optim import paths
-from bvr.human_optim.boards import LIMBS, frame_contact, limb_contact, limb_of_frame
+from bvr.human_optim.measured_contacts import LIMBS, frame_contact, limb_contact, limb_of_frame
 from bvr.human_optim.qmath import normalize_q
 from bvr.npz_io import atomic_savez
 
@@ -83,9 +83,9 @@ def run(predictions_dir: str | Path, config_path: str | Path, *,
     """Write ``contacts_<tag>.npz`` from the boards for one clip."""
     pred = Path(predictions_dir)
     cfg = load_config(config_path)
-    boards_cfg = cfg["boards"]
-    enter_n, exit_n = float(boards_cfg["force_enter_n"]), float(boards_cfg["force_exit_n"])
-    near_m = float(boards_cfg["near_scene_m"])
+    measured_cfg = cfg["measured_contacts"]
+    enter_n, exit_n = float(measured_cfg["force_enter_n"]), float(measured_cfg["force_exit_n"])
+    near_m = float(measured_cfg["near_scene_m"])
     device = cfg.get("runtime", {}).get("device", "cuda")
 
     tag = bodies.removeprefix("kinematic_")
@@ -94,12 +94,12 @@ def run(predictions_dir: str | Path, config_path: str | Path, *,
     scene_path, transform_path = pred / "geometry" / "scene.npz", pred / "geometry" / "transform.npz"
     for needed in (body_path, sensor_path, scene_path):
         if not needed.exists():
-            raise SystemExit(f"[measure_contacts_boards] missing {needed}")
+            raise SystemExit(f"[measure_contacts] missing {needed}")
 
     kin = dict(np.load(body_path, allow_pickle=True))
     num_people, num_frames = int(kin["num_people"]), int(kin["num_frames"])
     if num_people != 1:
-        raise SystemExit(f"[measure_contacts_boards] {pred.name} tracks {num_people} people; "
+        raise SystemExit(f"[measure_contacts] {pred.name} tracks {num_people} people; "
                          "the boards measure one climber and cannot say which")
     valid = np.asarray(kin["valid_mask"][0], bool)
 
@@ -107,10 +107,10 @@ def run(predictions_dir: str | Path, config_path: str | Path, *,
                      sole_offsets=cfg["contacts"].get("sole_offset_m") or None)
     frame_names = list(body.contact_frame_names)
     if frame_names != [str(x) for x in kin["contact_frame_names"]]:
-        raise SystemExit("[measure_contacts_boards] the config's contact frames do not match the body's")
+        raise SystemExit("[measure_contacts] the config's contact frames do not match the body's")
     unowned = [n for n in frame_names if limb_of_frame(n) is None]
     if unowned:
-        raise SystemExit(f"[measure_contacts_boards] no board covers {unowned}; restrict "
+        raise SystemExit(f"[measure_contacts] no board covers {unowned}; restrict "
                          "[contacts].frames to the hands and feet")
 
     positions = _frame_positions(
@@ -130,9 +130,9 @@ def run(predictions_dir: str | Path, config_path: str | Path, *,
         cols = [c for c, owner in enumerate(frame_limb) if owner == limb]
         gaps = distance[:, cols][rescued[:, cols]]
         far = f", far {int(rescued[:, cols].any(1).sum())}f med {np.median(gaps) * 100:.0f} cm" if gaps.size else ""
-        print(f"[measure_contacts_boards] {limb}: {int(limb_on[:, i].sum())} loaded frames{far}")
+        print(f"[measure_contacts] {limb}: {int(limb_on[:, i].sum())} loaded frames{far}")
     labelled = distance[contact] * 100
-    print(f"[measure_contacts_boards] labelled frames' distance to the scene: "
+    print(f"[measure_contacts] labelled frames' distance to the scene: "
           + (f"med {np.median(labelled):.1f} p90 {np.percentile(labelled, 90):.1f} cm"
              if labelled.size else "no contact at all"))
 
@@ -158,7 +158,7 @@ def run(predictions_dir: str | Path, config_path: str | Path, *,
         source_scene_sha256=np.str_(_sha256(scene_path)),
         source_transform_sha256=np.str_(_sha256(transform_path)),
         source_sensor_sha256=np.str_(_sha256(sensor_path)))
-    print(f"[measure_contacts_boards] wrote {out_path}")
+    print(f"[measure_contacts] wrote {out_path}")
     return out_path
 
 
@@ -170,7 +170,7 @@ def main(argv: list[str] | None = None) -> int:
                     help="which refined body the frame choice is read on (its contacts tag "
                          "follows: kinematic_1 -> contacts_1, kinematic_2 -> contacts_2)")
     ap.add_argument("--config", type=Path, required=True,
-                    help="the dataset's human-optimization TOML ([boards] thresholds + [contacts] frames)")
+                    help="the dataset's human-optimization TOML ([measured_contacts] thresholds + [contacts] frames)")
     args = ap.parse_args(argv)
     run(args.predictions, args.config, bodies=args.bodies)
     return 0

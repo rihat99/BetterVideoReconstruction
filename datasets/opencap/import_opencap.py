@@ -32,7 +32,7 @@ timestamp, ``[i/60 - 1/120, i/60 + 1/120)``, so the value belongs to the instant
 frame was taken rather than to the 8 ms after it. Resampling averages the **wrench**
 — the force and the moment about the ground origin, ``M = p x F + T`` — and only then
 recovers the COP and the free torque from that average
-(:func:`~datasets.opencap.opencap_plates.cop_free_torque`). Averaging the COP directly would be
+(:func:`~datasets.opencap.plates.cop_free_torque`). Averaging the COP directly would be
 wrong: ``mean(p x F) != mean(p) x mean(F)``, and on a drop-jump landing the two differ
 by ~9 N*m. Samples below :data:`LOADED_N` contribute zero moment (an unloaded plate
 holds its last COP instead of resetting, and its true moment is ~0 because its force
@@ -99,7 +99,7 @@ import yaml
 from imageio_ffmpeg import get_ffmpeg_exe, read_frames
 
 
-from datasets.opencap.opencap_plates import LOADED_N, cop_free_torque, origin_moment
+from datasets.opencap.plates import LOADED_N, cop_free_torque, origin_moment
 from datasets.opencap.paths import LABVALIDATION
 
 SRC = LABVALIDATION

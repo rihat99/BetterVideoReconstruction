@@ -174,7 +174,7 @@ def joint_curve(ours: np.ndarray, markers: np.ndarray, shifts=JOINT_SHIFTS) -> d
 
 def measure_joints(clip: Path, run: str) -> dict:
     """The sync record for one clip from our reconstructed joints (``--joints``)."""
-    from datasets.opencap.opencap_sensor_forces import world_from_mocap
+    from datasets.opencap.sensor_forces import world_from_mocap
 
     meta = json.loads((clip / "meta.json").read_text())
     body = np.load(DST / "out" / clip.name / run / "kindyn_1.npz", allow_pickle=True)

@@ -117,7 +117,7 @@ uv run --no-sync python scripts/pipeline.py --dataset climb_wall_3 --variant gt_
 Every step is resumable: a step whose output already exists is skipped. A clip
 that fails is reported and the batch moves on.
 
-The thresholds live in `[boards]` in
+The thresholds live in `[measured_contacts]` in
 [`datasets/peter/configs/human_optimization_peter.toml`](configs/human_optimization_peter.toml);
 every loss weight is shared with the normal run, so the two trees differ by their
 contact labels and nothing else.
@@ -147,12 +147,12 @@ peter boards make, so the same stage runs on it.
 
 Only the file shape differed: the import stores a 6D wrench plus a mask saying
 which samples the rig actually caught.
-[`datasets/parkour/parkour_sensor_forces.py`](../parkour/parkour_sensor_forces.py) writes
+[`datasets/parkour/sensor_forces.py`](../parkour/sensor_forces.py) writes
 the force part of it as the `sensor_forces.npz` the stage reads, and then the
 chain is one command:
 
 ```bash
-uv run --no-sync python datasets/parkour/parkour_sensor_forces.py
+uv run --no-sync python datasets/parkour/sensor_forces.py
 CUDA_VISIBLE_DEVICES=6 uv run --no-sync python scripts/pipeline.py --dataset parkour --variant gt_contact
 ```
 
@@ -260,7 +260,7 @@ residual, and a low residual bought that way is flattery, not physics.
 ## Shared with the ground-truth chain
 
 The reading itself lives in
-[`bvr/human_optim/boards.py`](../../bvr/human_optim/boards.py) and is used by
+[`bvr/human_optim/measured_contacts.py`](../../bvr/human_optim/measured_contacts.py) and is used by
 two callers: this single-view stage, and the three-camera ground-truth chain in
 `datasets/peter/gt/fit_multiview.py`, which has always labelled from the boards.
 One implementation, so the two cannot drift into disagreeing about what the

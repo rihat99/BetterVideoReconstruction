@@ -29,7 +29,7 @@ The two never coexist on a frame: ``lib/contact_states.py::adjust_toe_contacts``
 toes wherever the sole is in contact, and the exporter that writes the labels never claims
 both anyway.
 
-**Triple.** ``datasets/opencap/opencap_plates.py`` turns that wrench into the dataset's
+**Triple.** ``datasets/opencap/plates.py`` turns that wrench into the dataset's
 ``(force, cop, free_torque)`` on the floor plane the plates themselves report
 (``export_opencap_mot.floor_y``, ≈6 mm). The estimator's own ground plane is not that
 plane — it has no way to know where the lab floor is; it solves a single height in the
@@ -48,8 +48,8 @@ the same copy).
 
 Usage::
 
-    uv run --no-sync python datasets/opencap/opencap_estmf_export.py
-    uv run --no-sync python datasets/opencap/opencap_estmf_export.py --clips <file>
+    uv run --no-sync python datasets/opencap/estmf_export.py
+    uv run --no-sync python datasets/opencap/estmf_export.py --clips <file>
 """
 
 from __future__ import annotations
@@ -62,8 +62,8 @@ import numpy as np
 
 
 from datasets.opencap.export_opencap_mot import floor_y, plate_triple
-from datasets.opencap.opencap_plates import LOADED_N
-from datasets.opencap.opencap_sensor_forces import PROCESSED, world_from_mocap
+from datasets.opencap.plates import LOADED_N
+from datasets.opencap.sensor_forces import PROCESSED, world_from_mocap
 from bvr.npz_io import atomic_savez
 from datasets.methods.paths import ESTMF
 
@@ -221,11 +221,11 @@ def main(argv: list[str] | None = None) -> int:
         names = sorted(p.name[: -len("_pred.npz")] for p in folder.glob("*_pred.npz"))
 
     written = 0
-    print(f"[opencap_estmf_export] mass of the estimator's person model: {person_mass():.3f} kg")
+    print(f"[estmf_export] mass of the estimator's person model: {person_mass():.3f} kg")
     for name in names:
         if export(args.source / name, args.source / "out" / name / args.run, args.save_name):
             written += 1
-    print(f"\n[opencap_estmf_export] {written}/{len(names)} clip(s)")
+    print(f"\n[estmf_export] {written}/{len(names)} clip(s)")
     return 0
 
 

@@ -433,7 +433,7 @@ def main(argv: list[str] | None = None) -> int:
                 continue
             command = stage_command(step, clip_dir, videos=videos, pipeline_config=pipeline_config,
                                     human_config=human_config, variant=args.variant,
-                                    boards=recipe.get("contacts") == "boards",
+                                    measured=recipe.get("contacts") == "measured",
                                     overlay_module=recipe.get("overlay"))
             started = time.monotonic()
             rc = _run(command, args.dry_run)

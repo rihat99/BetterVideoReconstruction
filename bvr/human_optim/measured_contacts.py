@@ -10,7 +10,7 @@ cannot say which part of a hand or foot is touching, and the optimization puts i
 :func:`frame_contact` picks the frames of a loaded limb that the body actually holds
 against the wall.
 
-Shared by the single-view stage (``bvr/stages/measure_contacts_boards.py``) and the peter
+Shared by the single-view stage (``bvr/stages/measure_contacts.py``) and the peter
 three-camera ground-truth chain (``datasets/peter/gt/fit_multiview.py``) so the two readings
 cannot drift apart.
 """

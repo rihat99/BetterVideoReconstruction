@@ -1,9 +1,9 @@
 """What the force rigs share in the viewer: measured forces (``sensor_forces.npz``) as arrows.
 
-The peter wall boards (``datasets/peter/peter_sensor_forces.py``), the Parkour plates
-(``datasets/parkour/parkour_sensor_forces.py``) and the OpenCap plates
-(``datasets/opencap/opencap_sensor_forces.py``) all write ``sensor_forces.npz`` in the schema
-``bvr.stages.measure_contacts_boards`` reads: ``reaction_world (N, C, 3)`` per channel in
+The peter wall boards (``datasets/peter/sensor_forces.py``), the Parkour plates
+(``datasets/parkour/sensor_forces.py``) and the OpenCap plates
+(``datasets/opencap/sensor_forces.py``) all write ``sensor_forces.npz`` in the schema
+``bvr.stages.measure_contacts`` reads: ``reaction_world (N, C, 3)`` per channel in
 ``limbs`` order, the reaction sense (force on the person), plus ``cop_world`` where the sensor
 knows where the force acts. :func:`measured_forces` draws them beside the solved forces as
 :class:`~bvr.viewer.loading.ForceArrows`.

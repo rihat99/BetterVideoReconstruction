@@ -56,7 +56,7 @@ import numpy as np
 from datasets.peter.compare_gt_contact import CONTACT_N, force_metrics, limb_forces, limb_labels
 from datasets._common import _render_table
 from datasets.methods.score_published_contacts import GT_ROOT, OURS_ROOT, _count, _rates_balanced, clips, ours, truth
-from bvr.human_optim.boards import LIMBS
+from bvr.human_optim.measured_contacts import LIMBS
 from datasets.peter.paths import PETER
 
 POSE_JSON = PETER / "climb_wall_3_gt" / "others" / "gt_pose_metrics.json"

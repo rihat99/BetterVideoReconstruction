@@ -3,7 +3,7 @@
 ``datasets/opencap/import_opencap.py`` stores each clip's plate ground truth per video frame in
 the dataset's own OpenSim ground frame (right-handed, **Y up**, floor at y≈0):
 ``processed/<clip>/forces.npz`` with ``force``/``cop``/``free_torque`` ``(N, 4, 3)`` in
-:data:`~bvr.human_optim.boards.LIMBS` order plus a ``captured (N, 4)`` mask. The
+:data:`~bvr.human_optim.measured_contacts.LIMBS` order plus a ``captured (N, 4)`` mask. The
 contact stages and the force comparison read ``sensor_forces.npz`` instead — the same
 vectors in the reconstruction's world frame. This script is that rotation.
 
@@ -36,14 +36,14 @@ measured* rather than *no force*. The hands are written as measured zeros — th
 have no hand contact at all.
 
 Output ``processed/out/<clip>/<run>/sensor_forces.npz``, beside the run, exactly where
-``datasets/parkour/parkour_sensor_forces.py`` and ``datasets/peter/peter_sensor_forces.py`` put their
+``datasets/parkour/sensor_forces.py`` and ``datasets/peter/sensor_forces.py`` put their
 rigs' own. ``--run`` names the run directory, so a variant chain
 (``human_optim_floorplane``) gets its own copy of the same rotated plates.
 
 Usage::
 
-    uv run --no-sync python datasets/opencap/opencap_sensor_forces.py
-    uv run --no-sync python datasets/opencap/opencap_sensor_forces.py --run human_optim_floorplane
+    uv run --no-sync python datasets/opencap/sensor_forces.py
+    uv run --no-sync python datasets/opencap/sensor_forces.py --run human_optim_floorplane
 """
 
 from __future__ import annotations
@@ -55,7 +55,7 @@ from pathlib import Path
 import numpy as np
 
 
-from bvr.human_optim.boards import LIMBS
+from bvr.human_optim.measured_contacts import LIMBS
 from bvr.npz_io import atomic_savez
 from datasets.opencap.paths import LABVALIDATION
 
@@ -153,7 +153,7 @@ def main(argv: list[str] | None = None) -> int:
               f"{int((~captured).sum())} unmeasured limb-frames, "
               f"gravity check {angle:.1f} deg vs {gravity_source})")
         written += 1
-    print(f"\n[opencap_sensor_forces] {written} clip(s) of {len(clips)}")
+    print(f"\n[sensor_forces] {written} clip(s) of {len(clips)}")
     return 0
 
 

@@ -4,8 +4,8 @@ The Parkour rig measures what the peter climbing boards measure — one 3D conta
 per limb, per video frame — but ``datasets/parkour/import_parkour.py`` stores it as a 6D wrench
 with a capture mask (``processed/<clip>/forces.npz``). The contact stages read
 ``sensor_forces.npz``: the linear part alone, ``(N, 4, 3)`` in
-:data:`~bvr.human_optim.boards.LIMBS` order, in the reaction-on-the-person sense.
-This script is that translation, so ``measure_contacts_boards.py`` and the comparison
+:data:`~bvr.human_optim.measured_contacts.LIMBS` order, in the reaction-on-the-person sense.
+This script is that translation, so ``measure_contacts.py`` and the comparison
 run on Parkour with no changes of their own.
 
 Two things are unlike the peter rigs, and the file records both:
@@ -17,11 +17,11 @@ Two things are unlike the peter rigs, and the file records both:
   touching" distinguishable from "not measured" for anything that cares.
 
 Output ``processed/out/<clip>/human_optim/sensor_forces.npz``, beside the run, exactly
-where ``datasets/peter/peter_sensor_forces.py`` puts the peter rigs' own.
+where ``datasets/peter/sensor_forces.py`` puts the peter rigs' own.
 
 Usage::
 
-    uv run --no-sync python datasets/parkour/parkour_sensor_forces.py
+    uv run --no-sync python datasets/parkour/sensor_forces.py
 """
 
 from __future__ import annotations
@@ -33,7 +33,7 @@ import numpy as np
 
 
 from datasets.parkour import paths
-from bvr.human_optim.boards import LIMBS
+from bvr.human_optim.measured_contacts import LIMBS
 
 PARKOUR = paths.PARKOUR / "processed"
 
@@ -67,7 +67,7 @@ def main(argv: list[str] | None = None) -> int:
         print(f"{clip.name}: wrote sensor_forces.npz  ({len(reaction)} frames, "
               f"{int((~captured).sum())} unmeasured limb-frames)")
         written += 1
-    print(f"\n[parkour_sensor_forces] {written} clip(s)")
+    print(f"\n[sensor_forces] {written} clip(s)")
     return 0
 
 

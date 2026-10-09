@@ -51,7 +51,7 @@ import numpy as np
 
 
 from datasets._common import _limb_members
-from bvr.human_optim.boards import LIMBS, limb_of_frame
+from bvr.human_optim.measured_contacts import LIMBS, limb_of_frame
 from datasets.peter.paths import PETER
 
 #: A board above this is loaded — the same rule the climb_wall_2 comparison uses.

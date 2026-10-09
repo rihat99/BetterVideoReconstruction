@@ -4,13 +4,11 @@ version = "0.1.0"
 description = "Monocular-video human reconstruction (SAM3 track → VGGT camera → SAM-3D-Body → MHR→SMPL-X → visually-guided kinematic refinement)"
 requires-python = ">=3.12"
 dependencies = [
-    # "better-robot",  # TEMP: hand-installed --no-deps (cu126/cu129 index conflict)
-    # "better-human",  # TEMP: hand-installed --no-deps (cu126/cu129 index conflict)
-    # view_3d's UI library — also better-robot's viewer extra, but declared here
-    # because better-robot is hand-installed with --no-deps (see INSTALL.md).
+    # The sibling libraries, editable from the dev worktrees next to this repo (uv.sources).
+    "better-robot",
+    "better-human",
+    # the viewer's UI library (bvr/viewer runs on better-robot's viser-based viewer)
     "viser>=1.0",
-    # better-robot's own runtime dep, same --no-deps reason.
-    "yourdfpy>=0.0.14",
     # MHR (Momentum Human Rig) — submodule
     "mhr",
     "pymomentum-gpu",
@@ -103,8 +101,8 @@ url = "https://download.pytorch.org/whl/cu129"
 explicit = true
 
 [tool.uv.sources]
-# better-robot = { path = "../BetterRobot", editable = true }  # TEMP: see above
-# better-human = { path = "../BetterHuman", editable = true }  # TEMP: see above
+better-robot = { path = "../BetterRobot", editable = true }
+better-human = { path = "../BetterHuman", editable = true }
 mhr = { path = "third_party/MHR", editable = true }
 sam3 = { path = "third_party/sam3", editable = true }
 sapiens = { path = "third_party/sapiens2", editable = true }

@@ -57,7 +57,7 @@ import torch
 from scipy.spatial import cKDTree
 
 from bvr.human_optim.camera import fold_root_to_world, world_from_cam
-from bvr.human_optim.boards import (
+from bvr.human_optim.measured_contacts import (
     LIMBS, frame_contact as board_frame_contact, limb_contact, limb_of_frame,
 )
 from bvr.config import load_config, load_human_config
@@ -91,7 +91,7 @@ def participant(clip: str) -> dict:
 
 
 def gt_section(name: str) -> dict:
-    """A section of ``human_gt.toml`` the pipeline's config loader does not expose ([multiview], [boards])."""
+    """A section of ``human_gt.toml`` the pipeline's config loader does not expose ([multiview], [measured_contacts])."""
     return load_config(CONFIG)[name]
 
 
@@ -370,8 +370,8 @@ def wall_penetration_term(wall: tuple[torch.Tensor, torch.Tensor], sub: torch.Te
 
 
 def board_limb_on(clip_dir: Path, n: int) -> tuple[np.ndarray, np.ndarray]:
-    """``(limb_on (N, 4) bool, force_world (N, 4, 3))`` from the boards with the [boards] hysteresis."""
-    boards = gt_section("boards")
+    """``(limb_on (N, 4) bool, force_world (N, 4, 3))`` from the boards with the [measured_contacts] hysteresis."""
+    boards = gt_section("measured_contacts")
     return limb_contact(clip_dir / "sensor_forces.npz", n,
                         float(boards["force_enter_n"]), float(boards["force_exit_n"]))
 
@@ -561,7 +561,7 @@ def run_shape(clip: str, device: str) -> None:
 
 def run_contacts(clip: str, device: str) -> None:
     cfg = load_human_config(CONFIG)
-    boards = gt_section("boards")
+    boards = gt_section("measured_contacts")
     enter_n, exit_n, near_m = float(boards["force_enter_n"]), float(boards["force_exit_n"]), float(boards["near_scene_m"])
     clip_dir = HUMAN_ROOT / clip
     tag = f"contacts[{clip}]"

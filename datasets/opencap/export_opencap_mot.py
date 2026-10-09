@@ -8,7 +8,7 @@ by anything that reads the dataset (OpenSim's ``ExternalLoads``, the paper's own
 scripts) and plotted against it column for column.
 
 **The math.** Our side gives the wrench directly: ``F = Σ f_i`` and ``M_O = Σ r_i × f_i``
-about the ground origin. :mod:`datasets.opencap.opencap_plates` inverts that to the triple; its
+about the ground origin. :mod:`datasets.opencap.plates` inverts that to the triple; its
 module docstring carries the derivation, sign by sign, and the tests round-trip the
 dataset's own force files through it.
 
@@ -62,11 +62,11 @@ import numpy as np
 import torch
 
 
-from datasets.opencap.opencap_plates import LOADED_N, cop_free_torque, vertical_free_torque
-from datasets.opencap.opencap_sensor_forces import PROCESSED, world_from_mocap
+from datasets.opencap.plates import LOADED_N, cop_free_torque, vertical_free_torque
+from datasets.opencap.sensor_forces import PROCESSED, world_from_mocap
 from datasets._common import _limb_members
 from bvr.body import load_body
-from bvr.human_optim.boards import LIMBS
+from bvr.human_optim.measured_contacts import LIMBS
 from bvr.human_optim.qmath import normalize_q
 from bvr.npz_io import atomic_savez
 
@@ -107,7 +107,7 @@ def frame_positions(kindyn: dict, chunk: int = 64) -> np.ndarray:
     """Re-pose the saved ``q`` → contact-frame world positions ``(N, F, 3)``.
 
     The stored global ``scale`` is re-applied about the pelvis, the same operation
-    ``estimate_contacts`` and ``measure_contacts_boards`` do, so the frames sit at the
+    ``estimate_contacts`` and ``measure_contacts`` do, so the frames sit at the
     body's metric size.
     """
     names = [str(x) for x in kindyn["contact_frame_names"]]

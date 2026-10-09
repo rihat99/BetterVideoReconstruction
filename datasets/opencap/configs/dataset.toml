@@ -22,7 +22,7 @@ steps = ["sam3", "vggt", "sapiens", "sam3d", "smplx", "fuse", "scale", "gravity"
 #             farm own geometry/, with the variant's synthetic scene.npz in it
 #   config    human TOML (default: human_optimization_<name>.toml)
 #   inherit   files of the normal run's human_optim/ linked in instead of recomputed
-#   contacts  "boards": measured board contacts (measure_contacts_boards.py), not estimated
+#   contacts  "measured": contacts measured by the rig's force sensors (measure_contacts.py), not estimated
 #   overlay   `python -m` module run on the finished run directory by the overlay step
 #   requires  a file under <out>/<clip>/ a clip must have to be run at all
 

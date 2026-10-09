@@ -46,6 +46,6 @@ steps = ["sam3", "vggt", "sapiens", "sam3d", "smplx", "fuse", "scale",
 steps = ["contacts_1", "kinematics_2", "contacts_2", "kindyn_1", "overlay"]
 config = "datasets/peter/configs/human_optimization_peter.toml"
 inherit = ["kinematic_1.npz", "sensor_forces.npz"]
-contacts = "boards"
+contacts = "measured"
 overlay = "datasets.peter.render_kindyn_overlays"
 requires = "human_optim/sensor_forces.npz"

@@ -48,8 +48,7 @@ NBINS = 10
 FOLDS = 5
 
 #: Provenance written into the TOML. Replace when the manual labels have been checked.
-FIT_NOTE = ("2026-09-12 — annotated ClimbingVideos scenes after the manual-label check "
-            "(datasets/climbingvideos/calibrate_contact_confidence.py --write)")
+FIT_NOTE = "2026-09-12 — annotated ClimbingVideos scenes after the manual-label check"
 
 
 # ─────────────────────────────── the rows ──────────────────────────────────

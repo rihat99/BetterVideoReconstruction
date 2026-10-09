@@ -6,7 +6,7 @@ of its 29 contact vertices (``pred_grf``, two rows fewer — the spring-mass mod
 velocity). Eight of those vertices are on the feet: SMPL parts 7/10 (left heel and toe)
 and 8/11 (right). Their forces summed per foot give the foot's force, and the vertex
 positions are the points of application, so the wrench about the ground origin is
-``Σ r_i × f_i`` — from which :mod:`datasets.opencap.opencap_plates` recovers the plate triple
+``Σ r_i × f_i`` — from which :mod:`datasets.opencap.plates` recovers the plate triple
 (COP on the floor plane, vertical free moment).
 
 **Frames.** PhysPT's world is its own: the camera's heading turned z-up by a fixed
@@ -31,7 +31,7 @@ scoring only on its own timestamps would hide the impact peaks that fall between
 Writes ``processed/out/<clip>/method_physpt/estimated_forces.npz``. Run from
 BetterVideoReconstruction::
 
-    uv run --no-sync python datasets/opencap/opencap_physpt_export.py
+    uv run --no-sync python datasets/opencap/physpt_export.py
 """
 from __future__ import annotations
 
@@ -44,7 +44,7 @@ import numpy as np
 
 
 from datasets.opencap.export_opencap_mot import floor_y, plate_triple
-from datasets.opencap.opencap_plates import LOADED_N
+from datasets.opencap.plates import LOADED_N
 from bvr.npz_io import atomic_savez
 from bvr.paths import REPO_ROOT
 from datasets.opencap.paths import LABVALIDATION
@@ -268,7 +268,7 @@ def main(argv: list[str] | None = None) -> int:
     residual = np.array([r["residual_mm"] for r in rows])
     free = np.array([r["free_residual_mm"] for r in rows])
     tilt = np.array([r["tilt_deg"] for r in rows])
-    print(f"\n[opencap_physpt_export] {len(rows)} clip(s); missing: {missing}")
+    print(f"\n[physpt_export] {len(rows)} clip(s); missing: {missing}")
     print(f"  yaw-fit residual   mean {residual.mean():.0f} mm  median "
           f"{np.median(residual):.0f}  max {residual.max():.0f} "
           f"({rows[int(residual.argmax())]['clip']})")

@@ -80,13 +80,13 @@ def sweep_command(step: str, manifest: Path, out_root: Path, pipeline_config: Pa
 
 
 def stage_command(step: str, clip_root: Path, *, videos: list[Path], pipeline_config: Path,
-                  human_config: Path, variant: str | None = None, boards: bool = False,
+                  human_config: Path, variant: str | None = None, measured: bool = False,
                   overlay_module: str | None = None) -> list[str]:
     """Argv of one per-clip step over ``clip_root`` (``out/<stem>/`` or a variant farm).
 
     :param videos: one video per camera view, in the ``camera.npz`` view order; only fuse
         takes more than the first.
-    :param boards: measure the contacts on the force boards instead of estimating them.
+    :param measured: measure the contacts on the rig's force sensors instead of estimating them.
     :param overlay_module: the ``overlay`` step's renderer (a ``python -m`` module name, from
         the variant's recipe), run on the real run directory, not the farm.
     """
@@ -113,8 +113,8 @@ def stage_command(step: str, clip_root: Path, *, videos: list[Path], pipeline_co
                 "--config", str(pipeline_config)]
     if step in _CONTACT_BODIES:
         bodies = _CONTACT_BODIES[step]
-        if boards:
-            return [sys.executable, "-m", "bvr.stages.measure_contacts_boards",
+        if measured:
+            return [sys.executable, "-m", "bvr.stages.measure_contacts",
                     "--predictions", str(clip_root), "--config", str(human_config),
                     "--bodies", bodies]
         return [sys.executable, "-m", "bvr.stages.estimate_contacts", *common,

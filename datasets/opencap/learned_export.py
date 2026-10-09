@@ -49,7 +49,7 @@ Writes ``processed/out/<clip>/<run>/estimated_forces.npz`` plus a copy of the so
 
 Usage::
 
-    uv run --no-sync python datasets/opencap/opencap_learned_export.py \
+    uv run --no-sync python datasets/opencap/learned_export.py \
         --clips /…/processed/out/_methods/clips_natural.txt
 """
 
@@ -64,8 +64,8 @@ import torch
 
 
 from datasets.opencap.export_opencap_mot import floor_y, plate_triple
-from datasets.opencap.opencap_plates import LOADED_N
-from datasets.opencap.opencap_sensor_forces import PROCESSED, world_from_mocap
+from datasets.opencap.plates import LOADED_N
+from datasets.opencap.sensor_forces import PROCESSED, world_from_mocap
 from bvr.body import load_body
 from bvr.human_optim.qmath import normalize_q
 from bvr.npz_io import atomic_savez
@@ -348,7 +348,7 @@ def main(argv: list[str] | None = None) -> int:
               f"loaded, peak Fy {stats['peak_v_n']:7.1f} N ({stats['peak_v_bw']:5.1f} %BW "
               f"measured), {stats['undefined']} CoP-free rows, posing residual "
               f"{stats['posing_residual_mm']:.2f} mm")
-    print(f"\n[opencap_learned_export] {written} clip(s) -> {args.run}/estimated_forces.npz"
+    print(f"\n[learned_export] {written} clip(s) -> {args.run}/estimated_forces.npz"
           + (f"; {len(missing)} without predictions: {missing}" if missing else ""))
     return 1 if missing else 0
 

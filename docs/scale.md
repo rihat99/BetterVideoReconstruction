@@ -128,7 +128,7 @@ than 0.1% — typically after round 2 or 3. The per-frame scale spread (MAD)
 after the pre-fit is typically several times tighter than the ruler's — the
 frames agree about the scale once the bodies actually sit on their depth.
 
-The body move's loss terms (run by the shared engine in `bvr/optim.py`):
+The body move's loss terms (a BetterRobot `Problem`, run through `bvr/human_optim/solve.py`):
 
 | term | weight | what it does |
 |---|---|---|

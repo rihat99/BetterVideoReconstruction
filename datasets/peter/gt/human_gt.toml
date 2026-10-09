@@ -8,7 +8,7 @@
 #   * shape_height / shape_mass / betas_prior + [stages.kinematics_1].fit_betas: the 10 shape
 #     coefficients are fitted in the refine + lbfgs phases against the participant's real height
 #     and mass, until the shape is frozen per participant (_shapes/<participant>.npz).
-#   * kinematics_1 detects no contacts; the boards ([boards]) label loaded limbs — stillness in
+#   * kinematics_1 detects no contacts; the boards ([measured_contacts]) label loaded limbs — stillness in
 #     kinematics_1, the near-wall frames (contacts_1) in kin2/kindyn; wall_penetration = the wall PLANE.
 #   * board_force (kindyn): each limb's summed solved force is pulled to the board's measurement.
 #   * [stages.kindyn_1].cones = "all" (the pipeline's); "feet" (free hands) was tried and refuted.
@@ -224,7 +224,7 @@ thumb = 25.0
 [multiview]
 image_margin_px = 20     # a SAM-3D-Body anchor target further outside its image than this gets no weight
 
-[boards]                 # contact labels from the force boards (stage "contacts")
+[measured_contacts]                 # contact labels from the force boards (stage "contacts")
 force_enter_n = 50       # a limb is in contact from this measured |F| ...
 force_exit_n = 30        # ... until it drops below this (hysteresis)
 near_scene_m = 0.05      # its contact frames within this of the wall get the label; none → its nearest

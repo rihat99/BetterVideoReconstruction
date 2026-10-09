@@ -845,7 +845,6 @@ def run_kindyn(source, pred: Path, cfg: HumanOptimConfig, device: str, *,
         force_confidence_clip=np.asarray(fconf_clip_p, np.float32),  # (P,) mean over valid frames
         cones=np.bool_(cones), cone_half_angle_deg=np.float32(half_angle),
         source_bodies=np.array(bodies, dtype="U16"),
-        source_labels=np.array("auto", dtype="U8"),
         mass_source=np.array("config" if mass_kg is not None else "shape", dtype="U8"),
         edge_speed_scale=np.float32(edge_speed_scale),
     )
