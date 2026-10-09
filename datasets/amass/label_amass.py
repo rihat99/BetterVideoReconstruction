@@ -57,7 +57,7 @@ from datasets.bedlam2.contacts import (
     calm_speed, contact_from_floor, frame_positions)
 from datasets.bedlam2.forces import FORCE_METHOD, person_forces
 from bvr.body import load_body
-from bvr.config import load_toml, section
+from bvr.config import load_config, section
 from bvr.config import FPS_REF, load_human_config
 
 LOCKED_HEAD = models_dir() / "smplx_lockedhead" / "SMPLX_NEUTRAL.npz"
@@ -357,7 +357,7 @@ def main(argv: list[str] | None = None) -> int:
         return 1
     args.save_dir.mkdir(parents=True, exist_ok=True)
 
-    cfg = load_toml(args.config)
+    cfg = load_config(args.config)
     bedlam = vars(section(cfg, "bedlam", {
         "window_s": WINDOW_S, "still_mps": STILL_MPS, "enter_m": ENTER_M, "exit_m": EXIT_M,
         "min_span_s": MIN_SPAN_S, "max_tilt_deg": MAX_TILT_DEG}))

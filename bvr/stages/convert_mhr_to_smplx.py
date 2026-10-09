@@ -65,7 +65,7 @@ from tqdm import tqdm
 
 from bvr import determinism
 from bvr.paths import REPO_ROOT
-from bvr.config import load_toml, section
+from bvr.config import load_config, section
 from bvr.precompute_runner import InputItem, SkipItem, run_batch
 
 _MAPPING_NPZ = (
@@ -486,7 +486,7 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     p.add_argument("--config", type=Path, default=REPO_ROOT / "configs" / "pipeline.toml",
                    help="pipeline TOML (default: configs/pipeline.toml)")
     cli = p.parse_args(argv)
-    cfg = load_toml(cli.config)
+    cfg = load_config(cli.config)
     args = section(cfg, "smplx", {
         "subdir": "sam3d",
         "skip_existing": False,

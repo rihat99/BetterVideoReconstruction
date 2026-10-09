@@ -21,6 +21,7 @@ from bvr.viewer.loading import (
     load_forces,
     playback_fps,
 )
+from bvr.config import load_config
 from datasets.bedlam2.paths import BEDLAM2_OUR
 from datasets.climbingvideos.viewer import select_scenes, serve_scene_farm
 
@@ -96,10 +97,18 @@ def load_bedlam_data(pred: Path, *, body: Body, video: bool, video_dir: Path | N
         bodies={BEDLAM_BODY: src}, videos=videos)
 
 
-def run_scene_db(args, view) -> None:
-    """Browse the BEDLAM2 ground truth: every scene of the DB under ``args.data_root`` (default
-    ``BEDLAM2_our``), narrowed by the ``[viewer]`` scene_ids / sample / limit knobs."""
-    data_root = args.data_root or BEDLAM2_OUR
-    rows = select_scenes(data_root, categories=(), rope_supported=None, scene_ids=args.scene_ids,
-                         sample=args.sample, limit=args.limit, seed=args.seed)
+#: Which scenes to browse: the ``[viewer]`` table (data_root, scene_ids, sample, limit, seed).
+BEDLAM_CONFIG = Path(__file__).resolve().parent / "configs" / "bedlam.toml"
+
+
+def run_scene_db(view, config_path: Path = BEDLAM_CONFIG) -> None:
+    """Browse the BEDLAM2 ground truth: every scene of the DB under ``[viewer].data_root``
+    (default ``BEDLAM2_our``), narrowed by its scene_ids / sample / limit knobs."""
+    knobs = load_config(config_path).get("viewer", {})
+    data_root = Path(knobs["data_root"]) if knobs.get("data_root") else BEDLAM2_OUR
+    rows = select_scenes(data_root, categories=(), rope_supported=None,
+                         scene_ids=knobs.get("scene_ids") or None,
+                         sample=int(knobs["sample"]) if knobs.get("sample", "") != "" else None,
+                         limit=int(knobs["limit"]) if knobs.get("limit", "") != "" else None,
+                         seed=int(knobs.get("seed", 0)))
     serve_scene_farm(view, data_root, rows, stages=("gt",), needs=("gt", "smplx.npz"))

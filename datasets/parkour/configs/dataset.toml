@@ -1,0 +1,14 @@
+# The LAAS Parkour dataset for scripts/pipeline.py --dataset parkour (datasets/parkour/README.md).
+# Paths are relative to the data root (bvr/paths.py: ../data, or $BVR_DATA_ROOT); configs are paths
+# relative to the repo root. One video per clip (`clips`: the glob that finds them,
+# <root>/<clip>/video.mp4); `steps` is the chain, in order: the first five are manifest sweeps (the
+# model loads once and sweeps every clip), the rest run per clip.
+
+[datasets.parkour]            # datasets/parkour/import_parkour.py writes processed/<clip>/; one static lab camera
+root = "Parkour-dataset/processed"
+clips = "*/video.mp4"
+out = "Parkour-dataset/processed/out"
+pipeline_config = "datasets/peter/configs/pipeline_peter.toml"
+human_config = "datasets/peter/configs/human_optimization_peter.toml"
+steps = ["sam3", "vggt", "sapiens", "sam3d", "smplx", "fuse", "scale", "gravity",
+         "kinematics_1", "contacts_1", "kinematics_2", "contacts_2", "kindyn_1"]

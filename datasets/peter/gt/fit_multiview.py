@@ -48,7 +48,6 @@ from __future__ import annotations
 import argparse
 import hashlib
 import math
-import tomllib
 from pathlib import Path
 
 import numpy as np
@@ -61,7 +60,7 @@ from bvr.human_optim.camera import fold_root_to_world, world_from_cam
 from bvr.human_optim.boards import (
     LIMBS, frame_contact as board_frame_contact, limb_contact, limb_of_frame,
 )
-from bvr.config import load_human_config
+from bvr.config import load_config, load_human_config
 from bvr.human_optim.force_confidence import force_confidence
 from bvr.human_optim.keypoints import smooth_tracks
 from bvr.human_optim.kindyn import _GRAVITY_MAG, build_dynamics_spec
@@ -93,8 +92,7 @@ def participant(clip: str) -> dict:
 
 def gt_section(name: str) -> dict:
     """A section of ``human_gt.toml`` the pipeline's config loader does not expose ([multiview], [boards])."""
-    with CONFIG.open("rb") as f:
-        return tomllib.load(f)[name]
+    return load_config(CONFIG)[name]
 
 
 # ───────────────────────────── inputs ─────────────────────────────

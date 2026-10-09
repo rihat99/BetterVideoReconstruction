@@ -42,7 +42,7 @@ from scipy.spatial import cKDTree
 
 from bvr import determinism
 from bvr.body import load_body
-from bvr.config import load_toml
+from bvr.config import load_config
 from bvr.human_optim import paths
 from bvr.human_optim.boards import LIMBS, frame_contact, limb_contact, limb_of_frame
 from bvr.human_optim.qmath import normalize_q
@@ -82,7 +82,7 @@ def run(predictions_dir: str | Path, config_path: str | Path, *,
         bodies: str = "kinematic_1") -> Path:
     """Write ``contacts_<tag>.npz`` from the boards for one clip."""
     pred = Path(predictions_dir)
-    cfg = load_toml(config_path)
+    cfg = load_config(config_path)
     boards_cfg = cfg["boards"]
     enter_n, exit_n = float(boards_cfg["force_enter_n"]), float(boards_cfg["force_exit_n"])
     near_m = float(boards_cfg["near_scene_m"])

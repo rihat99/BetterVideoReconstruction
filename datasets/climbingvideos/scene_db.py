@@ -137,8 +137,3 @@ def resolve_rows(
 def stride_shard(rows: list, i: int, n: int) -> list:
     """Rows ``i, i+n, i+2n, …`` — a stable disjoint partition of ``rows``."""
     return rows[i::n]
-
-
-def parse_int_csv(s: str) -> tuple[int, ...]:
-    """``"1,2,3"`` → ``(1, 2, 3)`` (empty fields dropped)."""
-    return tuple(int(x) for x in s.split(",") if x.strip() != "")

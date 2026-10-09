@@ -14,7 +14,6 @@ from __future__ import annotations
 
 import argparse
 import subprocess
-import tomllib
 from pathlib import Path
 
 import cv2
@@ -23,6 +22,7 @@ import torch
 
 
 from bvr.body import load_body
+from bvr.config import load_config
 from bvr.human_optim.qmath import normalize_q
 from bvr.paths import REPO_ROOT
 from datasets.peter.paths import PETER
@@ -61,8 +61,7 @@ def main() -> None:
     n = len(q)                                   # the body's frames (cam_left's clock)
     offsets = np.asarray(cams["frame_offset"], int) if "frame_offset" in cams.files else np.zeros(3, int)
 
-    with CONFIG.open("rb") as f:
-        frames = tomllib.load(f)["contacts"]["frames"]
+    frames = load_config(CONFIG)["contacts"]["frames"]
     body = load_body(device="cuda" if torch.cuda.is_available() else "cpu", frames_allow=frames)
     parents = [int(body.parent_tree[0, j]) for j in range(body.num_joints)]
     with torch.no_grad():

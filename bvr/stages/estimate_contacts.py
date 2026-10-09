@@ -75,7 +75,7 @@ import torch
 from bvr import determinism
 from bvr.paths import REPO_ROOT
 from bvr.body import frame_normals, load_body
-from bvr.config import load_toml
+from bvr.config import load_config
 from bvr.geometry.normals import load_scene_cloud
 from bvr.geometry.quality import cam_motion_ratio, quality_flag, smear_stats
 from bvr.npz_io import atomic_savez
@@ -112,7 +112,7 @@ CONTACT_LABEL_METHOD = "frames-v4"   # v1 = geometry only; v2 adds the force wit
 
 def _load_config(path: Path) -> dict:
     """Operational knobs for the contact stage (no loss weights here)."""
-    cfg = load_toml(path) if path.exists() else {}
+    cfg = load_config(path) if path.exists() else {}
     c = cfg.setdefault("contacts", {})
     c.setdefault("close_thresh_m", 0.03)   # enter: "just outside" distance counted as contact
     c.setdefault("exit_thresh_m", 0.035)   # stay: looser hysteresis exit (kills boundary flicker)

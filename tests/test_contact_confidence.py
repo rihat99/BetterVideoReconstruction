@@ -7,7 +7,7 @@ import numpy as np
 import pytest
 import torch
 
-from bvr.config import load_toml
+from bvr.config import load_config
 from bvr.human_optim.confidence import (
     CONTACT_CONFIDENCE_METHOD,
     confidence_coefficients,
@@ -143,7 +143,7 @@ def test_confidence_coefficients_rejects_an_incomplete_or_broken_section():
 
 def test_the_shipped_coefficients_read_drift_the_way_the_two_classes_need():
     shipped = confidence_coefficients(
-        load_toml(_REPO_ROOT / "configs" / "human_optimization.toml")["contact_confidence"])
+        load_config(_REPO_ROOT / "configs" / "human_optimization.toml")["contact_confidence"])
     assert shipped["contact"]["log_drift"] < 0.0 < shipped["free"]["log_drift"]
     assert shipped["contact"]["log_transition"] > 0.0
     assert shipped["free"]["log_transition"] > 0.0

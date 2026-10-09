@@ -38,3 +38,8 @@ seed = 0                      # Deterministic draw among the small new videos.
 
 [contacts_run]
 bodies = "kinematic_1"      # Body artifact to score; produces contacts_1.npz (or use kinematic_2).
+
+[viewer]                    # scripts/view_3d.py --scenes: which of the [corpus] target scenes to browse
+scene_ids = ""              # Optional scene-id CSV; empty browses every target scene.
+sample = ""                 # Optional random subset size (drawn with [corpus].seed); empty disables sampling.
+limit = ""                  # Optional first-N limit; empty disables limiting.

@@ -1,13 +1,14 @@
-# Orchestrator config for scripts/pipeline.py (file-based, small-batch).
-# Per-stage knobs + step selection. Each stage is also runnable standalone
-# (see bvr/stages/); standalone CLIs read their knobs from this file.
+# The general pipeline config: per-stage knobs, read by every stage CLI (bvr/stages/) from
+# this file — a dataset config names it as its `base` and lists only what it changes — plus the
+# chain of a `scripts/pipeline.py --source` run ([steps], [human_optimization]).
 
 [steps]
-# Active stages, in order; the chain ends at human_optimization (four-stage SMPL-X
-# refinement). List order is honoured: `fuse` builds the point clouds in VGGT's
-# up-to-scale world; `scale` (estimate_scale) then measures the metric factor against
-# the fused human points and rescales the saved geometry in place. `--steps` runs any subset.
-run = ["sam3", "vggt", "sapiens", "sam3d", "smplx", "fuse", "scale", "human_optimization"]
+# The chain of a --source run, in order (bvr/runner.py lists every step). The five model stages
+# sweep all clips with one model load; `fuse` builds the point clouds in VGGT's up-to-scale
+# world; `scale` (estimate_scale) then measures the metric factor against the fused human
+# points and rescales the saved geometry in place; `kinematics_1` is the root + kinematics_1
+# SMPL-X refinement. `--steps` runs any subset, in this order.
+run = ["sam3", "vggt", "sapiens", "sam3d", "smplx", "fuse", "scale", "kinematics_1"]
 
 [runtime]
 device = "cuda"             # compute device of the stages (the viewer poses bodies on the CPU)
@@ -120,7 +121,7 @@ ground_max_tilt_deg = 30.0 # reject when the floor normal strays this far from t
 weights = "pinhole"        # GeoCalib checkpoint: pinhole | distorted
 skip_existing = false      # skip when geocalib/gravity.npz exists
 
-[viewer]                    # scripts/view_3d.py display and scene-selection knobs
+[viewer]                    # scripts/view_3d.py display knobs
 port = 8082                # viser server port
 point_size = 0.02          # scene point radius in metres
 human_point_size = 0.01    # human point radius in metres
@@ -131,13 +132,8 @@ human_max_points = 6000    # max human points per frame and climber; 0 keeps all
 video = false              # sidebar video pane; off skips the decode and the per-frame streaming (laggy over remote)
                            # (--bedlam turns it on regardless: the footage is what you check the bodies against)
 video_dir = ""             # source-video directory; empty uses the viewer default
-data_root = ""             # ClimbingVideos root; empty uses the scene DB default
-categories = "1,2"         # ClimbingVideos vlm_category CSV filter
-rope_supported = 0        # rope-supported filter; -1 selects any
-scene_ids = ""             # optional scene-id CSV; empty selects all matches
-sample = ""                # optional random subset size; empty disables sampling
-limit = ""                 # optional first-N limit; empty disables limiting
-seed = 0                   # random-sampling seed
+                           # (--scenes / --bedlam pick their scenes through the dataset's own
+                           #  config: datasets/climbingvideos/configs/corpus.toml, datasets/bedlam2/configs/bedlam.toml)
 
-[human_optimization]        # four-stage SMPL-X refinement → human_optim/ (default chain: root, kinematics_1)
-config = "configs/human_optimization.toml"   # stage selection + all knobs live in THAT file
+[human_optimization]        # the human chain of a --source run (kinematics_1, contacts_*, kinematics_2, kindyn_1)
+config = "configs/human_optimization.toml"   # all its knobs live in THAT file

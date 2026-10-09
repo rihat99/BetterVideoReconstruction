@@ -50,7 +50,7 @@ import numpy as np
 import torch
 
 from bvr import determinism
-from bvr.config import load_toml, section
+from bvr.config import load_config, section
 from bvr.precompute_runner import (
     InputItem,
     SkipItem,
@@ -397,7 +397,7 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     p = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     add_standard_args(p)
     cli = p.parse_args(argv)
-    cfg = load_toml(cli.config)
+    cfg = load_config(cli.config)
     args = section(cfg, "sapiens", {
         "skip_existing": False,
         "dtype": "fp16",

@@ -19,10 +19,10 @@ import argparse
 import json
 import random
 import sqlite3
-import tomllib
 from datetime import datetime
 from pathlib import Path
 
+from bvr.config import load_config
 from bvr.paths import REPO_ROOT
 
 from datasets.climbingvideos.scene_db import ScenePaths, select_targets
@@ -34,8 +34,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--dry-run", action="store_true", help="print the plan, write nothing")
     args = parser.parse_args(argv)
 
-    with args.config.open("rb") as f:
-        cfg = tomllib.load(f)
+    cfg = load_config(args.config)
     corpus = cfg.get("corpus", {})
     split = cfg.get("split", {})
     test_frac = float(split.get("test_frames_frac", 0.10))

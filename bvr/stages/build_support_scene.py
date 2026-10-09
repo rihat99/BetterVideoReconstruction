@@ -58,7 +58,7 @@ import torch
 from bvr import determinism
 from bvr.paths import REPO_ROOT
 from bvr.body import load_body
-from bvr.config import load_toml
+from bvr.config import load_config
 from bvr.npz_io import atomic_savez
 from bvr.human_optim import paths
 from bvr.human_optim.qmath import normalize_q
@@ -379,7 +379,7 @@ def _plateau_arrays(plateaus: list[Plateau]) -> dict:
 def run(predictions_dir: str | Path, config_path: str | Path, *,
         bodies: str | None = None) -> Path:
     """Write the clip's synthetic ``geometry/scene.npz``; return its path."""
-    cfg = load_toml(Path(config_path))
+    cfg = load_config(Path(config_path))
     pred = Path(predictions_dir)
     gravity_path = pred / "geocalib" / "gravity.npz"
     if not gravity_path.exists():

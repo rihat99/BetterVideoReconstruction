@@ -9,7 +9,7 @@ vault `sv`), one subject each, one static 720x576 camera. Truth: Vicon (16 joint
 - **Import:** `uv run --no-sync python datasets/parkour/import_parkour.py [--clips …]` (bakes the 3-frame video/MoCap offset);
   `parkour_sensor_forces.py [--source …]` → `<clip>/human_optim/sensor_forces.npz` (the linear part per limb, reaction sense;
   `world_aligned = False`: the MoCap yaw is not ours, so readers compare sizes only).
-- **Run:** `uv run --no-sync python scripts/run_dataset.py --dataset parkour [--variant gt_contact] [--dry-run]` with the peter configs
+- **Run:** `uv run --no-sync python scripts/pipeline.py --dataset parkour [--variant gt_contact] [--dry-run]` (`configs/dataset.toml`) with the peter configs
   (`datasets/peter/configs/pipeline_peter.toml`, `human_optimization_peter.toml`).
 - **Score:** `score_parkour_pose.py` (the dataset's own per-frame Procrustes MPJPE); `compare_parkour_methods.py [--clips …] [--gt …] [--variant …]`
   scores Li et al. (their / our inputs), PhysPT and our chain on the same frames and truth; `render_parkour_method_overlays.py [--clips --methods]`

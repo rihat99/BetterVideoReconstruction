@@ -1,8 +1,14 @@
-"""Stage TOML configuration: the raw loaders and the human-optimization config.
+"""Stage TOML configuration: the one loader and the human-optimization config.
 
-``load_toml`` / ``section`` read any stage TOML. The human-optimization TOML stores
-each loss weight as a length-4 array ``[root, kinematics_1, kinematics_2, kindyn_1]``
-under ``[loss_weights.*]`` — the single source of truth for every weight;
+:func:`load_config` reads any stage TOML. A file may name a ``base`` (a path relative to
+the repository root); the base is loaded first, recursively, and the file's own tables are
+merged over it key by key — so a dataset config holds only the knobs it changes. Arrays
+replace the base's whole (a loss-weight column ``[root, kinematics_1, kinematics_2,
+kindyn_1]`` is one value, never merged element by element). ``section`` layers one table
+over its defaults.
+
+The human-optimization TOML stores each loss weight as such a length-4 array under
+``[loss_weights.*]`` — the single source of truth for every weight;
 :func:`load_human_config` flattens them into one ``{term: weight}`` dict per stage
 (the shape the losses read), so the runner just picks a stage's dict per
 optimization phase. Per-stage ``iters`` and the shared knob sections
@@ -16,11 +22,28 @@ from dataclasses import dataclass
 from pathlib import Path
 from types import SimpleNamespace
 
+from bvr.paths import REPO_ROOT
 
-def load_toml(path: str | Path) -> dict:
-    """Load a TOML file into a plain dictionary."""
+
+def _merge(base: dict, override: dict) -> dict:
+    """``override`` laid over ``base``, table by table; any other value replaces whole."""
+    merged = dict(base)
+    for key, value in override.items():
+        if isinstance(value, dict) and isinstance(merged.get(key), dict):
+            merged[key] = _merge(merged[key], value)
+        else:
+            merged[key] = value
+    return merged
+
+
+def load_config(path: str | Path) -> dict:
+    """Load a TOML file into a plain dictionary, its ``base`` (if any) merged underneath."""
     with Path(path).open("rb") as config_file:
-        return tomllib.load(config_file)
+        raw = tomllib.load(config_file)
+    base = raw.pop("base", None)
+    if base is None:
+        return raw
+    return _merge(load_config(REPO_ROOT / base), raw)
 
 
 def section(cfg: dict, name: str, defaults: dict) -> SimpleNamespace:
@@ -82,7 +105,7 @@ class HumanOptimConfig:
 
 def load_human_config(path: str | Path) -> HumanOptimConfig:
     """Load a human-optimization TOML into a :class:`HumanOptimConfig`."""
-    raw = load_toml(path)
+    raw = load_config(path)
 
     weights: dict[str, dict[str, float]] = {s: {} for s in STAGE_ORDER}
     for group, table in raw.get("loss_weights", {}).items():

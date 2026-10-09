@@ -84,7 +84,7 @@ import torch
 from PIL import Image
 
 from bvr import determinism
-from bvr.config import load_toml, section
+from bvr.config import load_config, section
 from bvr.mask_io import union_obj_masks, write_mask_png
 from bvr.precompute_runner import InputItem, SkipItem, add_standard_args, run_batch
 from bvr.source import frame_stem, resolve_source
@@ -908,7 +908,7 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     )
     add_standard_args(p)
     cli = p.parse_args(argv)
-    cfg = load_toml(cli.config)
+    cfg = load_config(cli.config)
     args = section(cfg, "sam3", _DEFAULTS)
     args.device = section(cfg, "runtime", {"device": "cuda"}).device
     args.source, args.save_dir, args.config = cli.source, cli.save_dir, cli.config

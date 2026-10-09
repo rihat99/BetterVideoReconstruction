@@ -7,7 +7,7 @@ from pathlib import Path
 
 import numpy as np
 
-from scripts.run_dataset import build_view_farm
+from bvr.runner import build_view_farm
 from datasets._rigs import load_sensor_forces
 from datasets.opencap.viewer import load_plate_estimate
 

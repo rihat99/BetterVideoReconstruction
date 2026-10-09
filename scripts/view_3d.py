@@ -14,8 +14,9 @@ add orange measured arrows, OpenCap clips also our blue plate-format arrows.
 
 ``--scenes`` browses the ClimbingVideos scene DB, ``--bedlam`` the BEDLAM2 ground truth (one
 ``ground truth`` source, contact labels and forces where ``datasets/bedlam2/label_bedlam2.py`` ran,
-video on); both alias the selected scenes into a throwaway ``out/``-shaped symlink farm. Knobs live
-in the config's ``[viewer]`` section. This script is where the dataset readers
+video on); both alias the selected scenes into a throwaway ``out/``-shaped symlink farm. Display
+knobs live in the config's ``[viewer]`` section; which scenes a DB browse shows is the dataset's own
+choice (``[viewer]`` of ``datasets/climbingvideos/configs/corpus.toml`` / ``datasets/bedlam2/configs/bedlam.toml``). This script is where the dataset readers
 (``datasets/<name>/viewer.py``, ``datasets/_rigs.py``) are composed into the generic viewer.
 
 Usage::
@@ -32,7 +33,7 @@ import sys
 from functools import partial
 from pathlib import Path
 
-from bvr.config import load_toml, section
+from bvr.config import load_config, section
 from bvr.paths import REPO_ROOT
 
 
@@ -43,17 +44,15 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--scenes", action="store_true", help="browse the ClimbingVideos scene DB")
     p.add_argument("--bedlam", action="store_true",
                    help="browse the BEDLAM2 ground truth (video pane on); every scene unless "
-                        "[viewer].scene_ids / sample / limit picks a set")
+                        "datasets/bedlam2/configs/bedlam.toml [viewer] picks a set")
     p.add_argument("--config", type=Path, default=REPO_ROOT / "configs" / "pipeline.toml",
                    help="pipeline TOML (default: configs/pipeline.toml)")
     cli = p.parse_args(sys.argv[1:] if argv is None else argv)
     if cli.scenes and cli.bedlam:
         p.error("--bedlam and --scenes pick different DBs; use one")
-    args = section(load_toml(cli.config), "viewer", {
+    args = section(load_config(cli.config), "viewer", {
         "port": 8082, "point_size": 0.02, "human_point_size": 0.01, "camera_scale": 0.1, "up": "-y",
         "smplx": True, "human_max_points": 6000, "video": True, "video_dir": "",
-        "data_root": "", "categories": "1,2", "rope_supported": 0, "scene_ids": "", "sample": "",
-        "limit": "", "seed": 0,
     })
 
     from bvr.viewer import view_3d
@@ -80,11 +79,7 @@ def main(argv: list[str] | None = None) -> int:
                    video=args.video or cli.bedlam, read=read_clip,
                    markers=(*CLIP_MARKERS, bedlam2.BEDLAM_MARKER))
     if cli.scenes or cli.bedlam:
-        args.data_root = Path(args.data_root) if args.data_root else None
-        args.scene_ids = args.scene_ids or None
-        args.sample = int(args.sample) if args.sample != "" else None
-        args.limit = int(args.limit) if args.limit != "" else None
-        (bedlam2 if cli.bedlam else climbingvideos).run_scene_db(args, view)
+        (bedlam2 if cli.bedlam else climbingvideos).run_scene_db(view)
         return 0
     if cli.target is None:
         p.error("give a predictions dir (out/ or out/<stem>/) or use --scenes / --bedlam")

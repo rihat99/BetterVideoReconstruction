@@ -96,7 +96,7 @@ from datasets.bedlam2.contacts import (
 )
 from datasets.bedlam2.forces import save_forces, scene_forces
 from datasets.bedlam2.masks import save_boxes, scene_masks
-from bvr.config import load_toml, section
+from bvr.config import load_config, section
 from bvr.config import load_human_config
 
 _STATE: dict = {}
@@ -284,7 +284,7 @@ def main(argv: list[str] | None = None) -> int:
                    help="select: actually clear human_selected (default is a dry run)")
     args = p.parse_args(sys.argv[1:] if argv is None else argv)
 
-    cfg = load_toml(args.config)
+    cfg = load_config(args.config)
     # Defaults come from the module, never a second copy: a --config without a
     # [bedlam] section must behave exactly like the shipped readout.
     contact_knobs = vars(section(cfg, "bedlam", {

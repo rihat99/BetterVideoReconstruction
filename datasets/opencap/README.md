@@ -10,8 +10,8 @@ STS1, DJ1 from camera `Cam1`.
   `sync_opencap.py [--clips …] [--joints RUN]` measures each clip's video-to-mocap offset from the video → `sync.json`, then
   `import_opencap.py --resample-only` re-reads the plates at the corrected times; `opencap_sensor_forces.py [--run human_optim]`
   rotates the plates into our world → `<clip>/human_optim/sensor_forces.npz`.
-- **Run:** `uv run --no-sync python scripts/run_dataset.py --dataset opencap [--variant floorplane|floorplane_edgev] [--dry-run]` with
-  `configs/pipeline_opencap.toml` + `datasets/peter/configs/human_optimization_peter.toml`; `floorplane` (`configs/human_optimization_floorplane.toml`)
+- **Run:** `uv run --no-sync python scripts/pipeline.py --dataset opencap [--variant floorplane|floorplane_edgev] [--dry-run]` (`configs/dataset.toml`) with
+  `configs/pipeline_opencap.toml` (a delta over the peter config) + `datasets/peter/configs/human_optimization_peter.toml`; `floorplane` (`configs/human_optimization_floorplane.toml`, a delta over the general config)
   runs on a synthetic support scene — feet + sit-bone frames, no hands, `floor_gate_m = 0`; `_edgev` adds the `kindyn_1` edge knobs.
 - **Score:** `export_opencap_mot.py --run <run>` folds our foot forces into the plates' triple (force, centre of pressure, free moment;
   `opencap_plates.py`) → `<run>/estimated_forces.npz` + OpenSim `.mot`; `compare_opencap_plates.py --run <run>` scores it with the published

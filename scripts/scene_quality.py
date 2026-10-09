@@ -102,7 +102,7 @@ def flag_of(row: dict, q: dict) -> str:
 
 
 def main(argv: list[str] | None = None) -> int:
-    from bvr.config import load_toml
+    from bvr.config import load_config
 
     ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     ap.add_argument("--predictions", nargs="+", required=True,
@@ -111,7 +111,7 @@ def main(argv: list[str] | None = None) -> int:
                     default=REPO_ROOT / "configs" / "human_optimization.toml",
                     help="TOML carrying the [quality] flag thresholds")
     args = ap.parse_args(argv)
-    q = (load_toml(args.config) if args.config.exists() else {}).get("quality", {})
+    q = (load_config(args.config) if args.config.exists() else {}).get("quality", {})
     q.setdefault("cam_depth_max", 0.4)
     q.setdefault("res_before_bw_max", 2.5)
     q.setdefault("smear_med_max", 2.0)

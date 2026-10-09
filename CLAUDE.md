@@ -59,53 +59,61 @@ datasets (`ClimbingVideos`, `LabValidation_withVideos`, `Parkour-dataset`,
 process: `--source`, `--predictions`, `--save-dir`, stage/scene selection,
 `--config`). The config files:
 
+One loader, `bvr.config.load_config`: a TOML may name a `base` (a path relative to the repo
+root) and is merged over it table by table, so a dataset config holds only the knobs it
+changes (a loss-weight column is one value, replaced whole).
+
 - [`configs/pipeline.toml`](configs/pipeline.toml) — one section per stage
   (`[sam3] [vggt] [sapiens] [scale] [fuse] [sam3d] [smplx] [gravity] [viewer]`),
-  read by the stage CLIs themselves + `[steps]`/`[runtime]` for the orchestrator.
+  read by the stage CLIs themselves + `[steps]`/`[human_optimization]` for a
+  `scripts/pipeline.py --source` run.
 - [`datasets/peter/configs/pipeline_peter.toml`](datasets/peter/configs/pipeline_peter.toml) — the static-camera
-  peter rigs and Parkour: one tracked person, overlays off, no pre-fit, chunked VGGT.
+  peter rigs and Parkour, over the base: one tracked person, overlays off, no pre-fit, chunked VGGT.
 - [`datasets/opencap/configs/pipeline_opencap.toml`](datasets/opencap/configs/pipeline_opencap.toml) — OpenCap
-  LabValidation: the peter copy with no frame subsampling and leaner VGGT chunks.
+  LabValidation, over the peter config: no frame subsampling and leaner VGGT chunks.
 - [`configs/human_optimization.toml`](configs/human_optimization.toml) — the four
   human-optimization stages: loss weights as length-4 columns
   `[root, kinematics_1, kinematics_2, kindyn_1]` (a term is off where its
   column is 0), per-stage `[stages.*]` options, shared knob sections, `[contacts]` +
   `[contact_force]`.
 - [`datasets/peter/configs/human_optimization_peter.toml`](datasets/peter/configs/human_optimization_peter.toml) —
-  the rigs, Parkour and OpenCap: contact frames on hands and feet only, kinematic
-  chamfer off; otherwise a copy of the general config.
+  the rigs, Parkour and OpenCap, over the general config: contact frames on hands and
+  feet only, kinematic chamfer off, the `[boards]` thresholds.
 - [`datasets/opencap/configs/human_optimization_floorplane.toml`](datasets/opencap/configs/human_optimization_floorplane.toml) —
-  the OpenCap `floorplane` variant: feet + sit-bone frames, no hands, contact against
-  a synthetic support scene (`floor_gate_m = 0`).
+  the OpenCap `floorplane` variant, over the general config: feet + sit-bone frames, no
+  hands, contact against a synthetic support scene (`floor_gate_m = 0`), shod heels.
 - [`datasets/opencap/configs/human_optimization_floorplane_edgev.toml`](datasets/opencap/configs/human_optimization_floorplane_edgev.toml) —
   floorplane with the `kindyn_1` edge knobs on (`force_edge`, `edge_speed_m_s`).
 - [`datasets/climbingvideos/configs/corpus.toml`](datasets/climbingvideos/configs/corpus.toml) — ClimbingVideos DB fan-out (data
-  root, devices, QA/discard) + the corpus tools (`[split]`, `[score]`).
-- [`configs/datasets.toml`](configs/datasets.toml) — the measured datasets
-  `run_dataset.py` runs (roots, clips or rig views, out trees, their configs) and the
-  `[variants.*]` chains.
+  root, devices, QA/discard), the corpus tools (`[split]`) and which scenes the viewer
+  browses (`[viewer]`).
+- `datasets/<name>/configs/dataset.toml` (`parkour`, `opencap`, `peter`) — the measured
+  datasets `scripts/pipeline.py --dataset` runs (roots, clips or rig views, out trees,
+  their configs) and the `[variants.*]` chains.
 
-## Three pipelines, shared stages
+## Two runners, shared stages
 
-- **Local, file-based** — `scripts/pipeline.py` runs the chain on a video/folder
-  → `out/<stem>/` (one tree per clip). Resume with `--skip-existing`.
+- **Clips** — `scripts/pipeline.py` runs the chain over a target: `--source` (a
+  video/folder → `<save-dir>/<stem>/`, one tree per clip) or `--dataset <name>` (a
+  `datasets/<name>/configs/dataset.toml` table: `parkour`, `opencap`, and the peter
+  rigs `campus_board`, `climb_wall_2`, `climb_wall_3` → `<out>/<clip>/`, the same
+  tree). Every stage command comes from `bvr/runner.py` (`stage_command`,
+  `sweep_command` → `python -m bvr.stages.<name>`). The five model stages sweep every
+  clip with one model load; the rest run clip by clip, resumable (a finished step is
+  skipped; `--skip-existing` also leaves out finished sweeps), `--shard i/n` across
+  GPUs, `--dry-run` to print the commands. `--variant <name>` re-runs the human chain
+  into `<clip>/human_optim_<name>/` (`floorplane`: a synthetic support scene;
+  `gt_contact`: the boards' measured contacts); `--views a,b` reconstructs a rig clip
+  from several cameras at once.
 - **ClimbingVideos DB** — `datasets/climbingvideos/corpus.py --stage <s>` fans ANY stage over the
   scene DB (`features/<stage>/<aa>/<bb>/<scene>/`), stride-sharded across the
   configured GPUs. Manifest stages (sam3/vggt/sapiens/sam3d/smplx) sweep with one
   model load per GPU; farm stages (geometry/human_optim/contacts) fake a local
   `out/<stem>/` tree with symlinks and call the same stage entry points. Stage
   knobs come from the same pipeline/human-optimization TOMLs (written per shard
-  with the corpus overrides), so the two pipelines cannot drift. Selection:
+  with the corpus overrides) and the stage commands from the same `bvr/runner.py`,
+  so the two runners cannot drift. Selection:
   `--scenes/--sample/--limit`, plus `--dry-run`. DB access in `datasets/climbingvideos/scene_db.py`.
-- **Measured datasets** — `scripts/run_dataset.py --dataset <name>` runs the chain
-  over one dataset of `configs/datasets.toml` (`parkour`, `opencap`, and the peter
-  rigs `campus_board`, `climb_wall_2`, `climb_wall_3`) → `<out>/<clip>/`, the same
-  tree as `out/<stem>/`. The five model stages sweep every clip with one model load;
-  the rest run clip by clip, resumable, `--shard i/n` across GPUs, `--dry-run` to
-  print the commands. `--variant <name>` re-runs the human chain into
-  `<clip>/human_optim_<name>/` (`floorplane`: a synthetic support scene;
-  `gt_contact`: the boards' measured contacts); `--views a,b` reconstructs a rig clip
-  from several cameras at once.
 - `datasets/examples/score_frame_contacts.py` scores the stage's contact-frame labels
   against manual annotations.
 
@@ -147,7 +155,7 @@ scene points. Where `datasets/bedlam2/label_bedlam2.py` has run it also draws th
 frames** red/green from `gt/contacts.npz` and drops the people `gt/bboxes.npz` found
 no usable frame for, and draws the solved forces from `gt/forces.npz` on that body
 the way it draws `kindyn_1`'s. Video pane on; all 18 076 scenes in the pager unless
-`[viewer].scene_ids`/`sample`/`limit` narrows them (a scene loads only when selected).
+`[viewer]` of `datasets/bedlam2/configs/bedlam.toml` narrows them (a scene loads only when selected).
 
 **BEDLAM2 labels** — `datasets/bedlam2/label_bedlam2.py` measures what that pose ground truth
 implies but does not state, writing it beside it under `features/gt/`:
@@ -169,17 +177,19 @@ Knobs in `[bedlam]` and `[bedlam_forces]`.
 ## Run
 
 ```bash
-# Whole chain on one clip (knobs in configs/pipeline.toml).
+# Whole chain on one clip (knobs in configs/pipeline.toml, chain = its [steps].run).
 uv run --no-sync python scripts/pipeline.py --source ../data/examples/data/boulder_1.mp4 --save-dir ../data/examples/out/
-# Batch of clips; resume.
+# Batch of clips; resume (finished sweeps are not even launched).
 uv run --no-sync python scripts/pipeline.py --source ../data/examples/data/ --save-dir ../data/examples/out/ --skip-existing
+# The standalone human steps after the default chain, in order.
+uv run --no-sync python scripts/pipeline.py --source ../data/examples/data/ --save-dir ../data/examples/out/ --steps contacts_1,kinematics_2,contacts_2,kindyn_1
 # One stage standalone (all stages follow this shape).
 uv run --no-sync python bvr/stages/estimate_scale.py --predictions ../data/examples/out/boulder_1/
 uv run --no-sync python bvr/stages/human_optimization.py --source ../data/examples/data/boulder_1.mp4 --predictions ../data/examples/out/boulder_1/
 # Corpus: any stage over the scene DB.
 uv run --no-sync python datasets/climbingvideos/corpus.py --stage geometry --limit 10 --dry-run
-# A measured dataset (configs/datasets.toml); --dry-run prints the commands, runs nothing.
-uv run --no-sync python scripts/run_dataset.py --dataset climb_wall_3 --variant gt_contact --dry-run
+# A measured dataset (datasets/<name>/configs/dataset.toml); --dry-run prints the commands, runs nothing.
+uv run --no-sync python scripts/pipeline.py --dataset climb_wall_3 --variant gt_contact --dry-run
 ```
 
 ## Project layout
@@ -190,9 +200,8 @@ BetterVideoReconstruction/
 ├── docs/                          # the algorithm docs (see top of this file)
 ├── configs/                       # the TOMLs listed under "Configs over CLIs"
 ├── scripts/
-│   ├── pipeline.py                # LOCAL pipeline (subprocess orchestrator)
+│   ├── pipeline.py                # the chain over clips: --source video/folder or --dataset <name> (+ variants)
 │   ├── corpus.py                  # DATASET pipeline: any stage over the scene DB
-│   ├── run_dataset.py             # MEASURED datasets: the chain + variants per configs/datasets.toml
 │   ├── scene_db.py                # scene-DB access + target selection
 │   ├── assign_dataset_split.py    # train/test split for newly curated scenes
 │   ├── import_bedlam2.py          # BEDLAM2 → the ClimbingVideos layout (pose ground truth)

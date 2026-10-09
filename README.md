@@ -19,10 +19,10 @@ optimization residuals used here.
 
 ## Pipeline
 
-The default chain (`scripts/pipeline.py`) runs these stages in order:
+The default chain (`scripts/pipeline.py --source`) runs these stages in order:
 
 ```
-video ─▶ sam3 ─▶ vggt ─▶ sapiens ─▶ sam3d ─▶ smplx ─▶ fuse ─▶ scale ─▶ human_optimization
+video ─▶ sam3 ─▶ vggt ─▶ sapiens ─▶ sam3d ─▶ smplx ─▶ fuse ─▶ scale ─▶ kinematics_1
 ```
 
 | Stage | Model | Output (under `out/<stem>/`) |
@@ -67,8 +67,8 @@ label-confidence coefficients
 (`datasets/climbingvideos/calibrate_contact_confidence.py`, whose numbers then live in the TOML).
 
 For the measured datasets (LAAS Parkour, OpenCap LabValidation, the peter climbing
-rigs), `scripts/run_dataset.py --dataset <name>` runs the same chain over every clip;
-the datasets and their variant chains live in `configs/datasets.toml`.
+rigs), `scripts/pipeline.py --dataset <name>` runs the same chain over every clip;
+the datasets and their variant chains live in `datasets/<name>/configs/dataset.toml`.
 
 ## Quick start
 

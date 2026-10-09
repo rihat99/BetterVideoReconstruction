@@ -33,3 +33,10 @@ device = "cpu"             # the solve is a few hundred tiny L-BFGS steps — la
 [bedlam_forces.weights]    # laid over the kindyn_1 column above
 force_edge = 3000          # the force on the first/last frame of every contact interval — loads
                            #  ramp in and out instead of stepping (the OpenCap validation term)
+
+[viewer]                   # scripts/view_3d.py --bedlam: which scenes of the ground-truth DB to browse
+data_root = ""             # BEDLAM2_our root; empty uses datasets/bedlam2/paths.py
+scene_ids = ""             # optional scene-id CSV; empty browses every scene
+sample = ""                # optional random subset size; empty disables sampling
+limit = ""                 # optional first-N limit; empty disables limiting
+seed = 0                   # random-sampling seed

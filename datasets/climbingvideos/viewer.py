@@ -12,7 +12,12 @@ import shutil
 import tempfile
 from pathlib import Path
 
+from bvr.config import load_config
+from bvr.paths import REPO_ROOT
 from datasets.climbingvideos import scene_db
+
+#: Which scenes to browse: ``[corpus]`` (data_root, categories, rope_supported, seed) + ``[viewer]``.
+CORPUS_CONFIG = Path(__file__).resolve().parent / "configs" / "corpus.toml"
 
 #: The stage feature dirs the loaders read, each aliased as ``<farm>/<stage>``.
 FARM_STAGES = ("geometry", "sam3d", "vggt", "human_optim", "geocalib")
@@ -70,10 +75,19 @@ def serve_scene_farm(view, data_root: Path, rows: list, *, stages: tuple[str, ..
     view(farm_root, video_dir=farm_root)
 
 
-def run_scene_db(args, view) -> None:
-    """Browse the ClimbingVideos DB; ``args`` carry the ``[viewer]`` selection knobs."""
-    data_root = args.data_root or scene_db.DEFAULT_DATA_ROOT
-    rows = select_scenes(data_root, categories=scene_db.parse_int_csv(args.categories),
-                         rope_supported=None if args.rope_supported < 0 else args.rope_supported,
-                         scene_ids=args.scene_ids, sample=args.sample, limit=args.limit, seed=args.seed)
+def run_scene_db(view, config_path: Path = CORPUS_CONFIG) -> None:
+    """Browse the corpus's target scenes (``[corpus]`` of ``corpus.toml``, narrowed by its
+    ``[viewer]`` scene_ids / sample / limit knobs)."""
+    config = load_config(config_path)
+    corpus, knobs = config.get("corpus", {}), config.get("viewer", {})
+    data_root = Path(corpus.get("data_root", scene_db.DEFAULT_DATA_ROOT))
+    if not data_root.is_absolute():
+        data_root = (REPO_ROOT / data_root).resolve()
+    rope = int(corpus.get("rope_supported", scene_db.DEFAULT_ROPE_SUPPORTED))
+    rows = select_scenes(data_root, categories=tuple(int(c) for c in corpus.get("categories", [1, 2])),
+                         rope_supported=None if rope < 0 else rope,
+                         scene_ids=knobs.get("scene_ids") or None,
+                         sample=int(knobs["sample"]) if knobs.get("sample", "") != "" else None,
+                         limit=int(knobs["limit"]) if knobs.get("limit", "") != "" else None,
+                         seed=int(corpus.get("seed", 0)))
     serve_scene_farm(view, data_root, rows, stages=FARM_STAGES, needs=("geometry", "scene.npz"))

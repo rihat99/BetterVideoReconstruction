@@ -23,13 +23,14 @@ import numpy as np
 import pytest
 import torch
 
-from scripts import run_dataset
+from scripts import pipeline
 from bvr.stages.build_support_scene import (
     FLOOR_MARGIN_M, PLATEAU_INPLANE_M, PLATEAU_MAX_SPAN_M, PLATEAU_MIN_STILL_S,
     PLATEAU_SIT_BELOW_KNEE_M, SPACING_M,
     detect_plateaus, disc_points, frame_groups, plane_basis, run,
 )
-from scripts.run_dataset import VARIANT_CHAINS, VARIANT_STEPS, build_farm, owns_scene
+from bvr.runner import VARIANT_STEPS, build_farm
+from scripts.pipeline import VARIANT_CHAINS, owns_scene
 
 from bvr.human_optim.losses import scene_signed_distance
 
@@ -339,12 +340,12 @@ def test_untracked_frames_carry_no_stillness() -> None:
     assert accepted(detect(points, knee, drift, valid)) == []
 
 
-# ── the variant farm and the run_dataset guards ──────────────────────────────────────
+# ── the variant farm and the pipeline guards ──────────────────────────────────────
 
 def _point_opencap_at(monkeypatch: pytest.MonkeyPatch, root: Path) -> None:
     """Make ``--dataset opencap`` read ``root/<clip>/video.mp4`` and write ``root/out/``."""
-    monkeypatch.setitem(run_dataset.DATASETS["opencap"], "root", root)
-    monkeypatch.setitem(run_dataset.DATASETS["opencap"], "out", root / "out")
+    monkeypatch.setitem(pipeline.DATASETS["opencap"], "root", root)
+    monkeypatch.setitem(pipeline.DATASETS["opencap"], "out", root / "out")
 
 
 def _fake_clip_root(tmp_path: Path) -> Path:
@@ -414,7 +415,7 @@ def test_support_steps_cannot_touch_a_farm_that_links_the_real_geometry(
     out = _fake_clip_root(tmp_path)
     _point_opencap_at(monkeypatch, tmp_path)
     with pytest.raises(SystemExit, match="geometry"):
-        run_dataset.main(["--dataset", "opencap", *argv])
+        pipeline.main(["--dataset", "opencap", *argv])
     assert (out / "geometry" / "scene.npz").read_bytes() == b"the real fused cloud"
     assert not (out / "_labvalidation").exists()
 
@@ -432,7 +433,7 @@ def test_steps_must_be_this_run_s_chain_in_order(
     _fake_clip_root(tmp_path)
     _point_opencap_at(monkeypatch, tmp_path)
     with pytest.raises(SystemExit, match=message):
-        run_dataset.main(["--dataset", "opencap", *argv])
+        pipeline.main(["--dataset", "opencap", *argv])
 
 
 def test_human_chain_refuses_to_run_without_the_synthetic_scene(
@@ -441,5 +442,5 @@ def test_human_chain_refuses_to_run_without_the_synthetic_scene(
     out = _fake_clip_root(tmp_path)
     _point_opencap_at(monkeypatch, tmp_path)
     with pytest.raises(SystemExit, match="scene.npz is missing"):
-        run_dataset.main(["--dataset", "opencap", "--variant", "floorplane", "--steps", "kinematics_1"])
+        pipeline.main(["--dataset", "opencap", "--variant", "floorplane", "--steps", "kinematics_1"])
     assert not (out / "_floorplane" / "geometry" / "scene.npz").exists()

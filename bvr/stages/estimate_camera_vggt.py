@@ -74,7 +74,7 @@ from bvr.adapters.vggt_omega import (
     load_vggt_omega,
     uniform_subsample,
 )
-from bvr.config import load_toml, section
+from bvr.config import load_config, section
 from bvr.precompute_runner import InputItem, SkipItem, add_standard_args, run_batch
 from bvr.source import resolve_source
 
@@ -194,7 +194,7 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     p = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     add_standard_args(p)
     cli = p.parse_args(argv)
-    cfg = load_toml(cli.config)
+    cfg = load_config(cli.config)
     args = section(cfg, "vggt", {
         "skip_existing": False,
         "dtype": "fp16",

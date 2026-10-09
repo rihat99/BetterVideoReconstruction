@@ -80,7 +80,7 @@ import torch
 from bvr import determinism
 from bvr.paths import REPO_ROOT
 from bvr.adapters.geocalib import DEFAULT_WEIGHTS, infer_gravity, load_geocalib
-from bvr.config import load_toml, section
+from bvr.config import load_config, section
 from bvr.geometry.ground import fit_ground_plane
 from bvr.source import resolve_source
 
@@ -359,7 +359,7 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--config", type=Path, default=REPO_ROOT / "configs" / "pipeline.toml",
                    help="pipeline TOML (default: configs/pipeline.toml)")
     cli = p.parse_args(sys.argv[1:] if argv is None else argv)
-    cfg = load_toml(cli.config)
+    cfg = load_config(cli.config)
     args = section(cfg, "gravity", {
         "num_frames": 48,
         "conf_rel": 0.5,

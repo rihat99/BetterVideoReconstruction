@@ -76,7 +76,7 @@ import torch
 
 from bvr import determinism
 from bvr.paths import REPO_ROOT
-from bvr.config import load_toml, section
+from bvr.config import load_config, section
 from bvr.geometry.backproject import backproject
 from bvr.geometry.camera_motion import image_motion, is_static
 from bvr.geometry.clean import clean_depth
@@ -467,7 +467,7 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--config", type=Path, default=REPO_ROOT / "configs" / "pipeline.toml",
                    help="pipeline TOML (default: configs/pipeline.toml)")
     cli = p.parse_args(argv)
-    cfg = load_toml(cli.config)
+    cfg = load_config(cli.config)
     args = section(cfg, "fuse", {
         "voxel_px": 5.0,
         "conf_drop_q": 0.3,

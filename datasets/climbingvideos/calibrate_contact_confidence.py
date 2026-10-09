@@ -32,7 +32,7 @@ from sklearn.model_selection import GroupKFold
 from bvr.paths import REPO_ROOT
 
 from datasets.examples.score_frame_contacts import fold_for_schema
-from bvr.config import load_toml
+from bvr.config import load_config
 from bvr.human_optim.confidence import (
     CONTACT_CONFIDENCE_METHOD, GROUP_NAMES, REPORT_GROUPS, fold_contacts, fold_drift,
     frame_report_joints, transition_seconds, witness_features,
@@ -402,7 +402,7 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--write", action="store_true", help="rewrite the given TOMLs")
     args = ap.parse_args(argv)
 
-    data_root = Path(load_toml(_CORPUS_CONFIG)["corpus"]["data_root"])
+    data_root = Path(load_config(_CORPUS_CONFIG)["corpus"]["data_root"])
     if not data_root.is_absolute():
         data_root = (REPO_ROOT / data_root).resolve()
     print(f"corpus: {data_root}   contacts_{args.contacts}.npz")

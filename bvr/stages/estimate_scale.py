@@ -61,7 +61,7 @@ import torch
 from bvr import determinism
 from bvr.paths import REPO_ROOT
 from bvr.body import load_body
-from bvr.config import load_toml, section
+from bvr.config import load_config, section
 from bvr.geometry.depth_smear import alongray_smear, smear_weight
 from bvr.geometry.human_scale import combine_log_scales, weighted_median
 from bvr.geometry.intrinsics import denormalize_K
@@ -585,7 +585,7 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     p.add_argument("--config", type=Path, default=REPO_ROOT / "configs" / "pipeline.toml",
                    help="pipeline TOML (default: configs/pipeline.toml)")
     cli = p.parse_args(argv)
-    cfg = load_toml(cli.config)
+    cfg = load_config(cli.config)
     args = section(cfg, "scale", {
         "conf_drop_q": 0.3,
         "min_inlier_verts": 50,

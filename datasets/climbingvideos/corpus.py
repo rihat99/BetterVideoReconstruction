@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 import gc
 import hashlib
+import importlib
 import json
 import math
 import multiprocessing
@@ -24,7 +25,9 @@ from typing import Any, Literal
 
 import numpy as np
 
+from bvr.config import load_config
 from bvr.paths import REPO_ROOT
+from bvr.runner import stage_command, sweep_command
 from datasets.climbingvideos import scene_db
 from datasets.climbingvideos.scene_db import ScenePaths, select_targets
 
@@ -58,7 +61,6 @@ class StageSpec:
     """The stage-specific hooks used by the shared orchestrator and worker."""
 
     mode: InvocationMode
-    cli: str | None          # the stage module under ``bvr.stages`` (subprocess stages)
     out_stage: str
     out_check: str
     manifest_dependencies: tuple[str, ...] = ()
@@ -72,7 +74,6 @@ class StageSpec:
 STAGES: dict[str, StageSpec] = {
     "sam3": StageSpec(
         mode="manifest_subprocess",
-        cli="track_sam3",
         out_stage="sam3",
         out_check="bboxes.npz",
         config_sections=("sam3",),
@@ -81,7 +82,6 @@ STAGES: dict[str, StageSpec] = {
     ),
     "vggt": StageSpec(
         mode="manifest_subprocess",
-        cli="estimate_camera_vggt",
         out_stage="vggt",
         out_check="camera.npz",
         config_sections=("vggt",),
@@ -89,7 +89,6 @@ STAGES: dict[str, StageSpec] = {
     ),
     "sapiens": StageSpec(
         mode="manifest_subprocess",
-        cli="estimate_sapiens",
         out_stage="sapiens",
         out_check="pose.npz",
         manifest_dependencies=("bboxes",),
@@ -99,7 +98,6 @@ STAGES: dict[str, StageSpec] = {
     ),
     "sam3d": StageSpec(
         mode="manifest_subprocess",
-        cli="estimate_body_sam3d",
         out_stage="sam3d",
         out_check="params.npz",
         manifest_dependencies=("bboxes", "camera"),
@@ -109,7 +107,6 @@ STAGES: dict[str, StageSpec] = {
     ),
     "smplx": StageSpec(
         mode="manifest_subprocess",
-        cli="convert_mhr_to_smplx",
         out_stage="sam3d",
         out_check="smplx_params.npz",
         manifest_dependencies=("params",),
@@ -119,7 +116,6 @@ STAGES: dict[str, StageSpec] = {
     ),
     "geometry": StageSpec(
         mode="farm_inprocess",
-        cli=None,
         out_stage="geometry",
         out_check="scale.npz",  # scale runs last in the fuse→scale chain
         farm_inputs=("vggt", "sam3d", "sam3", "sapiens"),  # sapiens: the scale pre-fit reads it
@@ -127,7 +123,6 @@ STAGES: dict[str, StageSpec] = {
     ),
     "gravity": StageSpec(
         mode="farm_inprocess",
-        cli=None,
         out_stage="geocalib",
         out_check="gravity.npz",
         farm_inputs=("geometry",),  # transform.npz extrinsics + scene.npz floor fit
@@ -135,7 +130,6 @@ STAGES: dict[str, StageSpec] = {
     ),
     "human_optim": StageSpec(
         mode="farm_inprocess",
-        cli=None,
         out_stage="human_optim",
         out_check="kinematic_1.npz",
         farm_inputs=("sam3d", "sapiens", "geometry"),
@@ -143,7 +137,6 @@ STAGES: dict[str, StageSpec] = {
     ),
     "kinematics_2": StageSpec(
         mode="farm_inprocess",
-        cli=None,
         out_stage="human_optim",
         out_check="kinematic_2.npz",
         farm_inputs=("sapiens", "geometry"),  # kinematic_1 + contacts_1 come via the human_optim out link
@@ -151,7 +144,6 @@ STAGES: dict[str, StageSpec] = {
     ),
     "kindyn": StageSpec(
         mode="farm_inprocess",
-        cli=None,
         out_stage="human_optim",
         out_check="kindyn_1.npz",
         # kinematic_* + contacts_* come via the human_optim out link; geocalib is the
@@ -162,7 +154,6 @@ STAGES: dict[str, StageSpec] = {
     ),
     "contacts": StageSpec(
         mode="farm_subprocess_per_scene",
-        cli="estimate_contacts",
         out_stage="human_optim",
         out_check="contacts_{tag}.npz",
         farm_inputs=("human_optim", "geometry"),
@@ -170,9 +161,10 @@ STAGES: dict[str, StageSpec] = {
     ),
 }
 
-# farm_inprocess human-optimization stages → the --stages argument they dispatch.
-_HUMAN_STAGE_ARGS = {
-    "human_optim": "root,kinematics_1",
+# farm_inprocess stages → the chain step ``bvr.runner.stage_command`` builds (geometry = fuse + scale).
+_CHAIN_STEP = {
+    "gravity": "gravity",
+    "human_optim": "kinematics_1",
     "kinematics_2": "kinematics_2",
     "kindyn": "kindyn_1",
 }
@@ -180,7 +172,7 @@ _HUMAN_STAGE_ARGS = {
 
 @dataclass(frozen=True)
 class CorpusConfig:
-    """Resolved values from ``datasets/climbingvideos/datasets/climbingvideos/configs/corpus.toml``."""
+    """Resolved values from ``datasets/climbingvideos/configs/corpus.toml``."""
 
     source_path: Path
     data_root: Path
@@ -211,11 +203,10 @@ def _repo_path(value: str | Path) -> Path:
     return path if path.is_absolute() else (REPO_ROOT / path).resolve()
 
 
-def load_config(path: Path) -> CorpusConfig:
+def load_corpus_config(path: Path) -> CorpusConfig:
     """Load and validate the corpus-driver portions of a TOML config."""
     path = path.resolve()
-    with path.open("rb") as config_file:
-        raw = tomllib.load(config_file)
+    raw = load_config(path)
     corpus = raw.get("corpus", {})
     track = raw.get("track_sam3", {})
     contacts = raw.get("contacts_run", {})
@@ -587,8 +578,7 @@ def _stage_config_data(stage: str, config: CorpusConfig) -> dict[str, Any]:
         if stage in {"human_optim", "kinematics_2", "kindyn", "contacts"}
         else config.pipeline_config
     )
-    with base_path.open("rb") as config_file:
-        base = tomllib.load(config_file)
+    base = load_config(base_path)
     resolved: dict[str, Any] = {"runtime": dict(base.get("runtime", {}))}
     resolved["runtime"]["device"] = "cuda"
 
@@ -669,30 +659,20 @@ def _drop_farm(farm: Path, spec: StageSpec) -> None:
         farm.rmdir()
 
 
-def _manifest_args(spec: StageSpec, manifest: Path, save_dir: Path, config: Path) -> list[str]:
-    """Build a manifest stage's path-only CLI arguments."""
-    assert spec.cli is not None
-    return [
-        sys.executable,
-        "-m",
-        f"bvr.stages.{spec.cli}",
-        "--source",
-        str(manifest),
-        "--save-dir",
-        str(save_dir),
-        "--config",
-        str(config),
-    ]
-
-
-def _run_manifest_worker(spec: StageSpec, manifest: Path, config_path: Path) -> int:
+def _run_manifest_worker(stage: str, manifest: Path, config_path: Path) -> int:
     """Run one manifest stage subprocess for a GPU shard."""
     entries = json.loads(manifest.read_text())
     if not entries:
         return 0
     return subprocess.run(
-        _manifest_args(spec, manifest, manifest.parent, config_path), check=False
+        sweep_command(stage, manifest, manifest.parent, config_path), check=False
     ).returncode
+
+
+def _run_in_process(command: list[str]) -> int:
+    """Run a ``python -m bvr.stages.<name> …`` command's ``main`` in this process."""
+    _, _, module, *args = command
+    return importlib.import_module(module).main(args)
 
 
 def _run_farm_worker(
@@ -700,14 +680,6 @@ def _run_farm_worker(
 ) -> int:
     """Run a geometry or human-optimization shard in-process, isolating scene failures."""
     import torch  # noqa: E402  (worker-only; the orchestrator stays torch-free)
-
-    if stage == "geometry":
-        from bvr.stages import estimate_scale as scale_stage  # noqa: E402
-        from bvr.stages import fuse_geometry as fuse_stage  # noqa: E402
-    elif stage == "gravity":
-        from bvr.stages import estimate_gravity_geocalib as gravity_stage  # noqa: E402
-    else:
-        from bvr.stages import human_optimization as human_stage  # noqa: E402
 
     entries = json.loads(manifest.read_text())
     farms_root = manifest.parent / "farms"
@@ -724,49 +696,14 @@ def _run_farm_worker(
         started = time.monotonic()
         farm = _build_farm(entry, farms_root, spec)
         try:
-            if stage == "geometry":
-                # fuse builds the up-to-scale clouds; scale then metricizes them in place.
-                fuse_rc = fuse_stage.main(
-                    [
-                        "--source",
-                        entry["clip"],
-                        "--predictions",
-                        str(farm),
-                        "--config",
-                        str(config_path),
-                    ]
-                )
-                scale_rc = scale_stage.main(
-                    ["--predictions", str(farm), "--config", str(config_path)]
-                )
-                if fuse_rc or scale_rc:
-                    raise RuntimeError(f"stage return codes: fuse={fuse_rc}, scale={scale_rc}")
-            elif stage == "gravity":
-                rc = gravity_stage.main(
-                    [
-                        "--source",
-                        entry["clip"],
-                        "--predictions",
-                        str(farm),
-                        "--config",
-                        str(config_path),
-                    ]
-                )
+            # geometry = fuse then scale (fuse builds the up-to-scale clouds; scale then
+            # metricizes them in place); the rest are one chain step each.
+            for step in ("fuse", "scale") if stage == "geometry" else (_CHAIN_STEP[stage],):
+                rc = _run_in_process(stage_command(
+                    step, farm, videos=[Path(entry["clip"])], pipeline_config=config_path,
+                    human_config=config_path))
                 if rc:
-                    raise RuntimeError(f"gravity return code: {rc}")
-            else:
-                rc = human_stage.main(
-                    [
-                        "--predictions",
-                        str(farm),
-                        "--stages",
-                        _HUMAN_STAGE_ARGS[stage],
-                        "--config",
-                        str(config_path),
-                    ]
-                )
-                if rc:
-                    raise RuntimeError(f"human_optimization return code: {rc}")
+                    raise RuntimeError(f"{step} return code: {rc}")
             if out.is_file():
                 ok += 1
             print(f"[{index}/{len(entries)}] {sid}: done in {time.monotonic() - started:.1f}s",
@@ -823,19 +760,8 @@ def _run_contacts_worker(
                 geocalib = Path(entry["geocalib"]) if "geocalib" in entry else None
                 if geocalib is not None and geocalib.is_dir():  # optional gravity input
                     (farm / "geocalib").symlink_to(geocalib.resolve())
-                cmd = [
-                    sys.executable,
-                    "-m",
-                    "bvr.stages.estimate_contacts",
-                    "--source",
-                    entry["clip"],
-                    "--predictions",
-                    str(farm),
-                    "--bodies",
-                    bodies,
-                    "--config",
-                    str(config_path),
-                ]
+                cmd = stage_command(f"contacts_{tag}", farm, videos=[Path(entry["clip"])],
+                                    pipeline_config=config_path, human_config=config_path)
                 result = subprocess.run(cmd, capture_output=True, text=True, check=False)
                 produced = farm / "human_optim" / f"contacts_{tag}.npz"
                 if result.returncode != 0 or not produced.is_file():
@@ -869,7 +795,7 @@ def run_worker(
     os.environ["PYTHONUNBUFFERED"] = "1"
     spec = STAGES[stage]
     if spec.mode == "manifest_subprocess":
-        code = _run_manifest_worker(spec, manifest, config_path)
+        code = _run_manifest_worker(stage, manifest, config_path)
     elif spec.mode == "farm_inprocess":
         code = _run_farm_worker(stage, spec, manifest, config_path, skip_existing)
     else:
@@ -1159,7 +1085,7 @@ def main(argv: list[str] | None = None) -> int:
         parser.error("--limit must be non-negative")
 
     try:
-        config = load_config(args.config)
+        config = load_corpus_config(args.config)
     except (OSError, TypeError, ValueError, tomllib.TOMLDecodeError) as error:
         parser.error(f"invalid corpus config: {error}")
     paths = ScenePaths(config.data_root)
