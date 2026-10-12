@@ -4,10 +4,9 @@
 
 - [uv](https://docs.astral.sh/uv/)
 - A CUDA GPU; the lock pins the PyTorch **cu129** wheels (`pymomentum-gpu`'s ABI).
-- The sibling checkouts `../BetterRobot` and `../BetterHuman` next to this repo
-  (in the dev layout: `/home/rikhat.akizhanov/better/dev/{BetterRobot,BetterHuman,BetterVideoReconstruction}`).
-  `pyproject.toml` declares them as editable path dependencies, so `uv sync`
-  installs them from there.
+- Network access to GitHub: [BetterRobot](https://github.com/rihat99/BetterRobot) and
+  [BetterHuman](https://github.com/rihat99/better_human) are git dependencies
+  (`[tool.uv.sources]`), fetched by `uv sync` at the commits pinned in `uv.lock`.
 
 ## 1. Clone with submodules
 
@@ -30,7 +29,7 @@ uv sync --managed-python
 
 This creates `.venv` with a uv-managed CPython 3.12 (`xtcocotools` builds a C
 extension, so a system Python without headers fails) and installs everything in
-`uv.lock`: `better-robot` and `better-human` editable from `../`, the
+`uv.lock`: `better-robot` and `better-human` from GitHub, the
 `third_party/` packages editable (`sam3`, `mhr`, `sapiens`, `vggt-omega`,
 `geocalib`), `pymomentum-gpu` with the matching torch cu129 build, and every
 `sam-3d-body` dependency (listed in `pyproject.toml`, since that submodule has no
@@ -64,7 +63,21 @@ unzip assets.zip
 cd ../..
 ```
 
-(In the dev layout the folder is a symlink to the main checkout's `assets/`.)
+### Developing against local BetterRobot / BetterHuman checkouts
+
+To run BVR on your own checkouts instead of the pinned GitHub commits, install
+them editable on top of the synced environment:
+
+```bash
+uv pip install --python .venv/bin/python -e ../BetterRobot -e ../BetterHuman --no-deps
+```
+
+A later exact `uv sync` reverts this (see below). When BVR should follow new
+BetterRobot or BetterHuman commits, re-pin and commit the lock:
+
+```bash
+uv lock --upgrade-package better-robot --upgrade-package better-human
+```
 
 ### `uv run` vs `uv sync` afterwards
 
@@ -77,8 +90,8 @@ detectron2 line after it.
 
 | Variable | Meaning | Default |
 |---|---|---|
-| `BVR_DATA_ROOT` | where the data lives (`examples/`, `peter/`, the datasets) | `<repo>/../data` (in the dev layout that path does not exist — set it) |
-| `BETTERHUMAN_MODELS_DIR` | BetterHuman's licensed body models (`smplx/SMPLX_NEUTRAL.npz`, `smplx_lockedhead/`, …) | `../BetterHuman/models` |
+| `BVR_DATA_ROOT` | where the data lives (`examples/`, `peter/`, the datasets) | `<repo>/../data` |
+| `BETTERHUMAN_MODELS_DIR` | BetterHuman's licensed body models (`smplx/SMPLX_NEUTRAL.npz`, `MHR/converted/`, …; see BetterHuman's README for the layout) | the installed BetterHuman's `models/` (only exists for an editable checkout) — set it |
 | `BVR_DETERMINISTIC` | `1` makes a GPU run bit-reproducible (deterministic torch kernels, no cuDNN autotune) | off |
 | `CUDA_VISIBLE_DEVICES` | the GPU to use; `""` runs on the CPU (tests) | all |
 
@@ -89,7 +102,7 @@ uv run python -c "import better_robot, better_human, bvr, datasets, sam3, sam_3d
 CUDA_VISIBLE_DEVICES="" uv run pytest -q
 ```
 
-The first line must print a path under `../BetterRobot`.
+The first line prints the installed BetterRobot (under `.venv/` for the GitHub pin, under your checkout for the editable override).
 
 ## Model checkpoints
 

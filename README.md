@@ -31,9 +31,9 @@ video ─▶ sam3 ─▶ vggt ─▶ sapiens ─▶ sam3d ─▶ smplx ─▶ fu
 | kinematics_2 | contact-patch repair | each labelled contact pulled onto the surface it touches (`human_optim/kinematic_2.npz`) |
 | kindyn_1 | kinematics + dynamics | pose and per-contact-frame forces solved together (`human_optim/kindyn_1.npz`) |
 
-The optimization runs on [`BetterRobot`](../BetterRobot) (kinematics, inverse
-dynamics, the optimizer) with [`BetterHuman`](../BetterHuman) bodies; both are
-installed editable from the checkouts next to this repo.
+The optimization runs on [`BetterRobot`](https://github.com/rihat99/BetterRobot) (kinematics, inverse
+dynamics, the optimizer) with [`BetterHuman`](https://github.com/rihat99/better_human) bodies; `uv sync`
+fetches both from GitHub at the commits pinned in `uv.lock`.
 
 ## Install
 

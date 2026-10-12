@@ -38,10 +38,9 @@ Try ideas, simplify the code. Four rules guide every change:
 
 ## Git workflow
 
-Work happens on the **`dev`** branch (this worktree); `main` stays as it is until
-dev is merged. Commit directly to `dev` — do not create further branches. The sibling
-libraries are the `dev` worktrees next to this repo (`../BetterRobot`, `../BetterHuman`,
-see `INSTALL.md`).
+Work happens on `main`. The sibling libraries BetterRobot and BetterHuman are git
+dependencies pinned in `uv.lock`; a local editable checkout is a one-line override
+(see `INSTALL.md`).
 
 ## Data layout
 

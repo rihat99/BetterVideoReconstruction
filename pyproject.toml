@@ -4,7 +4,7 @@ version = "0.1.0"
 description = "Monocular-video human reconstruction (SAM3 track → VGGT camera → SAM-3D-Body → MHR→SMPL-X → visually-guided kinematic refinement)"
 requires-python = ">=3.12"
 dependencies = [
-    # The sibling libraries, editable from the dev worktrees next to this repo (uv.sources).
+    # The sibling libraries, fetched from GitHub (uv.sources); see INSTALL.md for the local override.
     "better-robot",
     "better-human",
     # the viewer's UI library (bvr/viewer runs on better-robot's viser-based viewer)
@@ -101,8 +101,8 @@ url = "https://download.pytorch.org/whl/cu129"
 explicit = true
 
 [tool.uv.sources]
-better-robot = { path = "../BetterRobot", editable = true }
-better-human = { path = "../BetterHuman", editable = true }
+better-robot = { git = "https://github.com/rihat99/BetterRobot", branch = "main" }
+better-human = { git = "https://github.com/rihat99/better_human", branch = "main" }
 mhr = { path = "third_party/MHR", editable = true }
 sam3 = { path = "third_party/sam3", editable = true }
 sapiens = { path = "third_party/sapiens2", editable = true }
