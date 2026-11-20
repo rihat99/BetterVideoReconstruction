@@ -46,7 +46,7 @@ MODELS = {"sam3", "sapiens", "vggt_omega", "sam_3d_body", "geocalib"}
 #: in the commit that ports or removes its module; the list is empty when the rebuild is done.
 UNPORTED = {
     "bvr.old_config", "bvr.npz_io", "bvr.mask_io", "bvr.source", "bvr.determinism", "bvr.human_optim",
-    "bvr.stages.fuse_geometry", "bvr.stages.estimate_scale", "bvr.stages.human_optimization",
+    "bvr.stages.human_optimization",
     "bvr.stages.estimate_contacts", "bvr.stages.measure_contacts", "bvr.stages.build_support_scene",
     "bvr_datasets", "scripts.view_3d", "scripts.scene_quality",
 }
