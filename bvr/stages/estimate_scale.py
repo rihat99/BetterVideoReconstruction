@@ -179,12 +179,14 @@ def _reading(vertices: np.ndarray, cloud: np.ndarray, trust: np.ndarray, intrins
     depth_map, trust_map = np.full(size, np.nan, np.float32), np.zeros(size, np.float32)
     depth_map[v[inside], u[inside]], trust_map[v[inside], u[inside]] = cloud[inside, 2], trust[inside]
     v, u, inside = pixels(vertices)
-    near, far, trust = vertices[inside, 2], depth_map[v[inside], u[inside]], trust_map[v[inside], u[inside]]
-    hit = np.isfinite(far) & (far > 0)
+    body_depth, cloud_depth = vertices[inside, 2], depth_map[v[inside], u[inside]]
+    trust = trust_map[v[inside], u[inside]]
+    hit = np.isfinite(cloud_depth) & (cloud_depth > 0)
     if hit.sum() >= options["min_inlier_verts"]:
         kept = hit & (trust >= np.quantile(trust[hit], options["conf_drop_q"]))
         if kept.sum() >= options["min_inlier_verts"]:
-            return weighted_median(np.log(near[kept]) - np.log(far[kept]), trust[kept]), trust[kept].sum() * smear
+            ratios = np.log(body_depth[kept]) - np.log(cloud_depth[kept])
+            return weighted_median(ratios, trust[kept]), trust[kept].sum() * smear
     return np.nan, 0.0
 
 
