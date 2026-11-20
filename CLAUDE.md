@@ -10,6 +10,28 @@ default chain ends at the refined SMPL-X bodies; scene contacts, gravity,
 annotation-guided refinement, and the joint kinematics+dynamics stage are
 standalone SMPL-X stages.
 
+## Rebuild in progress: read this first
+
+The core is being rebuilt on BetterRobot dev and BetterHuman dev (torch 2.13, no pymomentum).
+The foundation is new; the stage and optimisation code below it is still the old one, and the
+rest of this file describes the old layout until it is rewritten.
+
+- One config: `configs/bvr.toml` holds every default; a delta names `base = "configs/bvr.toml"`.
+  `bvr.config.load(path)` raises `ConfigError` for a key the base lacks. No default lives in code.
+- One stage table: `bvr.run.STEPS` (step, module, config tables, inputs, outputs). A stage module
+  defines `load(stage: run.Stage) -> process(clip: paths.Clip)` and ends with `run.main(load)`;
+  it reads through `clip.find(paths.X)`, writes through `clip.path(paths.X)` with
+  `files.save_npz` / `files.staged_directory`, and logs through `logging`. `bvr.run` applies
+  `[run]`, moves what a rerun replaces to `<save-dir>/_trash/`, and writes the manifest last.
+- One entry point: `uv run python scripts/pipeline.py --source <video|folder> --save-dir <root>
+  [--config <delta>] [--steps a,b] [--upstream <root>] [--skip-existing] [--shard i/n] [--dry-run]`.
+  `--dataset`, `--variant`, `--views` and the symlink farms are gone; a second run goes to a
+  second root and reads the first with `--upstream`.
+- Not ported yet: every module listed in `UNPORTED` of `tests/contract/test_layer_dependencies.py`.
+  They read the old loader `bvr/old_config.py`; an entry leaves when its module is ported.
+- Dataset code is `bvr_datasets/` and still calls the old core.
+- Tests: `CUDA_VISIBLE_DEVICES="" uv run pytest tests/contract tests/test_run.py -q`.
+
 The algorithm docs live in `docs/` and are the reference for auditing the
 optimization — keep them current when the code changes:
 
