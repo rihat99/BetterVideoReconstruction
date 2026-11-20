@@ -46,7 +46,8 @@ def kinematics_problem(
     human, penetration = identity.human, config["penetration"]
     with torch.no_grad():
         start_body = identity.forward(start)
-    problem = optim.Problem({"q": start, **(variables or {})}, data={"scene": None, "labels": None, "patches": None}, time=("q",))
+    problem = optim.Problem({"q": start, **(variables or {})}, data={"scene": None, "labels": None, "patches": None},
+                            time=("q",))
     problem.cached(terms.RobotManifold(human.model).project, name="pose", reads=("q",))
     problem.cached(bh.terms.human_state(identity, q="pose"), name="body")
     problem.cached(body.contact_frames, name="frames", reads=("body",))
@@ -71,7 +72,7 @@ def kinematics_problem(
         term(f"{name}_root", motion.mean_square(rows, slice(0, 6)), reads=(name,))
         term(f"{name}_joint", motion.mean_square(rows, slice(6, None)), reads=(name,))
     for part, columns in (("root", slice(0, 6)), ("joint", slice(6, None))):
-        term(f"interleave_{part}", motion.interleave(human.model, time, tracked, columns), reads=("pose",))
+        term(f"neighbour_{part}", motion.neighbour(human.model, time, tracked, columns), reads=("pose",))
     term("radial_velocity", motion.radial_velocity(time, camera.centers(cameras[0]), tracked))
     term("contact_velocity", motion.contact_velocity(time, **config["contact_velocity"]))
     term("penetration", scene.penetration(**{

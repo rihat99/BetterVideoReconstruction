@@ -9,6 +9,8 @@ frames. A row of a derivative counts only if every frame from its first to its l
 
 Tensors carry people first and time second, ``(P, T, ...)``. Every term returns one loss per
 person, ``(P,)``: a mean over that person's counted rows.
+
+One more term exists because of the stride: :func:`neighbour` holds the frames between the strides together.
 """
 from __future__ import annotations
 
@@ -77,23 +79,24 @@ def mean_square(rows: torch.Tensor, columns: slice) -> Term:
     return loss
 
 
-def interleave(model: Model, time: Time, tracked: torch.Tensor, columns: slice) -> Term:
-    """Term: neighbouring frames lie on one trajectory. Zero at a stride of one frame.
+def neighbour(model: Model, time: Time, tracked: torch.Tensor, columns: slice) -> Term:
+    """Term: the acceleration between neighbouring frames, per reference step, squared. Zero at a stride of one frame.
 
     The strided derivatives tie frame ``t`` to ``t + h`` and never to ``t + 1``, so a clip filmed at 60 fps or more
     is ``h`` trajectories that share only their evidence, and they drift apart: the root zig-zags by millimetres
-    between neighbours. The cost is the mean square of ``columns`` of the second difference of ``pose`` over
-    neighbouring frames, in m^2 and rad^2: how far a frame sits off the midpoint of its two neighbours, in plain
-    frame units. That damps the zig-zag and hardly prices a real acceleration, which is ``h^2`` times smaller
-    between neighbours than over a stride. At a stride of one frame the acceleration terms are this term already.
+    between neighbours. This term is the mean square of ``columns`` of the second difference of ``pose`` over
+    neighbouring frames, in the rule's unit (times ``(fps / 30)^2``). A real acceleration reads here as it does in
+    the strided term, so a weight well below that term's leaves the motion alone at every frame rate, while a
+    zig-zag of ``z`` reads as ``4 z (fps / 30)^2`` and is damped. At a stride of one frame the acceleration term is
+    this term already.
     """
     if time.stride == 1:
         return lambda pose: pose.new_zeros(len(pose))
-    rows = tracked.unfold(1, 3, 1).all(dim=-1)
+    rows, rate = tracked.unfold(1, 3, 1).all(dim=-1), (time.fps / REFERENCE_RATE) ** 2
 
     def loss(pose: torch.Tensor) -> torch.Tensor:
         step = kinematics.difference(model, pose[:, :-1], pose[:, 1:])[..., columns]
-        return _mean((step[:, 1:] - step[:, :-1]).square(), rows)
+        return _mean((rate * (step[:, 1:] - step[:, :-1])).square(), rows)
     return loss
 
 

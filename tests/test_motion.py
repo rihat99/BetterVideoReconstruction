@@ -4,6 +4,7 @@ from __future__ import annotations
 import pytest
 import torch
 
+from bvr.terms import motion
 from bvr.terms.motion import Time
 
 
@@ -31,3 +32,10 @@ def test_a_row_counts_only_if_every_frame_from_its_first_to_its_last_is_tracked(
     rows = time.rows(tracked, 2)
     assert rows.shape == (1, 8)
     assert rows[0].tolist() == [True, False, False, False, False, False, True, True]
+
+
+@pytest.mark.parametrize("fps", [24.0, 25.0, 30.0])
+def test_the_neighbour_term_is_zero_where_the_stride_is_one_frame(fps: float) -> None:
+    pose = torch.randn(2, 9, 7, generator=torch.Generator().manual_seed(0))
+    loss = motion.neighbour(None, Time(fps), torch.ones(2, 9, dtype=torch.bool), slice(0, 6))(pose)
+    assert loss.tolist() == [0.0, 0.0]

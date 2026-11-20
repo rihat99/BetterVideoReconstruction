@@ -34,8 +34,8 @@ def at(frames: int, **distance: float | list[float]) -> np.ndarray:
 
 def test_scene_signals_measure_the_offset_along_the_scene_normal_and_no_scene_is_no_evidence() -> None:
     grid = torch.cartesian_prod(torch.linspace(-1, 1, 21), torch.linspace(-1, 1, 21))
-    floor = Scene(torch.cat((grid, torch.zeros(len(grid), 1)), dim=1), torch.tensor([0.0, 0.0, 1.0]).expand(len(grid), 3),
-                  torch.full((len(grid),), 2.0))
+    floor = Scene(torch.cat((grid, torch.zeros(len(grid), 1)), dim=1),
+                  torch.tensor([0.0, 0.0, 1.0]).expand(len(grid), 3), torch.full((len(grid),), 2.0))
     points = torch.tensor([[[0.0, 0.0, 0.02]], [[0.0, 0.0, -0.01]], [[5.0, 5.0, 5.0]]])
     down = torch.tensor([0.0, 0.0, -1.0]).expand(3, 1, 3)
     found = detector.scene_signals(points, down, floor, prune_margin_m=0.1)
@@ -182,7 +182,8 @@ def test_seconds_to_a_label_change_ignore_tracking_gaps() -> None:
     tracked = np.array([1, 1, 1, 1, 1, 1, 1, 1], bool)
     assert np.allclose(confidence.transition_seconds(contact, tracked, 10.0)[:, 0], [0.1, 0, 0, 0.1, 0, 0, 0.1, 0.2])
     tracked[5] = False  # the release happens inside a gap: it is no change anyone saw
-    assert np.allclose(confidence.transition_seconds(contact, tracked, 10.0)[:, 0], [0.1, 0, 0, 0.1, 0.2, 0.3, 0.4, 0.5])
+    seconds = confidence.transition_seconds(contact, tracked, 10.0)[:, 0]
+    assert np.allclose(seconds, [0.1, 0, 0, 0.1, 0.2, 0.3, 0.4, 0.5])
 
 
 def test_drift_makes_a_contact_label_less_sure_and_a_free_label_more_sure() -> None:

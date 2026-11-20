@@ -114,8 +114,8 @@ def kindyn_1(clip: paths.Clip, human: bh.HumanModel, config: dict) -> None:
     counted = dynamics.stencil_rows(time, tracked) & held.any(dim=(1, 2))[:, None]
     root = torques[..., :6] * counted[..., None]
     # One size per joint: the root's six rows, then three rows for each of the other joints.
-    sizes = torch.cat((torques[..., :6].norm(dim=-1, keepdim=True), torques[..., 6:].unflatten(-1, (-1, 3)).norm(dim=-1)),
-                      dim=-1) * counted[..., None]
+    sizes = torch.cat((torques[..., :6].norm(dim=-1, keepdim=True),
+                       torques[..., 6:].unflatten(-1, (-1, 3)).norm(dim=-1)), dim=-1) * counted[..., None]
     parents = tensor(np.array(human.contact_frames.parent_joints))
     joints = len(human.spec.joint_names)
     trust = confidence.force_confidence(root.cpu().numpy(), forces.cpu().numpy(), tracked.cpu().numpy(),

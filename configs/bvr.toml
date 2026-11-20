@@ -117,6 +117,7 @@ lbfgs_history = 10          # L-BFGS memory of the kinematics_1 polish and of ki
 lbfgs_line_search = 10      # step sizes an L-BFGS step tries, each half the one before
 
 # Objective weights, one table per stage. Difference terms are per change over 1/30 s.
+# neighbour_* prices the acceleration between neighbouring frames; it acts where the stride is above one frame (60 fps up).
 
 [stages.root]               # first phase of kinematics_1: root coordinates only
 iterations = 150            # Adam
@@ -133,6 +134,8 @@ jerk_root = 300
 jerk_joint = 500
 snap_root = 300
 snap_joint = 500
+neighbour_root = 24
+neighbour_joint = 48
 
 [stages.kinematics_1]       # visual fit -> human_optim/kinematic_1.npz
 iterations = { full = 300, refine = 200, polish = 30 }  # Adam, Adam with the scene, L-BFGS
@@ -151,6 +154,8 @@ jerk_root = 300
 jerk_joint = 500
 snap_root = 300
 snap_joint = 500
+neighbour_root = 24
+neighbour_joint = 48
 radial_velocity = 400
 penetration = 12000
 contact_attraction = 10
@@ -170,6 +175,8 @@ jerk_root = 300
 jerk_joint = 500
 snap_root = 300
 snap_joint = 500
+neighbour_root = 24
+neighbour_joint = 48
 radial_velocity = 100
 penetration = 12000
 contact_acquisition = 1000
@@ -191,6 +198,8 @@ jerk_root = 300
 jerk_joint = 500
 snap_root = 300
 snap_joint = 500
+neighbour_root = 240
+neighbour_joint = 480
 radial_velocity = 100
 penetration = 12000
 contact_attraction = 20

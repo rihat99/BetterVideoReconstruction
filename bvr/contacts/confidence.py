@@ -115,7 +115,8 @@ def label_confidence(joint_contact: np.ndarray, drift: np.ndarray, tracked: np.n
         if name in REPORT_GROUPS:
             for head, rows in (("contact", joint_contact[:, joint]), ("free", ~joint_contact[:, joint])):
                 fitted = coefficients[head]
-                logit = (fitted["intercept"] + fitted[REPORT_GROUPS[name]] + fitted["log_drift"] * stillness[rows, joint]
+                logit = (fitted["intercept"] + fitted[REPORT_GROUPS[name]]
+                         + fitted["log_drift"] * stillness[rows, joint]
                          + fitted["log_transition"] * transition[rows, joint])
                 confidence[rows, joint] = 1.0 / (1.0 + np.exp(-logit))
     confidence[~tracked] = np.nan

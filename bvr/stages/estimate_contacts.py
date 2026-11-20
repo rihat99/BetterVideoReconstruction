@@ -80,17 +80,17 @@ def contacts(clip: paths.Clip, human: bh.HumanModel, config: dict, bodies: str, 
     carried = (solved.forces.norm(dim=-1) / weight[:, None, None]).cpu().numpy()
     mute = (~solved.heard | (solved.after / weight[:, None] > force["mute_res_bw"])).cpu().numpy()
 
-    read, near = [], []
-    for person, seen in enumerate(tracked):
-        near.append(detector.scene_signals(frames[person, :, :, :3], normals[person], cloud,
-                                           prune_margin_m=options["prune_margin_m"]))
-        read.append(labels.read(
-            near[-1], drift[person], frames[person, :, :, :3], carried[person], far[person].cpu().numpy(),
-            mute[person], seen, names=names, fps=time.fps, contacts=options, gate=gate, force=force))
-        log.info("person %d: contact on %d of %d tracked frames; %s", fitted["object_ids"][person],
-                 read[-1].contact.any(axis=1).sum(), seen.sum(), ", ".join(
-                     f"{name} {count}" for name, count in zip(names, read[-1].contact.sum(axis=0)) if count))
-    contact, geometric, loaded = (np.stack(part) for part in zip(*read))
+    near = [detector.scene_signals(*person, cloud, prune_margin_m=options["prune_margin_m"])
+            for person in zip(frames[..., :3], normals)]
+    readouts = [
+        labels.read(signals, drift[person], frames[person, :, :, :3], carried[person], far[person].cpu().numpy(),
+                    mute[person], tracked[person], names=names, fps=time.fps, contacts=options, gate=gate, force=force)
+        for person, signals in enumerate(near)]
+    for object_id, readout, seen in zip(fitted["object_ids"], readouts, tracked):
+        counts = ", ".join(f"{name} {count}" for name, count in zip(names, readout.contact.sum(axis=0)) if count)
+        log.info("person %d: contact on %d of %d tracked frames; %s", object_id, readout.contact.any(axis=1).sum(),
+                 seen.sum(), counts)
+    contact, geometric, loaded = (np.stack(part) for part in zip(*readouts))
 
     # A drift is evidence only on a tracked frame; the confidence reads the stillest frame of each joint.
     measured = np.where(tracked[..., None], drift.cpu().numpy(), np.nan)
