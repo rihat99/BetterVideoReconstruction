@@ -237,7 +237,7 @@ wheels = [
 
 [[package]]
 name = "better-human"
-version = "0.2.0"
+version = "0.1.0"
 source = { editable = "../BetterHuman" }
 dependencies = [
     { name = "better-robot" },
