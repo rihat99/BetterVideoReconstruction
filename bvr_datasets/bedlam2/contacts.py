@@ -13,8 +13,8 @@ geometry to reason about. Three measurements are enough:
   sit 4–7 cm up, all visibly on the floor in the render.
 * **stillness** — the contact frame's speed. It is BetterRobot's: the frame's
   Jacobian times the generalised velocity of the trajectory
-  (:func:`frame_velocity`), averaged over a tenth of a second on whichever side of
-  now is calmer (:func:`calm_speed`), so a plant is still right up to its last frame
+  (:func:`generalised_velocity`), averaged over a tenth of a second on whichever side
+  of now is calmer (:func:`calm_speed`), so a plant is still right up to its last frame
   and mocap jitter does not flicker a label.
 * **facing** — whether the skin at that point looks at the floor. Each contact frame
   carries its own outward surface normal. This is what keeps the wide height band
@@ -25,10 +25,10 @@ geometry to reason about. Three measurements are enough:
 
 Height alone would label a foot swinging low through mid-stride; stillness alone
 would label a hand held motionless in the air; facing alone would label the back of
-every hand that passes near the ground. The readout is the repo's existing primitives
-wired to a plane instead of a scene cloud: gate the height by the speed and the
-facing, then run hysteresis with a minimum duration so a label is an episode rather
-than a flicker.
+every hand that passes near the ground. The readout is the contact detector's own
+rules (:mod:`bvr.contacts.detector`) wired to a plane instead of a scene cloud: gate
+the height by the speed and the facing, then run hysteresis with a minimum duration
+so a label is an episode rather than a flicker.
 
 All 35 contact frames are eligible. BEDLAM2's motion library is full of floor work —
 yoga, sitting, lying — where the sacrum, back, head and sit bones are genuinely the
@@ -50,23 +50,23 @@ Two limits worth knowing before trusting a label:
 """
 from __future__ import annotations
 
+import math
 from pathlib import Path
 
+import better_human as bh
 import numpy as np
 import torch
-from better_robot.kinematics import frame_jacobian
+from better_robot import kinematics
 
-from bvr.body import frame_normals
-from bvr.human_optim.contacts import drift_gate, hysteresis_spans, min_span_frames
-from bvr.human_optim.motion import velocity_acceleration_from_trajectory
+from bvr import body
+from bvr.contacts import detector
 
 #: Window (seconds) the speed is averaged across — a tenth of a second either side of
 #: now. Long enough to reject a foot swinging through at walking speed, short enough
 #: that a running stance (~0.25 s) fits inside a half-window.
 WINDOW_S = 0.20
 
-#: Speed (m/s) at which a point is half in contact; :func:`drift_gate` kills a label
-#: at twice this. A point provably on the floor reads 0.03 m/s at the median and
+#: Speed (m/s) at which a point is half in contact; a label dies at twice this. A point provably on the floor reads 0.03 m/s at the median and
 #: 0.12 m/s at p90 from mocap jitter and foot roll, so 0.2 m/s is where contact ends.
 STILL_MPS = 0.10
 
@@ -102,7 +102,7 @@ TOUCH_M = 0.01
 #: the band is the one number that says "this scene's floor may be wrong".
 SUSPECT_M = 0.15
 
-#: The label schema :mod:`bvr.viewer.loading` reads.
+#: The label schema of ``contacts_<n>.npz``, which this file shares.
 CONTACT_LABEL_SCHEMA = 2
 CONTACT_LABEL_METHOD = "bedlam2-gt-floor-speed-v3"
 
@@ -110,28 +110,15 @@ POSE_CHUNK = 256
 
 
 def generalised_velocity(model, q: torch.Tensor, *, fps: float) -> torch.Tensor:
-    """Tangent-space velocity ``(N, nv)`` of a configuration trajectory ``(N, nq)``.
+    """Tangent-space velocity ``(N, nv)`` of a configuration trajectory ``(N, nq)``, per second.
 
-    The central difference on the BetterRobot manifold that kindyn feeds RNEA. That
-    helper pins the first and last frame to zero so the dynamics stay well-defined;
-    a contact readout wants the neighbour's speed there instead, or the clip's edges
-    would always look still.
+    The central difference of neighbouring frames on the BetterRobot manifold. At the first
+    and last frame it is the neighbour's: a contact readout must not see the clip's edges as
+    still.
     """
-    velocity, _acceleration = velocity_acceleration_from_trajectory(model, q, 1.0 / fps)
-    velocity[0], velocity[-1] = velocity[1], velocity[-2]
-    return velocity
-
-
-def frame_velocity(posed, frame_ids, qdot: torch.Tensor) -> torch.Tensor:
-    """World linear velocity ``(B, F, 3)`` of the contact frames of one posed chunk.
-
-    ``J(q) · q̇`` per frame, with the Jacobian in BetterRobot's ``local_world_aligned``
-    reference so the linear rows are the velocity of the frame origin in world axes.
-    The joint-column table is built once per ``KinematicState`` and shared by every frame.
-    """
-    jac = torch.stack([frame_jacobian(posed.model, posed.kinematics, frame=int(fid))[..., :3, :]
-                       for fid in frame_ids], dim=-3)                       # (B, F, 3, nv)
-    return (jac @ qdot[:, None, :, None])[..., 0]
+    step = kinematics.difference(model, q[:-1], q[1:]) * fps         # (N - 1, nv)
+    velocity = 0.5 * (step[:-1] + step[1:])                           # (N - 2, nv)
+    return torch.cat((velocity[:1], velocity, velocity[-1:]))
 
 
 def calm_speed(speed: torch.Tensor, *, fps: float, window_s: float) -> torch.Tensor:
@@ -158,12 +145,13 @@ def calm_speed(speed: torch.Tensor, *, fps: float, window_s: float) -> torch.Ten
     return torch.where(torch.isfinite(calm), calm, torch.zeros_like(calm))
 
 
-def frame_positions(body, betas: np.ndarray, q: np.ndarray, device, *,
-                    up: torch.Tensor, centroid: torch.Tensor, fps: float,
-                    chunk: int = POSE_CHUNK
+def frame_positions(identity: bh.Identity, q: torch.Tensor, *, up: torch.Tensor, centroid: torch.Tensor,
+                    fps: float, chunk: int = POSE_CHUNK
                     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
     """Pose one person's whole clip and measure everything the readout needs.
 
+    :param identity: one person's body (:func:`bvr.body.bake` of one shape).
+    :param q: ``(N, 211)`` world-frame trajectory.
     :returns: ``(frames (N, F, 3), velocities (N, F, 3), normals (N, F, 3),
         mesh_low (N,))`` — the contact frames' world positions and velocities, the
         outward direction the skin faces at each of them, and how far the body's
@@ -172,24 +160,18 @@ def frame_positions(body, betas: np.ndarray, q: np.ndarray, device, *,
         it says whether the body was touching at all, without consulting the 35 points
         the detector looks at.
     """
-    shape = torch.as_tensor(betas, device=device)[None]
-    q = torch.as_tensor(q, device=device)
-    qdot = generalised_velocity(body.shaped(shape).model, q, fps=fps)
-    count = len(body.contact_frame_names)
-    frames = torch.empty((len(q), count, 3), device=device)
-    velocities = torch.empty((len(q), count, 3), device=device)
-    normals = torch.empty((len(q), count, 3), device=device)
-    mesh_low = torch.empty(len(q), device=device)
+    names = identity.human.contact_frames.names
+    qdot = generalised_velocity(identity.model, q, fps=fps)
+    origins = q.new_zeros(len(names), 3)
+    parts = []
     for start in range(0, len(q), chunk):
-        stop = min(start + chunk, len(q))
         with torch.no_grad():
-            posed = body.forward(shape.expand(stop - start, -1), q[start:stop])
-            velocities[start:stop] = frame_velocity(posed, body.contact_frame_ids,
-                                                    qdot[start:stop])
-        frames[start:stop] = posed.frames_world[..., :3]
-        normals[start:stop] = frame_normals(posed.frames_world)
-        mesh_low[start:stop] = ((posed.vertices - centroid) @ up).amin(-1)
-    return frames, velocities, normals, mesh_low
+            state = identity.forward(q[None, start:start + chunk])
+            frames = body.contact_frames(state)[0]
+            jacobians = kinematics.point_jacobian(state.model, state.kinematics, frames=names, points=origins)[0]
+            parts.append((frames[..., :3], (jacobians @ qdot[start:start + chunk, None, :, None])[..., 0],
+                          body.frame_normals(frames), ((state.vertices[0] - centroid) @ up).amin(-1)))
+    return tuple(torch.cat(part) for part in zip(*parts))
 
 
 def contact_from_floor(positions: torch.Tensor, velocities: torch.Tensor,
@@ -213,27 +195,25 @@ def contact_from_floor(positions: torch.Tensor, velocities: torch.Tensor,
     height = (positions - centroid) @ up                         # (N, F) above the floor
     tilt = torch.rad2deg(torch.arccos((normals @ -up).clamp(-1.0, 1.0)))
     speed = calm_speed(velocities.norm(dim=-1), fps=fps, window_s=window_s)
-    # ``drift_gate`` is a ramp on whatever stillness measure it is handed; here that
-    # is a speed, so ``still_m`` is in m/s.
-    gated = drift_gate(height, speed, still_m=still_mps)
-    # Skin facing away from the floor is not resting on it, however low and still it
-    # is. Same sentinel as the stillness gate, so the hysteresis runs unchanged: the
-    # point simply looks infinitely far from the ground.
-    gated = torch.where(tilt <= max_tilt_deg, gated,
-                        torch.full_like(gated, torch.finfo(gated.dtype).max))
-    contact = hysteresis_spans(gated, enter_below=enter_m, exit_below=exit_m,
-                               min_frames=min_span_frames(min_span_s, fps))
-    return {"contact": contact, "height": height, "speed": speed, "tilt": tilt}
+    # A point that moves, or whose skin faces away from the floor, is not resting on it
+    # however low it is: it looks infinitely far from the ground, so it can neither start
+    # nor hold a span.
+    resting = ((speed < 2.0 * still_mps) & (tilt <= max_tilt_deg)).cpu().numpy()
+    gated = np.where(resting, height.cpu().numpy(), np.inf)
+    contact = detector.min_span(detector.hysteresis(gated < enter_m, gated < exit_m),
+                                max(1, math.ceil(min_span_s * fps)))
+    return {"contact": torch.as_tensor(contact), "height": height, "speed": speed, "tilt": tilt}
 
 
-def scene_contacts(gt_dir: Path, *, body, device, knobs: dict | None = None) -> dict:
+def scene_contacts(gt_dir: Path, *, human: bh.HumanModel, knobs: dict | None = None) -> dict:
     """Label every person in one BEDLAM2 scene.
 
     :param gt_dir: the scene's ``features/gt/<aa>/<bb>/<scene_id>`` directory.
-    :param body: a :class:`bvr.body.Body` already on ``device``.
+    :param human: the pipeline's body (:func:`bvr.body.load`), on the device the scene is posed on.
     :param knobs: overrides for the module defaults, by keyword name.
     :returns: the arrays :func:`save_contacts` stores, keyed by npz field name.
     """
+    device = human.spec.device
     knobs = dict(knobs or {})
     touch_m = float(knobs.pop("touch_m", TOUCH_M))
     suspect_m = float(knobs.pop("suspect_m", SUSPECT_M))
@@ -244,7 +224,7 @@ def scene_contacts(gt_dir: Path, *, body, device, knobs: dict | None = None) -> 
     fps = float(meta["fps"])
     q, betas = meta["q"], meta["betas"]
     people, frames = q.shape[:2]
-    names = list(body.contact_frame_names)
+    names = list(human.contact_frames.names)
 
     contact = np.zeros((people, frames, len(names)), bool)
     height = np.zeros((people, frames, len(names)), np.float32)
@@ -252,8 +232,9 @@ def scene_contacts(gt_dir: Path, *, body, device, knobs: dict | None = None) -> 
     tilt = np.zeros((people, frames, len(names)), np.float32)
     lowest = np.zeros((people, frames), np.float32)
     for person in range(people):
+        identity = body.bake(human, torch.as_tensor(betas[person:person + 1], device=device))
         positions, velocities, normals, mesh_low = frame_positions(
-            body, betas[person], q[person], device, up=up, centroid=centroid, fps=fps)
+            identity, torch.as_tensor(q[person], device=device), up=up, centroid=centroid, fps=fps)
         out = contact_from_floor(positions, velocities, normals, up=up, centroid=centroid,
                                  fps=fps, **knobs)
         contact[person] = out["contact"].cpu().numpy()
@@ -275,8 +256,8 @@ def scene_contacts(gt_dir: Path, *, body, device, knobs: dict | None = None) -> 
         "plane_suspect": float(np.mean((lowest > knobs.get("enter_m", ENTER_M))
                                        & (lowest <= suspect_m))),
         "contact_frame_names": np.array(names),
-        "frame_parent_joint": np.array(body.contact_frame_parents, dtype=np.int64),
-        "frame_vertex": np.array(body.contact_frame_vertices, dtype=np.int64),
+        "frame_parent_joint": np.array(human.contact_frames.parent_joints, dtype=np.int64),
+        "frame_vertex": np.array(human.contact_frames.vertex_ids, dtype=np.int64),
         "object_ids": np.asarray(meta["object_ids"], np.int32),
         "num_people": np.int32(people), "num_frames": np.int32(frames),
         "fps": np.float32(fps),
@@ -297,5 +278,5 @@ def save_contacts(path: Path, fields: dict) -> None:
     np.savez_compressed(path, **fields)
 
 
-__all__ = ["calm_speed", "contact_from_floor", "frame_positions", "frame_velocity",
-           "generalised_velocity", "save_contacts", "scene_contacts"]
+__all__ = ["calm_speed", "contact_from_floor", "frame_positions", "generalised_velocity", "save_contacts",
+           "scene_contacts"]

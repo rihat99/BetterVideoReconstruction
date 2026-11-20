@@ -2,7 +2,7 @@
 
 The frames-era detector labels named body contact frames (the legacy 12-frame climbing
 set, or the full-body ``better_contacts`` set with per-foot ball / big_toe frames). The
-manual annotations in ``../data/examples/data/<stem>.npz`` label coarse joints (a 10-joint
+manual annotations in ``<data root>/examples/data/<stem>.npz`` label coarse joints (a 10-joint
 or a 14-joint schema). To compare them we fold each coarse joint's frames together with an OR — a
 joint is predicted in contact if ANY of its frames is:
 
@@ -19,7 +19,7 @@ Annotations are tri-state: 1 = contact, 0 = no contact, -1 = unlabeled. Only cel
 are 0 or 1 and whose frame is in the prediction's ``valid_mask`` are scored. Annotated
 people flagged ``ignored`` are skipped. People are matched by ``object_ids``.
 
-    uv run --no-sync python bvr_datasets/examples/score_frame_contacts.py --predictions ../data/examples/out/
+    uv run python bvr_datasets/examples/score_frame_contacts.py --predictions <run root> --contacts 1|2
 """
 
 from __future__ import annotations
@@ -31,8 +31,16 @@ from pathlib import Path
 import numpy as np
 
 
-from bvr_datasets.examples.annotations import ANN_TO_SMPLX, ANN_TO_SMPLX_14
-from bvr.paths import EXAMPLES
+from bvr import files, paths
+
+#: The contact file each ``--contacts`` tag scores.
+CONTACTS = {"1": paths.CONTACTS_1, "2": paths.CONTACTS_2}
+
+#: The joints of the two annotation schemas. The 14-joint one adds ankles and shoulders, and its
+#: "foot" is the forefoot.
+SCHEMA_10 = frozenset({"left_hand", "right_hand", "left_foot", "right_foot", "left_knee", "right_knee",
+                       "left_hip", "right_hip", "left_elbow", "right_elbow"})
+SCHEMA_14 = SCHEMA_10 | {"left_ankle", "right_ankle", "left_shoulder", "right_shoulder"}
 
 # Which contact frames fold onto which annotated coarse joint, per annotation schema.
 # Names cover BOTH frame sets — the legacy 12-frame set (toe_under) and the full-body
@@ -77,12 +85,12 @@ def fold_for_schema(ann_names: list[str]) -> tuple[dict[str, tuple[str, ...]], i
     """Pick the frame→coarse-joint fold for one annotation, by EXACT joint-name set.
 
     Returns ``(fold, schema)`` where ``schema`` is 10 or 14. Raises on any other name set
-    rather than silently dropping joints (same rule as :func:`bvr_datasets.examples.annotations.ann_mapping`).
+    rather than silently dropping joints.
     """
     names = set(ann_names)
-    if names == set(ANN_TO_SMPLX):
+    if names == SCHEMA_10:
         return _FOLD_10, 10
-    if names == set(ANN_TO_SMPLX_14):
+    if names == SCHEMA_14:
         return _FOLD_14, 14
     raise ValueError(f"unrecognized annotation schema {sorted(ann_names)}")
 
@@ -125,14 +133,14 @@ def metrics(counts: dict[str, int]) -> dict[str, float | int | None]:
 
 
 def score_scene(scene_dir: Path, tag: str) -> dict:
-    """Score one ``out/<scene>/`` against ``../data/examples/data/<scene>.npz``.
+    """Score one clip directory ``<run root>/<scene>/`` against ``<data root>/examples/data/<scene>.npz``.
 
     Reads ``human_optim/contacts_<tag>.npz`` (``frame_contact (P,N,F)``, ``valid_mask (P,N)``,
     ``object_ids (P,)``) and the annotation ``contacts (P_ann,J_ann,N_ann)`` — note the
     annotation's time axis is LAST. Returns the per-joint counts pooled over the scored people.
     """
-    pred = np.load(scene_dir / "human_optim" / f"contacts_{tag}.npz", allow_pickle=True)
-    ann_path = EXAMPLES / "data" / f"{scene_dir.name}.npz"
+    pred = files.load_npz(scene_dir / CONTACTS[tag], "bvr-contacts")
+    ann_path = paths.EXAMPLES / "data" / f"{scene_dir.name}.npz"
     if not ann_path.exists():
         raise FileNotFoundError(f"no manual annotation at {ann_path}")
     ann = np.load(ann_path, allow_pickle=True)
@@ -184,15 +192,14 @@ def score_scene(scene_dir: Path, tag: str) -> dict:
     }
 
 
-def _find_scenes(paths: list[Path], tag: str) -> list[Path]:
+def _find_scenes(predictions: list[Path], tag: str) -> list[Path]:
     """Expand each ``--predictions`` path into scene dirs holding a ``contacts_<tag>.npz``."""
     scenes: list[Path] = []
-    for path in paths:
-        if (path / "human_optim" / f"contacts_{tag}.npz").exists():
+    for path in predictions:
+        if (path / CONTACTS[tag]).exists():
             scenes.append(path)
         else:
-            scenes += sorted(c for c in path.iterdir()
-                             if (c / "human_optim" / f"contacts_{tag}.npz").exists())
+            scenes += sorted(c for c in path.iterdir() if (c / CONTACTS[tag]).exists())
     return scenes
 
 
@@ -210,8 +217,8 @@ def _row(scene: str, joint: str, counts: dict) -> str:
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     parser.add_argument("--predictions", type=Path, nargs="+", required=True,
-                        help="scene dirs out/<scene>/ or a parent dir containing them")
-    parser.add_argument("--contacts", default="1", choices=("1", "2"), help="contacts_<tag>.npz")
+                        help="clip dirs <run root>/<scene>/ or a run root holding them")
+    parser.add_argument("--contacts", default="1", choices=tuple(CONTACTS), help="contacts_<tag>.npz")
     parser.add_argument("--json", type=Path, default=None, help="write the full numbers here")
     args = parser.parse_args()
 

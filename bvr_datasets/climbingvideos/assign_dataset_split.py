@@ -19,12 +19,11 @@ import argparse
 import json
 import random
 import sqlite3
+import tomllib
 from datetime import datetime
 from pathlib import Path
 
-from bvr.old_config import load_config
-from bvr.paths import REPO_ROOT
-
+from bvr_datasets.climbingvideos.paths import CLIMBING
 from bvr_datasets.climbingvideos.scene_db import ScenePaths, select_targets
 
 
@@ -34,21 +33,17 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--dry-run", action="store_true", help="print the plan, write nothing")
     args = parser.parse_args(argv)
 
-    cfg = load_config(args.config)
-    corpus = cfg.get("corpus", {})
-    split = cfg.get("split", {})
-    test_frac = float(split.get("test_frames_frac", 0.10))
-    max_scenes = int(split.get("max_test_video_scenes", 4))
-    seed = int(split.get("seed", 0))
+    with args.config.open("rb") as file:
+        cfg = tomllib.load(file)
+    corpus, split = cfg["corpus"], cfg["split"]
+    test_frac, max_scenes, seed = split["test_frames_frac"], split["max_test_video_scenes"], split["seed"]
 
-    data_root = (REPO_ROOT / corpus.get("data_root", "../data/ClimbingVideos")).resolve()
-    paths = ScenePaths(data_root)
+    paths = ScenePaths(CLIMBING)
     conn = paths.connect()
-    rope_value = int(corpus.get("rope_supported", 0))
     rows = select_targets(
         conn,
-        categories=tuple(int(v) for v in corpus.get("categories", [1, 2])),
-        rope_supported=None if rope_value < 0 else rope_value,
+        categories=tuple(corpus["categories"]),
+        rope_supported=None if corpus["rope_supported"] < 0 else corpus["rope_supported"],
     )
     labels = {
         r["scene_id"]: r["dataset_split"]

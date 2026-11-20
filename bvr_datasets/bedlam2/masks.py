@@ -19,7 +19,7 @@ Three things come back per person-frame:
 * the **instance map** — one 8-bit PNG per *frame*, ``0`` background and ``p + 1``
   for person ``p``, so a frame costs one small file however many people are in it.
   It is an id map, not a binary mask: reading it with
-  :func:`bvr.mask_io.read_binary_mask` silently returns the union of everyone, so
+  :func:`bvr.files.read_mask` silently returns the union of everyone, so
   a consumer wanting one person compares against ``p + 1``;
 * ``bbox_full`` — the axis-aligned box of the projected surface, measured from the
   vertices and deliberately **not** clipped to the image, so how far the person
@@ -43,10 +43,12 @@ from __future__ import annotations
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
+import better_human as bh
 import cv2
 import numpy as np
 import torch
 
+from bvr import body
 from bvr_datasets.bedlam2.rasterize import NEAR_M, instance_map
 
 #: Share of ``bbox_full`` that may fall outside the image before the person-frame is
@@ -67,36 +69,27 @@ PNG_LEVEL = 6
 PNG_THREADS = 4
 
 
-def _pose_vertices(body, betas: np.ndarray, q: np.ndarray, device) -> torch.Tensor:
-    """Posed world vertices ``(P, B, V, 3)`` for one chunk of frames."""
-    out = []
-    for person in range(len(betas)):
-        shape = torch.as_tensor(betas[person], device=device)[None]
-        pose = torch.as_tensor(q[person], device=device)
-        with torch.no_grad():
-            out.append(body.forward(shape.expand(len(pose), -1), pose).vertices)
-    return torch.stack(out)
-
-
-def scene_masks(gt_dir: Path, *, body, device, masks_dir: Path | None,
+def scene_masks(gt_dir: Path, *, human: bh.HumanModel, masks_dir: Path | None,
                 chunk: int = POSE_CHUNK) -> dict:
     """Rasterise one BEDLAM2 scene and measure every person-frame.
 
     :param gt_dir: the scene's ``features/gt/<aa>/<bb>/<scene_id>`` directory.
-    :param body: a :class:`bvr.body.Body` already on ``device``.
+    :param human: the pipeline's body (:func:`bvr.body.load`), on the device the scene is posed on.
     :param masks_dir: where to write ``NNNNNN.png``; ``None`` measures without writing.
     :returns: the arrays :func:`save_boxes` stores, keyed by npz field name. Both boxes
         are ``xyxy`` with an exclusive far corner, so ``x1 - x0`` is a width:
         ``bbox_full`` in continuous pixel coordinates and unclipped, ``bbox_visible``
         on whole pixels and necessarily inside the image.
     """
+    device = human.spec.device
     meta = np.load(gt_dir / "smplx.npz")
     cam = np.load(gt_dir / "camera.npz")
     height, width = int(cam["image_height"]), int(cam["image_width"])
     extrinsics = torch.as_tensor(cam["extrinsics"], device=device)
     intrinsics = torch.as_tensor(cam["intrinsics_px"], device=device)
-    faces = torch.as_tensor(body.faces, dtype=torch.long, device=device)
-    q, betas = meta["q"], meta["betas"]
+    faces = human.spec.faces.to(device=device, dtype=torch.long)
+    q = torch.as_tensor(meta["q"], device=device)
+    identity = body.bake(human, torch.as_tensor(meta["betas"], device=device))
     people, frames = q.shape[:2]
 
     bbox_full = np.zeros((people, frames, 4), np.float32)
@@ -111,7 +104,8 @@ def scene_masks(gt_dir: Path, *, body, device, masks_dir: Path | None,
 
     for start in range(0, frames, chunk):
         stop = min(start + chunk, frames)
-        verts = _pose_vertices(body, betas, q[:, start:stop], device)      # (P, B, V, 3)
+        with torch.no_grad():
+            verts = identity.forward(q[:, start:stop]).vertices            # (P, B, V, 3)
         camera = torch.einsum("bij,pbvj->pbvi", extrinsics[start:stop, :3, :3], verts)
         camera = camera + extrinsics[start:stop, None, :3, 3]
         depth = camera[..., 2]

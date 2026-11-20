@@ -1,7 +1,7 @@
 """Shared ClimbingVideos scene-DB access, feature layout, and row selection.
 
-The corpus driver resolves every stage's scenes, on-disk paths, and target set
-the same way, so that logic lives here.
+The corpus tools (and BEDLAM2's, whose copy has the same layout) resolve scenes,
+on-disk paths and the target set the same way, so that logic lives here.
 
 Feature layout is **stage-first**, matching the existing DB dirs
 (``features/{yolo,tracking,vlm,sam3}/<aa>/<bb>/<scene_id>``): each stage writes
@@ -10,23 +10,14 @@ scene_id[:2]/scene_id[2:4]``.
 
 The scenes DB (``scenes/scenes.db``) is owned by the upstream ``../BetterParsing``
 pipeline and is opened **read-only** here; :meth:`ScenePaths.connect_rw` exists
-only for the explicit, auditable discard of scenes whose tracking failed.
+only for the explicit, auditable writes: the train/test split and BEDLAM2's
+unselection of scenes without a valid person.
 """
 from __future__ import annotations
 
 import random
 import sqlite3
 from pathlib import Path
-
-
-from bvr_datasets.climbingvideos.paths import CLIMBING
-
-DEFAULT_DATA_ROOT = CLIMBING
-
-# The curated target set: human-selected indoor bouldering + indoor rope, no
-# rope support (== BetterParsing's SceneTrackConfig default). Overridable on CLI.
-DEFAULT_CATEGORIES = (1, 2)
-DEFAULT_ROPE_SUPPORTED = 0
 
 
 def shard(scene_id: str) -> tuple[str, str]:
@@ -52,7 +43,7 @@ class ScenePaths:
         return conn
 
     def connect_rw(self) -> sqlite3.Connection:
-        # Read-write — only for the explicit discard of failed scenes.
+        # Read-write — only for the explicit writes the module docstring names.
         conn = sqlite3.connect(self.scenes_db)
         conn.row_factory = sqlite3.Row
         conn.execute("PRAGMA journal_mode = WAL")
@@ -67,21 +58,6 @@ class ScenePaths:
         """``features/<stage>/<aa>/<bb>/<scene_id>`` — the per-scene stage dir."""
         aa, bb = shard(scene_id)
         return self.features_root / stage / aa / bb / scene_id
-
-    def tracking_npz(self, scene_id: str) -> Path:
-        aa, bb = shard(scene_id)
-        return self.features_root / "tracking" / aa / bb / f"{scene_id}.npz"
-
-    def sam3_dir(self, scene_id: str) -> Path:
-        return self.feature_dir("sam3", scene_id)
-
-    def sam3_bboxes(self, scene_id: str) -> Path:
-        """The SAM 3 ``bboxes.npz`` the pose / body stages consume."""
-        return self.sam3_dir(scene_id) / "bboxes.npz"
-
-    def vggt_camera(self, scene_id: str) -> Path:
-        """The VGGT-Omega ``camera.npz`` the body stage reads intrinsics from."""
-        return self.feature_dir("vggt", scene_id) / "camera.npz"
 
 
 def select_targets(

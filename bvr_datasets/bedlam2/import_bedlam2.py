@@ -48,10 +48,9 @@ most of their clip more than 2 cm above it. An earlier version of this line clai
 5% of people never come within 5 cm; that is wrong by three orders of magnitude and
 no definition of the gap reproduces it. The classic
 ``body_pose`` arrays are AMASS axis-angle copied verbatim, including rotation
-vectors past 2*pi, so they do not match ``body.to_classic(betas, q)`` elementwise
+vectors past 2*pi, so they do not match ``better_human.to_classic(identity, q)`` elementwise
 — ``q`` is the canonical form. And no *stage* in this repo reads ``features/gt``;
-it is a ground-truth tree for training, not a drop-in for the corpus chain. The
-viewer does read it: ``scripts/view_3d.py --bedlam``.
+it is a ground-truth tree for training, not a drop-in for the corpus chain.
 
 World frame: Unreal's world, mapped to OpenCV axes by ``unreal2cv2`` and metres.
 Up is ``-y``, so gravity is ``+y`` — the same convention the geocalib stage uses.
@@ -73,7 +72,7 @@ the body's 10,475 vertices inside the image that frame, and ``valid_mask`` is
 modelled, so a visible body may still be fully behind something.
 
 Hands: BEDLAM2 renders with ``flat_hand_mean=True`` (absolute hand pose), while
-``Body.from_classic`` adds the model's hand mean, so the mean is subtracted on
+BetterHuman's ``from_classic`` adds the model's hand mean, so the mean is subtracted on
 the way in. Skipping that costs 6.5 mm mean / 93 mm max on the hands.
 
 Usage::
@@ -110,7 +109,6 @@ import numpy as np
 from scipy.spatial.transform import Rotation
 
 
-from bvr.body import models_dir
 from bvr_datasets.bedlam2.paths import BEDLAM2, BEDLAM2_OUR
 
 SRC = BEDLAM2
@@ -119,7 +117,6 @@ DST = BEDLAM2_OUR
 IMAGE_DIR = SRC / "b2_imagedata_download"
 RENDER_DB = SRC / "bedlam2_render_database-20250318" / "bedlam2.sqlite"
 MOTION_DIR = SRC / "b2_motions_npz_training" / "motions_npz_training"
-LOCKED_HEAD = models_dir() / "smplx_lockedhead" / "SMPLX_NEUTRAL.npz"
 
 FPS = 30.0
 JPEG_QUALITY = 95
@@ -502,28 +499,31 @@ def write_gravity_npz(path: Path, ground_height_world: float) -> None:
     )
 
 
-def joint_parents(body) -> list[int]:
-    """Parent index per joint, root as ``-1`` — the layout ``stages.py`` stores."""
-    return [-1] + [int(body.parent_tree[0, joint]) for joint in range(1, body.num_joints)]
-
 _BODY = None
-_HAND_MEAN: tuple[np.ndarray, np.ndarray] | None = None
 
 
 def get_body():
-    """One BetterHuman body per worker process."""
-    global _BODY, _HAND_MEAN
+    """One BetterHuman body per worker process (:func:`bvr.body.load`, on the CPU)."""
+    global _BODY
     if _BODY is None:
         import torch
 
-        torch.set_num_threads(1)
-        from bvr.body import load_body
+        from bvr import body
 
-        _BODY = load_body(device="cpu")
-        model = np.load(LOCKED_HEAD, allow_pickle=True)
-        _HAND_MEAN = (model["hands_meanl"].astype(np.float64),
-                      model["hands_meanr"].astype(np.float64))
-    return _BODY, _HAND_MEAN
+        torch.set_num_threads(1)
+        _BODY = body.load("cpu")
+    return _BODY
+
+
+def from_classic(betas: np.ndarray, **fields: np.ndarray):
+    """``(identity, q)`` of one person's classic SMPL-X parameters; the identity is baked from ``betas (10,)``."""
+    import better_human as bh
+    import torch
+
+    as_tensor = lambda array: torch.from_numpy(np.ascontiguousarray(array)).float()  # noqa: E731
+    identity, q, _ = bh.from_classic(get_body(), bh.families.SMPLXClassic(
+        betas=as_tensor(betas), **{name: as_tensor(value) for name, value in fields.items()}))
+    return identity, q
 
 
 @lru_cache(maxsize=256)
@@ -536,16 +536,11 @@ def load_motion(name: str) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
 @lru_cache(maxsize=4096)
 def pelvis_offset(betas_key: bytes) -> np.ndarray:
     """``q[0:3] - transl`` for a shape — the rest pelvis BetterHuman poses about."""
-    import torch
-
-    body, _ = get_body()
-    betas = torch.from_numpy(np.frombuffer(betas_key, dtype=np.float64).copy()).float()[None]
-    zero = lambda width: torch.zeros(1, width)
-    q = body.from_classic(betas, zero(63), zero(3), zero(3), zero(45), zero(45))
-    return q[0, :3].detach().numpy().astype(np.float64)
+    _, q = from_classic(np.frombuffer(betas_key, dtype=np.float64).copy())
+    return q[:3].detach().numpy().astype(np.float64)
 
 
-def visible_fraction(body, betas: np.ndarray, q: np.ndarray, geometry: dict) -> np.ndarray:
+def visible_fraction(identity, q: np.ndarray, geometry: dict) -> np.ndarray:
     """Fraction of the body's vertices inside the image, per frame ``(N,)``.
 
     BEDLAM2 places crowd members outside the camera frustum and labels them all
@@ -558,12 +553,11 @@ def visible_fraction(body, betas: np.ndarray, q: np.ndarray, geometry: dict) -> 
     extrinsics = geometry["extrinsics"]
     intrinsics = geometry["intrinsics_px"]
     width, height = geometry["width"], geometry["height"]
-    shape = torch.from_numpy(betas).float()[None]
     fraction = np.empty(len(q), dtype=np.float32)
     for start in range(0, len(q), VISIBILITY_CHUNK):
         stop = min(start + VISIBILITY_CHUNK, len(q))
         with torch.no_grad():
-            vertices = body.forward(shape, torch.from_numpy(q[start:stop])).vertices.numpy()
+            vertices = identity.forward(torch.from_numpy(q[start:stop])).vertices.numpy()
         rotation = extrinsics[start:stop, :3, :3]
         camera = np.einsum("fij,fvj->fvi", rotation, vertices.astype(np.float64))
         camera += extrinsics[start:stop, None, :3, 3]
@@ -580,11 +574,10 @@ def visible_fraction(body, betas: np.ndarray, q: np.ndarray, geometry: dict) -> 
 
 def write_smplx_npz(path: Path, scene: dict, geometry: dict) -> None:
     """Compose every body's world-frame SMPL-X trajectory and pack it as ``q``."""
-    import torch
-
     width, height = geometry["width"], geometry["height"]
-    body, hand_mean = get_body()
-    mean_left, mean_right = hand_mean
+    spec = get_body().spec
+    mean_left, mean_right = (spec.classic.hand_means[name].double().numpy()
+                             for name in ("left_hand_pose", "right_hand_pose"))
     n_frames = scene["n_frames"]
     people = scene["bodies"]
 
@@ -617,15 +610,12 @@ def write_smplx_npz(path: Path, scene: dict, geometry: dict) -> None:
         left_hand = poses[:, 75:120] - mean_left
         right_hand = poses[:, 120:165] - mean_right
 
-        as_tensor = lambda array: torch.from_numpy(np.ascontiguousarray(array)).float()
-        # betas stay (1, 10) and broadcast: baking one shape instead of one per
-        # frame is ~165x faster and gives a bit-identical q.
-        q = body.from_classic(as_tensor(shape10)[None],
-                              as_tensor(poses[:, 3:66]), as_tensor(transl),
-                              as_tensor(global_orient), as_tensor(left_hand),
-                              as_tensor(right_hand))
+        # One shape for every frame: the betas broadcast over the poses.
+        identity, q = from_classic(shape10, body_pose=poses[:, 3:66], transl=transl,
+                                   global_orient=global_orient, left_hand_pose=left_hand,
+                                   right_hand_pose=right_hand)
         q_all[index] = q.detach().numpy()
-        visible[index] = visible_fraction(body, shape10.astype(np.float32), q_all[index], geometry)
+        visible[index] = visible_fraction(identity, q_all[index], geometry)
         betas10[index] = shape10
         betas16[index] = betas
         classic["global_orient"][index] = global_orient
@@ -642,8 +632,8 @@ def write_smplx_npz(path: Path, scene: dict, geometry: dict) -> None:
         q=q_all, betas=betas10, betas_bedlam2=betas16,
         scale=np.ones(len(people), dtype=np.float32),
         expression=np.zeros((len(people), n_frames, 10), dtype=np.float32),
-        joint_names=np.array(body.joint_names, dtype="U16"),
-        parents=np.array(joint_parents(body), dtype=np.int32),
+        joint_names=np.array(spec.joint_names, dtype="U16"),
+        parents=np.array(spec.parents, dtype=np.int32),
         object_ids=np.arange(len(people), dtype=np.int32),
         valid_mask=visible > 0.0, visible_fraction=visible,
         num_people=np.int32(len(people)), num_frames=np.int32(n_frames),
@@ -891,7 +881,6 @@ def run_verify(plan: list[dict], sample: int, seed: int) -> None:
     """Reproject the stored bodies onto real frames and report the pixel error."""
     import torch
 
-    body, _ = get_body()
     rng = np.random.default_rng(seed)
     picks = [plan[i] for i in rng.choice(len(plan), size=min(sample, len(plan)), replace=False)]
     out_dir = DST / "_verify"
@@ -918,9 +907,9 @@ def run_verify(plan: list[dict], sample: int, seed: int) -> None:
         overlay = image.copy()
         inside, depths = [], []
         for person in range(int(smplx["num_people"])):
-            betas = torch.from_numpy(smplx["betas"][person]).float()[None]
-            q = torch.from_numpy(smplx["q"][person, frame]).float()[None]
-            vertices = body.forward(betas, q).vertices[0].detach().numpy().astype(np.float64)
+            identity = get_body().bake(betas=torch.from_numpy(smplx["betas"][person]))
+            q = torch.from_numpy(smplx["q"][person, frame])
+            vertices = identity.forward(q).vertices.detach().numpy().astype(np.float64)
             in_camera = vertices @ extrinsic[:3, :3].T + extrinsic[:3, 3]
             depths.append(float(np.median(in_camera[:, 2])))
             uv = (intrinsic @ (in_camera / in_camera[:, 2:3]).T).T[:, :2]
