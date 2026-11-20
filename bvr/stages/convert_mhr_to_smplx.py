@@ -50,7 +50,6 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from bvr.stages import _pym_preload  # noqa: F401  (must be first — re-execs to fix libstdc++ ABI)
 
 import argparse
 import gc
