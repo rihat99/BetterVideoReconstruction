@@ -105,10 +105,7 @@ point_size = 0.02           # scene point radius (m)
 human_point_size = 0.01     # human point radius (m)
 camera_scale = 0.1          # camera frustum size (m)
 up = "-y"                   # up direction
-smplx = true                # load the fitted bodies
 human_max_points = 6000     # human points per frame and person; 0 keeps all
-video = false               # video pane in the sidebar
-video_dir = ""              # folder of the source videos; empty uses the example clips
 
 [optimizer]                 # shared by the kinematic and dynamic solves
 learning_rate = 0.01        # Adam
