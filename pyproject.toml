@@ -4,18 +4,12 @@ version = "0.1.0"
 description = "Monocular-video human reconstruction (SAM3 track → VGGT camera → SAM-3D-Body → MHR→SMPL-X → visually-guided kinematic refinement)"
 requires-python = ">=3.12"
 dependencies = [
-    # The sibling libraries, fetched from GitHub (uv.sources); see INSTALL.md for the local override.
-    "better-robot",
+    # The sibling libraries (uv.sources). The viewer extra brings viser: bvr/viewer runs on
+    # better-robot's viewer.
+    "better-robot[viewer]",
     "better-human",
-    # the viewer's UI library (bvr/viewer runs on better-robot's viser-based viewer)
-    "viser>=1.0",
-    # MHR (Momentum Human Rig) — submodule
-    "mhr",
-    "pymomentum-gpu",
-    # pypose: SE3/SO3 tangent ops (Lie-group manifold math).
-    "pypose",
-    # Force torch/torchvision to match pymomentum-gpu's cu129 ABI (see uv.sources below).
-    "torch>=2.8,<2.9",
+    # The torch better-robot's compiled path is gated on.
+    "torch>=2.13,<2.14",
     "torchvision",
     # sam3 (video human tracker)
     "sam3",
@@ -65,11 +59,8 @@ dependencies = [
     # from it; GeoCalib recovers it per frame. Inference-only deps (adds kornia).
     "geocalib",
     "scikit-learn>=1.4",
-    # Gemma 4 VLM (legacy/ triage stage): transformers + accelerate (device_map="auto")
-    # + bitsandbytes (4/8-bit quantization). Kept installed pending that stage's revival.
     "transformers>=4.50",
     "accelerate>=0.30",
-    "bitsandbytes>=0.46",
     "trimesh>=4.0",
     # SMPL-X body model (pip package) — backs convert_mhr_to_smplx.py. BetterHuman's
     # native SMPLX has no jaw/eye/face deformation yet, so the MHR→SMPL-X fitter uses
@@ -83,6 +74,9 @@ dependencies = [
     # read_frames); covered by tests/test_opencap_forces.py.
     "imageio-ffmpeg>=0.6.0",
 ]
+
+[dependency-groups]
+dev = ["pytest>=8.0"]
 
 [build-system]
 requires = ["setuptools>=70"]
@@ -101,17 +95,15 @@ url = "https://download.pytorch.org/whl/cu129"
 explicit = true
 
 [tool.uv.sources]
-better-robot = { git = "https://github.com/rihat99/BetterRobot", branch = "main" }
-better-human = { git = "https://github.com/rihat99/better_human", branch = "main" }
-mhr = { path = "third_party/MHR", editable = true }
+better-robot = { path = "../BetterRobot", editable = true }
+better-human = { path = "../BetterHuman", editable = true }
 sam3 = { path = "third_party/sam3", editable = true }
 sapiens = { path = "third_party/sapiens2", editable = true }
 # VGGT-Omega is not on PyPI — install editable from the vendored copy (we patch it
 # for chunked low-memory inference, so it is no longer a submodule).
 vggt-omega = { path = "third_party/vggt-omega", editable = true }
 geocalib = { path = "third_party/geocalib", editable = true }
-# pymomentum-gpu wheels are built against PyTorch cu129 — force torch/torchvision
-# to the matching CUDA 12.9 build to avoid ABI segfaults (momentum issue #939).
+# The CUDA 12.9 build, the one better-robot and better-human lock.
 torch = { index = "pytorch-cu129" }
 torchvision = { index = "pytorch-cu129" }
 
