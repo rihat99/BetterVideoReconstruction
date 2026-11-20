@@ -31,7 +31,7 @@ ALLOWED = {
 
 #: package -> the sibling libraries it may import.
 LIBRARIES = {
-    "bvr.body": {"better_human"},
+    "bvr.body": {"better_robot", "better_human"},
     "bvr.terms": {"better_robot", "better_human"},
     "bvr.contacts": {"better_robot"},
     "bvr.stages": {"better_robot", "better_human"},
@@ -45,7 +45,7 @@ MODELS = {"sam3", "sapiens", "vggt_omega", "sam_3d_body", "geocalib"}
 #: Modules of the old core, not held to the table until the rebuild replaces them. An entry leaves
 #: in the commit that ports or removes its module; the list is empty when the rebuild is done.
 UNPORTED = {
-    "bvr.old_config", "bvr.npz_io", "bvr.mask_io", "bvr.source", "bvr.determinism", "bvr.human_optim", "bvr.body",
+    "bvr.old_config", "bvr.npz_io", "bvr.mask_io", "bvr.source", "bvr.determinism", "bvr.human_optim",
     "bvr.stages.fuse_geometry", "bvr.stages.estimate_scale", "bvr.stages.human_optimization",
     "bvr.stages.estimate_contacts", "bvr.stages.measure_contacts", "bvr.stages.build_support_scene",
     "bvr_datasets", "scripts.view_3d", "scripts.scene_quality",

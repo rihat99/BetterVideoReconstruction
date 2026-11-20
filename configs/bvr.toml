@@ -114,6 +114,7 @@ video_dir = ""              # folder of the source videos; empty uses the exampl
 learning_rate = 0.01        # Adam
 learning_rate_decay = 0.1   # factor at 1/2 and at 3/4 of a phase
 lbfgs_history = 10          # L-BFGS memory of the kinematics_1 polish
+lbfgs_line_search = 10      # step sizes an L-BFGS step tries, each half the one before
 
 # Objective weights, one table per stage. Difference terms are per change over 1/30 s.
 
@@ -233,7 +234,7 @@ vertex_subsample = 1000     # body vertices
 chunk = 16                  # frames per nearest-neighbour chunk
 emphasis_lo = 0.1           # vertex weight on the torso
 emphasis_hi = 10.0          # vertex weight on hands and feet
-emphasis_radius = 1.0       # geodesic falloff of the emphasis (m)
+emphasis_radius = 0.5       # distance along the skin over which the emphasis falls off (m)
 limb_quota = 200            # points each hand and foot keeps before the rest fills max_points
 
 [keypoints]                 # Sapiens keypoint reprojection
@@ -279,15 +280,15 @@ max_dist_m = 0.25           # nearest-neighbour guard (m); above band_m and dete
 prune_margin_m = 0.30       # scene candidates within this of the body (m); at least max_dist_m
 conf_thresh = 0.1           # scene points below this confidence are ignored
 
-[contact_gate]              # stillness, shared by kinematics_1's detector and the contact readout
+[contact_gate]              # what kinematics_1's detector and the contact readout share
 window_s = 0.35             # drift window (s)
 still_m = 0.04              # net drift at which stillness is one half (m)
 still_override_m = 0.01     # a frame pressing closer than this counts however fast it moves (m)
+detect_min_s = 0.1          # shortest raw detection (s); frames = ceil(s * fps)
 
 [contacts]                  # the contact readout -> human_optim/contacts_<n>.npz
 close_thresh_m = 0.03       # enter distance (m)
 exit_thresh_m = 0.035       # stay distance (m)
-detect_min_s = 0.1          # shortest raw detection (s); frames = ceil(s * fps)
 min_span_s = 0.1            # shortest span of the fused labels (s); frames = ceil(s * fps)
 max_dist_m = 0.10           # nearest-neighbour guard (m)
 conf_thresh = 0.1           # scene points below this confidence are ignored
