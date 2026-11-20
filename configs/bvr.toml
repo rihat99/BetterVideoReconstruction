@@ -62,7 +62,6 @@ conf_drop_q = 0.3           # drop this lowest-confidence fraction of scene dept
 edge_rtol = 0.04            # depth-edge (flying pixel) filter tolerance; 0 disables
 human_dilate = 8            # grow the human mask this many px before cutting it from the scene
 min_scene_voxels = 25       # drop scene clusters smaller than this many connected voxels
-person_obj_ids = ""         # SAM 3 ids treated as people, e.g. "0,1"; empty takes all
 static_motion_max = 0.02    # the shot counts as locked while the scene slides less than this fraction of the image width
 
 [scale]                     # metric scale from the human body -> geometry/
@@ -75,6 +74,7 @@ iters = 150                 # Adam iterations per body round
 lr = 0.01                   # Adam learning rate
 gm_chamfer_m = 0.3          # chamfer robust scale (m)
 gm_reproj_px = 10.0         # reprojection robust scale (px)
+score_thresh = 0.3          # Sapiens keypoints below this score carry no weight
 max_points = 2000           # cloud points per frame in the chamfer
 vertex_subsample = 3000     # body vertices in the chamfer
 
@@ -84,7 +84,7 @@ reprojection = 0.5          # Sapiens keypoints
 pose = 2.0                  # joint rotations toward the converter pose
 orientation = 1.0           # root orientation toward the converter pose
 translation = 0.5           # root translation toward the converter pose (m^2)
-start_velocity = 0.1        # joint velocities toward the converter's
+start_velocity = 0.1        # joint velocities toward the converter's, per 1/30 s
 
 [gravity]                   # world-frame gravity -> geocalib/gravity.npz
 num_frames = 48             # frames sampled uniformly over the clip

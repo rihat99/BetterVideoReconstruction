@@ -11,7 +11,9 @@ usually sit.
 The answer is a fraction of the image width, which makes it independent of the
 clip's resolution, of how far away the scene is, and of the world's unknown
 scale (the fused world is up-to-scale until ``estimate_scale`` runs, and metric
-afterwards — the same clip must get the same answer either way).
+afterwards — the same clip must get the same answer either way). The fuse step calls a shot locked
+when it slides less than ``[fuse].static_motion_max`` of the width; docs/fusion.md says where 2 %
+comes from.
 
 Checked against optical flow on the raw video for twenty clips: the two agree
 across four orders of magnitude — a locked tripod reads 0.03 % where flow says
@@ -20,15 +22,6 @@ across four orders of magnitude — a locked tripod reads 0.03 % where flow says
 from __future__ import annotations
 
 import numpy as np
-
-#: A shot counts as locked when the scene slides less than this fraction of the
-#: image width. Where 2 % comes from: on a clip whose picture optical flow says
-#: is perfectly frozen this measure still reads up to 0.7 %, so that is the
-#: noise the threshold has to clear; a camera that nudges reads 1–2 %; and the
-#: quietest clip anyone would call a moving shot reads 4 %. 2 % sits nearly 3×
-#: above the noise and 2× below the first real motion, so nothing near the line
-#: is a camera that actually travels.
-STATIC_MOTION_MAX = 0.02
 
 
 def image_motion(
@@ -70,7 +63,3 @@ def image_motion(
     slide = np.linalg.norm(uv[:, seen] - home[seen], axis=-1)       # (F, P) pixels
     return float(np.percentile(np.median(slide, axis=1), 90) / width)
 
-
-def is_static(motion: float, threshold: float = STATIC_MOTION_MAX) -> bool:
-    """Does this count as a locked shot? A clip we could not measure (``nan``) does not."""
-    return bool(motion < threshold)

@@ -1,17 +1,13 @@
-"""Per-point surface normals for an unstructured point cloud.
+"""Surface normals: of an unstructured point cloud, and of a mesh's vertices.
 
-The fused scene cloud (``geometry/scene.npz``) stores points but no normals, yet
-the penetration SDF in :mod:`bvr.human_optim.losses` needs them to *sign* the
-distance: a body vertex behind the local surface — on the far side of the
-outward normal — is penetrating. We estimate one normal per point by local PCA
-(the smallest principal axis of the k nearest neighbours) and orient it toward
-the cameras that observed the scene, so "outward" consistently means "toward the
-camera".
+The fused scene cloud (``geometry/scene.npz``) is points without a surface, yet the scene terms need
+normals to *sign* a distance: a point behind the local surface, on the far side of the outward normal,
+is inside it. One normal per point comes from local PCA (the smallest principal axis of the k nearest
+neighbours), turned toward the cameras that observed the scene, so "outward" means "toward the camera".
 
-The whole estimate runs in NumPy on CPU: neighbour search is a ``cKDTree``, and
-the batched 3×3 eigendecomposition is ``np.linalg.eigh`` (the GPU
-``torch.linalg.eigh`` hits a cuSOLVER internal error on ~10⁵ tiny matrices). It
-is a one-time precompute per run, so CPU is fine and keeps the GPU free.
+The cloud estimate runs in NumPy on the CPU: the neighbour search is a ``cKDTree``, and the batched
+3x3 eigendecomposition is ``np.linalg.eigh`` (the GPU ``torch.linalg.eigh`` hits a cuSOLVER internal
+error on ~10^5 tiny matrices). It runs once per clip.
 """
 
 from __future__ import annotations
@@ -84,3 +80,11 @@ def load_scene_cloud(
     if normals is None:
         normals = estimate_point_normals(pts, camera_centers, k=k)
     return pts, normals, conf
+
+
+def vertex_normals(vertices: torch.Tensor, faces: torch.Tensor) -> torch.Tensor:
+    """Unit normals ``(..., V, 3)`` of mesh vertices ``(..., V, 3)``: the area-weighted mean of their faces' normals."""
+    a, b, c = (vertices[..., faces[:, corner], :] for corner in range(3))
+    normals = torch.zeros_like(vertices).index_add_(
+        -2, faces.reshape(-1), torch.linalg.cross(b - a, c - a).repeat_interleave(3, dim=-2))
+    return torch.nn.functional.normalize(normals, dim=-1)
