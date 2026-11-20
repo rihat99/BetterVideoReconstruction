@@ -25,7 +25,7 @@ CONTACT_TERMS = ("penetration", "contact_attraction", "contact_acquisition", "co
 def kinematics_problem(
     identity: bh.Identity, start: torch.Tensor, *, keypoints: torch.Tensor, scores: torch.Tensor,
     tracked: torch.Tensor, cameras: camera.Cameras, time: motion.Time, attraction: dict, config: dict,
-    cloud: tuple[torch.Tensor, torch.Tensor] | None = None,
+    cloud: tuple[torch.Tensor, torch.Tensor] | None = None, variables: dict[str, torch.Tensor] | None = None,
 ) -> optim.Problem:
     """The problem of fitting ``identity``'s trajectory to a clip, from ``start (P, T, 211)``, before it is solved.
 
@@ -36,6 +36,7 @@ def kinematics_problem(
     :param config: the config tables of the terms.
     :param cloud: each person's depth points ``(P, T, M, 3)`` and the mask ``(P, T, M)`` of the real ones
         (``visual.human_points``); without it the problem has no ``chamfer`` term.
+    :param variables: more variables ``(P, ...)`` beside ``q``, for the terms a caller registers (contact forces).
 
     Cached values: ``pose`` (``q`` with unit quaternions), ``body`` (its ``HumanState``), ``frames`` (the contact
     frames), ``velocity`` to ``snap`` (the strided derivatives of ``pose``) and ``distance`` (the frames against
@@ -45,7 +46,8 @@ def kinematics_problem(
     human, penetration = identity.human, config["penetration"]
     with torch.no_grad():
         start_body = identity.forward(start)
-    problem = optim.Problem({"q": start}, data={"scene": None, "labels": None, "patches": None}, time=("q",))
+    problem = optim.Problem({"q": start, **(variables or {})}, data={"scene": None, "labels": None, "patches": None},
+                            time=("q",))
     problem.cached(terms.RobotManifold(human.model).project, name="pose", reads=("q",))
     problem.cached(bh.terms.human_state(identity, q="pose"), name="body")
     problem.cached(body.contact_frames, name="frames", reads=("body",))
@@ -69,6 +71,8 @@ def kinematics_problem(
         rows = time.rows(tracked, order)
         term(f"{name}_root", motion.mean_square(rows, slice(0, 6)), reads=(name,))
         term(f"{name}_joint", motion.mean_square(rows, slice(6, None)), reads=(name,))
+    for part, columns in (("root", slice(0, 6)), ("joint", slice(6, None))):
+        term(f"neighbour_{part}", motion.neighbour(human.model, time, tracked, columns), reads=("pose",))
     term("radial_velocity", motion.radial_velocity(time, camera.centers(cameras[0]), tracked))
     term("contact_velocity", motion.contact_velocity(time, **config["contact_velocity"]))
     term("penetration", scene.penetration(**{

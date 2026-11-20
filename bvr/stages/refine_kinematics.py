@@ -23,7 +23,6 @@ labels that held it.
 from __future__ import annotations
 
 import logging
-import math
 from collections.abc import Callable
 
 import better_human as bh
@@ -32,8 +31,8 @@ import torch
 from better_robot import optim
 
 from bvr import body, camera, files, paths, run
+from bvr.contacts import detector
 from bvr.geometry.normals import load_scene_cloud
-from bvr.human_optim.contacts import detect_frame_contacts, joint_drift
 from bvr.terms import motion, objective, scene, visual
 
 log = logging.getLogger(__name__)
@@ -194,14 +193,14 @@ def _detect_contacts(state: bh.HumanState, evidence: Evidence, config: dict) -> 
     names = evidence.human.contact_frames.names
     labels, drifts = [], []
     for frames, seen in zip(body.contact_frames(state), evidence.tracked):
-        drift = joint_drift(frames[..., :3], fps=fps, window_s=gate["window_s"], valid_mask=seen)
-        found = detect_frame_contacts(
-            frames[..., :3], body.frame_normals(frames), drift, *evidence.scene, frame_names=names,
-            close_thresh_m=auto["detect_thresh_m"], exit_thresh_m=auto["detect_exit_m"],
-            min_frames=math.ceil(gate["detect_min_s"] * fps), still_m=gate["still_m"],
-            still_override_m=gate["still_override_m"], max_dist_m=auto["max_dist_m"],
-            conf_thresh=auto["conf_thresh"], prune_margin_m=auto["prune_margin_m"])
-        labels.append(found.contact & seen[:, None])
+        drift = detector.drift(frames[..., :3], seen, fps=fps, window_s=gate["window_s"])
+        signals = detector.scene_signals(frames[..., :3], body.frame_normals(frames), evidence.scene,
+                                         prune_margin_m=auto["prune_margin_m"])
+        found = detector.detect(
+            signals, drift, names=names, close_thresh_m=auto["detect_thresh_m"], exit_thresh_m=auto["detect_exit_m"],
+            min_frames=gate["detect_min_frames"], still_m=gate["still_m"],
+            still_override_m=gate["still_override_m"], max_dist_m=auto["max_dist_m"], conf_thresh=auto["conf_thresh"])
+        labels.append(evidence.tensor(found.contact) & seen[:, None])
         drifts.append(drift)
     labels = torch.stack(labels)
     log.info("detected contacts: %s", ", ".join(

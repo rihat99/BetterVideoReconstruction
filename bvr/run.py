@@ -80,7 +80,8 @@ STEPS = (
     Step("contacts_2", "estimate_contacts", _CONTACTS, (paths.KINEMATIC_2, *_GEOMETRY, paths.GRAVITY),
          (paths.CONTACTS_2,)),
     Step("kindyn_1", "solve_dynamics", (*_KINEMATIC, "stages.kindyn_1", "torque_multipliers", "friction"),
-         (paths.KINEMATIC_2, paths.CONTACTS_2, paths.GRAVITY, paths.SAPIENS_POSE, *_GEOMETRY), (paths.KINDYN_1,)),
+         (paths.KINEMATIC_2, paths.CONTACTS_2, paths.GRAVITY, paths.SAPIENS_POSE, paths.TRANSFORM, paths.SCENE),
+         (paths.KINDYN_1,)),
 )
 
 

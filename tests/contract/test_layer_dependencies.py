@@ -33,7 +33,7 @@ ALLOWED = {
 LIBRARIES = {
     "bvr.body": {"better_robot", "better_human"},
     "bvr.terms": {"better_robot", "better_human"},
-    "bvr.contacts": {"better_robot"},
+    "bvr.contacts": {"better_robot", "better_human"},
     "bvr.stages": {"better_robot", "better_human"},
     "bvr.viewer": {"better_robot", "better_human"},
     "bvr_datasets": {"better_robot", "better_human"},
@@ -47,7 +47,7 @@ MODELS = {"sam3", "sapiens", "vggt_omega", "sam_3d_body", "geocalib"}
 UNPORTED = {
     "bvr.old_config", "bvr.npz_io", "bvr.mask_io", "bvr.source", "bvr.determinism", "bvr.human_optim",
     "bvr.stages.human_optimization",
-    "bvr.stages.estimate_contacts", "bvr.stages.measure_contacts", "bvr.stages.build_support_scene",
+    "bvr.stages.measure_contacts", "bvr.stages.build_support_scene",
     "bvr_datasets", "scripts.scene_quality",
 }
 
