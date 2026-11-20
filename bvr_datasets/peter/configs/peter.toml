@@ -1,0 +1,36 @@
+# The static-camera force rigs: the peter climbing walls and campus board, LAAS Parkour and OpenCap
+# LabValidation (one static camera, one person, a force sensor under each limb). A delta over the
+# defaults; scripts/pipeline.py runs the steps up to gravity with it, and
+# bvr_datasets/peter/chain.py the human steps on a body with contact on the hands and feet only.
+base = "configs/bvr.toml"
+
+[run]
+steps = ["sam3", "vggt", "sapiens", "sam3d", "smplx", "fuse", "scale", "gravity"]
+
+[sam3]
+top_k = 1                   # the largest frame-0 person only: climb_wall_2's cam_left sees a second person behind
+overlay = false
+
+[vggt]
+frame_chunk = 128           # chunked: the whole-clip forward needs about 43 GB at 500 frames; matches it to bf16 rounding
+token_chunk = 65536
+
+[sapiens]
+overlay = false
+
+[sam3d]
+overlay = false
+
+[fuse]
+conf_drop_q = 0.0           # a static camera's depth confidence is uniformly low: the 0.3 cut deleted the campus board
+human_dilate = 2            # 8 px erased the gripped rung around the hands
+
+[scale]
+conf_drop_q = 0.0           # every body pixel votes for the scale, the limbs included
+prefit = false              # no parallax, so the human depth sits at the wrong depth: one robust median scale, no pre-fit
+
+[stages.root.weights]
+chamfer = 0                 # the same reason: the depth points would pull the limbs to the wrong depth
+
+[stages.kinematics_1.weights]
+chamfer = 0

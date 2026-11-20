@@ -1,12 +1,12 @@
 """What measured contacts buy: the board-labelled chain against the estimated one.
 
-Both trees of a peter rig run the same stages with the same weights and differ in one
-thing — where the contact labels came from. ``human_optim/`` estimated them from the
-video; ``human_optim_gt_contact/`` measured them off the force boards
-(``bvr_datasets/peter/board_contacts.md``). Every clip's boards are also the force ground truth, and
+Two runs of a rig run the same steps with the same weights and differ in one thing —
+where the contact labels came from. The ``--estimated`` run estimated them from the video;
+the ``--measured`` run read them off the force boards (``bvr_datasets/peter/chain.py --measured``,
+``bvr_datasets/peter/board_contacts.md``). Every clip's boards are also the force ground truth, and
 neither run is supervised on them, so the comparison is honest for both.
 
-Two tables, pooled over every clip of the tree and its four limbs:
+Two tables, pooled over every clip of both runs and its four limbs:
 
 * **contacts** — how well the estimated labels agree with the boards (the error the
   second table prices), per limb and pooled.
@@ -36,10 +36,7 @@ so the angle column is blank; ``sensor_forces.npz`` says which case it is
 
 Usage::
 
-    uv run --no-sync python bvr_datasets/peter/compare_gt_contact.py
-    uv run --no-sync python bvr_datasets/peter/compare_gt_contact.py --tree ../data/peter/out_climb_wall_2_single
-    uv run --no-sync python bvr_datasets/peter/compare_gt_contact.py \\
-        --tree <data root>/Parkour-dataset/processed/out
+    uv run python bvr_datasets/peter/compare_gt_contact.py --estimated <run> --measured <run 2>
 """
 
 from __future__ import annotations
@@ -49,22 +46,20 @@ from pathlib import Path
 
 import numpy as np
 
-
-from bvr_datasets._common import _limb_members
-from bvr.human_optim.measured_contacts import LIMBS, limb_of_frame
-from bvr_datasets.peter.paths import PETER
+from bvr import files, paths
+from bvr_datasets._rigs import LIMBS, SENSOR_FORCES, limb_members, limb_of_frame
 
 #: A board above this is loaded — the same rule the climb_wall_2 comparison uses.
 CONTACT_N = 50.0
 
-RUNS = {"Estimated contacts (video)": "human_optim",
-        "Measured contacts (boards)": "human_optim_gt_contact"}
+#: The two runs, in table order, by the option that names their root.
+RUNS = {"Estimated contacts (video)": "estimated", "Measured contacts (boards)": "measured"}
 
 
 def limb_forces(kindyn_path: Path, num_frames: int) -> tuple[np.ndarray, np.ndarray]:
     """``(force (N, 4, 3), root_residual_bw (N,))`` for one clip's solved forces."""
-    kindyn = np.load(kindyn_path, allow_pickle=True)
-    members = _limb_members([str(x) for x in kindyn["joint_names"]])
+    kindyn = files.load_npz(kindyn_path, "bvr-kindyn")
+    members = limb_members([str(x) for x in kindyn["joint_names"]])
     forces = np.asarray(kindyn["contact_forces_world"][0], float)[:num_frames]
     body_weight = float(np.asarray(kindyn["total_mass"], float)[0]) * 9.81
     residual = np.linalg.norm(
@@ -74,7 +69,7 @@ def limb_forces(kindyn_path: Path, num_frames: int) -> tuple[np.ndarray, np.ndar
 
 def limb_labels(contacts_path: Path, num_frames: int) -> np.ndarray:
     """``(N, 4)`` bool — did this run's labels claim each limb was in contact."""
-    contacts = np.load(contacts_path, allow_pickle=True)
+    contacts = files.load_npz(contacts_path, "bvr-contacts")
     names = [str(x) for x in contacts["contact_frame_names"]]
     frame_contact = np.asarray(contacts["frame_contact"][0], bool)[:num_frames]
     return np.stack([frame_contact[:, [c for c, n in enumerate(names)
@@ -88,37 +83,38 @@ def rescued_share(clip: Path) -> float:
     *reconstruction* put that limb nowhere near the reconstructed wall — the body is in
     the wrong place, and a true contact label is then being pinned onto a bad pose.
     """
-    contacts = np.load(clip / "human_optim_gt_contact" / "contacts_1.npz", allow_pickle=True)
+    contacts = files.load_npz(clip / paths.CONTACTS_1, "bvr-contacts")
     labelled = np.asarray(contacts["frame_contact"][0], bool)
     return float(np.asarray(contacts["frame_rescued"][0], bool).sum()) / max(labelled.sum(), 1)
 
 
-def finished_clips(tree: Path) -> list[Path]:
-    """Every clip of the tree that has BOTH runs finished."""
-    return [c for c in sorted(tree.iterdir())
-            if all((c / d / "kindyn_1.npz").exists() for d in RUNS.values())]
+def finished_clips(roots: dict[str, Path]) -> list[str]:
+    """Every clip that BOTH runs finished."""
+    return [clip.name for clip in sorted(roots["estimated"].iterdir())
+            if all((root / clip.name / paths.KINDYN_1).exists() for root in roots.values())]
 
 
-def gather(clips: list[Path]) -> dict[str, np.ndarray]:
-    """Stack the given clips into pooled per-frame arrays."""
+def gather(roots: dict[str, Path], clips: list[str]) -> dict[str, np.ndarray]:
+    """Stack the given clips of both runs into pooled per-frame arrays."""
     columns: dict[str, list[np.ndarray]] = {key: [] for key in
                                             ("boards", "board_on", "measured", "estimated_on",
-                                             *(f"{d}_force" for d in RUNS.values()),
-                                             *(f"{d}_residual" for d in RUNS.values()))}
+                                             *(f"{run}_force" for run in RUNS.values()),
+                                             *(f"{run}_residual" for run in RUNS.values()))}
     aligned = True
     for clip in clips:
-        sensor = np.load(clip / "human_optim" / "sensor_forces.npz")
+        estimated = roots["estimated"] / clip
+        sensor = np.load(estimated / SENSOR_FORCES)
         boards = np.asarray(sensor["reaction_world"], float)
         aligned &= bool(sensor["world_aligned"]) if "world_aligned" in sensor else True
-        n = min(len(boards), len(np.load(clip / "human_optim" / "kindyn_1.npz")["base_wrench"][0]))
+        n = min(len(boards), len(np.load(estimated / paths.KINDYN_1)["base_wrench"][0]))
         columns["boards"].append(boards[:n])
         columns["board_on"].append(np.linalg.norm(boards[:n], axis=-1) > CONTACT_N)
         columns["measured"].append(np.isfinite(boards[:n]).all(-1))
-        columns["estimated_on"].append(limb_labels(clip / "human_optim" / "contacts_2.npz", n))
-        for directory in RUNS.values():
-            force, residual = limb_forces(clip / directory / "kindyn_1.npz", n)
-            columns[f"{directory}_force"].append(force)
-            columns[f"{directory}_residual"].append(residual)
+        columns["estimated_on"].append(limb_labels(estimated / paths.CONTACTS_2, n))
+        for run, root in roots.items():
+            force, residual = limb_forces(root / clip / paths.KINDYN_1, n)
+            columns[f"{run}_force"].append(force)
+            columns[f"{run}_residual"].append(residual)
     data = {key: np.concatenate(parts) for key, parts in columns.items()}
     data["world_aligned"] = np.bool_(aligned)
     return data
@@ -164,9 +160,9 @@ def force_table(title: str, data: dict[str, np.ndarray]) -> None:
     """Print both runs' solved limb forces against the boards, for one set of clips."""
     truth, claimed = data["board_on"], data["estimated_on"]
     aligned = bool(data["world_aligned"])
-    rows = {name: force_metrics(data["boards"], data[f"{d}_force"], data[f"{d}_residual"],
-                                claimed if d == "human_optim" else truth, aligned)
-            for name, d in RUNS.items()}
+    rows = {name: force_metrics(data["boards"], data[f"{run}_force"], data[f"{run}_residual"],
+                                claimed if run == "estimated" else truth, aligned)
+            for name, run in RUNS.items()}
     keys = list(next(iter(rows.values())))
     cell = lambda v: f"{'—':>16s}" if np.isnan(v) else f"{v:16.3f}"  # noqa: E731
     print(f"\n  Solved limb forces vs the boards — {title}")
@@ -182,16 +178,18 @@ def force_table(title: str, data: dict[str, np.ndarray]) -> None:
 
 def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
-    ap.add_argument("--tree", type=Path,
-                    default=PETER / "out_climb_wall_3_single")
+    ap.add_argument("--estimated", type=Path, required=True,
+                    help="run root of the estimated contacts, with each clip's sensor_forces.npz")
+    ap.add_argument("--measured", type=Path, required=True, help="run root of the measured contacts")
     ap.add_argument("--clean", type=float, default=0.05,
                     help="rescued share below which a clip counts as reconstructed on the wall")
     ap.add_argument("--broken", type=float, default=0.50,
                     help="rescued share above which a clip counts as reconstructed off the wall")
     args = ap.parse_args(argv)
-    clips = finished_clips(args.tree)
-    print(f"[compare] {len(clips)} clip(s) of {args.tree}")
-    data = gather(clips)
+    roots = {"estimated": args.estimated, "measured": args.measured}
+    clips = finished_clips(roots)
+    print(f"[compare] {len(clips)} clip(s) of {args.estimated} and {args.measured}")
+    data = gather(roots, clips)
     truth, claimed, measured = data["board_on"], data["estimated_on"], data["measured"]
     if not measured.all():
         print(f"[compare] {int((~measured).sum())}/{measured.size} limb-frames were never "
@@ -216,9 +214,9 @@ def main(argv: list[str] | None = None) -> int:
                          lambda f: f < args.clean),
                         (f"reconstruction OFF the wall (rescued > {100 * args.broken:.0f}%)",
                          lambda f: f > args.broken)):
-        subset = [c for c in clips if keep(rescued_share(c))]
+        subset = [clip for clip in clips if keep(rescued_share(args.measured / clip))]
         if subset:
-            force_table(f"{label} — {len(subset)} clips", gather(subset))
+            force_table(f"{label} — {len(subset)} clips", gather(roots, subset))
     return 0
 
 

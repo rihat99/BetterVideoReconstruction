@@ -6,7 +6,7 @@ evaluate on this dataset (Uhlrich 2023, Miller 2025, Gilon 2026, Tan 2026) all s
 ground-reaction-force (GRF) estimates on that triple with the same small metric set.
 This script follows their protocol. Our per-frame contact forces are first folded into
 the same triple per foot by ``bvr_datasets/opencap/export_opencap_mot.py``
-(``human_optim*/estimated_forces.npz``; the algebra is in ``bvr_datasets/opencap/plates.py``)
+(``human_optim/estimated_forces.npz``; the algebra is in ``bvr_datasets/opencap/plates.py``)
 and compared in the OpenSim ground frame: ``x`` anterior–posterior (AP), ``y`` vertical
 (V, up), ``z`` medio-lateral (ML).
 
@@ -59,18 +59,12 @@ are scored on their own row and left out of everything else. Frames the plates c
 see (a drop jump's box phase) and frames the reconstruction marked invalid drop out of
 every number.
 
-**External methods.** A run directory whose ``estimated_forces.npz`` carries ``hips_mocap``
-(``(N, 2, 3)`` left / right hip centres), ``foot_points_mocap`` (``(N, 2, 2, 3)`` heel and
-toe per foot), ``valid_mask`` (``(N,)``) and ``total_mass`` — all already in the mocap frame
-— is scored without a ``kindyn_1.npz``; that is how the learned model, PhysPT and Li et al.
-are put on this protocol (``bvr_datasets/opencap/*_export.py``).
+The summary goes to ``<run>/_plates/summary.md`` (``_plates_<stem>`` for a ``--clips`` list), with the
+metrics beside it.
 
 Usage::
 
-    uv run --no-sync python bvr_datasets/opencap/compare_opencap_plates.py \
-        --run human_optim_floorplane
-    uv run --no-sync python bvr_datasets/opencap/compare_opencap_plates.py \
-        --run method_physpt --clips out/_methods/clips_natural.txt
+    uv run python bvr_datasets/opencap/compare_opencap_plates.py --save-dir <run> [--clips <list.txt>]
 """
 
 from __future__ import annotations
@@ -84,10 +78,11 @@ import numpy as np
 from scipy.signal import butter, filtfilt
 
 
+from bvr import files, paths
+from bvr_datasets._rigs import LIMBS
 from bvr_datasets.opencap.export_opencap_mot import frame_positions
-from bvr_datasets.opencap.plates import LOADED_N
-from bvr.human_optim.measured_contacts import LIMBS
 from bvr_datasets.opencap.paths import LABVALIDATION
+from bvr_datasets.opencap.plates import LOADED_N
 
 PROCESSED = LABVALIDATION / "processed"
 
@@ -162,10 +157,9 @@ def clip_series(clip: Path, run_dir: Path) -> dict:
     """
     gt = np.load(clip / "forces.npz", allow_pickle=True)
     ours = np.load(run_dir / "estimated_forces.npz", allow_pickle=True)
-    external = "hips_mocap" in ours.files
-    kindyn = {} if external else dict(np.load(run_dir / "kindyn_1.npz", allow_pickle=True))
+    kindyn = files.load_npz(run_dir / "kindyn_1.npz", "bvr-kindyn")
     markers = np.load(clip / "markers.npz", allow_pickle=True)
-    mass_ours = float(np.asarray(ours["total_mass"] if external else kindyn["total_mass"], float).ravel()[0])
+    mass_ours = float(np.asarray(kindyn["total_mass"], float).ravel()[0])
     n = min(len(gt["force"]), len(ours["force"]), len(markers["markers"]))
     if len(gt["force"]) != len(ours["force"]):
         print(f"  {clip.name}: plates cover {len(gt['force'])} frames, ours {len(ours['force'])}"
@@ -175,25 +169,21 @@ def clip_series(clip: Path, run_dir: Path) -> dict:
 
     feet = list(FEET.values())
     our_cols = [list(map(str, ours["limbs"])).index(name) for name in FEET]
-    valid = np.asarray(ours["valid_mask"] if external else kindyn["valid_mask"][0], bool)[:n]
+    valid = np.asarray(kindyn["valid_mask"][0], bool)[:n]
     watched = np.asarray(gt["captured"], bool)[:n, feet] & valid[:, None]
 
     marker_names = list(map(str, markers["names"]))
     mk = np.asarray(markers["markers"], float)[:n]
-    if external:
-        hips = np.asarray(ours["hips_mocap"], float)[:n]
-        our_foot = np.asarray(ours["foot_points_mocap"], float)[:n].mean(2)
-    else:
-        rotation = np.asarray(ours["R_world_from_mocap"], float)
-        translation = np.asarray(ours["t_world_from_mocap"], float)
-        to_mocap = lambda p: (p - translation) @ rotation  # noqa: E731  Rᵀ (r − t)
-        joints = to_mocap(np.asarray(kindyn["joints_world"][0], float)[:n])
-        joint_names = list(map(str, kindyn["joint_names"]))
-        hips = np.stack([joints[:, joint_names.index(j)] for j, _ in HIP_PAIRS], 1)
-        frames = to_mocap(frame_positions(kindyn)[:n])
-        frame_names = list(map(str, kindyn["contact_frame_names"]))
-        our_foot = np.stack([frames[:, [frame_names.index(a), frame_names.index(b)]].mean(1)
-                             for a, b in FOOT_FRAMES.values()], 1)
+    rotation = np.asarray(ours["R_world_from_mocap"], float)
+    translation = np.asarray(ours["t_world_from_mocap"], float)
+    to_mocap = lambda p: (p - translation) @ rotation  # noqa: E731  Rᵀ (r − t)
+    joints = to_mocap(np.asarray(kindyn["joints_world"][0], float)[:n])
+    joint_names = list(map(str, kindyn["joint_names"]))
+    hips = np.stack([joints[:, joint_names.index(j)] for j, _ in HIP_PAIRS], 1)
+    frames = to_mocap(frame_positions(kindyn)[:n])
+    frame_names = list(map(str, kindyn["contact_frame_names"]))
+    our_foot = np.stack([frames[:, [frame_names.index(a), frame_names.index(b)]].mean(1)
+                         for a, b in FOOT_FRAMES.values()], 1)
     offsets = np.concatenate([(hips[:, i] - mk[:, marker_names.index(m)])[valid]
                               for i, (_, m) in enumerate(HIP_PAIRS)])
     sync = clip / "sync.json"
@@ -386,31 +376,29 @@ CLIP_KEYS = ["stance frames", "MAE V [%BW]", "MAE V own-BW [%BW]", "fit gain", "
 
 def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
-    ap.add_argument("--source", type=Path, default=PROCESSED)
-    ap.add_argument("--run", default="human_optim_floorplane")
+    ap.add_argument("--source", type=Path, default=PROCESSED, help="the processed clip root")
+    ap.add_argument("--save-dir", type=Path, required=True, help="the run root")
     ap.add_argument("--clips", type=Path, default=None,
                     help="score only the clips listed in this file (one name per line); the "
                          "summary goes to a directory suffixed with the file's stem")
     args = ap.parse_args(argv)
 
-    out_root = args.source / "out"
+    estimate = Path(paths.KINDYN_1).with_name("estimated_forces.npz")
     wanted = set(args.clips.read_text().split()) if args.clips else None
-    clips = [c for c in sorted(out_root.iterdir()) if c.is_dir() and not c.name.startswith("_")
-             and (wanted is None or c.name in wanted)
-             and (c / args.run / "estimated_forces.npz").exists()]
+    clips = [c for c in sorted(args.save_dir.iterdir()) if c.is_dir() and not c.name.startswith("_")
+             and (wanted is None or c.name in wanted) and (c / estimate).exists()]
     if not clips:
-        print(f"[compare_plates] no clip under {out_root} has {args.run}/estimated_forces.npz")
+        print(f"[compare_plates] no clip under {args.save_dir} has {estimate}")
         return 1
     if wanted is not None and len(clips) < len(wanted):
         print(f"[compare_plates] {len(wanted) - len(clips)} listed clips have no "
-              f"{args.run}/estimated_forces.npz: {sorted(wanted - {c.name for c in clips})}")
-    suffix = args.run.removeprefix("human_optim") if args.run.startswith("human_optim") else "_" + args.run
-    compare_dir = out_root / ("_plates" + suffix + (f"_{args.clips.stem}" if args.clips else ""))
+              f"{estimate}: {sorted(wanted - {c.name for c in clips})}")
+    compare_dir = args.save_dir / ("_plates" + (f"_{args.clips.stem}" if args.clips else ""))
     compare_dir.mkdir(parents=True, exist_ok=True)
 
     all_series = []
     for clip in clips:
-        s = clip_series(args.source / clip.name, clip / args.run)
+        s = clip_series(args.source / clip.name, (clip / estimate).parent)
         s["metrics"] = clip_metrics(s)
         all_series.append(s)
         m = s["metrics"]
@@ -441,7 +429,7 @@ def main(argv: list[str] | None = None) -> int:
 
     clip_rows = {(f"{s['clip']} *" if s["sync_uncertain"] else s["clip"]): s["metrics"]
                  for s in all_series}
-    lines = [f"# OpenCap LabValidation — plate-format comparison ({len(clips)} clips, run `{args.run}`)",
+    lines = [f"# OpenCap LabValidation — plate-format comparison ({len(clips)} clips, run `{args.save_dir}`)",
              "", "## Ground reaction force per foot, stance frames, %BW", "",
              *table(rows, GRF_KEYS, "activity"), "",
              "## Centre of pressure, free moment, stance detection", "",

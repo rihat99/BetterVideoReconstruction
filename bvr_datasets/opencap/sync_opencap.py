@@ -9,15 +9,15 @@ moment of the gait cycle.
 
 The offset is measured without touching a force: the mocap markers are projected into
 the clip's camera through the dataset's own calibration and compared with the 2D
-keypoints Sapiens detected on the video, at every candidate shift. At each shift the
+keypoints Sapiens detected on the video (``<run>/<clip>/sapiens/pose.npz``), at every candidate shift. At each shift the
 median 2D offset is removed first — the calibration's translation residual, and a
 walking subject turns a position offset into an apparent time offset — so only the
 shape of the motion decides. The minimum is refined to a fraction of a frame by a
 parabola through its neighbours. Where the motion is too small to time (a static
 trial), the curve is flat and the offset stays at zero.
 
-``--joints <run>`` measures against our own reconstruction instead of the keypoints:
-the 3D joints of ``out/<clip>/<run>/kindyn_1.npz`` against the hip-centre, knee, ankle
+``--joints`` measures against our own reconstruction instead of the keypoints:
+the 3D joints of ``<run>/<clip>/human_optim/kindyn_1.npz`` against the hip-centre, knee, ankle
 and shoulder markers, translation-free, in metres. It exists because the keypoint scan
 is nearly flat on the side-view walking clips of subjects 4, 7 and 8 (the best shift
 is 17-20 px, barely below the shipped alignment) and lands up to 30 frames off there,
@@ -41,8 +41,8 @@ corrected times.
 
 Usage::
 
-    uv run --no-sync python bvr_datasets/opencap/sync_opencap.py            # every imported clip
-    uv run --no-sync python bvr_datasets/opencap/sync_opencap.py --clips subject2_walking1_cam1
+    uv run python bvr_datasets/opencap/sync_opencap.py --save-dir <run>          # every imported clip
+    uv run python bvr_datasets/opencap/sync_opencap.py --save-dir <run> --clips subject2_walking1_cam1
 """
 
 from __future__ import annotations
@@ -55,7 +55,9 @@ import cv2
 import numpy as np
 
 
+from bvr import files, paths
 from bvr_datasets.opencap.import_opencap import DST, FPS, SRC, _load_trc, _resample_markers
+from bvr_datasets.opencap.sensor_forces import world_from_mocap
 
 #: Sapiens (Goliath-308) keypoint index ↔ mocap marker, for the joints both can see.
 PAIRS = ((5, "L_Shoulder"), (6, "R_Shoulder"), (9, "L_HJC"), (10, "R_HJC"),
@@ -120,10 +122,10 @@ def best_shift(curve: dict[int, float]) -> tuple[float, float]:
     return float(s0), float(curve[round(s0)])
 
 
-def measure(clip: Path) -> dict:
-    """The sync record for one imported clip folder."""
+def measure(clip: Path, run: Path) -> dict:
+    """The sync record for one imported clip folder, from the keypoints of its tree in the run root ``run``."""
     meta = json.loads((clip / "meta.json").read_text())
-    pose = np.load(DST / "out" / clip.name / "sapiens" / "pose.npz")
+    pose = files.load_npz(run / clip.name / paths.SAPIENS_POSE, "bvr-keypoints")
     names, times, xyz = _load_trc(SRC / meta["subject"] / "MarkerData" / "Mocap"
                                   / f"{meta['trial']}.trc")
     start = int(meta.get("frame_offset", 0))
@@ -172,12 +174,10 @@ def joint_curve(ours: np.ndarray, markers: np.ndarray, shifts=JOINT_SHIFTS) -> d
     return curve
 
 
-def measure_joints(clip: Path, run: str) -> dict:
-    """The sync record for one clip from our reconstructed joints (``--joints``)."""
-    from bvr_datasets.opencap.sensor_forces import world_from_mocap
-
+def measure_joints(clip: Path, run: Path) -> dict:
+    """The sync record for one clip from our reconstructed joints of the run root ``run`` (``--joints``)."""
     meta = json.loads((clip / "meta.json").read_text())
-    body = np.load(DST / "out" / clip.name / run / "kindyn_1.npz", allow_pickle=True)
+    body = files.load_npz(run / clip.name / paths.KINDYN_1, "bvr-kindyn")
     joint_names = list(body["joint_names"])
     ours = body["joints_world"][0][:, [joint_names.index(a) for a, _ in JOINT_PAIRS]]
     ours = np.where(body["valid_mask"][0].astype(bool)[:, None, None], ours, np.nan)
@@ -209,22 +209,23 @@ def measure_joints(clip: Path, run: str) -> dict:
         "mocap_offset_frames": 0.0 if flat else round(offset, 2),
         "m_at_best": round(at_best, 4), "m_at_zero": round(at_zero, 4),
         "flat": flat, "halves": halves, "uncertain": uncertain,
-        "method": f"our {run} joints vs mocap joint-centre markers, translation-free "
+        "method": f"our kindyn_1 joints vs mocap joint-centre markers, translation-free "
                   f"median 3D error over offsets {JOINT_SHIFTS.start}..{JOINT_SHIFTS.stop - 1}",
     }
 
 
 def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
+    ap.add_argument("--save-dir", type=Path, required=True, help="the run root that holds the clips' trees")
     ap.add_argument("--clips", default="", help="comma-separated clip names (default: all)")
-    ap.add_argument("--joints", default="", metavar="RUN",
-                    help="measure with our reconstructed joints of out/<clip>/RUN/kindyn_1.npz "
+    ap.add_argument("--joints", action="store_true",
+                    help="measure with our reconstructed joints of <run>/<clip>/human_optim/kindyn_1.npz "
                          "instead of the Sapiens keypoints (see the module docstring)")
     args = ap.parse_args(argv)
     clips = ([DST / c for c in args.clips.split(",") if c] if args.clips else
              sorted(c for c in DST.iterdir() if (c / "meta.json").exists()))
     for clip in clips:
-        record = measure_joints(clip, args.joints) if args.joints else measure(clip)
+        record = measure_joints(clip, args.save_dir) if args.joints else measure(clip, args.save_dir)
         (clip / "sync.json").write_text(json.dumps(record, indent=2))
         error = (f"{record['m_at_zero'] * 100:5.1f} -> {record['m_at_best'] * 100:5.1f} cm"
                  if args.joints else f"px {record['px_at_zero']:5.1f} -> {record['px_at_best']:5.1f}")

@@ -1,0 +1,8 @@
+# OpenCap LabValidation: the force-rig delta (one static iPhone, 720x1280 portrait at 60 fps), with
+# no frame subsampling and leaner VGGT chunks.
+base = "bvr_datasets/peter/configs/peter.toml"
+
+[vggt]
+max_frames = 900            # above the longest clip (subject4_STS1, 839 frames): every row stays one video frame, as the plates are indexed
+frame_chunk = 32            # 128 / 65536 run out of memory at 47 GB on the 800-frame portrait clips
+token_chunk = 8192

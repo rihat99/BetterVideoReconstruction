@@ -21,7 +21,7 @@ hand or foot is touching — it is one sensor under the whole hold.
 
 That matters, because the optimization does not put contact on limbs. It puts
 contact on **contact frames**: named points on the skin, each facing a particular
-way (see [`contacts.md`](contacts.md)). The peter rigs use eighteen of them, nine
+way (see [`docs/contacts.md`](../../docs/contacts.md)). The peter rigs use eighteen of them, nine
 per side — palm, palm base, fingertip, thumb for a hand; heel, both balls of the
 foot, big toe, top of the toe for a foot.
 
@@ -92,40 +92,33 @@ measured against those same boards means anything.
 
 ## Where it lands
 
-Everything goes to `<clip>/human_optim_gt_contact/`, beside the normal
+The measured run is a second run root beside the normal one. It reads what it does
+not compute (the videos' model outputs, the geometry, `kinematic_1.npz`, the boards'
+`sensor_forces.npz`) from the normal run through `--upstream`, and writes its own
 `<clip>/human_optim/`, so the two runs can be compared clip by clip.
-
-The stages themselves are untouched. Each clip gets a small directory of symlinks
-at `<clip>/_gt_contact/` whose `human_optim` points at the variant directory and
-whose inputs point at the real ones, so the stock stage CLIs write into the
-variant tree without knowing it exists. It is the same trick the corpus driver
-uses to fan a stage over the scene database.
 
 ## Running it
 
 ```bash
-# the whole tree, four GPUs
-for i in 1 2 3 4; do
-  CUDA_VISIBLE_DEVICES=$((i + 1)) uv run --no-sync python scripts/pipeline.py \
-    --dataset climb_wall_3 --variant gt_contact --shard $i/4 &
-done
+C=bvr_datasets/peter/configs/peter.toml
+uv run python bvr_datasets/peter/sensor_forces.py --rig climb_wall_3 --save-dir <run>
+uv run python -m bvr_datasets.peter.chain --measured --source <videos> --save-dir <run 2> --upstream <run> --config $C
 # one clip, one step
-uv run --no-sync python scripts/pipeline.py --dataset climb_wall_3 --variant gt_contact \
+uv run python -m bvr_datasets.peter.chain --measured --source <videos> --save-dir <run 2> --upstream <run> --config $C \
   --clips a_00_01_part1 --steps contacts_1
 ```
 
-Every step is resumable: a step whose output already exists is skipped. A clip
-that fails is reported and the batch moves on.
+`--skip-existing` resumes: a step whose manifest still vouches for it is skipped. A
+clip that fails is recorded and the batch moves on.
 
-The thresholds live in `[measured_contacts]` in
-[`bvr_datasets/peter/configs/human_optimization_peter.toml`](configs/human_optimization_peter.toml);
-every loss weight is shared with the normal run, so the two trees differ by their
-contact labels and nothing else.
+The thresholds (50 N in, 30 N out, 5 cm) are constants of
+[`bvr_datasets/_rigs.py`](../_rigs.py); every loss weight is shared with the normal
+run, so the two runs differ by their contact labels and nothing else.
 
 ## The artifact
 
-`contacts_<1|2>.npz` is the same schema-2 file the pipeline's own contact stage
-writes, so `kinematics_2` and `kindyn_1` read it unchanged. Beyond the labels it
+`contacts_<1|2>.npz` is the same schema-2 file (format `bvr-contacts`) the pipeline's
+own contact step writes, so `kinematics_2` and `kindyn_1` read it unchanged. Beyond the labels it
 carries what the boards said, which is what makes it auditable:
 
 | field | what it is |
@@ -135,7 +128,7 @@ carries what the boards said, which is what makes it auditable:
 | `frame_scene_dist_m (1, N, F)` | how far each point was from the wall |
 | `limb_contact (1, N, 4)` | the boards' own per-limb on/off |
 | `limb_force_world (1, N, 4, 3)` | the measured force vectors |
-| `contact_label_method` | `boards-v3`, the same string the three-camera GT chain stamps |
+| `contact_label_method` | `boards-v3: …`, the same rule the three-camera GT chain stamps |
 
 ## The same stage on the Parkour clips
 
@@ -152,8 +145,9 @@ the force part of it as the `sensor_forces.npz` the stage reads, and then the
 chain is one command:
 
 ```bash
-uv run --no-sync python bvr_datasets/parkour/sensor_forces.py
-CUDA_VISIBLE_DEVICES=6 uv run --no-sync python scripts/pipeline.py --dataset parkour --variant gt_contact
+uv run python bvr_datasets/parkour/sensor_forces.py --save-dir <run>
+uv run python -m bvr_datasets.peter.chain --measured --source <videos> --save-dir <run 2> --upstream <run> \
+  --config bvr_datasets/peter/configs/peter.toml
 ```
 
 Two things about this rig are unlike the climbing boards. Both are written into
@@ -259,9 +253,8 @@ residual, and a low residual bought that way is flattery, not physics.
 
 ## Shared with the ground-truth chain
 
-The reading itself lives in
-[`bvr/human_optim/measured_contacts.py`](../../bvr/human_optim/measured_contacts.py) and is used by
-two callers: this single-view stage, and the three-camera ground-truth chain in
-`bvr_datasets/peter/gt/fit_multiview.py`, which has always labelled from the boards.
-One implementation, so the two cannot drift into disagreeing about what the
-sensors said.
+The reading itself lives in [`bvr_datasets/_rigs.py`](../_rigs.py) (`limb_contact`,
+`frame_contact`) and is meant for two callers: this single-view chain, and the
+three-camera ground-truth chain in `bvr_datasets/peter/gt/fit_multiview.py`, which has
+always labelled from the boards (it still calls the old copy until it is ported).
+One implementation, so the two cannot drift into disagreeing about what the sensors said.
