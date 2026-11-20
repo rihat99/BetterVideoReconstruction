@@ -93,7 +93,8 @@ def load(stage: run.Stage) -> Callable[[paths.Clip], None]:
         spread_median = float(np.median(spread)) if spread.size else float("nan")
         diversity = _rotation_spread_deg([extrinsics[row][:3, :3] for row in used[selected]])
         failed = [reason for reason, failing in (
-            (f"max confidence {confidence.max():.4f} < {settings['conf_floor']:g}", confidence.max() < settings["conf_floor"]),
+            (f"max confidence {confidence.max():.4f} < {settings['conf_floor']:g}",
+             confidence.max() < settings["conf_floor"]),
             (f"spread median {spread_median:.1f} deg > {settings['max_spread_deg']:g}",
              not spread_median <= settings["max_spread_deg"]),
             (f"camera rotation diversity {diversity:.1f} deg < {settings['min_diversity_deg']:g}",
@@ -145,14 +146,15 @@ def load(stage: run.Stage) -> Callable[[paths.Clip], None]:
             fallback_gravity=fallback.astype(np.float32), weights=np.str_(settings["weights"]))
         log.info("gravity [%+.4f %+.4f %+.4f] from %s; GeoCalib %s (%d/%d frames)%s; floor %s", *gravity, source,
                  "reliable" if reliable else "unreliable", int(selected.sum()), len(found),
-                 "" if reliable else f": {'; '.join(failed)}", "accepted" if ground is not None else f"rejected: {ground_reject}")
+                 "" if reliable else f": {'; '.join(failed)}",
+                 "accepted" if ground is not None else f"rejected: {ground_reject}")
 
     return process
 
 
 def _combine(worlds: np.ndarray, confidence: np.ndarray, *, conf_rel: float, inlier_deg: float,
              min_frames: int) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
-    """Gravity ``(3,)`` from per-frame world gravities ``(S, 3)``, the frames used ``(S,)`` and each frame's angle to it.
+    """Gravity ``(3,)`` from per-frame world gravities ``(S, 3)``, the frames used ``(S,)``, each frame's angle to it.
 
     Frames under ``conf_rel`` of the best confidence are dropped (at least ``min_frames`` stay),
     then one round drops the frames more than ``inlier_deg`` from the mean if enough remain.

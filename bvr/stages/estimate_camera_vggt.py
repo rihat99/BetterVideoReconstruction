@@ -49,7 +49,8 @@ def load(stage: run.Stage) -> Callable[[paths.Clip], None]:
 
     settings = stage.config["vggt"]
     checkpoint = settings["checkpoint"]
-    weights = checkpoint if Path(checkpoint).is_file() else hf_hub_download(repo_id=checkpoint, filename=_CHECKPOINT_FILE)
+    weights = (checkpoint if Path(checkpoint).is_file()
+               else hf_hub_download(repo_id=checkpoint, filename=_CHECKPOINT_FILE))
     model = VGGTOmega(enable_alignment=False).eval()
     model.load_state_dict(torch.load(weights, map_location="cpu"))
     model = model.to(stage.device)
@@ -90,8 +91,8 @@ def load(stage: run.Stage) -> Callable[[paths.Clip], None]:
                 depth = prediction["depth"][0, ..., 0].float().cpu().numpy()
                 confidence = prediction["depth_conf"][0].float().cpu().numpy()
                 for row, frame in enumerate(kept):
-                    np.savez_compressed(depth_dir / f"frame_{int(frame):06d}.npz",
-                                        depth=depth[row].astype(np.float16), depth_conf=confidence[row].astype(np.float16))
+                    np.savez_compressed(depth_dir / f"frame_{int(frame):06d}.npz", depth=depth[row].astype(np.float16),
+                                        depth_conf=confidence[row].astype(np.float16))
         log.info("%d/%d frame(s) %dx%d -> VGGT %dx%d, mean horizontal field of view %.2f deg", len(kept),
                  len(frame_paths), width, height, vggt_width, vggt_height,
                  float(np.degrees(2 * np.arctan(vggt_width / 2 / intrinsics_px[:, 0, 0])).mean()))

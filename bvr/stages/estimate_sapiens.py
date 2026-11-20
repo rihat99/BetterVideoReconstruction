@@ -76,7 +76,8 @@ def load(stage: run.Stage) -> Callable[[paths.Clip], None]:
     flip_indices = metainfo["flip_indices"] if model.cfg.val_cfg.get("flip_test", False) else None
 
     def crop(image: np.ndarray, box: np.ndarray) -> tuple[torch.Tensor, dict]:
-        data = model.data_preprocessor(model.pipeline(dict(img=image, bbox=box[None], bbox_score=np.ones(1, np.float32))))
+        data = model.data_preprocessor(model.pipeline(
+            dict(img=image, bbox=box[None], bbox_score=np.ones(1, np.float32))))
         return data["inputs"], data["data_samples"]["meta"]
 
     def decode(heatmaps: np.ndarray, meta: dict) -> tuple[np.ndarray, np.ndarray]:
@@ -88,7 +89,8 @@ def load(stage: run.Stage) -> Callable[[paths.Clip], None]:
         tracked = files.load_npz(clip.find(paths.SAM3_BBOXES), "bvr-bboxes")
         people = np.flatnonzero(tracked["labels"] == settings["label"])
         if not people.size:
-            raise ValueError(f"no object labelled {settings['label']!r} in {paths.SAM3_BBOXES}: {list(tracked['labels'])}")
+            raise ValueError(f"no object labelled {settings['label']!r} in {paths.SAM3_BBOXES}: "
+                             f"{list(tracked['labels'])}")
         boxes = tracked["bboxes_per_obj"][people].astype(np.float32)  # (P, N, 4)
         count = boxes.shape[1]
         keypoints = np.zeros((len(people), count, _KEYPOINTS, 2), np.float32)
@@ -125,7 +127,8 @@ def load(stage: run.Stage) -> Callable[[paths.Clip], None]:
                 files.save_npz(
                     out / Path(paths.SAPIENS_POSE).name, "bvr-keypoints",
                     keypoints=keypoints, keypoint_scores=scores, bboxes=boxes, valid_mask=valid,
-                    object_ids=tracked["object_ids"][people].astype(np.int32), labels=tracked["labels"][people].astype(str),
+                    object_ids=tracked["object_ids"][people].astype(np.int32),
+                    labels=tracked["labels"][people].astype(str),
                     num_people=np.int32(len(people)), num_frames=np.int32(count), image_height=np.int32(height),
                     image_width=np.int32(width), keypoint_scheme=np.str_("goliath_308"))
                 if settings["overlay"]:

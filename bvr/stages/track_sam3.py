@@ -116,7 +116,8 @@ def _seeds(grounding, settings: dict, prompts: list[dict], frame: Path,
             mask = masks[int(np.argmax(ious))] if ious and max(ious) >= entry.get("iou_thresh", 0.2) else None
             if mask is None:  # nothing matched, e.g. a fade-in frame: ground the box, else seed it raw
                 mask = _ground_box(grounding, image, label or entry.get("text", "person"), box, confidence)
-                log.info("select_bbox %s matched no detection; seeding %s", box, "text+box" if mask is not None else "the box")
+                log.info("select_bbox %s matched no detection; seeding %s", box,
+                         "text+box" if mask is not None else "the box")
             seeds.append(("mask", mask) if mask is not None else ("bbox", tuple(box)))
             labels.append(label or "person")
         elif "text" in entry:
@@ -231,7 +232,8 @@ def _track(tracker, frame_paths: list[Path], seeds: list[tuple[str, object]], pa
                                 masks[k, local].astype(np.uint8) * 255, [cv2.IMWRITE_PNG_COMPRESSION, 6])
                     boxes[k, frame] = _mask_box(masks[k, local])
                 if writer is not None:
-                    writer.write(_overlay(cv2.imread(str(frame_paths[frame])), masks[:, local], boxes[:, frame], labels))
+                    image = cv2.imread(str(frame_paths[frame]))
+                    writer.write(_overlay(image, masks[:, local], boxes[:, frame], labels))
             if end == count:
                 break
             seeds = [("mask", masks[k, -1]) for k in range(len(seeds))]
@@ -247,7 +249,8 @@ def _propagate(tracker, folder: Path, seeds: list[tuple[str, object]], size: tup
     state = tracker.init_state(video_path=str(folder))
     for object_id, (kind, payload) in enumerate(seeds, start=1):
         if kind == "mask":
-            tracker.add_new_mask(state, frame_idx=0, obj_id=object_id, mask=torch.as_tensor(payload, dtype=torch.float32))
+            tracker.add_new_mask(state, frame_idx=0, obj_id=object_id,
+                                 mask=torch.as_tensor(payload, dtype=torch.float32))
         elif kind == "bbox":
             x1, y1, x2, y2 = payload
             tracker.add_new_points_or_box(state, frame_idx=0, obj_id=object_id, rel_coordinates=True,

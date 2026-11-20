@@ -69,8 +69,8 @@ def load(stage: run.Stage) -> Callable[[paths.Clip], None]:
         bodies = files.load_npz(clip.find(paths.SAM3D_PARAMS), "bvr-mhr")
         valid = bodies["valid_mask"].astype(bool)
         people, count = valid.shape
-        fitted = {name: np.full((people, count, size), np.nan, np.float32) for name, size in
-                  {"betas": 10, **_POSES, "transl": 3}.items()}
+        fitted = {name: np.full((people, count, size), np.nan, np.float32)
+                  for name, size in {"betas": 10, **_POSES, "transl": 3}.items()}
         fit_error = np.full((people, count), np.nan, np.float32)
         for person in range(people):
             frames = np.flatnonzero(valid[person])
@@ -106,7 +106,8 @@ def _fit(smplx: bh.HumanModel, goal: torch.Tensor, edges: torch.Tensor,
     centre = (goal.amin(dim=1, keepdim=True) + goal.amax(dim=1, keepdim=True)) / 2
     centred = goal - centre
     goal_edges = centred[:, edges[:, 1]] - centred[:, edges[:, 0]]
-    problem = optim.Problem({name: goal.new_zeros(len(goal), size) for name, size in {"betas": 10, **_POSES, "transl": 3}.items()})
+    sizes = {"betas": 10, **_POSES, "transl": 3}
+    problem = optim.Problem({name: goal.new_zeros(len(goal), size) for name, size in sizes.items()})
 
     def vertices(betas, global_orient, body_pose, left_hand_pose, right_hand_pose, transl):
         identity, q, streams = bh.from_classic(smplx, SMPLXClassic(
@@ -134,14 +135,16 @@ def _fit(smplx: bh.HumanModel, goal: torch.Tensor, edges: torch.Tensor,
             return {**x, "transl": x["transl"] + (centred - vertices(**x)).mean(dim=1)}, {}
 
     coarse = optim.TorchOptim(lambda parameters: torch.optim.Adam(parameters, lr=0.1))
+    milestones = [iterations // 3, 2 * iterations // 3]
     fine = optim.TorchOptim(lambda parameters: torch.optim.Adam(parameters, lr=0.01),
-                      scheduler=lambda optimizer: MultiStepLR(optimizer, [iterations // 3, 2 * iterations // 3], 0.1))
+                            scheduler=lambda optimizer: MultiStepLR(optimizer, milestones, 0.1))
     x = optim.run(problem, [
-        optim.Phase(coarse, 40, free=frozen("betas", "body_pose", "transl", "left_hand_pose", "right_hand_pose"), stop_every=0),
+        optim.Phase(coarse, 40, stop_every=0,
+                    free=frozen("betas", "body_pose", "transl", "left_hand_pose", "right_hand_pose")),
         optim.Phase(coarse, 80, free=frozen("transl", "left_hand_pose", "right_hand_pose"), stop_every=0),
         optim.Phase(coarse, 40, free=frozen("transl"), stop_every=0),
         optim.Phase(fine, iterations, weights={"vertex": 1.0}, on_start=centre_translation, stop_every=0,
-              on_step=lambda view, state: with_edges.__setitem__(0, state.iteration < 50)),
+                    on_step=lambda view, state: with_edges.__setitem__(0, state.iteration < 50)),
     ]).x
     x["transl"] = x["transl"] + centre[:, 0]
     with torch.no_grad():
