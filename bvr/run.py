@@ -98,7 +98,7 @@ def chain(source: Path, save_dir: Path, *, config_path: Path | None = None, step
     :param shard: ``(i, n)`` takes every n-th clip starting at the i-th, so n runs fill one root.
     :param dry_run: log the commands and touch nothing.
     """
-    _log_to_console()
+    _log_to_console(logging.getLogger("bvr"))
     config = configuration.load(config_path)
     selected = _steps(config["run"]["steps"] if steps is None else steps)
     clips = paths.clips(source, save_dir, upstream)[shard[0] - 1::shard[1]]
@@ -175,7 +175,10 @@ def stage(module: str, load: Callable[[Stage], Callable[[Clip], None]], argument
         if unknown := sorted(set(names) - {clip.name for clip in clips}):
             parser.error(f"no clip named {', '.join(unknown)} at {options.source}")
         clips = [clip for clip in clips if clip.name in names]
-    _log_to_console()
+    # A module started with ``python -m`` is ``__main__``: its own logger is outside ``bvr``.
+    loggers = [logging.getLogger(name) for name in {"bvr", load.__module__} if name == "bvr" or name[:4] != "bvr."]
+    for logger in loggers:
+        _log_to_console(logger)
     code = manifest.code(options.save_dir)
     if options.skip_existing:
         clips = [clip for clip in clips if _stale(step, clip, config, code)]
@@ -204,7 +207,8 @@ def stage(module: str, load: Callable[[Stage], Callable[[Clip], None]], argument
         _clear(step, clip)
         clip.log(step.name).parent.mkdir(parents=True, exist_ok=True)
         file_log = logging.FileHandler(clip.log(step.name), mode="w")
-        logging.getLogger("bvr").addHandler(file_log)
+        for logger in loggers:
+            logger.addHandler(file_log)
         log.info("%s: %s", step.name, clip.name)
         if on_gpu:
             torch.cuda.reset_peak_memory_stats(device)
@@ -226,7 +230,8 @@ def stage(module: str, load: Callable[[Stage], Callable[[Clip], None]], argument
             device=f"{device} ({torch.cuda.get_device_name(device)})" if on_gpu else str(device),
             peak_gpu_bytes=torch.cuda.max_memory_allocated(device) if on_gpu else 0,
             inputs=inputs, outputs=outputs))
-        logging.getLogger("bvr").removeHandler(file_log)
+        for logger in loggers:
+            logger.removeHandler(file_log)
         file_log.close()
     return 1 if failed else 0
 
@@ -284,9 +289,8 @@ def _clear(step: Step, clip: Clip) -> None:
             path.rename(target)
 
 
-def _log_to_console() -> None:
-    """Send the ``bvr`` logger to the console at INFO; stages add a DEBUG file per clip."""
-    logger = logging.getLogger("bvr")
+def _log_to_console(logger: logging.Logger) -> None:
+    """Send a logger to the console at INFO; a stage adds a DEBUG file per clip."""
     if not logger.handlers:
         console = logging.StreamHandler()
         console.setLevel(logging.INFO)
