@@ -122,10 +122,10 @@ def chamfer(human: bh.HumanModel, cloud: torch.Tensor, counted: torch.Tensor, ca
         for start in range(0, people * frames, chunk):
             v, p = vertices[start:start + chunk], points[start:start + chunk]
             seen, there = facing[start:start + chunk], real[start:start + chunk]
-            with torch.no_grad():
-                distance = torch.cdist(v, p)
-                to_cloud = distance.masked_fill(~there[:, None, :], torch.inf).argmin(dim=2)
-                to_body = distance.masked_fill(~seen[:, :, None], torch.inf).argmin(dim=1)
+            with torch.no_grad():  # a hidden vertex or a padded point is nobody's nearest, and its own match is unused
+                distance = torch.cdist(v, p).masked_fill_(~seen[:, :, None], torch.inf)
+                distance.masked_fill_(~there[:, None, :], torch.inf)
+                to_cloud, to_body = distance.min(dim=2).indices, distance.min(dim=1).indices
             outward = _saturated((v - _take(p, to_cloud)).norm(dim=-1), sat_m) * seen * emphasis
             inward = _saturated((p - _take(v, to_body)).norm(dim=-1), sat_m) * there
             rows.append(outward.sum(dim=1) / (seen * emphasis).sum(dim=1).clamp_min(1e-6)
@@ -155,7 +155,7 @@ def orientation_prior(start: torch.Tensor) -> Term:
 
 
 def human_points(human: bh.HumanModel, points: np.ndarray, confidence: np.ndarray, frame_ids: np.ndarray,
-                 start_pixels: np.ndarray, tracked: np.ndarray, cameras: Cameras, *, conf_drop_q: float,
+                 start_pixels: torch.Tensor, tracked: np.ndarray, cameras: Cameras, *, conf_drop_q: float,
                  max_points: int, limb_quota: int) -> tuple[np.ndarray, np.ndarray]:
     """One person's depth points per frame, hands and feet kept: ``(T, M, 3)`` and the mask ``(T, M)`` of real points.
 
@@ -166,18 +166,21 @@ def human_points(human: bh.HumanModel, points: np.ndarray, confidence: np.ndarra
     scale, and one gate over the whole frame would empty the limbs first). Then each hand and foot keeps up to
     ``limb_quota`` points and the rest fills ``max_points``, by uniform strides. An untracked frame keeps none.
     """
-    limb_of_joint = _limbs(human.spec.joint_names)
     order = np.argsort(frame_ids, kind="stable")
     points, confidence, frame_ids = points[order], confidence[order], frame_ids[order]
-    extrinsics, intrinsics = (matrix.cpu()[frame_ids] for matrix in cameras)
-    pixels = camera.project(torch.from_numpy(points)[:, None], extrinsics, intrinsics)[:, 0].numpy()
+    nearest = []
+    for part in torch.arange(len(points)).split(2**20):
+        frame = torch.as_tensor(frame_ids[part], device=start_pixels.device)
+        extrinsics, intrinsics = (matrix[frame] for matrix in cameras)  # every point in the camera of its own frame
+        pixels = camera.project(torch.as_tensor(points[part, None], device=frame.device), extrinsics, intrinsics)
+        nearest.append((pixels - start_pixels[frame]).square().sum(dim=-1).argmin(dim=-1).cpu().numpy())
+    limbs = _limbs(human.spec.joint_names)[np.concatenate(nearest)]
     bounds = np.searchsorted(frame_ids, np.arange(len(tracked) + 1))
     cloud = np.zeros((len(tracked), max(max_points, len(_LIMBS) * limb_quota), 3), np.float32)
     counted = np.zeros(cloud.shape[:2], bool)
     for frame in np.flatnonzero(tracked & (bounds[1:] > bounds[:-1])):
         span = slice(bounds[frame], bounds[frame + 1])
-        gaps = start_pixels[frame] - pixels[span, None]
-        limb, trust = limb_of_joint[np.square(gaps).sum(axis=-1).argmin(axis=1)], confidence[span]
+        limb, trust = limbs[span], confidence[span]
         keep = np.ones(len(limb), bool)
         for group in np.unique(limb):
             keep &= (limb != group) | (trust >= np.quantile(trust[limb == group], conf_drop_q))

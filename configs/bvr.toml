@@ -119,6 +119,7 @@ video_dir = ""              # folder of the source videos; empty uses the exampl
 learning_rate = 0.01        # Adam
 learning_rate_decay = 0.1   # factor at 1/2 and at 3/4 of a phase
 lbfgs_history = 10          # L-BFGS memory of the kinematics_1 polish
+lbfgs_line_search = 10      # step sizes an L-BFGS step tries, each half the one before
 
 # Objective weights, one table per stage. Difference terms are per change over 1/30 s.
 

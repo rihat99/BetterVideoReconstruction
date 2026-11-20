@@ -69,7 +69,7 @@ def kinematics_1(clip: paths.Clip, human: bh.HumanModel, config: dict) -> None:
 
     if len(evidence.people):
         fitted = body.bake(human, betas[evidence.people])
-        problem = evidence.problem(fitted, q[evidence.people], config["auto_contact"])
+        problem = evidence.problem(fitted, q[evidence.people], config["auto_contact"], depth=True)
         iterations, weights, root = options["iterations"], options["weights"], config["stages"]["root"]
         free = _first(BODY, human) if options["freeze_fingers"] else None
         placed = optim.run(problem, [
@@ -108,7 +108,7 @@ def kinematics_2(clip: paths.Clip, human: bh.HumanModel, config: dict) -> None:
                 labels[row] = tensor(contacts["frame_contact"][list(contacts["object_ids"]).index(person)])
         labels &= evidence.tracked[..., None]
         fitted = body.bake(human, betas[evidence.people])
-        problem = evidence.problem(fitted, q[evidence.people], config["contact_attraction"])
+        problem = evidence.problem(fitted, q[evidence.people], config["contact_attraction"], depth=False)
         look = evidence.scene_refresh(fitted, labels)
         result = optim.run(problem.with_(data={"labels": labels}), [
             _adam(name, options["iterations"][name], config, weights=options["weights"], free=free, on_start=look)
@@ -142,22 +142,27 @@ class Evidence:
         self.people = np.flatnonzero(tracked.any(axis=1) & np.isin(start["object_ids"], self.keypoints["object_ids"]))
         self.object_ids, self.tracked = start["object_ids"][self.people], self.tensor(tracked[self.people])
 
-    def problem(self, identity: bh.Identity, start: torch.Tensor, attraction: dict) -> optim.Problem:
-        """The kinematic problem of the people, whose bodies are ``identity`` and start at ``start (P, T, 211)``."""
+    def problem(self, identity: bh.Identity, start: torch.Tensor, attraction: dict, *, depth: bool) -> optim.Problem:
+        """The kinematic problem of the people, whose bodies are ``identity`` and start at ``start (P, T, 211)``.
+
+        With ``depth`` it has the chamfer term, on each person's depth points sampled around the start body.
+        """
         rows = [list(self.keypoints["object_ids"]).index(person) for person in self.object_ids]
-        pixels = camera.project(objective.posed(identity, start).joint_translations, *self.cameras).cpu().numpy()
-        sampling = {key: self.config["chamfer"][key] for key in ("conf_drop_q", "max_points", "limb_quota")}
-        clouds = []
-        for person, start_pixels, seen in zip(self.object_ids, pixels, self.tracked.cpu().numpy()):
-            own = self.points["obj_id"] == person
-            clouds.append(visual.human_points(
-                self.human, self.points["points"][own], self.points["confidence"][own], self.points["frame_id"][own],
-                start_pixels, seen, self.cameras, **sampling))
-        cloud, counted = (self.tensor(np.stack(part)) for part in zip(*clouds))
+        cloud = None
+        if depth:
+            pixels = camera.project(objective.posed(identity, start).joint_translations, *self.cameras)
+            sampling = {key: self.config["chamfer"][key] for key in ("conf_drop_q", "max_points", "limb_quota")}
+            clouds = []
+            for person, start_pixels, seen in zip(self.object_ids, pixels, self.tracked.cpu().numpy()):
+                own = self.points["obj_id"] == person
+                clouds.append(visual.human_points(
+                    self.human, self.points["points"][own], self.points["confidence"][own],
+                    self.points["frame_id"][own], start_pixels, seen, self.cameras, **sampling))
+            cloud = tuple(self.tensor(np.stack(part)) for part in zip(*clouds))
         return objective.kinematics_problem(
             identity, start, keypoints=self.tensor(self.keypoints["keypoints"][rows]),
-            scores=self.tensor(self.keypoints["keypoint_scores"][rows]), cloud=cloud, counted=counted,
-            tracked=self.tracked, cameras=self.cameras, time=self.time, attraction=attraction, config=self.config)
+            scores=self.tensor(self.keypoints["keypoint_scores"][rows]), tracked=self.tracked, cameras=self.cameras,
+            time=self.time, attraction=attraction, config=self.config, cloud=cloud)
 
     def scene_refresh(self, identity: bh.Identity, labels: torch.Tensor | None = None):
         """A phase's ``on_start``: the scene candidates around the standing body and, given ``labels``, the patches."""
@@ -218,9 +223,11 @@ def _adam(name: str, iterations: int, config: dict, **phase) -> optim.Phase:
 
 
 def _lbfgs(name: str, iterations: int, config: dict, **phase) -> optim.Phase:
-    """A phase of BetterRobot's L-BFGS, which keeps one memory and one line search per person."""
-    solver = optim.LBFGS(history=config["optimizer"]["lbfgs_history"])
-    return optim.Phase(solver, iterations, name=name, on_step=_report(name, iterations), stop_every=0, **phase)
+    """A phase of BetterRobot's L-BFGS, which keeps one memory and one line search per person; it ends early once
+    no person's search finds a step."""
+    solver = optim.LBFGS(history=config["optimizer"]["lbfgs_history"],
+                         line_search=config["optimizer"]["lbfgs_line_search"])
+    return optim.Phase(solver, iterations, name=name, on_step=_report(name, iterations), **phase)
 
 
 def _first(coordinates: int, human: bh.HumanModel) -> dict[str, torch.Tensor]:

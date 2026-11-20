@@ -24,17 +24,18 @@ CONTACT_TERMS = ("penetration", "contact_attraction", "contact_acquisition", "co
 
 def kinematics_problem(
     identity: bh.Identity, start: torch.Tensor, *, keypoints: torch.Tensor, scores: torch.Tensor,
-    cloud: torch.Tensor, counted: torch.Tensor, tracked: torch.Tensor, cameras: camera.Cameras,
-    time: motion.Time, attraction: dict, config: dict,
+    tracked: torch.Tensor, cameras: camera.Cameras, time: motion.Time, attraction: dict, config: dict,
+    cloud: tuple[torch.Tensor, torch.Tensor] | None = None,
 ) -> optim.Problem:
     """The problem of fitting ``identity``'s trajectory to a clip, from ``start (P, T, 211)``, before it is solved.
 
     :param keypoints: Sapiens keypoints ``(P, T, 308, 2)`` in pixels, with ``scores (P, T, 308)``.
-    :param cloud: each person's depth points ``(P, T, M, 3)``; ``counted (P, T, M)`` marks the real ones.
     :param tracked: ``(P, T)`` bool, the frames each person is tracked on.
     :param cameras: ``(extrinsics (T, 4, 4), intrinsics (T, 3, 3))``.
     :param attraction: the band of the attraction term, ``[auto_contact]`` or ``[contact_attraction]``.
     :param config: the config tables of the terms.
+    :param cloud: each person's depth points ``(P, T, M, 3)`` and the mask ``(P, T, M)`` of the real ones
+        (``visual.human_points``); without it the problem has no ``chamfer`` term.
 
     Cached values: ``pose`` (``q`` with unit quaternions), ``body`` (its ``HumanState``), ``frames`` (the contact
     frames), ``velocity`` to ``snap`` (the strided derivatives of ``pose``) and ``distance`` (the frames against
@@ -58,9 +59,10 @@ def kinematics_problem(
         human, keypoints, scores, tracked, cameras, time.fps, **config["keypoints"]))
     term("reprojection_start", visual.start_reprojection(
         start_body, tracked, cameras, time.fps, **config["reprojection_start"]))
-    term("chamfer", visual.chamfer(human, cloud, counted, cameras, **{
-        key: config["chamfer"][key]
-        for key in ("sat_m", "vertex_subsample", "emphasis_lo", "emphasis_hi", "emphasis_radius", "chunk")}))
+    if cloud is not None:
+        term("chamfer", visual.chamfer(human, *cloud, cameras, **{
+            key: config["chamfer"][key]
+            for key in ("sat_m", "vertex_subsample", "emphasis_lo", "emphasis_hi", "emphasis_radius", "chunk")}))
     term("pose_prior", visual.pose_prior(start))
     term("orientation_prior", visual.orientation_prior(start))
     for order, name in enumerate(("acceleration", "jerk", "snap"), start=2):
