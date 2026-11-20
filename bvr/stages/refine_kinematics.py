@@ -68,8 +68,8 @@ def kinematics_1(clip: paths.Clip, human: bh.HumanModel, config: dict) -> None:
     labels = torch.zeros_like(drift, dtype=torch.bool)
 
     if len(evidence.people):
-        fitted = body.bake(human, betas[evidence.people])
-        problem = evidence.problem(fitted, q[evidence.people], config["auto_contact"], depth=True)
+        fitted, own = body.bake(human, betas[evidence.people]), q[evidence.people]
+        problem = evidence.problem(fitted, own, config["auto_contact"], cloud=evidence.depth_points(fitted, own))
         iterations, weights, root = options["iterations"], options["weights"], config["stages"]["root"]
         free = _first(BODY, human) if options["freeze_fingers"] else None
         placed = optim.run(problem, [
@@ -102,13 +102,12 @@ def kinematics_2(clip: paths.Clip, human: bh.HumanModel, config: dict) -> None:
 
     if len(evidence.people):
         # A person the contact readout does not list has no labels and is fitted without them.
-        labels = torch.zeros_like(tensor(start["auto_labels"][evidence.people]), dtype=torch.bool)
-        for row, person in enumerate(evidence.object_ids):
-            if person in contacts["object_ids"]:
-                labels[row] = tensor(contacts["frame_contact"][list(contacts["object_ids"]).index(person)])
-        labels &= evidence.tracked[..., None]
+        listed = {person: row for row, person in enumerate(contacts["object_ids"])}
+        nowhere = np.zeros(contacts["frame_contact"].shape[1:], bool)
+        labels = tensor(np.stack([contacts["frame_contact"][listed[person]] if person in listed else nowhere
+                                  for person in evidence.object_ids])) & evidence.tracked[..., None]
         fitted = body.bake(human, betas[evidence.people])
-        problem = evidence.problem(fitted, q[evidence.people], config["contact_attraction"], depth=False)
+        problem = evidence.problem(fitted, q[evidence.people], config["contact_attraction"])
         look = evidence.scene_refresh(fitted, labels)
         result = optim.run(problem.with_(data={"labels": labels}), [
             _adam(name, options["iterations"][name], config, weights=options["weights"], free=free, on_start=look)
@@ -127,7 +126,7 @@ class Evidence:
     """
 
     def __init__(self, clip: paths.Clip, human: bh.HumanModel, config: dict, start: dict[str, np.ndarray]) -> None:
-        self.human, self.config, device = human, config, human.spec.device
+        self.clip, self.human, self.config, device = clip, human, config, human.spec.device
         self.tensor = lambda array: torch.as_tensor(array, device=device)
         transform = files.load_npz(clip.find(paths.TRANSFORM), "bvr-transform")
         self.cameras = self.tensor(transform["extrinsics"]), self.tensor(transform["intrinsics_px_orig"])
@@ -137,28 +136,26 @@ class Evidence:
             files.load_npz(clip.find(paths.SCENE), "bvr-scene"), camera.centers(self.cameras[0]),
             conf_drop_q=config["penetration"]["conf_drop_q"], k=config["penetration"]["normal_k"], device=device))
         self.keypoints = files.load_npz(clip.find(paths.SAPIENS_POSE), "bvr-keypoints")
-        self.points = files.load_npz(clip.find(paths.HUMAN), "bvr-human-points")
         tracked = start["valid_mask"].astype(bool)
         self.people = np.flatnonzero(tracked.any(axis=1) & np.isin(start["object_ids"], self.keypoints["object_ids"]))
         self.object_ids, self.tracked = start["object_ids"][self.people], self.tensor(tracked[self.people])
 
-    def problem(self, identity: bh.Identity, start: torch.Tensor, attraction: dict, *, depth: bool) -> optim.Problem:
-        """The kinematic problem of the people, whose bodies are ``identity`` and start at ``start (P, T, 211)``.
+    def depth_points(self, identity: bh.Identity, start: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+        """Each person's depth points for the chamfer, ``(P, T, M, 3)`` and their mask, sampled around ``start``."""
+        points = files.load_npz(self.clip.find(paths.HUMAN), "bvr-human-points")
+        pixels = camera.project(objective.posed(identity, start).joint_translations, *self.cameras)
+        sampling = {key: self.config["chamfer"][key] for key in ("conf_drop_q", "max_points", "limb_quota")}
+        clouds = []
+        for person, start_pixels, seen in zip(self.object_ids, pixels, self.tracked.cpu().numpy()):
+            own = points["obj_id"] == person
+            clouds.append(visual.human_points(
+                self.human, points["points"][own], points["confidence"][own], points["frame_id"][own],
+                start_pixels, seen, self.cameras, **sampling))
+        return tuple(self.tensor(np.stack(part)) for part in zip(*clouds))
 
-        With ``depth`` it has the chamfer term, on each person's depth points sampled around the start body.
-        """
+    def problem(self, identity: bh.Identity, start: torch.Tensor, attraction: dict, cloud=None) -> optim.Problem:
+        """The kinematic problem of the people, whose bodies are ``identity`` and start at ``start (P, T, 211)``."""
         rows = [list(self.keypoints["object_ids"]).index(person) for person in self.object_ids]
-        cloud = None
-        if depth:
-            pixels = camera.project(objective.posed(identity, start).joint_translations, *self.cameras)
-            sampling = {key: self.config["chamfer"][key] for key in ("conf_drop_q", "max_points", "limb_quota")}
-            clouds = []
-            for person, start_pixels, seen in zip(self.object_ids, pixels, self.tracked.cpu().numpy()):
-                own = self.points["obj_id"] == person
-                clouds.append(visual.human_points(
-                    self.human, self.points["points"][own], self.points["confidence"][own],
-                    self.points["frame_id"][own], start_pixels, seen, self.cameras, **sampling))
-            cloud = tuple(self.tensor(np.stack(part)) for part in zip(*clouds))
         return objective.kinematics_problem(
             identity, start, keypoints=self.tensor(self.keypoints["keypoints"][rows]),
             scores=self.tensor(self.keypoints["keypoint_scores"][rows]), tracked=self.tracked, cameras=self.cameras,
