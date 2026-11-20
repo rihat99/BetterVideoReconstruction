@@ -119,8 +119,20 @@ def test_a_dry_run_names_every_step_and_touches_nothing(tmp_path: Path, source: 
     assert run.chain(source, tmp_path / "out", dry_run=True) == 0
     commands = [record.getMessage() for record in caplog.records if " -m bvr.stages." in record.getMessage()]
     assert [command.split(" --step ")[1].split()[0] for command in commands] == config.load()["run"]["steps"]
-    assert all(command.endswith("--clips one,two") for command in commands)
+    assert all(command.endswith("--clips=one,two") for command in commands)
     assert not (tmp_path / "out").exists()
+
+
+def test_a_clip_whose_name_starts_with_a_dash_reaches_its_stage(tmp_path: Path, source: Path, arguments: list[str],
+                                                                caplog) -> None:
+    (source / "-zq.mp4").write_bytes(b"dash")
+    caplog.set_level("INFO", logger="bvr")
+    run.chain(source, tmp_path / "out", steps=["gravity"], dry_run=True)
+    command = next(record.getMessage() for record in caplog.records if " -m bvr.stages." in record.getMessage())
+    calls: list[str] = []
+    # The stage reads the chain's own token for the clips, after the fixture's source, root and config.
+    assert run.stage("estimate_gravity", gravity(calls), [*arguments, command.split()[-1]]) == 0
+    assert calls == ["-zq", "one", "two"]
 
 
 def test_steps_follow_the_chain(tmp_path: Path, source: Path) -> None:

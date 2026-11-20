@@ -118,7 +118,8 @@ def chain(source: Path, save_dir: Path, *, config_path: Path | None = None, step
                    "--source", str(source), "--save-dir", str(save_dir),
                    *([] if config_path is None else ["--config", str(config_path)]),
                    *([] if upstream is None else ["--upstream", str(upstream)]),
-                   "--clips", ",".join(clip.name for clip in todo)]
+                   # One token: a clip named "-x" after a bare --clips would read as an option.
+                   "--clips=" + ",".join(clip.name for clip in todo)]
         log.info("%s", shlex.join(command))
         if dry_run:
             # A step that would run rewrites the inputs of the steps after it.
