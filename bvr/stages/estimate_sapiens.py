@@ -1,429 +1,166 @@
-"""Sapiens2 pose (+ optional pointmap / normal) precompute step.
+"""Sapiens2-5B finds the 308 Goliath keypoints of every tracked person on every frame.
 
-Reads frames straight from the source video / folder / image and runs
-Meta's Sapiens2-5B model for any subset of {``pose``, ``pointmap``,
-``normal``}. **Default is ``pose`` only** (keypoints) — the dense
-``pointmap``/``normal`` depth-like forwards are opt-in (``--tasks
-pose,pointmap``). Per-item outputs land under ``<out-dir>/sapiens/`` so
-they don't collide with other precompute artifacts.
+Pose is top-down: each person is cropped by the box SAM 3 tracked (``sam3/bboxes.npz``, the
+objects labelled ``[sapiens].label``), the crop is forwarded with its mirror image (flip test),
+and the heatmaps are decoded on the CPU. Keypoints 0..69 are SAM 3D Body's MHR70 layout.
 
-Pose is top-down — it consumes the bboxes that the ``sam3`` stage
-already wrote (we never run Sapiens2's own DETR-based detector). Pointmap
-and normal are dense, full-image forwards. The 5B head is heavy
-(~20-30 GB VRAM at 1024×768 in bf16) and the safetensors load is ~30-60 s,
-so the orchestrator (:func:`run_sapiens`) loads each task's model **once**,
-sweeps every item through it, then releases — flipping the inner loop
-from ``load → forward → release × N`` to ``load → forward × N → release``.
+Decoding blurs 308 heatmaps per crop on the CPU and costs about as much as the two forwards, so it
+runs in a thread pool while the GPU forwards the next crops. Its cost is mostly system time: memory
+handed back to the system and faulted in again on every blur. With OpenCV's pool at every core of
+the host (its default) or at one thread a decode took 3.4 to 4.2 s, at ``[run].threads`` = 8 (the
+cap ``bvr.run`` applies) 0.25 to 0.85 s.
 
-The 308-keypoint Sociopticon scheme used here is a strict superset of
-SAM-3D-Body's MHR70 — indices 0..69 of ``pose.npz`` are byte-for-byte the
-MHR70 layout, suitable for keypoint-conditioned SAM-3D-Body inference.
+Writes, under the clip's directory::
 
-Per-item I/O::
-
-    reads:  the source video / folder of frames / single image
-            <out-dir>/sam3/bboxes.npz           only when 'pose' in --tasks
-    writes: <out-dir>/sapiens/pose.npz          (P, N, 308, 2) keypoints + (P, N, 308) scores
-            <out-dir>/sapiens/pointmap.npz      (N, H, W, 3) f16 metric xyz
-            <out-dir>/sapiens/normal.npz        (N, H, W, 3) f16 unit normals
-            <out-dir>/sapiens/overlay/pose.png|.mp4   skeleton overlay (default ON)
-
-Standalone::
-
-    uv run python bvr/stages/estimate_sapiens.py \\
-        --source data/images/wild_images/ellen2.jpg \\
-        --save-dir out/images/wild_images/ \\
-        --config configs/pipeline.toml
-
-Pipeline integration is deferred — this step is opt-in until we know the
-VRAM/perf profile in the static-pipeline context.
+    sapiens/pose.npz          bvr-keypoints: keypoints (P, N, 308, 2) pixels, keypoint_scores
+                              (P, N, 308) in [0, 1], bboxes (P, N, 4), valid_mask (P, N), object_ids (P,),
+                              labels (P,), num_people, num_frames, image_height, image_width,
+                              keypoint_scheme = "goliath_308"
+    sapiens/overlay/pose.mp4  the skeletons over the video, with [sapiens].overlay
 """
 from __future__ import annotations
 
-import argparse
-import gc
+import contextlib
+import logging
 import tempfile
+from collections.abc import Callable
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 import cv2
 import numpy as np
 import torch
 
-from bvr import determinism
-from bvr.old_config import load_config, section
-from bvr.precompute_runner import (
-    InputItem,
-    SkipItem,
-    add_standard_args,
-    run_batch,
-)
-from bvr.source import resolve_source
-from bvr.adapters.sapiens2 import (
-    NUM_KEYPOINTS,
-    forward_dense,
-    forward_pose_batched,
-    load_sapiens2,
-)
+from bvr import files, paths, run
+
+log = logging.getLogger(__name__)
+
+# Sapiens2 reads its configs relative to its pose folder.
+_POSE_FOLDER = paths.REPO_ROOT / "third_party/sapiens2/sapiens/pose"
+_CONFIG = "configs/keypoints308/shutterstock_goliath_3po/sapiens2_5b_keypoints308_shutterstock_goliath_3po-1024x768.py"
+_WEIGHTS = ("facebook/sapiens2-pose-5b", "sapiens2_5b_pose.safetensors")
+_DTYPES = {"fp32": torch.float32, "fp16": torch.float16, "bf16": torch.bfloat16}
+_KEYPOINTS = 308
 
 
-_TASK_CHOICES = ("pose", "pointmap", "normal")
+def load(stage: run.Stage) -> Callable[[paths.Clip], None]:
+    """Load Sapiens2-5B pose once; return the per-clip keypoint estimate."""
+    from huggingface_hub import hf_hub_download
+    from safetensors.torch import load_file
+    from sapiens.engine.config import Config
+    from sapiens.engine.datasets import Compose
+    from sapiens.pose import models  # noqa: F401  registers the pose models with MODELS
+    from sapiens.pose.datasets import UDPHeatmap, parse_pose_metainfo
+    from sapiens.registry import MODELS
+
+    settings = stage.config["sapiens"]
+    local = Path(settings["checkpoint_root"]) / "pose" / _WEIGHTS[1] if settings["checkpoint_root"] else None
+    weights = str(local) if local is not None and local.is_file() else hf_hub_download(*_WEIGHTS)
+    with contextlib.chdir(_POSE_FOLDER):
+        # What sapiens.pose.models.init_model does, except that the model is built on the meta device: its random
+        # initialisation of the 5B weights took 50 s, only to be overwritten by the checkpoint.
+        config = Config.fromfile(_CONFIG)
+        config.model["backbone"].pop("init_cfg", None)
+        with torch.device("meta"):
+            model = MODELS.build(config.model)
+        model.load_state_dict(load_file(weights), assign=True)
+        model.cfg, model.data_preprocessor = config, MODELS.build(config.data_preprocessor)
+        model.pipeline = Compose(config.test_pipeline)
+        metainfo = parse_pose_metainfo(dict(from_file="configs/_base_/keypoints308.py"))
+    codec = dict(model.cfg.codec)
+    if codec.pop("type") != "UDPHeatmap":
+        raise NotImplementedError(f"Sapiens2 pose codec {model.cfg.codec['type']} is not UDPHeatmap")
+    codec = UDPHeatmap(**codec)
+    # Cast on the CPU: on the GPU the float32 model is a 20 GB transient.
+    model = model.to(dtype=_DTYPES[settings["dtype"]]).to(stage.device).eval()
+    flip_indices = metainfo["flip_indices"] if model.cfg.val_cfg.get("flip_test", False) else None
+
+    def crop(image: np.ndarray, box: np.ndarray) -> tuple[torch.Tensor, dict]:
+        data = model.data_preprocessor(model.pipeline(
+            dict(img=image, bbox=box[None], bbox_score=np.ones(1, np.float32))))
+        return data["inputs"], data["data_samples"]["meta"]
+
+    def decode(heatmaps: np.ndarray, meta: dict) -> tuple[np.ndarray, np.ndarray]:
+        keypoints, scores = codec.decode(heatmaps)  # (1, 308, 2) in the crop's input pixels
+        size, centre, scale = (np.asarray(meta[key], np.float32) for key in ("input_size", "bbox_center", "bbox_scale"))
+        return keypoints[0] / size * scale + centre - 0.5 * scale, scores[0]
+
+    def process(clip: paths.Clip) -> None:
+        tracked = files.load_npz(clip.find(paths.SAM3_BBOXES), "bvr-bboxes")
+        people = np.flatnonzero(tracked["labels"] == settings["label"])
+        if not people.size:
+            raise ValueError(f"no object labelled {settings['label']!r} in {paths.SAM3_BBOXES}: "
+                             f"{list(tracked['labels'])}")
+        boxes = tracked["bboxes_per_obj"][people].astype(np.float32)  # (P, N, 4)
+        count = boxes.shape[1]
+        keypoints = np.zeros((len(people), count, _KEYPOINTS, 2), np.float32)
+        scores = np.zeros((len(people), count, _KEYPOINTS), np.float32)
+        valid = boxes.any(axis=-1)
+        with tempfile.TemporaryDirectory(prefix="sapiens_") as scratch:
+            frame_paths = files.extract_frames(clip.video, Path(scratch) / "frames")
+            if len(frame_paths) != count:
+                raise ValueError(f"{paths.SAM3_BBOXES} has {count} frames, the video {len(frame_paths)}")
+            height, width = cv2.imread(str(frame_paths[0])).shape[:2]
+            batch, pending = settings["batch_size"], []
+            with ThreadPoolExecutor(8) as pool:
+                # Frames go in windows of ``batch`` frames, so a forward holds about ``batch`` crops.
+                for first in range(0, count, batch):
+                    jobs = [(person, frame) for frame in range(first, min(count, first + batch))
+                            for person in np.flatnonzero(valid[:, frame])]
+                    images = {frame: cv2.imread(str(frame_paths[frame])) for _, frame in jobs}
+                    crops = [crop(images[frame], boxes[person, frame]) for person, frame in jobs]
+                    if not crops:
+                        continue
+                    inputs = torch.cat([inputs for inputs, _ in crops]).to(next(model.parameters()).dtype)
+                    with torch.no_grad():
+                        for start in range(0, len(jobs), batch):
+                            chunk = inputs[start:start + batch]
+                            heatmaps = model(chunk)
+                            if flip_indices is not None:
+                                heatmaps = (heatmaps + model(chunk.flip(-1)).flip(-1)[:, flip_indices]) / 2.0
+                            heatmaps = heatmaps.float().cpu().numpy()
+                            for k, job in enumerate(jobs[start:start + batch]):
+                                pending.append((job, pool.submit(decode, heatmaps[k], crops[start + k][1])))
+                for (person, frame), decoded in pending:
+                    keypoints[person, frame], scores[person, frame] = decoded.result()
+            with files.staged_directory(clip.path(paths.SAPIENS)) as out:
+                files.save_npz(
+                    out / Path(paths.SAPIENS_POSE).name, "bvr-keypoints",
+                    keypoints=keypoints, keypoint_scores=scores, bboxes=boxes, valid_mask=valid,
+                    object_ids=tracked["object_ids"][people].astype(np.int32),
+                    labels=tracked["labels"][people].astype(str),
+                    num_people=np.int32(len(people)), num_frames=np.int32(count), image_height=np.int32(height),
+                    image_width=np.int32(width), keypoint_scheme=np.str_("goliath_308"))
+                if settings["overlay"]:
+                    (out / "overlay").mkdir()
+                    _overlay(out / "overlay" / "pose.mp4", frame_paths, keypoints, scores, valid, metainfo,
+                             settings["score_thresh"], float(settings["fps"] or 30.0))
+        log.info("%d person(s) x %d frame(s), %d with a box", len(people), count, int(valid.sum()))
+
+    return process
 
 
-# -----------------------------------------------------------------------------
-# Helpers
-# -----------------------------------------------------------------------------
-
-def _parse_tasks(s: str) -> list[str]:
-    items = [t.strip() for t in s.split(",") if t.strip()]
-    bad = [t for t in items if t not in _TASK_CHOICES]
-    if bad:
-        raise argparse.ArgumentTypeError(
-            f"unknown task(s) {bad}; choose from {list(_TASK_CHOICES)}"
-        )
-    if not items:
-        raise argparse.ArgumentTypeError("--tasks must list at least one task")
-    # de-dupe while preserving order
-    seen: set[str] = set()
-    return [t for t in items if not (t in seen or seen.add(t))]
-
-
-def _draw_pose_overlay(
-    bgr: np.ndarray,
-    kpts_per_person: list[np.ndarray],
-    scores_per_person: list[np.ndarray],
-    *,
-    skeleton_links: np.ndarray,            # (E, 2) joint-index pairs
-    skeleton_link_colors: np.ndarray,      # (E, 3) RGB
-    keypoint_colors: np.ndarray,           # (K, 3) RGB
-    score_thr: float,
-    radius: int = 2,
-    thickness: int = 2,
-) -> np.ndarray:
-    """Draw keypoint dots + skeleton edges using the model's own metainfo.
-
-    ``skeleton_links``, ``skeleton_link_colors``, and ``keypoint_colors`` come
-    straight from ``model.pose_metainfo`` — using them keeps the overlay
-    consistent with whichever 308-keypoint scheme the model emits (the names
-    aren't COCO-style: e.g. ``9 = left_hip``, ``41 = right_wrist``,
-    ``62 = left_wrist``).
-    """
-    canvas = bgr.copy()
-    H, W = canvas.shape[:2]
-    for kpts, scs in zip(kpts_per_person, scores_per_person):
-        # Skeleton edges
-        for (a, b), rgb in zip(skeleton_links, skeleton_link_colors):
-            if scs[a] < score_thr or scs[b] < score_thr:
-                continue
-            pa = (int(round(kpts[a, 0])), int(round(kpts[a, 1])))
-            pb = (int(round(kpts[b, 0])), int(round(kpts[b, 1])))
-            color = (int(rgb[2]), int(rgb[1]), int(rgb[0]))   # RGB → BGR
-            cv2.line(canvas, pa, pb, color, thickness, lineType=cv2.LINE_AA)
-        # Keypoint dots (drawn on top so they're not hidden under thick edges)
-        for j in range(NUM_KEYPOINTS):
-            if scs[j] < score_thr:
-                continue
-            x, y = int(round(kpts[j, 0])), int(round(kpts[j, 1]))
-            if 0 <= x < W and 0 <= y < H:
-                rgb = keypoint_colors[j]
-                color = (int(rgb[2]), int(rgb[1]), int(rgb[0]))
-                cv2.circle(canvas, (x, y), radius, color, -1, lineType=cv2.LINE_AA)
-    return canvas
-
-
-# -----------------------------------------------------------------------------
-# Step
-# -----------------------------------------------------------------------------
-
-class Sapiens2Step:
-    """Run a single Sapiens2 5B head across a batch.
-
-    One instance handles exactly one task (``"pose"`` / ``"pointmap"`` /
-    ``"normal"``). The 5B safetensors load takes ~30-60 s, so the multi-task
-    orchestrator (:func:`run_sapiens`) creates one Step per task and feeds
-    every item through it before releasing the model — that flips the inner
-    loop from "load → forward → release × N items" to "load → forward × N → release".
-    """
-
-    def __init__(self, args: argparse.Namespace, task: str):
-        if task not in _TASK_CHOICES:
-            raise ValueError(f"unknown task: {task!r}; choices: {list(_TASK_CHOICES)}")
-        self.args = args
-        self.task = task
-        self._model = None
-        # Pose-only metainfo for overlay rendering. Captured in :meth:`load`.
-        self._sk_links: np.ndarray | None = None
-        self._sk_colors: np.ndarray | None = None
-        self._kp_colors: np.ndarray | None = None
-
-    def load(self) -> None:
-        self._model = load_sapiens2(
-            self.task,
-            checkpoint_root=self.args.checkpoint_root,
-            device=self.args.device,
-            dtype=self.args.dtype,
-        )
-        if self.task == "pose":
-            mi = self._model.pose_metainfo
-            self._sk_links = np.asarray(mi["skeleton_links"], dtype=np.int32)
-            self._sk_colors = np.asarray(mi["skeleton_link_colors"], dtype=np.int32)
-            self._kp_colors = np.asarray(mi["keypoint_colors"], dtype=np.int32)
-
-    def release(self) -> None:
-        self._model = None
-        self._sk_links = self._sk_colors = self._kp_colors = None
-        gc.collect()
-        if torch.cuda.is_available():
-            torch.cuda.empty_cache()
-
-    # ----- per-item entry --------------------------------------------------
-
-    def process(self, item: InputItem) -> None:
-        out_dir = item.out_dir
-        subdir = getattr(self.args, "subdir", "sapiens") or "sapiens"
-        sapiens_dir = out_dir if subdir in (".", "") else out_dir / subdir
-        # Top-down pose consumes sam3 bboxes: an explicit per-item path from the
-        # manifest (DB layout, where sam3 lives in its own feature tree) wins;
-        # otherwise the sibling out_dir/sam3/bboxes.npz (single-clip layout).
-        bboxes_npz = item.bboxes_path or (out_dir / "sam3" / "bboxes.npz")
-        out_npz = sapiens_dir / f"{self.task}.npz"
-        if self.args.skip_existing and out_npz.exists():
-            raise SkipItem(f"{out_npz} exists")
-        sapiens_dir.mkdir(parents=True, exist_ok=True)
-
-        # ---- frames (decoded straight from the source video/folder/image) ----
-        with tempfile.TemporaryDirectory(prefix="sapiens_frames_") as _tmp:
-            frame_paths, _ = resolve_source(item.source_path, Path(_tmp))
-            bgr_frames: list[np.ndarray] = []
-            for fp in frame_paths:
-                bgr = cv2.imread(str(fp))
-                if bgr is None:
-                    raise SkipItem(f"failed to read frame {fp}")
-                bgr_frames.append(bgr)
-        if not bgr_frames:
-            raise SkipItem(f"no frames resolved from {item.source_path}")
-        N = len(bgr_frames)
-        H, W = bgr_frames[0].shape[:2]
-
-        if self.task == "pose":
-            self._run_pose(bboxes_npz, bgr_frames, sapiens_dir, N=N, H=H, W=W)
-        else:
-            self._run_dense(bgr_frames, sapiens_dir, N=N, H=H, W=W)
-
-    # ----- pose ------------------------------------------------------------
-
-    def _run_pose(
-        self,
-        bp: Path,
-        bgr_frames: list[np.ndarray],
-        sapiens_dir: Path,
-        *,
-        N: int,
-        H: int,
-        W: int,
-    ) -> None:
-        if not bp.exists():
-            raise SkipItem(
-                f"missing {bp} — pose is top-down and needs bboxes from sam3"
-            )
-        bd = np.load(bp, allow_pickle=True)
-        all_labels: list[str] = list(bd["labels"])
-        all_ids = np.asarray(bd["object_ids"], dtype=np.int32)
-        all_bb = np.asarray(bd["bboxes_per_obj"], dtype=np.int32)  # (P', N, 4)
-        keep = np.array(
-            [lab == self.args.label for lab in all_labels], dtype=bool,
-        )
-        if not keep.any():
-            raise SkipItem(
-                f"no '{self.args.label}' objects in {bp.name} (labels={all_labels})"
-            )
-        n_bb = int(bd["num_frames"])
-        if n_bb != N:
-            raise RuntimeError(
-                f"frame count mismatch in {bp}: bboxes={n_bb}, frames={N}"
-            )
-        bboxes = all_bb[keep].astype(np.float32)
-        obj_ids = all_ids[keep]
-        labels = np.array(
-            [all_labels[i] for i in np.flatnonzero(keep)], dtype="U16",
-        )
-        P = int(bboxes.shape[0])
-
-        keypoints = np.zeros((P, N, NUM_KEYPOINTS, 2), dtype=np.float32)
-        scores = np.zeros((P, N, NUM_KEYPOINTS), dtype=np.float32)
-        valid = np.zeros((P, N), dtype=bool)
-        kpts_view: list[list[np.ndarray]] = [[] for _ in range(N)]
-        scs_view: list[list[np.ndarray]] = [[] for _ in range(N)]
-
-        # Frames go through the cross-image batched forward in windows of
-        # ``batch_size`` frames, so the backbone sees ~batch_size crops per
-        # call instead of the one or two people a single frame contributes.
-        window = max(1, int(self.args.batch_size))
-        for f0 in range(0, N, window):
-            frames = list(range(f0, min(N, f0 + window)))
-            rows_per_frame: list[list[int]] = []
-            bbs_per_frame: list[np.ndarray] = []
-            for f in frames:
-                rows = [p for p in range(P) if not np.all(bboxes[p, f] == 0)]
-                rows_per_frame.append(rows)
-                bbs_per_frame.append(bboxes[rows, f] if rows else np.zeros((0, 4), np.float32))
-            results = forward_pose_batched(
-                self._model, [bgr_frames[f] for f in frames], bbs_per_frame,
-                batch_size=self.args.batch_size,
-            )
-            for f, rows, (kpts, scs) in zip(frames, rows_per_frame, results):
-                for k, p in enumerate(rows):
-                    keypoints[p, f] = kpts[k]
-                    scores[p, f] = scs[k]
-                    valid[p, f] = True
-                    kpts_view[f].append(kpts[k])
-                    scs_view[f].append(scs[k])
-
-        out_npz = sapiens_dir / "pose.npz"
-        np.savez_compressed(
-            out_npz,
-            keypoints=keypoints,
-            keypoint_scores=scores,
-            bboxes=bboxes,
-            valid_mask=valid,
-            object_ids=obj_ids,
-            labels=labels,
-            num_people=np.int32(P),
-            num_frames=np.int32(N),
-            image_height=np.int32(H),
-            image_width=np.int32(W),
-            keypoint_scheme=np.array("goliath_308", dtype="<U32"),
-        )
-        n_ok = int(valid.sum())
-        print(
-            f"  sapiens/pose: P={P} (obj_ids={obj_ids.tolist()}) × N={N} "
-            f"→ {n_ok} valid → {out_npz.name}"
-        )
-
-        if self.args.overlay:
-            self._render_pose_overlay(
-                bgr_frames=bgr_frames,
-                kpts_per_frame=kpts_view,
-                scs_per_frame=scs_view,
-                sapiens_dir=sapiens_dir,
-                N=N, W=W, H=H,
-            )
-
-    def _render_pose_overlay(
-        self,
-        *,
-        bgr_frames: list[np.ndarray],
-        kpts_per_frame: list[list[np.ndarray]],
-        scs_per_frame: list[list[np.ndarray]],
-        sapiens_dir: Path,
-        N: int, W: int, H: int,
-    ) -> None:
-        ovr_dir = sapiens_dir / "overlay"
-        ovr_dir.mkdir(parents=True, exist_ok=True)
-        thr = float(self.args.score_thresh)
-        draw_kw = dict(
-            skeleton_links=self._sk_links,
-            skeleton_link_colors=self._sk_colors,
-            keypoint_colors=self._kp_colors,
-            score_thr=thr,
-        )
-        if N == 1:
-            ov = _draw_pose_overlay(
-                bgr_frames[0], kpts_per_frame[0], scs_per_frame[0], **draw_kw,
-            )
-            out_path = ovr_dir / "pose.png"
-            cv2.imwrite(str(out_path), ov)
-        else:
-            out_path = ovr_dir / "pose.mp4"
-            fourcc = cv2.VideoWriter_fourcc(*"mp4v")
-            fps = float(self.args.fps or 30.0)
-            writer = cv2.VideoWriter(str(out_path), fourcc, fps, (W, H))
-            if not writer.isOpened():
-                raise RuntimeError(f"cannot open video writer at {out_path}")
-            try:
-                for f in range(N):
-                    ov = _draw_pose_overlay(
-                        bgr_frames[f], kpts_per_frame[f], scs_per_frame[f],
-                        **draw_kw,
-                    )
-                    writer.write(ov)
-            finally:
-                writer.release()
-        print(f"  sapiens/overlay/{out_path.name}")
-
-    # ----- pointmap / normal ----------------------------------------------
-
-    def _run_dense(
-        self,
-        bgr_frames: list[np.ndarray],
-        sapiens_dir: Path,
-        *,
-        N: int, H: int, W: int,
-    ) -> None:
-        out_npz = sapiens_dir / f"{self.task}.npz"
-        buffer = np.zeros((N, H, W, 3), dtype=np.float16)
-        for f in range(N):
-            arr = forward_dense(self._model, bgr_frames[f], head=self.task)
-            buffer[f] = arr.astype(np.float16)
-        payload: dict[str, np.ndarray] = {
-            self.task: buffer,
-            "num_frames": np.int32(N),
-            "image_height": np.int32(H),
-            "image_width": np.int32(W),
-        }
-        np.savez_compressed(out_npz, **payload)
-        print(f"  sapiens/{self.task}: N={N} → {out_npz.name}")
-
-
-def run_sapiens(args: argparse.Namespace) -> int:
-    """Per-task batched runner: load 5B head once, sweep all items, release.
-
-    Drives one ``run_batch`` pass per task in ``args.tasks``. Each pass
-    instantiates a :class:`Sapiens2Step` for that task, which holds the
-    model resident in VRAM for the whole sweep — so 24 items × 2 tasks
-    needs 2 model loads instead of 48.
-    """
-    rc = 0
-    for task in args.tasks:
-        print(f"\n--- sapiens task: {task} ---")
-        rc |= run_batch(Sapiens2Step(args, task), args)
-    return rc
-
-
-# -----------------------------------------------------------------------------
-# CLI
-# -----------------------------------------------------------------------------
-
-def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
-    p = argparse.ArgumentParser(description=__doc__.splitlines()[0])
-    add_standard_args(p)
-    cli = p.parse_args(argv)
-    cfg = load_config(cli.config)
-    args = section(cfg, "sapiens", {
-        "skip_existing": False,
-        "dtype": "fp16",
-        "tasks": "pose",
-        "label": "person",
-        "subdir": "sapiens",
-        "batch_size": 1,
-        "checkpoint_root": "",
-        "score_thresh": 0.3,
-        "overlay": True,
-        "fps": "",
-    })
-    args.device = section(cfg, "runtime", {"device": "cuda"}).device
-    args.source, args.save_dir, args.config = cli.source, cli.save_dir, cli.config
-    args.skip_existing = args.skip_existing or cli.skip_existing
-    args.tasks = _parse_tasks(args.tasks) if isinstance(args.tasks, str) else list(args.tasks)
-    args.checkpoint_root = Path(args.checkpoint_root) if args.checkpoint_root else None
-    args.fps = float(args.fps) if args.fps != "" else None
-    return args
-
-
-def main(argv: list[str] | None = None) -> int:
-    determinism.apply()
-    args = _parse_args(argv)
-    return run_sapiens(args)
+def _overlay(path: Path, frame_paths: list[Path], keypoints: np.ndarray, scores: np.ndarray, valid: np.ndarray,
+             metainfo: dict, threshold: float, fps: float) -> None:
+    """Draw every person's skeleton and keypoints above ``threshold`` in the model's own colours."""
+    links = np.asarray(metainfo["skeleton_links"], np.int32)
+    link_colours = np.asarray(metainfo["skeleton_link_colors"], np.int32)[:, ::-1]  # RGB -> BGR
+    point_colours = np.asarray(metainfo["keypoint_colors"], np.int32)[:, ::-1]
+    first = cv2.imread(str(frame_paths[0]))
+    writer = cv2.VideoWriter(str(path), cv2.VideoWriter_fourcc(*"mp4v"), fps, first.shape[1::-1])
+    for frame, frame_path in enumerate(frame_paths):
+        image = cv2.imread(str(frame_path))
+        for person in np.flatnonzero(valid[:, frame]):
+            points, confident = keypoints[person, frame], scores[person, frame] >= threshold
+            for (a, b), colour in zip(links, link_colours):
+                if confident[a] and confident[b]:
+                    cv2.line(image, tuple(np.round(points[a]).astype(int)), tuple(np.round(points[b]).astype(int)),
+                             colour.tolist(), 2, cv2.LINE_AA)
+            for point, colour in zip(points[confident], point_colours[confident]):
+                cv2.circle(image, tuple(np.round(point).astype(int)), 2, colour.tolist(), -1, cv2.LINE_AA)
+        writer.write(image)
+    writer.release()
 
 
 if __name__ == "__main__":
-    raise SystemExit(main())
+    run.main(load)

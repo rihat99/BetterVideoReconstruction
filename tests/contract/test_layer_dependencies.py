@@ -45,11 +45,8 @@ MODELS = {"sam3", "sapiens", "vggt_omega", "sam_3d_body", "geocalib"}
 #: Modules of the old core, not held to the table until the rebuild replaces them. An entry leaves
 #: in the commit that ports or removes its module; the list is empty when the rebuild is done.
 UNPORTED = {
-    "bvr.old_config", "bvr.npz_io", "bvr.mask_io", "bvr.source", "bvr.determinism", "bvr.precompute_runner",
-    "bvr.adapters", "bvr.mhr_to_smplx", "bvr.human_optim", "bvr.body",
-    "bvr.stages.track_sam3", "bvr.stages.estimate_camera_vggt", "bvr.stages.estimate_sapiens",
-    "bvr.stages.estimate_body_sam3d", "bvr.stages.convert_mhr_to_smplx", "bvr.stages.fuse_geometry",
-    "bvr.stages.estimate_scale", "bvr.stages.estimate_gravity_geocalib", "bvr.stages.human_optimization",
+    "bvr.old_config", "bvr.npz_io", "bvr.mask_io", "bvr.source", "bvr.determinism", "bvr.human_optim", "bvr.body",
+    "bvr.stages.fuse_geometry", "bvr.stages.estimate_scale", "bvr.stages.human_optimization",
     "bvr.stages.estimate_contacts", "bvr.stages.measure_contacts", "bvr.stages.build_support_scene",
     "bvr_datasets", "scripts.view_3d", "scripts.scene_quality",
 }

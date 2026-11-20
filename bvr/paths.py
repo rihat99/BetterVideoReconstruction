@@ -26,6 +26,7 @@ VGGT_DEPTH = "vggt/depth"
 SAPIENS = "sapiens"
 SAPIENS_POSE = "sapiens/pose.npz"
 SAM3D_PARAMS = "sam3d/params.npz"
+SAM3D_OVERLAY = "sam3d/overlay.mp4"
 SMPLX_PARAMS = "sam3d/smplx_params.npz"
 FUSED = "geometry/fused"                        # the up-to-scale transform.npz, scene.npz, human.npz
 TRANSFORM = "geometry/transform.npz"            # metric from here on
