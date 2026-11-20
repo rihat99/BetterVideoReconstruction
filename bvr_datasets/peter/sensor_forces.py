@@ -1,4 +1,4 @@
-"""Write world-frame wall-sensor forces into the peter climb_wall out trees.
+"""Write world-frame wall-sensor forces into the run trees of a peter climb_wall rig.
 
 The climb_wall_2 / climb_wall_3 demonstrator rigs record four 3-axis force
 boards at ~98.85 Hz (``peter/<rig>/<clip>/forces.npz``, one channel per limb
@@ -12,21 +12,21 @@ datasheet cannot contain — that comes from the fused scene's wall normal.
 Nothing touches our predictions, which makes the measured-vs-predicted
 comparison fully independent.
 
-Output ``<tree>/<clip>/human_optim/sensor_forces.npz`` per video frame, in the
+Output ``<run>/<clip>/human_optim/sensor_forces.npz`` per video frame, in the
 REACTION sense (force on the climber, comparable to the predicted contact
 forces): ``reaction_world (N, 4, 3)`` per channel and ``total_world (N, 3)``.
 
 Usage:
-    uv run python bvr_datasets/peter/sensor_forces.py --tree out_climb_wall_2_single
-    uv run python bvr_datasets/peter/sensor_forces.py [--tree out_climb_wall_3_single]
+    uv run python bvr_datasets/peter/sensor_forces.py --rig climb_wall_3 --save-dir <run>
 """
 from __future__ import annotations
 
 import argparse
+from pathlib import Path
 
 import numpy as np
 
-
+from bvr_datasets._rigs import SENSOR_FORCES
 from bvr_datasets.peter.paths import PETER
 
 # climb_wall_2 (the 2026-08 demonstrator rig): channels ARE per-limb forces, in
@@ -96,19 +96,15 @@ def per_frame(forces: np.ndarray, ratio: float, n_frames: int) -> np.ndarray:
 
 def main() -> None:
     ap = argparse.ArgumentParser(description=__doc__.split("\n", 1)[0])
-    ap.add_argument("--tree", default="out_climb_wall_3_single",
-                    help="out tree under ../data/peter/ to write into")
+    ap.add_argument("--rig", choices=sorted(RIGS), required=True, help="the rig the clips were filmed on")
+    ap.add_argument("--save-dir", type=Path, required=True, help="the run root to write into")
     args = ap.parse_args()
 
-    tree = PETER / args.tree
-    dataset = args.tree.removeprefix("out_").removesuffix("_single").removesuffix("_multi")
-    gt = PETER / dataset
-    if dataset not in RIGS:
-        raise SystemExit(f"[sensor_forces] no rig calibration for {dataset!r}")
-    rotation, method, calib_clips, note = RIGS[dataset]
+    gt = PETER / args.rig
+    rotation, method, calib_clips, note = RIGS[args.rig]
     clips = sorted(p.name for p in gt.iterdir() if p.is_dir() and (p / "forces.npz").exists())
     for clip in clips:
-        out_dir = tree / clip / "human_optim"
+        out_dir = args.save_dir / clip
         if not out_dir.is_dir():
             print(f"{clip}: no out tree, skipped")
             continue
@@ -122,8 +118,9 @@ def main() -> None:
         # climb_wall_3 carries one rotation per wall inclination (the name's middle field).
         clip_rotation = rotation[clip.split("_")[1]] if isinstance(rotation, dict) else rotation
         reaction = -(s @ clip_rotation.T)
+        (out_dir / SENSOR_FORCES).parent.mkdir(parents=True, exist_ok=True)
         np.savez(
-            out_dir / "sensor_forces.npz",
+            out_dir / SENSOR_FORCES,
             reaction_world=reaction.astype(np.float32),
             total_world=reaction.sum(1).astype(np.float32),
             limbs=np.asarray(z["limbs"]),

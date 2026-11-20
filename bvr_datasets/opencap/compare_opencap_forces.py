@@ -60,15 +60,13 @@ invalid, drop out of every number rather than scoring as zero.
 Two pooled rows, because they answer different questions: **POOLED** pools frames, so the
 long trials dominate; **MEAN OF CLIPS** weights every clip equally.
 
-Writes ``processed/out/_compare/<clip>.png`` (ours vs plates per foot: size and the three
-components over time) and ``processed/out/_compare/summary.md``. ``--run`` picks the run
-directory to score; a variant chain lands in ``_compare_<its suffix>/`` beside it.
+Writes ``<run>/_compare/<clip>.png`` (ours vs plates per foot: size and the three
+components over time) and ``<run>/_compare/summary.md``, for the clips of the run root that
+have ``human_optim/sensor_forces.npz`` and ``human_optim/kindyn_1.npz``.
 
 Usage::
 
-    uv run --no-sync python bvr_datasets/opencap/compare_opencap_forces.py
-    uv run --no-sync python bvr_datasets/opencap/compare_opencap_forces.py \
-        --run human_optim_floorplane
+    uv run python bvr_datasets/opencap/compare_opencap_forces.py --save-dir <run>
 """
 
 from __future__ import annotations
@@ -82,13 +80,9 @@ matplotlib.use("Agg")
 import matplotlib.pyplot as plt  # noqa: E402
 import numpy as np
 
-
+from bvr import files, paths
+from bvr_datasets._rigs import LIMBS, SENSOR_FORCES, limb_members
 from bvr_datasets.opencap.plates import LOADED_N
-from bvr_datasets._common import _limb_members
-from bvr.human_optim.measured_contacts import LIMBS
-from bvr_datasets.opencap.paths import LABVALIDATION
-
-PROCESSED = LABVALIDATION / "processed"
 
 #: A foot above this is loaded — the threshold the peter and Parkour comparisons use.
 CONTACT_N = 50.0
@@ -107,7 +101,7 @@ ONSET_N = 50.0
 COLOURS = {"ours": "#0072B2", "plates": "#D55E00"}
 
 
-def limb_forces(kindyn: np.lib.npyio.NpzFile) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+def limb_forces(kindyn: dict[str, np.ndarray]) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
     """``(force (N, 4, 3), linear root residual (N,) in BW, angular residual (N,) in N·m)``.
 
     The per-limb force is the solve's ``contact_forces_world`` folded onto each limb's
@@ -115,7 +109,7 @@ def limb_forces(kindyn: np.lib.npyio.NpzFile) -> tuple[np.ndarray, np.ndarray, n
     ``base_wrench[:3]`` is a force, and a solve can balance every force and still leave an
     unexplained moment, which ``base_wrench[3:]`` carries.
     """
-    members = _limb_members([str(x) for x in kindyn["joint_names"]])
+    members = limb_members([str(x) for x in kindyn["joint_names"]])
     forces = np.asarray(kindyn["contact_forces_world"][0], float)
     wrench = np.asarray(kindyn["base_wrench"][0], float)
     body_weight = float(np.asarray(kindyn["total_mass"], float)[0]) * 9.81
@@ -124,7 +118,7 @@ def limb_forces(kindyn: np.lib.npyio.NpzFile) -> tuple[np.ndarray, np.ndarray, n
             np.linalg.norm(wrench[:, 3:], axis=-1))
 
 
-def clip_series(run_dir: Path) -> dict[str, np.ndarray]:
+def clip_series(clip: Path) -> dict[str, np.ndarray]:
     """One clip's plate and solved limb forces, in the OpenSim ground frame, unseen NaN.
 
     Both sides are carried BACK to the mocap frame (``Rᵀ``) rather than compared in our
@@ -136,12 +130,12 @@ def clip_series(run_dir: Path) -> dict[str, np.ndarray]:
     A frame is scored only where the plate saw the limb AND the reconstruction called the
     frame valid; everything else is NaN, which every reduction below skips.
     """
-    sensor = np.load(run_dir / "sensor_forces.npz", allow_pickle=True)
-    kindyn = np.load(run_dir / "kindyn_1.npz", allow_pickle=True)
+    sensor = np.load(clip / SENSOR_FORCES, allow_pickle=True)
+    kindyn = files.load_npz(clip / paths.KINDYN_1, "bvr-kindyn")
     plates_all = np.asarray(sensor["reaction_world"], float)            # (N, 4, 3) our world
     ours_all, linear, angular = limb_forces(kindyn)
     if len(ours_all) != len(plates_all):
-        print(f"  {run_dir.parent.name}: the plates cover {len(plates_all)} frames and the body "
+        print(f"  {clip.name}: the plates cover {len(plates_all)} frames and the body "
               f"{len(ours_all)} — comparing the first {min(len(plates_all), len(ours_all))}")
     n = min(len(plates_all), len(ours_all))
     valid = np.asarray(kindyn["valid_mask"][0], bool)[:n]
@@ -334,25 +328,20 @@ def table(rows: dict[str, dict[str, float]]) -> list[str]:
 
 def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
-    ap.add_argument("--source", type=Path, default=PROCESSED, help="the processed clip root")
-    ap.add_argument("--run", default="human_optim", help="run directory under processed/out/<clip>/")
+    ap.add_argument("--save-dir", type=Path, required=True, help="the run root")
     args = ap.parse_args(argv)
 
-    out_root = args.source / "out"
-    clips = [c for c in sorted(out_root.iterdir()) if c.is_dir() and not c.name.startswith("_")
-             and (c / args.run / "sensor_forces.npz").exists()
-             and (c / args.run / "kindyn_1.npz").exists()]
+    clips = [c for c in sorted(args.save_dir.iterdir()) if c.is_dir() and not c.name.startswith("_")
+             and (c / SENSOR_FORCES).exists() and (c / paths.KINDYN_1).exists()]
     if not clips:
-        print(f"[compare_opencap] no clip under {out_root} has both sensor_forces and kindyn_1"
-              f" under {args.run}/")
+        print(f"[compare_opencap] no clip under {args.save_dir} has both {SENSOR_FORCES} and {paths.KINDYN_1}")
         return 1
-    # the baseline run keeps _compare/; a variant gets _compare_<its suffix>/
-    compare_dir = out_root / ("_compare" + args.run.removeprefix("human_optim"))
+    compare_dir = args.save_dir / "_compare"
     compare_dir.mkdir(parents=True, exist_ok=True)
 
     rows, pooled = {}, []
     for clip in clips:
-        series = clip_series(clip / args.run)
+        series = clip_series(clip)
         pooled.append(series)
         rows[clip.name] = metrics(series)
         plot(clip.name, series, compare_dir / f"{clip.name}.png")
@@ -377,7 +366,7 @@ def main(argv: list[str] | None = None) -> int:
         print(f"\n{name}" + "".join(f" {k}={v:.3f}" for k, v in rows[name].items()))
 
     lines = [f"# OpenCap LabValidation — solved foot forces vs the plates "
-             f"({len(clips)} clips, run `{args.run}`)", "",
+             f"({len(clips)} clips, run `{args.save_dir}`)", "",
              *table(rows), "",
              f"Both feet pooled, vectors in the OpenSim ground frame (y up), over the frames "
              f"the plates saw and the reconstruction called valid. Angle over frames where "

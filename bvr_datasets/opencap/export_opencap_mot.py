@@ -39,18 +39,17 @@ Only the feet are exported — the layout has no column for a hand, and these tr
 hand contact.
 
 Which contact frames belong to a foot is read off their PARENT JOINT rather than their
-name, exactly as the comparison's ``_limb_members`` does, so the two cannot disagree and
+name, exactly as the comparison's ``limb_members`` does, so the two cannot disagree and
 a body carrying non-limb frames (``sacrum``, ``chest``, ``head``) does not trip a name
 rule that was written for the hands-and-feet rigs.
 
-Output ``processed/out/<clip>/<run>/estimated_forces.mot`` (19 columns at 60 Hz, the
-dataset's header style) and ``estimated_forces.npz`` beside it. ``--run`` names the run
-directory, so a variant chain (``human_optim_floorplane``) exports its own file.
+Output ``<run>/<clip>/human_optim/estimated_forces.mot`` (19 columns at 60 Hz, the
+dataset's header style) and ``estimated_forces.npz`` beside it, for every clip of the run root
+that has a ``kindyn_1.npz``.
 
 Usage::
 
-    uv run --no-sync python bvr_datasets/opencap/export_opencap_mot.py
-    uv run --no-sync python bvr_datasets/opencap/export_opencap_mot.py --run human_optim_floorplane
+    uv run python bvr_datasets/opencap/export_opencap_mot.py --save-dir <run>
 """
 
 from __future__ import annotations
@@ -62,13 +61,11 @@ import numpy as np
 import torch
 
 
+from bvr import body, files, paths
+from bvr.terms import objective
+from bvr_datasets._rigs import LIMBS, human, limb_members
 from bvr_datasets.opencap.plates import LOADED_N, cop_free_torque, vertical_free_torque
 from bvr_datasets.opencap.sensor_forces import PROCESSED, world_from_mocap
-from bvr_datasets._common import _limb_members
-from bvr.body import load_body
-from bvr.human_optim.measured_contacts import LIMBS
-from bvr.human_optim.qmath import normalize_q
-from bvr.npz_io import atomic_savez
 
 #: The 19 columns, in the dataset's order. ``R`` is the right foot, ``L`` the left.
 COLUMNS = ["time"] + [f"{side}_ground_{field}" for side in ("R", "L")
@@ -103,28 +100,14 @@ def plate_triple(force: np.ndarray, moment: np.ndarray, fallback: np.ndarray,
 
 
 @torch.no_grad()
-def frame_positions(kindyn: dict, chunk: int = 64) -> np.ndarray:
-    """Re-pose the saved ``q`` → contact-frame world positions ``(N, F, 3)``.
-
-    The stored global ``scale`` is re-applied about the pelvis, the same operation
-    ``estimate_contacts`` and ``measure_contacts`` do, so the frames sit at the
-    body's metric size.
-    """
+def frame_positions(kindyn: dict) -> np.ndarray:
+    """Re-pose the first person's saved ``q`` → contact-frame world positions ``(N, F, 3)``."""
     names = [str(x) for x in kindyn["contact_frame_names"]]
-    body = load_body(device="cpu", frames_allow=names)
-    if list(body.contact_frame_names) != names:
+    rig = human("cpu", names)
+    if list(rig.contact_frames.names) != names:
         raise SystemExit("the body's contact frames do not match the run's")
-    betas = torch.as_tensor(kindyn["betas"][0], dtype=torch.float32)
-    q = torch.as_tensor(kindyn["q"][0], dtype=torch.float32)
-    scale = float(np.asarray(kindyn["scale"], np.float32)[0])
-    posed = []
-    for start in range(0, q.shape[0], chunk):
-        end = min(start + chunk, q.shape[0])
-        out = body.forward(betas[None].expand(end - start, -1),
-                           normalize_q(q[start:end], body.num_joints))
-        root = out.joints[:, :1, :]
-        posed.append(root + scale * (out.frames_world[..., :3] - root))
-    return torch.cat(posed, 0).numpy().astype(np.float64)
+    state = objective.posed(body.bake(rig, torch.as_tensor(kindyn["betas"][:1])), torch.as_tensor(kindyn["q"][:1]))
+    return body.contact_frames(state)[0, ..., :3].numpy().astype(np.float64)
 
 
 def floor_y(clip: Path) -> float:
@@ -144,7 +127,7 @@ def foot_wrenches(kindyn: dict, rotation: np.ndarray, translation: np.ndarray, y
     contact frames, flattened onto the floor plane. It is only used on the rare row whose
     COP does not exist (see :func:`plate_triple`), never where the inversion applies.
     """
-    members = _limb_members([str(x) for x in kindyn["joint_names"]])       # LIMBS order
+    members = limb_members([str(x) for x in kindyn["joint_names"]])        # LIMBS order
     parents = [int(p) for p in kindyn["contact_frame_parents"]]
     points = frame_positions(kindyn)                                # (N, F, 3) our world
     forces = np.asarray(kindyn["frame_forces"][0], np.float64)      # (N, F, 3) our world
@@ -175,8 +158,8 @@ def write_mot(path: Path, table: np.ndarray) -> None:
 
 
 def export(clip: Path, run_dir: Path) -> int:
-    """Convert one clip's solved forces into the dataset's force-file form."""
-    kindyn = dict(np.load(run_dir / "kindyn_1.npz", allow_pickle=True))
+    """Convert one clip's solved forces (``run_dir/kindyn_1.npz``) into the dataset's force-file form."""
+    kindyn = files.load_npz(run_dir / "kindyn_1.npz", "bvr-kindyn")
     rotation, translation = world_from_mocap(clip)
     y0 = floor_y(clip)
     wrenches = foot_wrenches(kindyn, rotation, translation, y0)
@@ -192,7 +175,7 @@ def export(clip: Path, run_dir: Path) -> int:
     table = np.stack(columns, 1)
 
     write_mot(run_dir / "estimated_forces.mot", table)
-    atomic_savez(
+    np.savez(
         run_dir / "estimated_forces.npz",
         columns=np.array(COLUMNS), table=table.astype(np.float32),
         limbs=np.array(list(saved)),
@@ -214,13 +197,13 @@ def export(clip: Path, run_dir: Path) -> int:
 def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     ap.add_argument("--source", type=Path, default=PROCESSED, help="the processed clip root")
-    ap.add_argument("--run", default="human_optim", help="run directory under processed/out/<clip>/")
+    ap.add_argument("--save-dir", type=Path, required=True, help="the run root")
     args = ap.parse_args(argv)
 
     written = 0
     for clip in sorted(p for p in args.source.iterdir()
                        if (p / "forces.npz").exists() and (p / "meta.json").exists()):
-        run_dir = args.source / "out" / clip.name / args.run
+        run_dir = (args.save_dir / clip.name / paths.KINDYN_1).parent
         if not (run_dir / "kindyn_1.npz").exists():
             print(f"{clip.name}: no kindyn_1.npz, skipped")
             continue

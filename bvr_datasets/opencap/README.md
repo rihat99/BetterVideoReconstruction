@@ -1,20 +1,23 @@
 # opencap — OpenCap LabValidation
 
 OpenCap LabValidation (Uhlrich et al., PLOS Comp Biol 2023): 10 subjects x 17 trials, five static iPhones (720x1280 portrait,
-60 fps), Vicon markers (100 Hz) and two floor force plates (2000 Hz). We import 12 clips: subjects 2 / 3 / 4 x walking1, squats1,
-STS1, DJ1 from camera `Cam1`.
+60 fps), Vicon markers (100 Hz) and two floor force plates (2000 Hz). We import camera `Cam1`.
 
 - **Where:** raw `<data root>/LabValidation_withVideos/subject*/` (`paths.py: LABVALIDATION`); imported
-  `LabValidation_withVideos/processed/<subject>_<trial>_<cam>/{video.mp4, forces.npz, markers.npz, meta.json, sync.json}`; results `processed/out/<clip>/`.
-- **Import:** `uv run --no-sync python bvr_datasets/opencap/import_opencap.py [--subjects 2,3,4 --trials … --camera Cam1 --skip-existing]`;
-  `sync_opencap.py [--clips …] [--joints RUN]` measures each clip's video-to-mocap offset from the video → `sync.json`, then
-  `import_opencap.py --resample-only` re-reads the plates at the corrected times; `sensor_forces.py [--run human_optim]`
-  rotates the plates into our world → `<clip>/human_optim/sensor_forces.npz`.
-- **Run:** `uv run --no-sync python scripts/pipeline.py --dataset opencap [--variant floorplane|floorplane_edgev] [--dry-run]` (`configs/dataset.toml`) with
-  `configs/pipeline_opencap.toml` (a delta over the peter config) + `bvr_datasets/peter/configs/human_optimization_peter.toml`; `floorplane` (`configs/human_optimization_floorplane.toml`, a delta over the general config)
-  runs on a synthetic support scene — feet + sit-bone frames, no hands, `floor_gate_m = 0`; `_edgev` adds the `kindyn_1` edge knobs.
-- **Score:** `export_opencap_mot.py --run <run>` folds our foot forces into the plates' triple (force, centre of pressure, free moment;
-  `plates.py`) → `<run>/estimated_forces.npz` + OpenSim `.mot`; `compare_opencap_plates.py --run <run>` scores it with the published
-  GRF protocol; `compare_opencap_forces.py --run <run>` compares per-foot newtons.
-- **View / tests:** `scripts/view_3d.py processed/out/<clip>/` draws the plates (orange, `bvr_datasets/_rigs.py`) and the exported estimate
-  (blue, `viewer.py`); `tests/test_opencap_forces.py`, `test_support_scene.py`, `test_viewer_plate_forces.py`.
+  `LabValidation_withVideos/processed/<clip>/{video.mp4, forces.npz, markers.npz, meta.json, sync.json}`; the stored runs in
+  `processed/out/<clip>/` (`human_optim_floorplane/` on 161 clips, the plain `human_optim/` on 12).
+- **Import:** `uv run python bvr_datasets/opencap/import_opencap.py [--subjects 2,3,4 --trials … --camera Cam1 --skip-existing]`;
+  `sync_opencap.py --save-dir <run> [--clips …] [--joints]` measures each clip's video-to-mocap offset from the run's keypoints
+  (or its kindyn joints) → `sync.json`, then `import_opencap.py --resample-only` re-reads the plates at the corrected times.
+- **Videos:** a run reads a folder of links `<clip>.mp4`:
+  `mkdir -p <videos> && for c in <data root>/LabValidation_withVideos/processed/*/; do [ -f "${c}video.mp4" ] && ln -s "${c}video.mp4" "<videos>/$(basename $c).mp4"; done`
+- **Run:** the force-rig recipe of `bvr_datasets/peter/` with `configs/opencap.toml` (the peter delta, no frame subsampling,
+  leaner VGGT chunks): `scripts/pipeline.py`, then `python -m bvr_datasets.peter.chain` (see its README);
+  `sensor_forces.py --save-dir <run>` rotates the plates into our world → `<run>/<clip>/human_optim/sensor_forces.npz`.
+  The stored `floorplane` runs (a synthetic support scene, feet and sit-bone frames, shod heels) are not reproducible on the
+  rebuilt core: it has no way to push a contact frame out along its normal (the 3 cm heel of a running shoe).
+- **Score:** `export_opencap_mot.py --save-dir <run>` folds our foot forces into the plates' triple (force, centre of pressure,
+  free moment; `plates.py`) → `human_optim/estimated_forces.npz` + OpenSim `.mot`; `compare_opencap_plates.py --save-dir <run>
+  [--clips <list>]` scores it with the published GRF protocol (→ `<run>/_plates/summary.md`); `compare_opencap_forces.py
+  --save-dir <run>` compares per-foot newtons (→ `<run>/_compare/`).
+- **Tests:** `tests/test_opencap_forces.py`.

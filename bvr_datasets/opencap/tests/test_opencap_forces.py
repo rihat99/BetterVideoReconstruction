@@ -22,6 +22,7 @@ import numpy as np
 import pytest
 
 
+from bvr_datasets import _rigs
 from bvr_datasets.opencap.export_opencap_mot import COLUMNS, plate_triple, write_mot
 from bvr_datasets.opencap.plates import LOADED_N, cop_free_torque, origin_moment
 from bvr_datasets.opencap.sensor_forces import main as sensor_forces_main
@@ -165,8 +166,6 @@ def _rotation(axis: list[float], degrees: float) -> np.ndarray:
 
 def test_sensor_forces_rotates_the_plates_and_masks_the_unseen(tmp_path: Path) -> None:
     """The plate vectors land in our world, uncaptured limb-frames land as NaN."""
-    from bvr.human_optim.measured_contacts import LIMBS
-
     rotation = _rotation([0.3, 1.0, 0.2], 118.0) @ _rotation([1.0, 0.0, 0.0], 168.0)
     translation = np.array([0.42, 1.31, 4.05])
     rng = np.random.default_rng(2)
@@ -179,7 +178,7 @@ def test_sensor_forces_rotates_the_plates_and_masks_the_unseen(tmp_path: Path) -
     clip = tmp_path / "subject2_walking1_cam1"
     clip.mkdir()
     np.savez(clip / "forces.npz", force=force, cop=cop, free_torque=free, captured=captured,
-             limbs=np.array(LIMBS), fps=np.float32(60.0), mass_kg=np.float32(72.3),
+             limbs=np.array(_rigs.LIMBS), fps=np.float32(60.0), mass_kg=np.float32(72.3),
              height_m=np.float32(1.81), source=np.str_("synthetic"))
     (clip / "meta.json").write_text(json.dumps({"R_cam_from_mocap": rotation.tolist(),
                                                 "t_cam_from_mocap": translation.tolist()}))
@@ -187,8 +186,8 @@ def test_sensor_forces_rotates_the_plates_and_masks_the_unseen(tmp_path: Path) -
     (out / "geocalib").mkdir(parents=True)
     np.savez(out / "geocalib" / "gravity.npz", gravity_world=rotation @ np.array([0.0, -1.0, 0.0]))
 
-    assert sensor_forces_main(["--source", str(tmp_path)]) == 0
-    sensor = np.load(out / "human_optim" / "sensor_forces.npz", allow_pickle=True)
+    assert sensor_forces_main(["--source", str(tmp_path), "--save-dir", str(tmp_path / "out")]) == 0
+    sensor = np.load(out / _rigs.SENSOR_FORCES, allow_pickle=True)
     seen = captured[..., None]
     assert np.allclose(sensor["reaction_world"][captured], (force @ rotation.T)[captured], atol=1e-3)
     assert np.allclose(sensor["cop_world"][captured],

@@ -3,8 +3,8 @@
 ``bvr_datasets/opencap/import_opencap.py`` stores each clip's plate ground truth per video frame in
 the dataset's own OpenSim ground frame (right-handed, **Y up**, floor at y≈0):
 ``processed/<clip>/forces.npz`` with ``force``/``cop``/``free_torque`` ``(N, 4, 3)`` in
-:data:`~bvr.human_optim.measured_contacts.LIMBS` order plus a ``captured (N, 4)`` mask. The
-contact stages and the force comparison read ``sensor_forces.npz`` instead — the same
+:data:`~bvr_datasets._rigs.LIMBS` order plus a ``captured (N, 4)`` mask. The
+measured contacts and the force comparison read ``sensor_forces.npz`` instead — the same
 vectors in the reconstruction's world frame. This script is that rotation.
 
 Our world is VGGT's first-frame camera (OpenCV convention), and the dataset ships the
@@ -35,15 +35,13 @@ foot off the plates) are written NaN, which every reader already treats as *not
 measured* rather than *no force*. The hands are written as measured zeros — these trials
 have no hand contact at all.
 
-Output ``processed/out/<clip>/<run>/sensor_forces.npz``, beside the run, exactly where
+Output ``<run>/<clip>/human_optim/sensor_forces.npz`` for every clip the run root holds, exactly where
 ``bvr_datasets/parkour/sensor_forces.py`` and ``bvr_datasets/peter/sensor_forces.py`` put their
-rigs' own. ``--run`` names the run directory, so a variant chain
-(``human_optim_floorplane``) gets its own copy of the same rotated plates.
+rigs' own.
 
 Usage::
 
-    uv run --no-sync python bvr_datasets/opencap/sensor_forces.py
-    uv run --no-sync python bvr_datasets/opencap/sensor_forces.py --run human_optim_floorplane
+    uv run python bvr_datasets/opencap/sensor_forces.py --save-dir <run>
 """
 
 from __future__ import annotations
@@ -54,12 +52,11 @@ from pathlib import Path
 
 import numpy as np
 
-
-from bvr.human_optim.measured_contacts import LIMBS
-from bvr.npz_io import atomic_savez
+from bvr import paths
+from bvr_datasets._rigs import LIMBS, SENSOR_FORCES
 from bvr_datasets.opencap.paths import LABVALIDATION
 
-#: Where ``bvr_datasets/opencap/import_opencap.py`` writes the clips and the pipeline writes its runs.
+#: Where ``bvr_datasets/opencap/import_opencap.py`` writes the clips.
 PROCESSED = LABVALIDATION / "processed"
 
 #: Mocap up axis — the OpenSim ground frame is Y up, so this is where "down" lives.
@@ -93,7 +90,7 @@ def gravity_check(out_clip: Path, rotation: np.ndarray) -> tuple[float, str]:
     ``"ground"`` is a plane fitted to our own reconstructed floor, and the fallback is
     world-down, which agrees with nothing in particular.
     """
-    path = out_clip / "geocalib" / "gravity.npz"
+    path = out_clip / paths.GRAVITY
     if not path.exists():
         return float("nan"), "none"
     gravity = np.load(path)
@@ -107,19 +104,19 @@ def gravity_check(out_clip: Path, rotation: np.ndarray) -> tuple[float, str]:
 def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     ap.add_argument("--source", type=Path, default=PROCESSED, help="the processed clip root")
-    ap.add_argument("--run", default="human_optim", help="run directory under processed/out/<clip>/")
+    ap.add_argument("--save-dir", type=Path, required=True, help="the run root")
     args = ap.parse_args(argv)
 
     written = 0
     clips = sorted(p for p in args.source.iterdir()
                    if (p / "forces.npz").exists() and (p / "meta.json").exists())
     for clip in clips:
-        out_clip = args.source / "out" / clip.name
+        out_clip = args.save_dir / clip.name
         if not out_clip.is_dir():
             print(f"{clip.name}: no out tree, skipped")
             continue
         gt = np.load(clip / "forces.npz", allow_pickle=True)
-        if [str(x) for x in gt["limbs"]] != LIMBS:
+        if tuple(str(x) for x in gt["limbs"]) != LIMBS:
             raise SystemExit(f"{clip.name}: force channels are not {LIMBS}")
         rotation, translation = world_from_mocap(clip)
 
@@ -133,10 +130,9 @@ def main(argv: list[str] | None = None) -> int:
         total[~captured.all(1)] = np.nan
 
         angle, gravity_source = gravity_check(out_clip, rotation)
-        out_dir = out_clip / args.run
-        out_dir.mkdir(parents=True, exist_ok=True)
-        atomic_savez(
-            out_dir / "sensor_forces.npz",
+        (out_clip / SENSOR_FORCES).parent.mkdir(parents=True, exist_ok=True)
+        np.savez(
+            out_clip / SENSOR_FORCES,
             reaction_world=reaction.astype(np.float32),
             total_world=total.astype(np.float32),
             cop_world=cop.astype(np.float32),
