@@ -25,7 +25,7 @@ from __future__ import annotations
 import argparse
 import logging
 import sys
-from collections.abc import Collection, Sequence
+from collections.abc import Sequence
 
 import better_human as bh
 import numpy as np
@@ -47,8 +47,8 @@ LABEL_METHOD = ("boards-v3: measured |F| with hysteresis; per loaded span, on th
                 "scene for >= 1/3 of the span, else its nearest")
 
 
-def chain(arguments: Sequence[str], frames: Collection[str] = _rigs.LIMB_FRAMES) -> int:
-    """Run the human steps with a body of only the contact frames ``frames``; return the process exit code."""
+def chain(arguments: Sequence[str]) -> int:
+    """Run the human steps on the body of the rig's contact frames; return the process exit code."""
     parser = argparse.ArgumentParser(add_help=False)
     parser.add_argument("--measured", action="store_true")
     parser.add_argument("--steps", default=",".join(STEPS))
@@ -58,7 +58,7 @@ def chain(arguments: Sequence[str], frames: Collection[str] = _rigs.LIMB_FRAMES)
         parser.error(f"unknown step(s) {', '.join(unknown)}; the human steps are {', '.join(STEPS)}")
 
     def load(stage: run.Stage):
-        human = _rigs.human(stage.device, frames)
+        human = _rigs.human(stage.device)
         if stage.step in CONTACT_FILES and options.measured:
             return lambda clip: measured_contacts(clip, human, *CONTACT_FILES[stage.step])
         if stage.step in CONTACT_FILES:
