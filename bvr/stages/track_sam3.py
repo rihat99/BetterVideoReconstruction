@@ -214,8 +214,7 @@ def _track(tracker, frame_paths: list[Path], seeds: list[tuple[str, object]], pa
         (out / f"{k:02d}").mkdir()
     writer = None
     if overlay_fps is not None:
-        writer = cv2.VideoWriter(str(out / "mask_overlay.mp4"), cv2.VideoWriter_fourcc(*"mp4v"), overlay_fps,
-                                 (width, height))
+        writer = files.video_writer(out / "mask_overlay.mp4", overlay_fps, (width, height))
     start = 0
     with tempfile.TemporaryDirectory(prefix="sam3_part_") as scratch:
         while True:

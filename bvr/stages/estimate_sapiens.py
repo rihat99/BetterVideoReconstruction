@@ -147,7 +147,7 @@ def _overlay(path: Path, frame_paths: list[Path], keypoints: np.ndarray, scores:
     link_colours = np.asarray(metainfo["skeleton_link_colors"], np.int32)[:, ::-1]  # RGB -> BGR
     point_colours = np.asarray(metainfo["keypoint_colors"], np.int32)[:, ::-1]
     first = cv2.imread(str(frame_paths[0]))
-    writer = cv2.VideoWriter(str(path), cv2.VideoWriter_fourcc(*"mp4v"), fps, first.shape[1::-1])
+    writer = files.video_writer(path, fps, first.shape[1::-1])
     for frame, frame_path in enumerate(frame_paths):
         image = cv2.imread(str(frame_path))
         for person in np.flatnonzero(valid[:, frame]):

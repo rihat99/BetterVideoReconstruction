@@ -80,8 +80,8 @@ def load(stage: run.Stage) -> Callable[[paths.Clip], None]:
             overlay = clip.path(paths.SAM3D_OVERLAY).with_name("overlay.partial.mp4")
             if settings["overlay"]:
                 overlay.parent.mkdir(parents=True, exist_ok=True)
-                writer = cv2.VideoWriter(str(overlay), cv2.VideoWriter_fourcc(*"mp4v"),
-                                         float(settings["fps"] or files.frame_rate(clip.video)), (width, height))
+                writer = files.video_writer(
+                    overlay, float(settings["fps"] or files.frame_rate(clip.video)), (width, height))
             for frame, frame_path in enumerate(frame_paths):
                 image = cv2.imread(str(frame_path))
                 rendered = image
