@@ -13,9 +13,8 @@ dependencies = [
     "torchvision",
     # sam3 (video human tracker)
     "sam3",
-    "decord",
     "psutil",
-    # Sapiens2 (Meta) — pose / pointmap / normal heads. Distribution name is ``sapiens``;
+    # Sapiens2 (Meta) pose. Distribution name is ``sapiens``;
     # the path source below points at the submodule.
     "sapiens",
     # sam-3d-body deps (no pyproject.toml in repo)
@@ -55,21 +54,17 @@ dependencies = [
     # pulled transitively via MoGe; pinned directly now that MoGe is gone).
     "utils3d @ git+https://github.com/EasternJournalist/utils3d.git@3fab839f0be9931dac7c8488eb0e1600c236e183",
     # GeoCalib (cvg, ECCV'24) — single-image camera + gravity calibration, submodule.
-    # Backs estimate_gravity_geocalib.py: the camera moves/tilts so gravity can't come
+    # Backs estimate_gravity.py: the camera moves/tilts so gravity can't come
     # from it; GeoCalib recovers it per frame. Inference-only deps (adds kornia).
     "geocalib",
     "scikit-learn>=1.4",
-    "transformers>=4.50",
-    "accelerate>=0.30",
     "trimesh>=4.0",
-    # SMPL-X body model (pip package) — backs convert_mhr_to_smplx.py. BetterHuman's
-    # native SMPLX has no jaw/eye/face deformation yet, so the MHR→SMPL-X fitter uses
-    # the standard smplx package (loads ../BetterHuman/models/smplx/SMPLX_*.npz).
+    # SMPL-X body model (pip package): only bvr_datasets/parkour/score_parkour_pose.py still uses
+    # it; the stages pose SMPL-X with BetterHuman.
     "smplx>=0.1.28",
     # sam3 still uses pkg_resources, which setuptools 80+ no longer ships by
     # default; pin below that cutoff so ``import pkg_resources`` keeps working.
     "setuptools<80",
-    "open3d>=0.19.0",
     # bvr_datasets/opencap/import_opencap.py reads the OpenCap trial videos (get_ffmpeg_exe,
     # read_frames).
     "imageio-ffmpeg>=0.6.0",
