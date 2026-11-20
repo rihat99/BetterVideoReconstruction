@@ -85,19 +85,27 @@ def cone_edges(normals: torch.Tensor, half_angle_deg: float) -> torch.Tensor:
     return normalize(edges, dim=-1)
 
 
-def cone_forces(activation: torch.Tensor, edges: torch.Tensor) -> torch.Tensor:
-    """Cached value: world forces ``(P, T, F, 3)`` in newtons from ``activation (P, T, F, 4)``.
+def cone_forces(activation: torch.Tensor, edges: torch.Tensor, weight: torch.Tensor) -> torch.Tensor:
+    """Cached value: world forces ``(P, T, F, 3)`` in newtons from ``activation (P, T, F, 4)`` in body weights.
 
-    A force is the softplus of its four activations along its pyramid's ``edges (P, T, F, 4, 3)``: it cannot leave
-    the pyramid, and it has a gradient everywhere, which a coefficient clamped at zero would not. Where a contact
-    frame may carry no force its edges are zero.
+    A force is ``softplus(weight * activation)`` newtons along each of the four ``edges (P, T, F, 4, 3)`` of its
+    pyramid, with ``weight (P,)`` the body weights: it cannot leave the pyramid, it is the activation itself above
+    a newton or so, and it has a gradient everywhere, which a coefficient clamped at zero would not. Where a
+    contact frame may carry no force its edges are zero. The activations are in body weights so that they are of
+    the size of the pose's coordinates: one line search then steps both, and its first step is not lost in
+    rounding.
     """
-    return torch.einsum("ptfg,ptfgd->ptfd", softplus(activation), edges)
+    return torch.einsum("ptfg,ptfgd->ptfd", softplus(weight[:, None, None, None] * activation), edges)
 
 
 def stencil_rows(time: motion.Time, tracked: torch.Tensor) -> torch.Tensor:
-    """The frames whose inverse dynamics count, ``(P, T)`` bool: ``t - h`` to ``t + h`` are all ``tracked (P, T)``."""
-    return pad(time.rows(tracked, 2), (time.stride, time.stride))
+    """The frames whose inverse dynamics count, ``(P, T)`` bool: ``t - h`` to ``t + h`` are all ``tracked (P, T)``.
+
+    A frame beyond an end of the clip counts as tracked. The first and last ``h`` frames have no stencil, and
+    :func:`rates` takes the body at rest there: the balance of a body at rest still says which contacts hold it.
+    A frame beside a tracking gap does not count: what it would be differenced against is a held pose.
+    """
+    return time.rows(pad(tracked, (time.stride, time.stride), value=True), 2)
 
 
 def rates(time: motion.Time, velocity: torch.Tensor, acceleration: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
@@ -105,7 +113,8 @@ def rates(time: motion.Time, velocity: torch.Tensor, acceleration: torch.Tensor)
 
     ``velocity (P, T - h, nv)`` and ``acceleration (P, T - 2h, nv)`` are the strided derivatives of the pose per
     reference step (:func:`bvr.terms.motion.velocity` and its difference). Frame ``t`` gets the central
-    differences over ``t - h``, ``t``, ``t + h``; the first and last ``h`` frames have no such stencil and get zeros.
+    differences over ``t - h``, ``t``, ``t + h``; the first and last ``h`` frames have no such stencil and get
+    zeros, a body at rest.
     """
     stride, rate = time.stride, motion.REFERENCE_RATE
     ends = (0, 0, stride, stride)
@@ -162,9 +171,10 @@ def register(problem: optim.Problem, identity: bh.Identity, *, edges: torch.Tens
     no row counts for such a person, so every term here is zero and the fit stays kinematic.
     """
     rows = stencil_rows(time, tracked) & held.any(dim=(1, 2))[:, None]
-    scale = 0.5 / (rows.sum(dim=1).clamp_min(1) * weight(identity).square())
+    newtons = weight(identity)
+    scale = 0.5 / (rows.sum(dim=1).clamp_min(1) * newtons.square())
     costs = joint_weights(identity.model, multipliers)
-    problem.cached(partial(cone_forces, edges=edges), name="forces", reads=("activation",))
+    problem.cached(partial(cone_forces, edges=edges, weight=newtons), name="forces", reads=("activation",))
     problem.cached(partial(torques, time=time), name="torques", reads=("body", "velocity", "acceleration", "forces"))
 
     term = partial(problem.scalar, weight=0.0)

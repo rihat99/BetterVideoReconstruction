@@ -70,6 +70,8 @@ def kinematics_problem(
         rows = time.rows(tracked, order)
         term(f"{name}_root", motion.mean_square(rows, slice(0, 6)), reads=(name,))
         term(f"{name}_joint", motion.mean_square(rows, slice(6, None)), reads=(name,))
+    for part, columns in (("root", slice(0, 6)), ("joint", slice(6, None))):
+        term(f"interleave_{part}", motion.interleave(human.model, time, tracked, columns), reads=("pose",))
     term("radial_velocity", motion.radial_velocity(time, camera.centers(cameras[0]), tracked))
     term("contact_velocity", motion.contact_velocity(time, **config["contact_velocity"]))
     term("penetration", scene.penetration(**{

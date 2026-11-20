@@ -23,7 +23,6 @@ labels that held it.
 from __future__ import annotations
 
 import logging
-import math
 from collections.abc import Callable
 
 import better_human as bh
@@ -199,7 +198,7 @@ def _detect_contacts(state: bh.HumanState, evidence: Evidence, config: dict) -> 
                                          prune_margin_m=auto["prune_margin_m"])
         found = detector.detect(
             signals, drift, names=names, close_thresh_m=auto["detect_thresh_m"], exit_thresh_m=auto["detect_exit_m"],
-            min_frames=math.ceil(gate["detect_min_s"] * fps), still_m=gate["still_m"],
+            min_frames=gate["detect_min_frames"], still_m=gate["still_m"],
             still_override_m=gate["still_override_m"], max_dist_m=auto["max_dist_m"], conf_thresh=auto["conf_thresh"])
         labels.append(evidence.tensor(found.contact) & seen[:, None])
         drifts.append(drift)

@@ -113,7 +113,7 @@ video_dir = ""              # folder of the source videos; empty uses the exampl
 [optimizer]                 # shared by the kinematic and dynamic solves
 learning_rate = 0.01        # Adam
 learning_rate_decay = 0.1   # factor at 1/2 and at 3/4 of a phase
-lbfgs_history = 10          # L-BFGS memory of the kinematics_1 polish
+lbfgs_history = 10          # L-BFGS memory of the kinematics_1 polish and of kindyn_1's joint phase
 lbfgs_line_search = 10      # step sizes an L-BFGS step tries, each half the one before
 
 # Objective weights, one table per stage. Difference terms are per change over 1/30 s.
@@ -176,11 +176,11 @@ contact_acquisition = 1000
 contact_velocity = 4000
 
 [stages.kindyn_1]           # pose and contact forces together -> human_optim/kindyn_1.npz
-iterations = { warm_start = 200, joint = 150 }  # L-BFGS: forces at the frozen pose, then pose and forces
-warm_start_history = 20     # L-BFGS memory of the warm start
-gradient_tolerance = 1e-9   # the warm start stops below this gradient norm
+iterations = { forces = 200, joint = 150 }  # L-BFGS: the forces of the held pose, then pose and forces
+forces_history = 20         # L-BFGS memory of the forces phase; the joint phase has [optimizer].lbfgs_history
+gradient_tolerance = 1e-9   # the forces phase ends once no gradient entry is above this
 
-[stages.kindyn_1.weights]   # force and torque terms are in body weights squared
+[stages.kindyn_1.weights]   # the force and torque terms are in body weights squared
 reprojection_keypoints = 8
 reprojection_start = 30
 pose_prior = 300
@@ -284,7 +284,7 @@ conf_thresh = 0.1           # scene points below this confidence are ignored
 window_s = 0.35             # drift window (s)
 still_m = 0.04              # net drift at which stillness is one half (m)
 still_override_m = 0.01     # a frame pressing closer than this counts however fast it moves (m)
-detect_min_s = 0.1          # shortest raw detection (s); frames = ceil(s * fps)
+detect_min_frames = 3       # shortest raw detection, in frames at every rate (the fused labels have min_span_s)
 
 [contacts]                  # the contact readout -> human_optim/contacts_<n>.npz
 close_thresh_m = 0.03       # enter distance (m)
@@ -295,7 +295,7 @@ conf_thresh = 0.1           # scene points below this confidence are ignored
 conf_drop_q = 0.1           # drop this lowest-confidence fraction of the scene
 normal_k = 16               # neighbours of a scene normal
 prune_margin_m = 0.10       # scene candidates within this of the body (m)
-merge_dist_m = 0.03         # bridge a gap the frame moved less than this across (m); 0 disables
+merge_dist_m = 0.03         # bridge a gap the frame moved less than this across (m)
 merge_max_gap_s = 2.0       # only gaps shorter than this (s)
 merge_sdf_m = 0.08          # and only if it stayed this close to the scene throughout (m)
 
@@ -304,7 +304,7 @@ theta_bw = 0.02             # a frame carrying this fraction of body weight is l
 theta_hold_bw = 0.01        # and stays loaded until it drops below this
 gap_dstar_m = 0.05          # force this far from the scene is expensive (m)
 stillness_vstar_mps = 0.2   # force on a frame this fast is expensive (m/s)
-far_still_x = 4.0           # a far force label needs drift under this multiple of still_m; 0 disables
+far_still_x = 4.0           # a far force label needs drift under this multiple of still_m
 confirm_bw = 0.02           # load a pressing but moving frame must carry where the solve was heard
 mute_res_bw = 0.5           # root residual above which the solve's silence is not evidence
 iterations = 2000           # Adam iterations of the solve

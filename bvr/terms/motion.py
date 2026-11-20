@@ -77,6 +77,26 @@ def mean_square(rows: torch.Tensor, columns: slice) -> Term:
     return loss
 
 
+def interleave(model: Model, time: Time, tracked: torch.Tensor, columns: slice) -> Term:
+    """Term: neighbouring frames lie on one trajectory. Zero at a stride of one frame.
+
+    The strided derivatives tie frame ``t`` to ``t + h`` and never to ``t + 1``, so a clip filmed at 60 fps or more
+    is ``h`` trajectories that share only their evidence, and they drift apart: the root zig-zags by millimetres
+    between neighbours. The cost is the mean square of ``columns`` of the second difference of ``pose`` over
+    neighbouring frames, in m^2 and rad^2: how far a frame sits off the midpoint of its two neighbours, in plain
+    frame units. That damps the zig-zag and hardly prices a real acceleration, which is ``h^2`` times smaller
+    between neighbours than over a stride. At a stride of one frame the acceleration terms are this term already.
+    """
+    if time.stride == 1:
+        return lambda pose: pose.new_zeros(len(pose))
+    rows = tracked.unfold(1, 3, 1).all(dim=-1)
+
+    def loss(pose: torch.Tensor) -> torch.Tensor:
+        step = kinematics.difference(model, pose[:, :-1], pose[:, 1:])[..., columns]
+        return _mean((step[:, 1:] - step[:, :-1]).square(), rows)
+    return loss
+
+
 def radial_velocity(time: Time, centers: torch.Tensor, tracked: torch.Tensor) -> Term:
     """Term: the mean squared speed of the joints along their viewing rays, in m per reference step, squared.
 

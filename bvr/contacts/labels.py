@@ -48,7 +48,9 @@ def read(signals: detector.Signals, drift: torch.Tensor, points: torch.Tensor, l
     :param tracked: ``(T,)`` bool.
     :param contacts: ``[contacts]``, with ``gate`` = ``[contact_gate]`` and ``force`` = ``[contact_force]``.
     """
-    shortest, raw = math.ceil(contacts["min_span_s"] * fps), math.ceil(gate["detect_min_s"] * fps)
+    # A raw detection is a few frames at any frame rate: a longer bar at 60 fps removes the flicker a contact
+    # shows as before the spans are welded. The welded span is then held to a length in seconds.
+    shortest, raw = math.ceil(contacts["min_span_s"] * fps), gate["detect_min_frames"]
     seen = tracked[:, None]
     knees = [column for column, name in enumerate(names) if name.startswith("knee")]
     heels = [column for column, name in enumerate(names) if name.startswith("heel")]

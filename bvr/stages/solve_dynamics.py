@@ -96,8 +96,8 @@ def kindyn_1(clip: paths.Clip, human: bh.HumanModel, config: dict) -> None:
 
         weights, iterations, search = options["weights"], options["iterations"], config["optimizer"]
         result = optim.run(problem.with_(data={"labels": held[people]}), [
-            _lbfgs("forces", iterations["warm_start"], optim.LBFGS(
-                history=options["warm_start_history"], line_search=search["lbfgs_line_search"],
+            _lbfgs("forces", iterations["forces"], optim.LBFGS(
+                history=options["forces_history"], line_search=search["lbfgs_line_search"],
                 gradient_tolerance=options["gradient_tolerance"]),
                 weights={name: weights[name] for name in dynamics.TERMS},
                 free={"q": torch.zeros(human.model.nq, dtype=torch.bool, device=device)}),
@@ -108,7 +108,8 @@ def kindyn_1(clip: paths.Clip, human: bh.HumanModel, config: dict) -> None:
 
     state = objective.posed(identity, q)
     velocity = motion.velocity(human.model, time)(state.q)
-    forces = dynamics.cone_forces(activation, edges)
+    weight = dynamics.weight(identity)
+    forces = dynamics.cone_forces(activation, edges, weight)
     torques = dynamics.torques(state, velocity, time.difference(velocity), forces, time=time)
     counted = dynamics.stencil_rows(time, tracked) & held.any(dim=(1, 2))[:, None]
     root = torques[..., :6] * counted[..., None]
@@ -117,7 +118,6 @@ def kindyn_1(clip: paths.Clip, human: bh.HumanModel, config: dict) -> None:
                       dim=-1) * counted[..., None]
     parents = tensor(np.array(human.contact_frames.parent_joints))
     joints = len(human.spec.joint_names)
-    weight = dynamics.weight(identity)
     trust = confidence.force_confidence(root.cpu().numpy(), forces.cpu().numpy(), tracked.cpu().numpy(),
                                         weight.cpu().numpy())
     clip_trust = np.array([values[rows].mean() if rows.any() else np.nan
