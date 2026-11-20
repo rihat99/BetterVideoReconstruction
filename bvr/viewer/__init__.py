@@ -2,7 +2,7 @@
 
 * :mod:`bvr.viewer.loading` — one clip's numpy (scene, cameras, gravity, body sources, video),
 * :mod:`bvr.viewer.layers` — the adapter that turns it into BetterRobot layers,
-* the datasets' readers (``datasets/<name>/viewer.py``, ``datasets/_rigs.py``): the core never
+* the datasets' readers (``bvr_datasets/<name>/viewer.py``, ``bvr_datasets/_rigs.py``): the core never
   imports them, ``scripts/view_3d.py`` composes them into the ``read`` it hands the app,
 * :mod:`bvr.viewer.app` — the sidebar and clip switching, and :func:`view_3d`.
 

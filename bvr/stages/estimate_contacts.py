@@ -153,7 +153,7 @@ def _load_config(path: Path) -> dict:
     # than saying so.
     if "contact_confidence" not in cfg:
         raise SystemExit(f"[estimate_contacts] {path} has no [contact_confidence] section — "
-                         "run datasets/climbingvideos/calibrate_contact_confidence.py --write on it")
+                         "run bvr_datasets/climbingvideos/calibrate_contact_confidence.py --write on it")
     cfg["contact_confidence"] = confidence_coefficients(cfg["contact_confidence"])
     cfg.setdefault("runtime", {}).setdefault("device", "cuda")
     return cfg

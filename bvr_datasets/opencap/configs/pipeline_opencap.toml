@@ -1,0 +1,15 @@
+# Stage knobs for the OpenCap LabValidation runs (scripts/pipeline.py --dataset opencap): the peter
+# config — the clips share its failure mode (ONE static iPhone, so VGGT depth confidence is uniformly
+# low and the chamfer-based pre-fit is banned; see its [scale] / [fuse] comments) — with no frame
+# subsampling and leaner VGGT chunks. 12 clips, 720x1280 PORTRAIT @ 60 fps, one subject in a MoCap
+# lab with force plates (subjects 2/3/4 x walking1/squats1/STS1/DJ1, camera Cam1). Only the knobs
+# below differ from the base.
+base = "bvr_datasets/peter/configs/pipeline_peter.toml"
+
+[vggt]
+max_frames = 900            # cap per CAMERA VIEW; raised above the longest clip (subject4_STS1, 839 frames) so NO clip is subsampled and every output row stays one video frame — the force/marker arrays are indexed that way
+frame_chunk = 32            # chunked (as in pipeline_peter.toml; chunking matches the unchunked forward to bf16 rounding, ~3e-4). 128/65536 OOMs at 47 GB on the 800-frame portrait clips (subject4 squats1/STS1), so this dataset runs leaner
+token_chunk = 8192          # query tokens per chunk of the cross-frame attention (see frame_chunk)
+
+[human_optimization]
+config = "bvr_datasets/peter/configs/human_optimization_peter.toml"   # hands + feet contact frames only — what the force plates measure

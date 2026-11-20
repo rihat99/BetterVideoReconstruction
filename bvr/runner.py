@@ -6,7 +6,7 @@ assembled: :func:`stage_command` turns a chain step into the argv of its
 ``python -m bvr.stages.<name>`` call over a clip root, and :func:`sweep_command` does the
 same for the five model stages, which run once over a JSON manifest of clips (the model
 loads once and sweeps them all). ``scripts/pipeline.py`` and
-``datasets/climbingvideos/corpus.py`` both call these; nothing else builds a stage argv.
+``bvr_datasets/climbingvideos/corpus.py`` both call these; nothing else builds a stage argv.
 
 The chain, in order::
 

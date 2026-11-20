@@ -22,7 +22,7 @@ Run from CLI::
 
     python -m bvr.stages.measure_contacts \\
         --predictions out/clip/ --bodies kinematic_1 \\
-        --config datasets/peter/configs/human_optimization_peter.toml
+        --config bvr_datasets/peter/configs/human_optimization_peter.toml
 
 Reads:  human_optim/<bodies>.npz, human_optim/sensor_forces.npz,
         geometry/scene.npz, geometry/transform.npz
