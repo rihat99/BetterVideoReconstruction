@@ -153,7 +153,8 @@ def main(load: Callable[[Stage], Callable[[Clip], None]]) -> None:
 
 def stage(module: str, load: Callable[[Stage], Callable[[Clip], None]], arguments: Sequence[str]) -> int:
     """Run one step of ``bvr.stages.<module>`` over its clips; return the process exit code."""
-    import torch  # here, so that the chain's own process, which starts the stages, does not load torch
+    import cv2  # here, so that the chain's own process, which starts the stages, does not load cv2 or torch
+    import torch
 
     steps = {step.name: step for step in STEPS if step.module == module}
     if not steps:
@@ -189,6 +190,8 @@ def stage(module: str, load: Callable[[Stage], Callable[[Clip], None]], argument
     stage_config = _config(step, config)
     settings = stage_config["run"]
     torch.set_num_threads(settings["threads"])
+    # OpenCV keeps a pool of its own, one thread per core of the host unless capped.
+    cv2.setNumThreads(settings["threads"])
     torch.manual_seed(settings["seed"])
     if settings["deterministic"]:
         # cuBLAS reads this when it creates its handle, so it is set before the first CUDA call.
