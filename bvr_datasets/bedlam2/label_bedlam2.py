@@ -28,8 +28,8 @@ does not state, writing them next to it in the same directory:
     The force every labelled contact frame carries, solved at the frozen ground-truth
     pose by the ``kindyn_1`` force objective (:mod:`bvr_datasets.bedlam2.forces`): world
     newtons per contact frame, their sums per joint, the joint torques and the root
-    wrench that stays unexplained. The same fields as ``kindyn_1.npz``, so the viewer
-    draws them the same way. Needs ``contacts.npz``.
+    wrench that stays unexplained. The same fields as ``kindyn_1.npz``. Needs
+    ``contacts.npz``.
 
 ``--step contacts`` prints two numbers per run. The first is the support check: of the
 frames where the *mesh* comes within a centimetre of the floor, how many carry no label
@@ -54,7 +54,7 @@ ground truth stays exactly as imported.
 
 Usage::
 
-    # the 200 scenes `view_3d.py --bedlam` browses
+    # a deterministic sample of 200 scenes
     uv run python bvr_datasets/bedlam2/label_bedlam2.py --step masks --sample 200
     uv run python bvr_datasets/bedlam2/label_bedlam2.py --step contacts --sample 200
     uv run python bvr_datasets/bedlam2/label_bedlam2.py --step forces --sample 200 --workers 32
@@ -65,63 +65,49 @@ Usage::
     uv run python bvr_datasets/bedlam2/label_bedlam2.py --step select --apply
 
 Contact knobs live in ``bvr_datasets/bedlam2/configs/bedlam.toml`` under ``[bedlam]`` and the force
-solve's under ``[bedlam_forces]``; this CLI takes only targets.
+solve's under ``[bedlam_forces]``, which names the pipeline config the solve takes its
+``kindyn_1`` objective from; this CLI takes only targets.
 """
 from __future__ import annotations
 
 import argparse
 import json
 import multiprocessing as mp
+import os
 import sys
+import tomllib
 from datetime import datetime, timezone
 from pathlib import Path
 
 import numpy as np
 
+from bvr import config as configuration
 from bvr.paths import REPO_ROOT
-
-from bvr_datasets.climbingvideos import scene_db
-from bvr_datasets.bedlam2.paths import BEDLAM2_OUR
-from bvr_datasets.bedlam2.contacts import (
-    ENTER_M,
-    EXIT_M,
-    MAX_TILT_DEG,
-    MIN_SPAN_S,
-    STILL_MPS,
-    SUSPECT_M,
-    TOUCH_M,
-    WINDOW_S,
-    save_contacts,
-    scene_contacts,
-)
+from bvr_datasets.bedlam2.contacts import save_contacts, scene_contacts
 from bvr_datasets.bedlam2.forces import save_forces, scene_forces
 from bvr_datasets.bedlam2.masks import save_boxes, scene_masks
-from bvr.old_config import load_config, section
-from bvr.old_config import load_human_config
+from bvr_datasets.bedlam2.paths import BEDLAM2_OUR
+from bvr_datasets.climbingvideos import scene_db
 
 _STATE: dict = {}
 
 
 def _init_worker(data_root: str, device: str, knobs: dict, workers: int) -> None:
     """One body per worker process (and one CUDA context, or a fair share of the cores)."""
-    import os
-
     import torch
 
-    from bvr.body import load_body
+    from bvr import body
 
     dev = torch.device(device if torch.cuda.is_available() else "cpu")
     if dev.type == "cpu":   # a fair share of the cores, capped: 192 threads a worker only thrash
         torch.set_num_threads(min(16, max(1, (os.cpu_count() or 1) // workers)))
-    _STATE.update(paths=scene_db.ScenePaths(Path(data_root)), device=dev,
-                  body=load_body(device=dev), knobs=knobs)
+    _STATE.update(paths=scene_db.ScenePaths(Path(data_root)), human=body.load(dev), knobs=knobs)
 
 
 def _masks_worker(scene_id: str) -> tuple[str, str, int, int]:
     gt = _STATE["paths"].feature_dir("gt", scene_id)
     try:
-        fields = scene_masks(gt, body=_STATE["body"], device=_STATE["device"],
-                             masks_dir=gt / "masks")
+        fields = scene_masks(gt, human=_STATE["human"], masks_dir=gt / "masks")
         save_boxes(gt / "bboxes.npz", fields)
         return scene_id, "", int(fields["valid"].sum()), int(fields["person_valid"].sum())
     except Exception as exc:                       # a corrupt scene must not kill the batch
@@ -131,12 +117,13 @@ def _masks_worker(scene_id: str) -> tuple[str, str, int, int]:
 def _forces_worker(scene_id: str) -> tuple[str, str, float, float]:
     gt = _STATE["paths"].feature_dir("gt", scene_id)
     try:
-        fields = scene_forces(gt, body=_STATE["body"], device=_STATE["device"],
-                              **_STATE["knobs"]["forces"])
+        fields = scene_forces(gt, human=_STATE["human"], **_STATE["knobs"]["forces"])
         save_forces(gt / "forces.npz", fields)
-        weight = fields["total_mass"] * 9.81                                  # (P,)
-        residual = fields["base_wrench_diagnostics"][:, 2] / weight           # after, in BW
-        return scene_id, "", float(residual.mean()), float(fields["total_mass"].mean())
+        # The root force the solve leaves unexplained, RMS over the frames that count, in body weights.
+        residual = np.linalg.norm(fields["base_wrench"][..., :3], axis=-1)    # (P, N), zero where not counted
+        counted = residual > 0
+        rms = np.sqrt((residual ** 2).sum(1) / np.maximum(counted.sum(1), 1)) / (fields["total_mass"] * 9.81)
+        return scene_id, "", float(rms.mean()), float(fields["total_mass"].mean())
     except Exception as exc:
         return scene_id, f"{type(exc).__name__}: {exc}", 0.0, 0.0
 
@@ -144,8 +131,7 @@ def _forces_worker(scene_id: str) -> tuple[str, str, float, float]:
 def _contacts_worker(scene_id: str) -> tuple[str, str, float, float, float]:
     gt = _STATE["paths"].feature_dir("gt", scene_id)
     try:
-        fields = scene_contacts(gt, body=_STATE["body"], device=_STATE["device"],
-                                knobs=_STATE["knobs"]["contacts"])
+        fields = scene_contacts(gt, human=_STATE["human"], knobs=_STATE["knobs"]["contacts"])
         save_contacts(gt / "contacts.npz", fields)
         touching = fields["touching"]
         held = fields["frame_contact"].any(-1)
@@ -220,7 +206,7 @@ def run_forces(paths, rows, *, workers: int, device: str, skip_existing: bool,
     ok = [r for r in results if not r[1]]
     if ok:
         residual = np.array([r[2] for r in ok])
-        print(f"[forces] root residual left after the solve, in body weights: mean "
+        print(f"[forces] root residual force left after the solve, RMS in body weights: mean "
               f"{residual.mean():.3f}, worst scene {residual.max():.3f}; body mass "
               f"{np.mean([r[3] for r in ok]):.1f} kg mean", flush=True)
 
@@ -284,23 +270,15 @@ def main(argv: list[str] | None = None) -> int:
                    help="select: actually clear human_selected (default is a dry run)")
     args = p.parse_args(sys.argv[1:] if argv is None else argv)
 
-    cfg = load_config(args.config)
-    # Defaults come from the module, never a second copy: a --config without a
-    # [bedlam] section must behave exactly like the shipped readout.
-    contact_knobs = vars(section(cfg, "bedlam", {
-        "window_s": WINDOW_S, "still_mps": STILL_MPS, "enter_m": ENTER_M, "exit_m": EXIT_M,
-        "min_span_s": MIN_SPAN_S, "max_tilt_deg": MAX_TILT_DEG, "touch_m": TOUCH_M,
-        "suspect_m": SUSPECT_M,
-    }))
-    forces = section(cfg, "bedlam_forces", {
-        "config": "configs/human_optimization.toml", "edge_speed_m_s": 0.0, "weights": {},
-        "device": "cpu"})
-    # The force solve's objective is kindyn_1's; the worker pool gets the parsed config.
-    knobs = {"contacts": contact_knobs,
-             "forces": {"config": load_human_config(REPO_ROOT / forces.config),
-                        "weight_overrides": {k: float(v) for k, v in forces.weights.items()},
-                        "edge_speed_m_s": float(forces.edge_speed_m_s)}}
-    device = section(cfg, "runtime", {"device": "cuda"}).device
+    with args.config.open("rb") as file:
+        cfg = tomllib.load(file)
+    forces = cfg["bedlam_forces"]
+    # The force solve's objective is kindyn_1's; the worker pool gets the resolved config.
+    knobs = {"contacts": cfg["bedlam"],
+             "forces": {"config": configuration.load(REPO_ROOT / forces["config"]),
+                        "edge_weight": float(forces["edge_weight"]),
+                        "edge_speed_m_s": float(forces["edge_speed_m_s"])}}
+    device = cfg["runtime"]["device"]
 
     paths = scene_db.ScenePaths(args.data_root or BEDLAM2_OUR)
     with paths.connect() as conn:
@@ -320,7 +298,7 @@ def main(argv: list[str] | None = None) -> int:
             run_contacts(paths, rows, workers=args.workers, device=device,
                          skip_existing=args.skip_existing, knobs=knobs)
         elif step == "forces":
-            run_forces(paths, rows, workers=args.workers, device=str(forces.device),
+            run_forces(paths, rows, workers=args.workers, device=forces["device"],
                        skip_existing=args.skip_existing, knobs=knobs)
         elif step == "select":
             run_select(paths, rows, apply=args.apply)

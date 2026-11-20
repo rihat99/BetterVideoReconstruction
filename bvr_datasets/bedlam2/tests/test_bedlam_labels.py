@@ -16,9 +16,9 @@ from __future__ import annotations
 import numpy as np
 import torch
 
-from bvr_datasets.bedlam2.masks import MAX_OUT_OF_FRAME, out_of_frame_ratio
+from bvr import body
 from bvr_datasets.bedlam2.contacts import contact_from_floor, frame_positions
-from bvr.body import load_body
+from bvr_datasets.bedlam2.masks import MAX_OUT_OF_FRAME, out_of_frame_ratio
 from bvr_datasets.bedlam2.rasterize import NEAR_M, instance_map
 
 _UP = torch.tensor([0.0, -1.0, 0.0])          # BEDLAM2's world up
@@ -247,21 +247,20 @@ def test_the_frame_velocity_is_the_derivative_of_the_frame_position():
     moves, and its Jacobian velocity has to match the central difference of the
     positions the same forward pass produced.
     """
-    body = load_body(device="cpu")
+    human = body.load("cpu")
     frames, fps = 12, 30.0
-    q = torch.zeros(frames, body.nq)
+    q = torch.zeros(frames, human.model.nq)
     q[:, 3:7] = torch.tensor([0.0, 0.0, 0.0, 1.0])
-    q[:, 7:] = torch.tensor([0.0, 0.0, 0.0, 1.0]).repeat(body.num_joints - 1)
+    q[:, 7:] = torch.tensor([0.0, 0.0, 0.0, 1.0]).repeat(len(human.spec.joint_names) - 1)
     t = torch.arange(frames, dtype=torch.float32) / fps
     q[:, 0] = 0.8 * t                                             # 0.8 m/s along x
     q[:, 3], q[:, 6] = torch.sin(0.5 * t), torch.cos(0.5 * t)     # turning about x, 1 rad/s
     hip = 7 + 4 * 0                                                # first joint after the root
     q[:, hip], q[:, hip + 3] = torch.sin(1.0 * t), torch.cos(1.0 * t)
-    betas = np.zeros(10, np.float32)
     up, centroid = torch.tensor([0.0, -1.0, 0.0]), torch.zeros(3)
 
     positions, velocities, _normals, _low = frame_positions(
-        body, betas, q.numpy(), "cpu", up=up, centroid=centroid, fps=fps)
+        body.bake(human, torch.zeros(1, 10)), q, up=up, centroid=centroid, fps=fps)
 
     differenced = (positions[2:] - positions[:-2]) * (fps / 2)
     # A central difference is second-order: at 2.6 m/s under 1 rad/s it is off by a
