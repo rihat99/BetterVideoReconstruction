@@ -58,7 +58,7 @@ import torch
 from bvr import determinism
 from bvr.paths import REPO_ROOT
 from bvr.body import load_body
-from bvr.config import load_config
+from bvr.old_config import load_config
 from bvr.npz_io import atomic_savez
 from bvr.human_optim import paths
 from bvr.human_optim.qmath import normalize_q

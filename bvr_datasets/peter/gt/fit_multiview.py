@@ -60,7 +60,7 @@ from bvr.human_optim.camera import fold_root_to_world, world_from_cam
 from bvr.human_optim.measured_contacts import (
     LIMBS, frame_contact as board_frame_contact, limb_contact, limb_of_frame,
 )
-from bvr.config import load_config, load_human_config
+from bvr.old_config import load_config, load_human_config
 from bvr.human_optim.force_confidence import force_confidence
 from bvr.human_optim.keypoints import smooth_tracks
 from bvr.human_optim.kindyn import _GRAVITY_MAG, build_dynamics_spec

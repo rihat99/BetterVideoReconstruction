@@ -44,7 +44,7 @@ from bvr.body import frame_normals
 
 from . import paths
 from .camera import world_from_cam
-from bvr.config import FPS_REF, HumanOptimConfig, kindyn_weights
+from bvr.old_config import FPS_REF, HumanOptimConfig, kindyn_weights
 from .force_confidence import force_confidence
 from .friction import cone_generators
 from .motion import velocity_acceleration_from_trajectory
@@ -612,7 +612,7 @@ def build_dynamics_spec(body, betas: torch.Tensor, frame_labels: torch.Tensor,
     :meth:`DynamicsSpec.scale_edges_by_speed`. ``smooth_step_30fps`` differences the
     force / torque smoothness terms over the same ``round(fps/30)`` frames as the
     dynamics, so one force history costs the same at every frame rate (see
-    :func:`~bvr.config.kindyn_weights`); off, they difference adjacent frames.
+    :func:`~bvr.old_config.kindyn_weights`); off, they difference adjacent frames.
 
     The friction pyramids are frozen here, once, at the warm-start pose ``q_world``:
     forward kinematics gives every contact frame its outward skin normal, the contact

@@ -29,7 +29,7 @@ from pathlib import Path
 import numpy as np
 import torch
 
-from bvr.config import HumanOptimConfig
+from bvr.old_config import HumanOptimConfig
 from bvr.human_optim.kindyn import build_dynamics_spec
 from bvr.human_optim.qmath import normalize_q
 

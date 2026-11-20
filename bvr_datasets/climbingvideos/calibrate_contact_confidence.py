@@ -32,7 +32,7 @@ from sklearn.model_selection import GroupKFold
 from bvr.paths import REPO_ROOT
 
 from bvr_datasets.examples.score_frame_contacts import fold_for_schema
-from bvr.config import load_config
+from bvr.old_config import load_config
 from bvr.human_optim.confidence import (
     CONTACT_CONFIDENCE_METHOD, GROUP_NAMES, REPORT_GROUPS, fold_contacts, fold_drift,
     frame_report_joints, transition_seconds, witness_features,

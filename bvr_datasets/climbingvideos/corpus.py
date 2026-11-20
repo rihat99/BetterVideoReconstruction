@@ -25,7 +25,7 @@ from typing import Any, Literal
 
 import numpy as np
 
-from bvr.config import load_config
+from bvr.old_config import load_config
 from bvr.paths import REPO_ROOT
 from bvr.runner import stage_command, sweep_command
 from bvr_datasets.climbingvideos import scene_db

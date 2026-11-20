@@ -102,7 +102,7 @@ def flag_of(row: dict, q: dict) -> str:
 
 
 def main(argv: list[str] | None = None) -> int:
-    from bvr.config import load_config
+    from bvr.old_config import load_config
 
     ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     ap.add_argument("--predictions", nargs="+", required=True,

@@ -61,7 +61,7 @@ import torch
 from bvr import determinism
 from bvr.paths import REPO_ROOT
 from bvr.body import load_body
-from bvr.config import load_config, section
+from bvr.old_config import load_config, section
 from bvr.geometry.depth_smear import alongray_smear, smear_weight
 from bvr.geometry.human_scale import combine_log_scales, weighted_median
 from bvr.geometry.intrinsics import denormalize_K

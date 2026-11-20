@@ -22,7 +22,7 @@ import torch
 
 
 from bvr.body import load_body
-from bvr.config import load_config
+from bvr.old_config import load_config
 from bvr.human_optim.qmath import normalize_q
 from bvr.paths import REPO_ROOT
 from bvr_datasets.peter.paths import PETER

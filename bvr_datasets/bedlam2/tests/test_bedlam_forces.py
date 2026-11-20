@@ -14,7 +14,7 @@ import torch
 
 from bvr_datasets.bedlam2.forces import person_forces
 from bvr.body import load_body
-from bvr.config import load_human_config
+from bvr.old_config import load_human_config
 from bvr.human_optim.kindyn import build_dynamics_spec
 from bvr.human_optim.qmath import normalize_q
 

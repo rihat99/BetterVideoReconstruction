@@ -96,8 +96,8 @@ from bvr_datasets.bedlam2.contacts import (
 )
 from bvr_datasets.bedlam2.forces import save_forces, scene_forces
 from bvr_datasets.bedlam2.masks import save_boxes, scene_masks
-from bvr.config import load_config, section
-from bvr.config import load_human_config
+from bvr.old_config import load_config, section
+from bvr.old_config import load_human_config
 
 _STATE: dict = {}
 

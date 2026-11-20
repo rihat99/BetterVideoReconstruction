@@ -76,7 +76,7 @@ import torch
 
 from bvr import determinism
 from bvr.paths import REPO_ROOT
-from bvr.config import load_config, section
+from bvr.old_config import load_config, section
 from bvr.geometry.backproject import backproject
 from bvr.geometry.camera_motion import image_motion, is_static
 from bvr.geometry.clean import clean_depth

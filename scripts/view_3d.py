@@ -33,7 +33,7 @@ import sys
 from functools import partial
 from pathlib import Path
 
-from bvr.config import load_config, section
+from bvr.old_config import load_config, section
 from bvr.paths import REPO_ROOT
 
 

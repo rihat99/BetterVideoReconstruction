@@ -64,7 +64,7 @@ from tqdm import tqdm
 
 from bvr import determinism
 from bvr.paths import REPO_ROOT
-from bvr.config import load_config, section
+from bvr.old_config import load_config, section
 from bvr.precompute_runner import InputItem, SkipItem, run_batch
 
 _MAPPING_NPZ = (

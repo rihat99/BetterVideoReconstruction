@@ -75,7 +75,7 @@ import torch
 from bvr import determinism
 from bvr.paths import REPO_ROOT
 from bvr.body import frame_normals, load_body
-from bvr.config import FPS_REF, load_config
+from bvr.old_config import FPS_REF, load_config
 from bvr.geometry.normals import load_scene_cloud
 from bvr.geometry.quality import cam_motion_ratio, quality_flag, smear_stats
 from bvr.npz_io import atomic_savez

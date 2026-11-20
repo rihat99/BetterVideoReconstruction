@@ -21,7 +21,7 @@ from bvr.viewer.loading import (
     load_forces,
     playback_fps,
 )
-from bvr.config import load_config
+from bvr.old_config import load_config
 from bvr_datasets.bedlam2.paths import BEDLAM2_OUR
 from bvr_datasets.climbingvideos.viewer import select_scenes, serve_scene_farm
 

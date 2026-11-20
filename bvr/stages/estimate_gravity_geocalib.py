@@ -80,7 +80,7 @@ import torch
 from bvr import determinism
 from bvr.paths import REPO_ROOT
 from bvr.adapters.geocalib import DEFAULT_WEIGHTS, infer_gravity, load_geocalib
-from bvr.config import load_config, section
+from bvr.old_config import load_config, section
 from bvr.geometry.ground import fit_ground_plane
 from bvr.source import resolve_source
 

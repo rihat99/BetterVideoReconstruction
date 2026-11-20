@@ -61,7 +61,7 @@ from tqdm import tqdm
 
 from bvr import determinism
 from bvr.paths import REPO_ROOT
-from bvr.config import load_config, section
+from bvr.old_config import load_config, section
 from bvr.geometry.intrinsics import denormalize_K
 from bvr.precompute_runner import InputItem, SkipItem, run_batch
 from bvr.source import find_frame_file, resolve_source

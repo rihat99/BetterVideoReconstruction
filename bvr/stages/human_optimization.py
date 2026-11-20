@@ -33,7 +33,7 @@ from pathlib import Path
 
 from bvr import determinism
 from bvr.paths import REPO_ROOT
-from bvr.config import STAGE_ORDER, load_human_config
+from bvr.old_config import STAGE_ORDER, load_human_config
 from bvr.human_optim.kindyn import run_kindyn
 from bvr.human_optim.stages import run_kinematic, run_kinematics_2
 

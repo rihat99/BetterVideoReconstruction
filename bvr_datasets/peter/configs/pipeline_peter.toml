@@ -2,7 +2,7 @@
 # climb_wall_2 | climb_wall_3 | parkour): configs/pipeline.toml with every model-stage overlay OFF
 # (the peter batch is 24+ clips and the mesh renders cost more than the fits do), finished items
 # skipped, chunked VGGT, and the static-camera human depth kept out of the scale (no pre-fit, no
-# confidence cut). Only the knobs below differ from the base (bvr.config.load_config merges them).
+# confidence cut). Only the knobs below differ from the base (bvr.old_config.load_config merges them).
 base = "configs/pipeline.toml"
 
 [sam3]

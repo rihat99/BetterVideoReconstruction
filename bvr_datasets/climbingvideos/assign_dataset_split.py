@@ -22,7 +22,7 @@ import sqlite3
 from datetime import datetime
 from pathlib import Path
 
-from bvr.config import load_config
+from bvr.old_config import load_config
 from bvr.paths import REPO_ROOT
 
 from bvr_datasets.climbingvideos.scene_db import ScenePaths, select_targets
