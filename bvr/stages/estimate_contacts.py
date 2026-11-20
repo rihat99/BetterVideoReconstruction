@@ -75,7 +75,7 @@ import torch
 from bvr import determinism
 from bvr.paths import REPO_ROOT
 from bvr.body import frame_normals, load_body
-from bvr.config import FPS_REF, load_config
+from bvr.old_config import FPS_REF, load_config
 from bvr.geometry.normals import load_scene_cloud
 from bvr.geometry.quality import cam_motion_ratio, quality_flag, smear_stats
 from bvr.npz_io import atomic_savez
@@ -153,7 +153,7 @@ def _load_config(path: Path) -> dict:
     # than saying so.
     if "contact_confidence" not in cfg:
         raise SystemExit(f"[estimate_contacts] {path} has no [contact_confidence] section — "
-                         "run datasets/climbingvideos/calibrate_contact_confidence.py --write on it")
+                         "run bvr_datasets/climbingvideos/calibrate_contact_confidence.py --write on it")
     cfg["contact_confidence"] = confidence_coefficients(cfg["contact_confidence"])
     cfg.setdefault("runtime", {}).setdefault("device", "cuda")
     return cfg

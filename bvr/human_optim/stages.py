@@ -9,7 +9,7 @@ the weight columns their phases use, and (for ``kinematics_2``) the contact labe
 of ``contacts_1``. The joint kinematics+dynamics stage lives in
 :mod:`bvr.human_optim.kindyn`.
 
-Weights + knobs come from a :class:`~bvr.config.HumanOptimConfig`;
+Weights + knobs come from a :class:`~bvr.old_config.HumanOptimConfig`;
 outputs are placed by :mod:`bvr.human_optim.paths`.
 """
 
@@ -27,7 +27,7 @@ from bvr.npz_io import atomic_savez
 
 from . import paths
 from .camera import fold_root_to_world, project, transform_points, world_from_cam
-from bvr.config import HumanOptimConfig
+from bvr.old_config import HumanOptimConfig
 from .keypoints import build_correspondence, visibility_weights
 from .optimizer import PhaseSpec, optimize_person
 from .prefit import smooth_finger_quats

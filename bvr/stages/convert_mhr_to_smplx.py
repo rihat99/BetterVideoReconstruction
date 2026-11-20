@@ -23,7 +23,7 @@ Two run modes (like ``estimate_body_sam3d``):
   * **batch / manifest** — ``--source manifest.json`` with ``[smplx].save_dir`` (a
     ``precompute_runner`` Step): builds the MHR→SMPL-X converter once and sweeps
     every scene, each manifest ``out_dir`` being that scene's sam3d feature dir.
-    This is how ``datasets/climbingvideos/corpus.py`` fans the stage across the
+    This is how ``bvr_datasets/climbingvideos/corpus.py`` fans the stage across the
     ClimbingVideos scene DB.
 
 Run from CLI::
@@ -50,7 +50,6 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from bvr.stages import _pym_preload  # noqa: F401  (must be first — re-execs to fix libstdc++ ABI)
 
 import argparse
 import gc
@@ -65,7 +64,7 @@ from tqdm import tqdm
 
 from bvr import determinism
 from bvr.paths import REPO_ROOT
-from bvr.config import load_config, section
+from bvr.old_config import load_config, section
 from bvr.precompute_runner import InputItem, SkipItem, run_batch
 
 _MAPPING_NPZ = (

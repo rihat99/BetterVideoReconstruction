@@ -74,7 +74,7 @@ from bvr.adapters.vggt_omega import (
     load_vggt_omega,
     uniform_subsample,
 )
-from bvr.config import load_config, section
+from bvr.old_config import load_config, section
 from bvr.precompute_runner import InputItem, SkipItem, add_standard_args, run_batch
 from bvr.source import resolve_source
 

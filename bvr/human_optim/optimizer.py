@@ -40,7 +40,7 @@ from bvr.body import frame_normals
 from bvr.geometry.depth_smear import padded_frame_weights
 
 from .camera import project, transform_points
-from bvr.config import fps_scaled_weights, kindyn_weights
+from bvr.old_config import fps_scaled_weights, kindyn_weights
 from .contacts import DETECT_MIN_FRAMES, detect_frame_contacts, joint_drift
 from .keypoints import smooth_tracks
 from .solve import State, adam, add_term, lbfgs, phase_weights, term_logger

@@ -13,11 +13,11 @@ the source footage in sync (``[viewer].video = false`` turns it off). Clips with
 add orange measured arrows, OpenCap clips also our blue plate-format arrows.
 
 ``--scenes`` browses the ClimbingVideos scene DB, ``--bedlam`` the BEDLAM2 ground truth (one
-``ground truth`` source, contact labels and forces where ``datasets/bedlam2/label_bedlam2.py`` ran,
+``ground truth`` source, contact labels and forces where ``bvr_datasets/bedlam2/label_bedlam2.py`` ran,
 video on); both alias the selected scenes into a throwaway ``out/``-shaped symlink farm. Display
 knobs live in the config's ``[viewer]`` section; which scenes a DB browse shows is the dataset's own
-choice (``[viewer]`` of ``datasets/climbingvideos/configs/corpus.toml`` / ``datasets/bedlam2/configs/bedlam.toml``). This script is where the dataset readers
-(``datasets/<name>/viewer.py``, ``datasets/_rigs.py``) are composed into the generic viewer.
+choice (``[viewer]`` of ``bvr_datasets/climbingvideos/configs/corpus.toml`` / ``bvr_datasets/bedlam2/configs/bedlam.toml``). This script is where the dataset readers
+(``bvr_datasets/<name>/viewer.py``, ``bvr_datasets/_rigs.py``) are composed into the generic viewer.
 
 Usage::
 
@@ -33,7 +33,7 @@ import sys
 from functools import partial
 from pathlib import Path
 
-from bvr.config import load_config, section
+from bvr.old_config import load_config, section
 from bvr.paths import REPO_ROOT
 
 
@@ -44,7 +44,7 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--scenes", action="store_true", help="browse the ClimbingVideos scene DB")
     p.add_argument("--bedlam", action="store_true",
                    help="browse the BEDLAM2 ground truth (video pane on); every scene unless "
-                        "datasets/bedlam2/configs/bedlam.toml [viewer] picks a set")
+                        "bvr_datasets/bedlam2/configs/bedlam.toml [viewer] picks a set")
     p.add_argument("--config", type=Path, default=REPO_ROOT / "configs" / "pipeline.toml",
                    help="pipeline TOML (default: configs/pipeline.toml)")
     cli = p.parse_args(sys.argv[1:] if argv is None else argv)
@@ -58,10 +58,10 @@ def main(argv: list[str] | None = None) -> int:
     from bvr.viewer import view_3d
     from bvr.viewer.app import CLIP_MARKERS
     from bvr.viewer.loading import ClipData, load_clip_data
-    from datasets import _rigs
-    from datasets.bedlam2 import viewer as bedlam2
-    from datasets.climbingvideos import viewer as climbingvideos
-    from datasets.opencap import viewer as opencap
+    from bvr_datasets import _rigs
+    from bvr_datasets.bedlam2 import viewer as bedlam2
+    from bvr_datasets.climbingvideos import viewer as climbingvideos
+    from bvr_datasets.opencap import viewer as opencap
 
     def read_clip(pred: Path, *, body, **opts) -> ClipData:
         """``load_clip_data`` with the datasets plugged in: a BEDLAM2 scene reads its ``gt/``; any

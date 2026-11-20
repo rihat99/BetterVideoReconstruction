@@ -1,0 +1,348 @@
+# Every default of BetterVideoReconstruction, once. A delta file names
+#     base = "configs/bvr.toml"
+# and lists only what it changes; bvr.config.load merges it table by table and refuses a key or a
+# table this file does not have. A [*.weights] table is the one place where a key may be absent:
+# a term a stage does not name is off in that stage.
+
+[run]
+steps = ["sam3", "vggt", "sapiens", "sam3d", "smplx", "fuse", "scale", "kinematics_1"]  # the default chain; --steps picks any steps of bvr.run.STEPS
+device = "cuda"             # compute device of every stage
+threads = 8                 # torch CPU threads per stage process
+seed = 0                    # seeds torch and the generator handed to each stage
+deterministic = false       # true: deterministic torch algorithms, bit-reproducible GPU runs
+
+[sam3]                      # SAM 3 video tracker -> sam3/
+text = "person"             # grounding prompt for frame-0 detection
+top_k = 0                   # max detections per text prompt; 0 keeps all
+confidence = 0.5            # grounding confidence threshold
+min_area_frac = 0.01        # minimum grounded-mask fraction of the image
+bbox = []                   # optional frame-0 xyxy prompt (px); empty uses the text prompt
+mask = ""                   # optional frame-0 mask path; empty disables
+points = []                 # optional point prompts as ["X,Y,+", "X,Y,-"]
+prompts = ""                # optional multi-prompt JSON path; empty disables
+label = ""                  # optional single-object display label; empty uses text
+part_length = 200           # frames per propagation part
+overlay = true              # render sam3/mask_overlay.mp4
+fps = ""                    # overlay rate; empty uses the source's
+checkpoint = ""             # SAM 3 checkpoint path; empty uses the Hugging Face cache
+dtype = "fp16"              # model precision
+
+[vggt]                      # VGGT-Omega cameras and depth -> vggt/ (up to scale)
+max_frames = 500            # longer clips are uniformly subsampled to this many frames
+frame_chunk = 0             # frames per chunk of the frame-local blocks; 0 runs them at once
+token_chunk = 0             # query tokens per chunk of the cross-frame attention; 0 runs them at once
+image_resolution = 512      # model input resolution (px)
+mode = "balanced"           # image sizing: balanced | max_size
+save_depth = true           # write per-frame depth and confidence (fuse and scale need them)
+checkpoint = "facebook/VGGT-Omega"  # local .pt path or Hugging Face repository
+dtype = "fp16"              # model precision
+
+[sapiens]                   # Sapiens2 keypoints -> sapiens/
+tasks = "pose"              # subset of pose, pointmap, normal
+overlay = true              # render the skeleton overlay
+label = "person"            # bboxes.npz label selected for pose
+batch_size = 1              # box crops per forward
+checkpoint_root = ""        # checkpoint tree; empty uses the Hugging Face cache
+score_thresh = 0.3          # overlay keypoint score threshold
+fps = ""                    # overlay rate; empty uses 30
+dtype = "fp16"              # model precision
+
+[sam3d]                     # SAM 3D Body, one MHR body per person and frame -> sam3d/params.npz
+obj_ids = ""                # tracked people to fit, e.g. "0,1"; empty fits all
+inference_type = "full"     # full (body and hands) | body
+overlay = true              # render sam3d/overlay.mp4
+hf_repo = "facebook/sam-3d-body-dinov3"  # Hugging Face repository of the model
+fps = ""                    # overlay rate; empty uses the source's
+
+[smplx]                     # MHR -> SMPL-X fit -> sam3d/smplx_params.npz
+iterations = 300            # Adam iterations of the fine phase
+gender = "neutral"          # neutral | male | female
+batch_size = 64             # frames per fit batch
+overlay = true              # render sam3d/smplx_overlay.mp4
+
+[fuse]                      # up-to-scale point clouds -> geometry/fused/
+voxel_px = 5.5              # scene merge voxel, in pixel footprints at the median scene depth
+conf_drop_q = 0.3           # drop this lowest-confidence fraction of scene depth
+edge_rtol = 0.04            # depth-edge (flying pixel) filter tolerance; 0 disables
+human_dilate = 8            # grow the human mask this many px before cutting it from the scene
+min_scene_voxels = 25       # drop scene clusters smaller than this many connected voxels
+person_obj_ids = ""         # SAM 3 ids treated as people, e.g. "0,1"; empty takes all
+static_motion_max = 0.02    # the shot counts as locked while the scene slides less than this fraction of the image width
+
+[scale]                     # metric scale from the human body -> geometry/
+conf_drop_q = 0.3           # drop this lowest-confidence fraction of cloud points per frame
+min_inlier_verts = 50       # skip a frame with fewer inlier vertices
+mad_k = 3.0                 # reject frames beyond this many MADs from the median log-scale
+prefit = true               # refine scale and body together -> geometry/prefit.npz; false keeps the ruler scale
+rounds = 4                  # body rounds, each followed by a scale measurement
+iters = 150                 # Adam iterations per body round
+lr = 0.01                   # Adam learning rate
+gm_chamfer_m = 0.3          # chamfer robust scale (m)
+gm_reproj_px = 10.0         # reprojection robust scale (px)
+max_points = 2000           # cloud points per frame in the chamfer
+vertex_subsample = 3000     # body vertices in the chamfer
+
+[scale.weights]             # the pre-fit objective
+chamfer = 1.0               # every cloud point near a visible body vertex
+reprojection = 0.5          # Sapiens keypoints
+pose = 2.0                  # joint rotations toward the converter pose
+orientation = 1.0           # root orientation toward the converter pose
+translation = 0.5           # root translation toward the converter pose (m^2)
+start_velocity = 0.1        # joint velocities toward the converter's
+
+[gravity]                   # world-frame gravity -> geocalib/gravity.npz
+num_frames = 48             # frames sampled uniformly over the clip
+conf_rel = 0.5              # relative confidence gate
+inlier_deg = 8.0            # world-frame angular inlier threshold
+min_frames = 5              # minimum frames kept by the confidence gate
+conf_floor = 0.01           # minimum reliable GeoCalib confidence
+min_diversity_deg = 8.0     # minimum spread of the selected camera rotations
+max_spread_deg = 5.0        # maximum spread of the gravity inliers
+fallback_gravity = "0,1,0"  # world down when the estimate is unreliable
+ground = true               # fit a floor plane to the scene; its normal wins when accepted
+ground_min_points = 500     # reject the floor fit below this many inlier points
+ground_max_tilt_deg = 30.0  # reject the floor when its normal is this far from the prior down
+weights = "pinhole"         # GeoCalib checkpoint: pinhole | distorted
+
+[viewer]                    # scripts/view_3d.py
+port = 8082                 # server port
+point_size = 0.02           # scene point radius (m)
+human_point_size = 0.01     # human point radius (m)
+camera_scale = 0.1          # camera frustum size (m)
+up = "-y"                   # up direction
+smplx = true                # load the fitted bodies
+human_max_points = 6000     # human points per frame and person; 0 keeps all
+video = false               # video pane in the sidebar
+video_dir = ""              # folder of the source videos; empty uses the example clips
+
+[optimizer]                 # shared by the kinematic and dynamic solves
+learning_rate = 0.01        # Adam
+learning_rate_decay = 0.1   # factor at 1/2 and at 3/4 of a phase
+lbfgs_history = 10          # L-BFGS memory of the kinematics_1 polish
+
+# Objective weights, one table per stage. Difference terms are per change over 1/30 s.
+
+[stages.root]               # first phase of kinematics_1: root coordinates only
+iterations = 150            # Adam
+
+[stages.root.weights]
+reprojection_keypoints = 8
+reprojection_start = 30
+chamfer = 10
+pose_prior = 300
+orientation_prior = 50
+acceleration_root = 24
+acceleration_joint = 48
+jerk_root = 300
+jerk_joint = 500
+snap_root = 300
+snap_joint = 500
+
+[stages.kinematics_1]       # visual fit -> human_optim/kinematic_1.npz
+iterations = { full = 300, refine = 200, polish = 30 }  # Adam, Adam with the scene, L-BFGS
+freeze_fingers = true       # keep the 30 finger joints at the converter's values
+finger_smooth_s = 0.2       # Gaussian sigma for those finger trajectories (s); 0 disables
+
+[stages.kinematics_1.weights]
+reprojection_keypoints = 8
+reprojection_start = 30
+chamfer = 10
+pose_prior = 300
+orientation_prior = 50
+acceleration_root = 400
+acceleration_joint = 800
+jerk_root = 300
+jerk_joint = 500
+snap_root = 300
+snap_joint = 500
+radial_velocity = 400
+penetration = 12000
+contact_attraction = 10
+contact_velocity = 500
+
+[stages.kinematics_2]       # contact-patch repair -> human_optim/kinematic_2.npz
+iterations = { root = 100, full = 200, refine = 250 }  # Adam, the scene on throughout
+
+[stages.kinematics_2.weights]
+reprojection_keypoints = 8
+reprojection_start = 30
+pose_prior = 300
+orientation_prior = 50
+acceleration_root = 24
+acceleration_joint = 48
+jerk_root = 300
+jerk_joint = 500
+snap_root = 300
+snap_joint = 500
+radial_velocity = 100
+penetration = 12000
+contact_acquisition = 1000
+contact_velocity = 4000
+
+[stages.kindyn_1]           # pose and contact forces together -> human_optim/kindyn_1.npz
+iterations = { warm_start = 200, joint = 150 }  # L-BFGS: forces at the frozen pose, then pose and forces
+warm_start_history = 20     # L-BFGS memory of the warm start
+gradient_tolerance = 1e-9   # the warm start stops below this gradient norm
+
+[stages.kindyn_1.weights]   # force and torque terms are in body weights squared
+reprojection_keypoints = 8
+reprojection_start = 30
+pose_prior = 300
+orientation_prior = 50
+acceleration_root = 24
+acceleration_joint = 48
+jerk_root = 300
+jerk_joint = 500
+snap_root = 300
+snap_joint = 500
+radial_velocity = 100
+penetration = 12000
+contact_attraction = 20
+contact_velocity = 4000
+root_force = 50
+root_torque = 300
+force_magnitude = 1
+force_rate_magnitude = 120
+force_rate_direction = 60
+force_acceleration_magnitude = 640
+force_acceleration_direction = 320
+force_jerk_magnitude = 400
+force_jerk_direction = 200
+torque_magnitude = 30
+torque_rate = 8
+torque_acceleration = 30
+
+[torque_multipliers]        # weight of a joint group's torque: 200 N m over its maximum voluntary torque
+hip = 1.0
+knee = 1.0
+ankle = 1.7
+foot = 1.7
+spine = 1.0
+neck = 6.0
+head = 6.0
+collar = 2.5
+shoulder = 2.5
+elbow = 3.3
+wrist = 17.0
+index = 25.0
+middle = 25.0
+ring = 25.0
+pinky = 25.0
+thumb = 25.0
+
+[chamfer]                   # body surface against the human depth points
+sat_m = 0.25                # distances saturate as sat_m * tanh(d / sat_m) (m)
+conf_drop_q = 0.3           # drop this lowest-confidence fraction of each frame's points
+max_points = 1500           # cloud points per frame
+vertex_subsample = 1000     # body vertices
+chunk = 16                  # frames per nearest-neighbour chunk
+emphasis_lo = 0.1           # vertex weight on the torso
+emphasis_hi = 10.0          # vertex weight on hands and feet
+emphasis_radius = 1.0       # geodesic falloff of the emphasis (m)
+limb_quota = 200            # points each hand and foot keeps before the rest fills max_points
+
+[keypoints]                 # Sapiens keypoint reprojection
+score_thresh = 0.3          # keypoints below this score carry no weight
+include_hands = true        # use the 10 fingertip landmarks
+gm_scale_px = 40.0          # Geman-McClure scale (px)
+smooth_window_s = 0.35      # Savitzky-Golay window of the target tracks (s); 0 disables
+
+[reprojection_start]        # reprojection toward the starting pose
+gm_scale_px = 30.0          # Geman-McClure scale (px)
+smooth_window_s = 0.35      # Savitzky-Golay window of the target tracks (s); 0 disables
+
+[penetration]               # contact frames against the scene
+conf_thresh = 0.1           # scene points below this confidence are ignored
+conf_drop_q = 0.1           # drop this lowest-confidence fraction of the scene
+margin_m = 0.01             # allowed penetration (m)
+max_dist_m = 0.15           # nearest-neighbour guard (m)
+max_pen_m = 0.10            # deeper matches are behind an occluder, not a surface (m)
+huber_m = 0.02              # Huber width (m)
+prune_margin_m = 0.30       # scene candidates within this of the body (m)
+max_candidates = 6000       # scene candidates kept
+normal_k = 16               # neighbours of a scene normal
+
+[contact_attraction]        # labelled contact frames pulled onto the scene
+conf_thresh = 0.1           # scene points below this confidence are ignored
+band_m = 0.30               # pull range (m)
+max_dist_m = 0.30           # nearest-neighbour guard (m)
+
+[contact_acquisition]       # kinematics_2: each labelled frame pulled to its own wall patch
+radius_px = 60              # patch footprint around the frame's pixel (px)
+patch_k = 64                # patch points kept, nearest in 3D
+delta_m = 0.10              # pseudo-Huber knee (m)
+conf_thresh = 0.1           # scene points below this confidence are ignored
+
+[contact_velocity]          # labelled contact frames held still
+angular_weight = 0.1        # weight of the orientation change against the translation
+
+[auto_contact]              # kinematics_1's own labels, detected once and frozen
+detect_thresh_m = 0.08      # enter: a still frame within this of the scene (m)
+detect_exit_m = 0.12        # stay (m); at least detect_thresh_m
+band_m = 0.15               # pull range of a labelled frame (m)
+max_dist_m = 0.25           # nearest-neighbour guard (m); above band_m and detect_exit_m
+prune_margin_m = 0.30       # scene candidates within this of the body (m); at least max_dist_m
+conf_thresh = 0.1           # scene points below this confidence are ignored
+
+[contact_gate]              # stillness, shared by kinematics_1's detector and the contact readout
+window_s = 0.35             # drift window (s)
+still_m = 0.04              # net drift at which stillness is one half (m)
+still_override_m = 0.01     # a frame pressing closer than this counts however fast it moves (m)
+
+[contacts]                  # the contact readout -> human_optim/contacts_<n>.npz
+close_thresh_m = 0.03       # enter distance (m)
+exit_thresh_m = 0.035       # stay distance (m)
+detect_min_s = 0.1          # shortest raw detection (s); frames = ceil(s * fps)
+min_span_s = 0.1            # shortest span of the fused labels (s); frames = ceil(s * fps)
+max_dist_m = 0.10           # nearest-neighbour guard (m)
+conf_thresh = 0.1           # scene points below this confidence are ignored
+conf_drop_q = 0.1           # drop this lowest-confidence fraction of the scene
+normal_k = 16               # neighbours of a scene normal
+prune_margin_m = 0.10       # scene candidates within this of the body (m)
+merge_dist_m = 0.03         # bridge a gap the frame moved less than this across (m); 0 disables
+merge_max_gap_s = 2.0       # only gaps shorter than this (s)
+merge_sdf_m = 0.08          # and only if it stayed this close to the scene throughout (m)
+
+[contact_force]             # the force witness of the contact readout
+theta_bw = 0.02             # a frame carrying this fraction of body weight is loaded
+theta_hold_bw = 0.01        # and stays loaded until it drops below this
+gap_dstar_m = 0.05          # force this far from the scene is expensive (m)
+stillness_vstar_mps = 0.2   # force on a frame this fast is expensive (m/s)
+far_still_x = 4.0           # a far force label needs drift under this multiple of still_m; 0 disables
+confirm_bw = 0.02           # load a pressing but moving frame must carry where the solve was heard
+mute_res_bw = 0.5           # root residual above which the solve's silence is not evidence
+iterations = 2000           # Adam iterations of the solve
+magnitude_weight = 0.01     # plain price of force magnitude
+learning_rate = 0.05        # Adam, at the start
+learning_rate_final = 5e-5  # and at the end, decaying exponentially
+
+[friction]
+half_angle_deg = 45.0       # half angle of the friction pyramid about the contact normal
+
+[quality]                   # per-clip reconstruction flags written by the contact readout
+cam_depth_max = 0.4         # camera travel over median scene depth above this ...
+res_before_bw_max = 2.5     # ... and root residual before forces above this: the camera flag
+smear_med_max = 2.0         # median along-ray smear of the human points above this: the depth flag
+
+[contact_confidence]        # probability that a label agrees with an annotator; fitted, do not edit
+drift_floor_m = 0.005       # log(drift + floor)
+transition_cap_s = 1.0      # seconds to the nearest label change, capped
+fit = "2026-09-12 — annotated ClimbingVideos scenes after the manual-label check"
+
+[contact_confidence.contact]  # the label says contact
+intercept = 0.000000
+log_drift = -0.766560
+log_transition = 0.454034
+hand = -0.331224
+foot = -1.267281
+ankle = -2.744473
+knee = 0.000000
+
+[contact_confidence.free]   # the label says free
+intercept = 0.000000
+log_drift = 0.985031
+log_transition = 0.618112
+hand = 0.833201
+foot = 1.191622
+ankle = 3.766264
+knee = 5.139848

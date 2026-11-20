@@ -7,7 +7,7 @@ import numpy as np
 import pytest
 import torch
 
-from bvr.config import load_config
+from bvr.old_config import load_config
 from bvr.human_optim.confidence import (
     confidence_coefficients,
     fold_contacts,

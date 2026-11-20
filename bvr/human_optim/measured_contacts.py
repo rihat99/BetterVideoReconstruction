@@ -11,7 +11,7 @@ cannot say which part of a hand or foot is touching, and the optimization puts i
 against the wall.
 
 Shared by the single-view stage (``bvr/stages/measure_contacts.py``) and the peter
-three-camera ground-truth chain (``datasets/peter/gt/fit_multiview.py``) so the two readings
+three-camera ground-truth chain (``bvr_datasets/peter/gt/fit_multiview.py``) so the two readings
 cannot drift apart.
 """
 

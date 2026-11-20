@@ -84,7 +84,7 @@ import torch
 from PIL import Image
 
 from bvr import determinism
-from bvr.config import load_config, section
+from bvr.old_config import load_config, section
 from bvr.mask_io import union_obj_masks, write_mask_png
 from bvr.precompute_runner import InputItem, SkipItem, add_standard_args, run_batch
 from bvr.source import frame_stem, resolve_source

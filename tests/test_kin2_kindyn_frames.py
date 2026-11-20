@@ -300,7 +300,7 @@ def test_edge_weight_falls_with_the_body_speed_across_the_switch():
 
 
 def test_fps_scaling_treats_force_accel_and_jerk_as_orders_two_and_three():
-    from bvr.config import fps_scaled_weights
+    from bvr.old_config import fps_scaled_weights
 
     scaled = fps_scaled_weights({"force_smooth_mag": 1.0, "force_accel_dir": 1.0,
                                  "force_jerk_mag": 1.0, "base_wrench_ang": 1.0}, 60.0)
@@ -361,7 +361,7 @@ def test_torque_terms_read_the_weighted_square():
 
 
 def test_fps_scaling_treats_torque_accel_as_order_two():
-    from bvr.config import fps_scaled_weights
+    from bvr.old_config import fps_scaled_weights
 
     scaled = fps_scaled_weights({"torque_magnitude": 1.0, "torque_smooth": 1.0,
                                  "torque_accel": 1.0}, 60.0)

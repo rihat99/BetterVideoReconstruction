@@ -22,7 +22,7 @@ Run from CLI::
 
     python -m bvr.stages.measure_contacts \\
         --predictions out/clip/ --bodies kinematic_1 \\
-        --config datasets/peter/configs/human_optimization_peter.toml
+        --config bvr_datasets/peter/configs/human_optimization_peter.toml
 
 Reads:  human_optim/<bodies>.npz, human_optim/sensor_forces.npz,
         geometry/scene.npz, geometry/transform.npz
@@ -42,7 +42,7 @@ from scipy.spatial import cKDTree
 
 from bvr import determinism
 from bvr.body import load_body
-from bvr.config import load_config
+from bvr.old_config import load_config
 from bvr.human_optim import paths
 from bvr.human_optim.measured_contacts import LIMBS, frame_contact, limb_contact, limb_of_frame
 from bvr.human_optim.qmath import normalize_q

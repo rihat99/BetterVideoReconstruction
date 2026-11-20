@@ -9,7 +9,7 @@ from __future__ import annotations
 import pytest
 import torch
 
-from bvr.config import fps_scaled_weights, kindyn_weights
+from bvr.old_config import fps_scaled_weights, kindyn_weights
 from bvr.human_optim.contacts import min_span_frames
 from bvr.human_optim.kindyn import DynamicsSpec
 from bvr.human_optim.motion import velocity_acceleration_from_trajectory

@@ -19,7 +19,7 @@ Two run modes:
   * **batch / manifest** — ``--source manifest.json`` with ``[sam3d].save_dir`` (a
     ``precompute_runner`` Step): loads SAM-3D-Body once and sweeps every scene,
     taking each scene's ``bboxes`` / ``camera`` paths from the manifest. This is
-    how ``datasets/climbingvideos/corpus.py`` fans the stage across the ClimbingVideos
+    how ``bvr_datasets/climbingvideos/corpus.py`` fans the stage across the ClimbingVideos
     scene DB, where ``sam3`` / ``vggt`` live in their own feature trees.
 
 Run from CLI::
@@ -48,7 +48,6 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from bvr.stages import _pym_preload  # noqa: F401  (must be first — re-execs to fix libstdc++ ABI)
 
 import argparse
 import gc
@@ -62,7 +61,7 @@ from tqdm import tqdm
 
 from bvr import determinism
 from bvr.paths import REPO_ROOT
-from bvr.config import load_config, section
+from bvr.old_config import load_config, section
 from bvr.geometry.intrinsics import denormalize_K
 from bvr.precompute_runner import InputItem, SkipItem, run_batch
 from bvr.source import find_frame_file, resolve_source

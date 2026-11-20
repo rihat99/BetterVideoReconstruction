@@ -50,7 +50,7 @@ import numpy as np
 import torch
 
 from bvr import determinism
-from bvr.config import load_config, section
+from bvr.old_config import load_config, section
 from bvr.precompute_runner import (
     InputItem,
     SkipItem,
