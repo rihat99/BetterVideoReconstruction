@@ -40,7 +40,7 @@ from bvr.body import frame_normals
 from bvr.geometry.depth_smear import padded_frame_weights
 
 from .camera import project, transform_points
-from bvr.config import fps_scaled_weights
+from bvr.config import fps_scaled_weights, kindyn_weights
 from .contacts import DETECT_MIN_FRAMES, detect_frame_contacts, joint_drift
 from .keypoints import smooth_tracks
 from .solve import State, adam, add_term, lbfgs, phase_weights, term_logger
@@ -881,8 +881,14 @@ def optimize_person(
     # the force-bearing limbs on a high-fps clip. The pure kinematic stages keep their
     # raw weights at every fps — scaling them too was tried (2026-08-22) and measured
     # to stiffen kinematics_2 against the contact-patch repair (the body seats less,
-    # 60 fps contact recall collapses .67 -> .42 on 2nwG).
-    scale_w = (lambda w: fps_scaled_weights(w, fps)) if dynamics is not None else (lambda w: w)
+    # 60 fps contact recall collapses .67 -> .42 on 2nwG). [optimizer].fps_scale_kinematic
+    # turns that scaling on for them too (the frame-interpolated 100-120 fps clips).
+    if dynamics is not None:
+        scale_w = lambda w: kindyn_weights(w, fps, dynamics.smooth_step)  # noqa: E731
+    elif bool(oc.get("fps_scale_kinematic", False)):
+        scale_w = lambda w: fps_scaled_weights(w, fps)  # noqa: E731
+    else:
+        scale_w = lambda w: w  # noqa: E731
 
     def _free(ph: PhaseSpec) -> dict[str, torch.Tensor]:
         free = dict(lbfgs_free) if ph.optimizer == "lbfgs" else {

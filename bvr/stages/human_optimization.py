@@ -70,7 +70,8 @@ def run(source, predictions_dir, config_path, *, stages=None) -> None:
                    bodies=str(kd.get("bodies", "kinematic_2")),
                    cones=bool(kd.get("cones", True)),
                    mass_kg=float(kd["mass_kg"]) if kd.get("mass_kg") else None,
-                   edge_speed_scale=float(kd.get("edge_speed_m_s", 0.0)))
+                   edge_speed_scale=float(kd.get("edge_speed_m_s", 0.0)),
+                   smooth_step_30fps=bool(kd.get("smooth_step_30fps", False)))
 
 
 def main(argv=None) -> int:

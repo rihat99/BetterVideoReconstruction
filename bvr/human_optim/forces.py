@@ -123,10 +123,13 @@ class FrameDynamics:
     :param q: ``(T, 211)`` world-frame configuration trajectory.
     :param gravity_world: ``(3,)`` world-frame down direction (any length).
     :param fps: clip frame rate, for the finite differences.
+    :param spacing: finite-difference stencil step in frames (see
+        :func:`~bvr.human_optim.motion.velocity_acceleration_from_trajectory`).
     """
 
     def __init__(self, body, betas: torch.Tensor, q: torch.Tensor, *,
-                 gravity_world: np.ndarray, fps: float, device: str = "cuda") -> None:
+                 gravity_world: np.ndarray, fps: float, device: str = "cuda",
+                 spacing: int = 1) -> None:
         from better_robot.dynamics import inverse_dynamics
         from better_robot.kinematics import forward_kinematics_state, frame_jacobian
 
@@ -148,7 +151,7 @@ class FrameDynamics:
 
         with torch.no_grad():
             velocity, acceleration = velocity_acceleration_from_trajectory(
-                model, self.q_model, 1.0 / float(fps))
+                model, self.q_model, 1.0 / float(fps), spacing=spacing)
             state = forward_kinematics_state(model, self.q_model)
             #: ``(T, nv)`` no-contact generalized force.
             self.tau = inverse_dynamics(model, state, v=velocity, a=acceleration)
@@ -302,18 +305,19 @@ def solve_person_forces(body, betas: torch.Tensor, q: torch.Tensor, valid: np.nd
                         drift_pre: torch.Tensor, drift_window_s: float,
                         gravity_world: np.ndarray, fps: float, scene_pts: torch.Tensor,
                         scene_normals: torch.Tensor, scene_conf: torch.Tensor,
-                        knobs: ForceKnobs) -> ForceSolution:
+                        knobs: ForceKnobs, spacing: int = 1) -> ForceSolution:
     """One person, start to finish: RNEA + Jacobians + cones + the solve.
 
     The single entry point shared by the contact stage and the diagnostics, so the two can
     never drift apart. ``drift_pre`` is the pre-enforcement drift ``(T, F)``; passing
     anything measured on a body that a contact term already acted on would make the
-    stillness price self-fulfilling.
+    stillness price self-fulfilling. ``spacing`` is the finite-difference stencil step in
+    frames.
     """
     from .contacts import frame_scene_signals
 
     dynamics = FrameDynamics(body, betas, q, gravity_world=gravity_world, fps=fps,
-                             device=str(scene_pts.device))
+                             device=str(scene_pts.device), spacing=spacing)
     _, dist_m, _, normal_dot = frame_scene_signals(
         dynamics.points, dynamics.normals, scene_pts, scene_normals, scene_conf,
         prune_margin_m=SEARCH_MARGIN_M)

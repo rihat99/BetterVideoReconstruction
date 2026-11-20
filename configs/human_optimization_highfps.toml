@@ -1,0 +1,12 @@
+# High-fps variant (scripts/pipeline.py --variant highfps), for the frame-interpolated 100-120 fps
+# wild clips: every stage measures time at the 30 fps reference the weights were tuned at. The
+# kinematic stages scale their per-frame-difference weights like kindyn does, and the contacts
+# stage's force solve differentiates over round(fps/30) frames. At <= 30 fps both are identity,
+# so this variant reproduces the general config there.
+base = "configs/human_optimization.toml"
+
+[optimizer]
+fps_scale_kinematic = true
+
+[contact_force]
+step_30fps = true

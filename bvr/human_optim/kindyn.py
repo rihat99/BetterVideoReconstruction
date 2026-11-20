@@ -44,7 +44,7 @@ from bvr.body import frame_normals
 
 from . import paths
 from .camera import world_from_cam
-from bvr.config import FPS_REF, HumanOptimConfig, fps_scaled_weights
+from bvr.config import FPS_REF, HumanOptimConfig, kindyn_weights
 from .force_confidence import force_confidence
 from .friction import cone_generators
 from .motion import velocity_acceleration_from_trajectory
@@ -105,6 +105,7 @@ class DynamicsSpec:
     total_mass: float             #: body mass, kg (baked inertia sum)
     res_scale: float = 1.0        #: 1 / (counted frames × body weight²) — see the class docstring
     spacing: int = 1              #: v/a stencil step (frames) — round(fps/30), keeps the accel noise at the 30 fps reference
+    smooth_step: int = 1          #: force / joint-torque smoothness stencil step (frames): 1, or round(fps/30) under [stages.kindyn_1].smooth_step_30fps
     dyn_row: torch.Tensor | None = None  #: (T,) float 0/1 — frames whose ±spacing stencil is fully tracked; only these rows carry the base-wrench residual (defaults to ``valid``)
     tau_weight: torch.Tensor | None = None  #: (nv-6,) per-DOF multiplier of the joint-torque terms (``[torque.multipliers]`` of the DOF's joint); None = 1 everywhere
     cone_axis: torch.Tensor | None = None   #: (T, 12, 3) frozen contact normal per frame
@@ -126,6 +127,14 @@ class DynamicsSpec:
         # term may act only where the contact holds over its whole (k+1)-frame window.
         self.ftrip = self.fpair[1:] * self.fpair[:-1]          # (T-2, 12)
         self.fquad = self.ftrip[1:] * self.ftrip[:-1]          # (T-3, 12)
+        # The smoothness LOSS terms difference over smooth_step frames, so their masks need
+        # the contact (and the tracked rows) to hold over the whole stencil window. At
+        # step 1 these equal the adjacent-frame masks above, which the end-of-run jitter
+        # diagnostics keep reading.
+        h = self.smooth_step
+        self.smooth_masks = tuple(self._held(k * h) for k in (1, 2, 3))   # force orders 1-3
+        self.dyn_pair_h = self.dyn_row[h:] * self.dyn_row[:-h]
+        self.dyn_trip_h = self.dyn_row[2 * h:] * self.dyn_row[h:-h] * self.dyn_row[:-2 * h]
         # First / last frame of every contact interval (a tracked neighbour without the
         # label). The smoothness terms only see PERSISTING contacts, so without this a
         # force may jump from zero to full load in one frame at a contact switch.
@@ -136,6 +145,14 @@ class DynamicsSpec:
         release[:-1] = self.mask[:-1] * (1.0 - self.mask[1:]) * vp
         self.fedge = torch.clamp(onset + release, max=1.0)      # (T, F)
         self._onset, self._release = onset, release
+
+    def _held(self, span: int) -> torch.Tensor:
+        """``(T-span, F)`` float 0/1 — the contact is labelled on every frame ``t..t+span``."""
+        num_frames = self.mask.shape[0]
+        held = self.mask[:num_frames - span]
+        for j in range(1, span + 1):
+            held = held * self.mask[j:num_frames - span + j]
+        return held
 
     def scale_edges_by_speed(self, root_pos: torch.Tensor, speed_scale: float) -> None:
         """Weight each contact edge by ``1 / (1 + (v / speed_scale)²)``.
@@ -260,7 +277,8 @@ class DynamicsSpec:
         return inverse_dynamics(self.model, state, v=v, a=a, fext=fext), f_eff
 
     @staticmethod
-    def force_split(f_world: torch.Tensor, order: int = 1) -> tuple[torch.Tensor, torch.Tensor]:
+    def force_split(f_world: torch.Tensor, order: int = 1,
+                    step: int = 1) -> tuple[torch.Tensor, torch.Tensor]:
         """Split the ``order``-th force difference into magnitude vs direction parts.
 
         The k-th finite difference (binomial stencil over ``k+1`` consecutive
@@ -268,10 +286,11 @@ class DynamicsSpec:
         window: ``d_par`` is the ‖f‖-change part and ``d_perp`` the
         direction-change part. Order 1 is the adjacent-frame decomposition the
         stage always had; orders 2 and 3 restrain the force's acceleration and
-        jerk the same way. Each ``(T-k, 12, 3)``.
+        jerk the same way. ``step`` spaces the stencil's frames that far apart. Each
+        ``(T-k·step, 12, 3)``.
         """
         num_frames = f_world.shape[0]
-        window = [f_world[i:num_frames - order + i] for i in range(order + 1)]
+        window = [f_world[i * step:num_frames - (order - i) * step] for i in range(order + 1)]
         d = sum(c * w for c, w in zip(_DIFF_COEFFS[order], window))
         u = sum(window)
         u = u / u.norm(dim=-1, keepdim=True).clamp_min(1e-9)
@@ -294,9 +313,9 @@ class DynamicsSpec:
                 f_eff = st["f_world"] * self.mask[..., None]
                 return torques(f_eff), f_eff
             st.put_lazy("dyn", frozen)
-        st.put_lazy("dyn_split", lambda: self.force_split(st["f_world"]))
-        st.put_lazy("dyn_split2", lambda: self.force_split(st["f_world"], 2))
-        st.put_lazy("dyn_split3", lambda: self.force_split(st["f_world"], 3))
+        st.put_lazy("dyn_split", lambda: self.force_split(st["f_world"], 1, self.smooth_step))
+        st.put_lazy("dyn_split2", lambda: self.force_split(st["f_world"], 2, self.smooth_step))
+        st.put_lazy("dyn_split3", lambda: self.force_split(st["f_world"], 3, self.smooth_step))
 
     def register(self, problem) -> None:
         """Register the dynamics terms (active only where their weight is).
@@ -336,26 +355,29 @@ class DynamicsSpec:
             tau = st["dyn"][0]
             return half * (self.dyn_row[:, None] * self.torque_sq(tau[:, 6:])).sum()
 
+        h = self.smooth_step
+
         def _tsmooth(st):
             tau = st["dyn"][0]
-            dtau = tau[1:, 6:] - tau[:-1, 6:]
-            return half * (self.dyn_pair[:, None] * self.torque_sq(dtau)).sum()
+            dtau = tau[h:, 6:] - tau[:-h, 6:]
+            return half * (self.dyn_pair_h[:, None] * self.torque_sq(dtau)).sum()
 
         def _taccel(st):
             tau = st["dyn"][0]
-            d2tau = tau[2:, 6:] - 2.0 * tau[1:-1, 6:] + tau[:-2, 6:]
-            return half * (self.dyn_trip[:, None] * self.torque_sq(d2tau)).sum()
+            d2tau = tau[2 * h:, 6:] - 2.0 * tau[h:-h, 6:] + tau[:-2 * h, 6:]
+            return half * (self.dyn_trip_h[:, None] * self.torque_sq(d2tau)).sum()
 
+        pair, trip, quad = self.smooth_masks
         add_term(problem, "base_wrench", _base)
         add_term(problem, "base_wrench_ang", _base_ang)
         add_term(problem, "force_magnitude", _fmag)
         add_term(problem, "force_edge", _fedge)
-        add_term(problem, "force_smooth_mag", _smooth("dyn_split", 0, self.fpair))
-        add_term(problem, "force_smooth_dir", _smooth("dyn_split", 1, self.fpair))
-        add_term(problem, "force_accel_mag", _smooth("dyn_split2", 0, self.ftrip))
-        add_term(problem, "force_accel_dir", _smooth("dyn_split2", 1, self.ftrip))
-        add_term(problem, "force_jerk_mag", _smooth("dyn_split3", 0, self.fquad))
-        add_term(problem, "force_jerk_dir", _smooth("dyn_split3", 1, self.fquad))
+        add_term(problem, "force_smooth_mag", _smooth("dyn_split", 0, pair))
+        add_term(problem, "force_smooth_dir", _smooth("dyn_split", 1, pair))
+        add_term(problem, "force_accel_mag", _smooth("dyn_split2", 0, trip))
+        add_term(problem, "force_accel_dir", _smooth("dyn_split2", 1, trip))
+        add_term(problem, "force_jerk_mag", _smooth("dyn_split3", 0, quad))
+        add_term(problem, "force_jerk_dir", _smooth("dyn_split3", 1, quad))
         add_term(problem, "torque_magnitude", _tmag)
         add_term(problem, "torque_smooth", _tsmooth)
         add_term(problem, "torque_accel", _taccel)
@@ -573,7 +595,8 @@ def build_dynamics_spec(body, betas: torch.Tensor, frame_labels: torch.Tensor,
                         half_angle_deg: float = 45.0,
                         torque_table: dict[str, float] | None = None,
                         mass_kg: float | None = None,
-                        edge_speed_scale: float = 0.0) -> DynamicsSpec:
+                        edge_speed_scale: float = 0.0,
+                        smooth_step_30fps: bool = False) -> DynamicsSpec:
     """Assemble one person's :class:`DynamicsSpec` from the frozen-at-init pieces.
 
     The RNEA model comes baked from BetterHuman at ``betas`` (real per-part inertia,
@@ -586,7 +609,10 @@ def build_dynamics_spec(body, betas: torch.Tensor, frame_labels: torch.Tensor,
     is scaled by the same ratio (centres of mass stay), so the mass distribution is
     still the shape's, only the total is the subject's. ``edge_speed_scale`` (m/s, 0 =
     off) makes the ``force_edge`` term speed-dependent, see
-    :meth:`DynamicsSpec.scale_edges_by_speed`.
+    :meth:`DynamicsSpec.scale_edges_by_speed`. ``smooth_step_30fps`` differences the
+    force / torque smoothness terms over the same ``round(fps/30)`` frames as the
+    dynamics, so one force history costs the same at every frame rate (see
+    :func:`~bvr.config.kindyn_weights`); off, they difference adjacent frames.
 
     The friction pyramids are frozen here, once, at the warm-start pose ``q_world``:
     forward kinematics gives every contact frame its outward skin normal, the contact
@@ -632,6 +658,7 @@ def build_dynamics_spec(body, betas: torch.Tensor, frame_labels: torch.Tensor,
     # High-fps clips: wider v/a stencil (fps-invariant accel noise) + the 30 fps
     # restraint of the force/torque smoothness weights. Both identity at fps <= 30.
     spacing = max(1, round(float(fps) / FPS_REF))
+    smooth_step = spacing if smooth_step_30fps else 1
     # Rows whose ±spacing stencil never touches an untracked frame — a gap holds the
     # nearest tracked pose and differencing across the held jump would read as a huge
     # phantom acceleration, so only these rows carry the base-wrench residual.
@@ -643,11 +670,11 @@ def build_dynamics_spec(body, betas: torch.Tensor, frame_labels: torch.Tensor,
     spec = DynamicsSpec(
         model=model, frame_ids=frame_ids, parent_ids=parent_ids, parent_body=parent_body,
         frame_names=frame_names, mask=mask, fpair=fpair, valid_pair=valid_pair,
-        dt=1.0 / float(fps), weights=fps_scaled_weights(weights, fps), dyn_opt=dyn_opt,
+        dt=1.0 / float(fps), weights=kindyn_weights(weights, fps, smooth_step), dyn_opt=dyn_opt,
         gravity_world=np.asarray(gravity_world, np.float32), valid=vb,
         total_mass=total_mass, mu=math.tan(math.radians(float(half_angle_deg))),
         res_scale=1.0 / (max(int(ok.sum()), 1) * body_weight_n ** 2),
-        spacing=spacing, dyn_row=torch.as_tensor(ok, dtype=dtype, device=dev),
+        spacing=spacing, smooth_step=smooth_step, dyn_row=torch.as_tensor(ok, dtype=dtype, device=dev),
         tau_weight=None if torque_table is None else
         torque_multipliers(model, body.joint_names, torque_table).to(dev))
     if cones or edge_speed_scale > 0:
@@ -680,7 +707,8 @@ def _kindyn_phases(cfg: HumanOptimConfig) -> list[PhaseSpec]:
 
 def run_kindyn(source, pred: Path, cfg: HumanOptimConfig, device: str, *,
                overlay: bool = False, bodies: str = "kinematic_2", cones: bool = True,
-               mass_kg: float | None = None, edge_speed_scale: float = 0.0) -> Path:
+               mass_kg: float | None = None, edge_speed_scale: float = 0.0,
+               smooth_step_30fps: bool = False) -> Path:
     """Joint kinematics + dynamics refinement of a refined body → ``human_optim/kindyn_1.npz``.
 
     Starts from a converged body and that body's contact labels, and optimizes the pose
@@ -691,8 +719,9 @@ def run_kindyn(source, pred: Path, cfg: HumanOptimConfig, device: str, *,
     and with it the matching contact readout (``contacts_2`` / ``contacts_1``), measured
     on the very body this stage starts from. ``cones`` confines every contact force to a 45° friction pyramid
     about its frame's contact normal. ``mass_kg`` is the subject's measured mass, solved
-    with instead of the shape-baked one (see :func:`build_dynamics_spec`), and
-    ``edge_speed_scale`` (m/s) is its speed-dependent ``force_edge`` knob.
+    with instead of the shape-baked one (see :func:`build_dynamics_spec`),
+    ``edge_speed_scale`` (m/s) is its speed-dependent ``force_edge`` knob, and
+    ``smooth_step_30fps`` its fps-independent force / torque smoothness.
     """
     knobs = cfg.knobs
     pred = Path(pred)
@@ -783,7 +812,7 @@ def run_kindyn(source, pred: Path, cfg: HumanOptimConfig, device: str, *,
             weights=weights, dyn_opt=dyn_opt, fps=fps, device=device,
             q_world=q_world, cones=cones, half_angle_deg=half_angle,
             torque_table=knobs["torque"]["multipliers"], mass_kg=mass_kg,
-            edge_speed_scale=edge_speed_scale)
+            edge_speed_scale=edge_speed_scale, smooth_step_30fps=smooth_step_30fps)
 
         print(f"[{tag}] person obj_id={oid} ({int(vmask.sum())}/{N} valid) …")
         # Fingers stay UNfrozen (like kinematics_2): a fingertip contact frame must be

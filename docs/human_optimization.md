@@ -179,6 +179,23 @@ Only `kinematics_1` reads the knob.
   motion would give. The pure kinematic stages deliberately keep their raw weights at
   every fps: scaling them too was tried and measured to stiffen `kinematics_2` against
   the contact-patch repair (the body seats less, and 60 fps contact recall collapsed).
+  `[optimizer].fps_scale_kinematic = true` scales them anyway (off by default); on the
+  frame-interpolated 100–120 fps wild clips (2026-10-15) it did not smooth the root at
+  the 30–40 ms scale and broke one person after a tracking gap.
+- **Two switches measure the force terms at the 30 fps reference on any clip** (both
+  off by default, identity below 45 fps; the `fps_agnostic` variant turns both on).
+  `[stages.kindyn_1].smooth_step_30fps` differences the force / torque smoothness over
+  `round(fps/30)` frames — the RNEA's own stencil — with weights scaled at that stencil's
+  rate (`kindyn_weights`), so one force history costs the same at every fps. Adjacent
+  differences with `(fps/30)^2k` cost the same only for slowly varying force; anything
+  faster than 30 fps can show (an impact, force following the frame-level motion) costs
+  up to `(fps/30)^2k` times more — at 120 fps, ×16 / ×256 / ×4096 for orders 1–3. On the
+  100–120 fps wild clips that price left 0.5–0.8 body weights of support on the root
+  residual and the contacts nearly unloaded; with the switch the contacts carry it as at
+  25–30 fps. `[contact_force].step_30fps` is the same fix for the contacts stage's force
+  solve (`estimate_contacts`), whose RNEA otherwise differences adjacent frames: at 100 fps
+  its root residual before any force read 13 body weights instead of 4–5 and it labelled
+  back / hip / head contacts that were never there.
 - A difference is **dropped where its stencil touches an untracked frame**. Those frames
   hold a pose copied from their nearest tracked neighbour, so the step across a gap is
   an artefact of the hold, not motion — without the gate the smoothness terms spend
@@ -474,7 +491,9 @@ acceleration and jerk) damp the alternating flicker a first difference cannot
 remove without also flattening real load changes. Every order is masked to
 contacts that persist over its whole window, so a 1-frame contact is untouchable
 by construction, and the weights scale with `(fps/30)^2k` like every difference
-term. The 2026-08-30 sweep behind the shipped values is in the config comments;
+term — or, under `[stages.kindyn_1].smooth_step_30fps`, the differences span
+`round(fps/30)` frames and the weights scale at that stencil's rate (see the fps
+note in the weights section). The 2026-08-30 sweep behind the shipped values is in the config comments;
 the headline is first/second/third-order jitter down 39 / 70 / 83 % with
 reprojection flat and load peaks intact.
 

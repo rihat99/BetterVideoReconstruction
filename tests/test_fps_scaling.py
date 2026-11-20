@@ -9,8 +9,9 @@ from __future__ import annotations
 import pytest
 import torch
 
-from bvr.config import fps_scaled_weights
+from bvr.config import fps_scaled_weights, kindyn_weights
 from bvr.human_optim.contacts import min_span_frames
+from bvr.human_optim.kindyn import DynamicsSpec
 from bvr.human_optim.motion import velocity_acceleration_from_trajectory
 
 
@@ -74,3 +75,23 @@ def test_va_stencil_spacing_two_equals_subsampled_rate():
     noise1 = (aw1[2:-2] - 1.0 / dt**2).abs().max()
     noise2 = (aw2[2:-2] - 1.0 / dt**2).abs().max()
     assert noise2 < 1e-2 * noise1
+
+
+def test_force_smoothness_over_a_30fps_stencil_prices_one_history_the_same_at_120_fps():
+    # A 12 Hz force wobble (visible at 30 fps, below its 15 Hz Nyquist). Over a stencil of
+    # round(fps/30) frames at the stencil's own rate it costs what it costs at 30 fps; over
+    # adjacent frames with the (fps/30)^2k scaling it costs ~1.7x / 2.9x / 5.3x more.
+    names = {1: "force_smooth_mag", 2: "force_accel_mag", 3: "force_jerk_mag"}
+
+    def penalty(fps: float, step: int, order: int) -> float:
+        t = torch.arange(int(4 * fps), dtype=torch.float64) / fps
+        force = (100.0 + 20.0 * torch.sin(2 * torch.pi * 12.0 * t))[:, None, None] \
+            * torch.tensor([0.0, 0.0, 1.0], dtype=torch.float64)
+        d_par, _ = DynamicsSpec.force_split(force, order, step)
+        weight = kindyn_weights({names[order]: 1.0}, fps, step)[names[order]]
+        return weight * float(d_par.pow(2).sum(-1).mean())
+
+    for order in (1, 2, 3):
+        at_30 = penalty(30.0, 1, order)
+        assert penalty(120.0, 4, order) == pytest.approx(at_30, rel=0.02)
+        assert penalty(120.0, 1, order) > 1.5 * at_30

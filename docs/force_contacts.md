@@ -35,7 +35,10 @@ Ask: what forces would that take?
 
 The tool for this is **inverse dynamics** — given a motion, compute the forces
 that produce it. (The implementation is a standard algorithm called RNEA; we run
-BetterRobot's.) It returns one number per degree of freedom of the body. Most of
+BetterRobot's. The motion's velocity and acceleration are finite differences of
+the pose over adjacent frames, or over `round(fps/30)` frames with
+`[contact_force].step_30fps`, so a high-fps clip's per-frame pose noise is not
+amplified by `(fps/30)²`.) It returns one number per degree of freedom of the body. Most of
 those belong to joints, and a joint can supply its own force: that is what
 muscles are.
 

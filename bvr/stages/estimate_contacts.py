@@ -75,7 +75,7 @@ import torch
 from bvr import determinism
 from bvr.paths import REPO_ROOT
 from bvr.body import frame_normals, load_body
-from bvr.config import load_config
+from bvr.config import FPS_REF, load_config
 from bvr.geometry.normals import load_scene_cloud
 from bvr.geometry.quality import cam_motion_ratio, quality_flag, smear_stats
 from bvr.npz_io import atomic_savez
@@ -139,6 +139,7 @@ def _load_config(path: Path) -> dict:
     f.setdefault("far_still_x", 4.0)        # far force labels need stillness at this multiple of still_m; 0 = off
     f.setdefault("confirm_bw", 0.02)        # load the PENETRATION EXCEPTION must carry where the solve spoke; 0 = off
     f.setdefault("mute_res_bw", 0.5)        # …unless the solve left this much residual unexplained
+    f.setdefault("step_30fps", False)       # differentiate over round(fps/30) frames (kindyn's rule), not 1
     g = cfg.setdefault("contact_gate", {})
     g.setdefault("window_s", 0.35)         # drift window (s) for the stillness gate
     g.setdefault("still_m", 0.03)          # net drift (m) at which stillness = 0.5
@@ -289,6 +290,7 @@ def run(source: str | Path, predictions_dir: str | Path, config_path: str | Path
     cf = cfg["contact_force"]
     force_knobs = ForceKnobs(gap_dstar_m=float(cf["gap_dstar_m"]),
                              stillness_vstar_mps=float(cf["stillness_vstar_mps"]))
+    force_spacing = max(1, round(fps / FPS_REF)) if bool(cf["step_30fps"]) else 1
 
     cconf = cfg["contact_confidence"]
 
@@ -372,7 +374,7 @@ def run(source: str | Path, predictions_dir: str | Path, config_path: str | Path
             body, betas, q, valid_mask[p], drift_pre=drift,
             drift_window_s=float(cg["window_s"]), gravity_world=gravity_world, fps=fps,
             scene_pts=scene_pts, scene_normals=scene_normals, scene_conf=scene_conf,
-            knobs=force_knobs)
+            knobs=force_knobs, spacing=force_spacing)
         load_bw = torch.as_tensor(
             force_solution.magnitude / max(force_solution.body_weight_n, 1e-9),
             device=device)
@@ -599,6 +601,7 @@ def run(source: str | Path, predictions_dir: str | Path, config_path: str | Path
         force_far_still_x=np.float32(cf["far_still_x"]),
         force_confirm_bw=np.float32(cf["confirm_bw"]),
         force_mute_res_bw=np.float32(cf["mute_res_bw"]),
+        force_step_frames=np.int32(force_spacing),
         still_override_m=np.float32(cg["still_override_m"]),
         frame_sdf_cm=frame_sdf_cm,
         frame_distance_cm=frame_distance_cm,

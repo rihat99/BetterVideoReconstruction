@@ -56,6 +56,11 @@ cones = true             # confine every contact force to a friction pyramid abo
                          # free bilateral forces everywhere (the pre-2026-08 behaviour).
 overlay = false          # reprojected-keypoint debug overlay → human_optim/kindyn_1_overlay.mp4
 mass_kg = 0              # the subject's measured mass in kg; 0 = the mass the body shape implies
+smooth_step_30fps = false  # true: the force / joint-torque smoothness terms difference over round(fps/30)
+                           # frames (the dynamics' own stencil) with weights scaled at that stencil's rate,
+                           # so one force history costs the same at every fps; false: adjacent frames with
+                           # weights x(fps/30)^2k, which charges anything faster than 30 fps can show up
+                           # to (fps/30)^2k times more. Identity below 45 fps. Off by default.
 edge_speed_m_s = 0.0     # force_edge weight × 1/(1+(v/edge_speed)²), v = the root's vertical speed at a
                          # contact onset/release; 0 = the plain weight (see the OpenCap floorplane_edgev config)
 
@@ -208,6 +213,9 @@ lr = 0.01
 lr_decay = 0.1
 lr_lbfgs = 1.0
 lbfgs_history = 10
+fps_scale_kinematic = false   # true: the kinematic stages scale their per-frame-difference weights
+                              # x(fps/30)^2k like kindyn (identity at <= 30 fps); off by default, see
+                              # [loss_weights.motion]. Turned on by human_optimization_highfps.toml.
 
 [chamfer]
 sat_m = 0.25           # saturate per-point distances at sat_m*tanh(d/sat_m): near the body it is
@@ -414,6 +422,11 @@ far_still_x = 4.0
 # .808 -> .860.
 confirm_bw = 0.02
 mute_res_bw = 0.5
+# The solve's velocities and accelerations are finite differences of the pose. false = over 1
+# frame; true = over round(fps/30) frames, kindyn's rule, so a high-fps clip's per-frame pose
+# noise is not amplified by (fps/30)^2 (identity below 45 fps). Off by default; turned on by
+# human_optimization_highfps.toml.
+step_30fps = false
 
 # Per-clip reconstruction-quality FLAGS, computed and saved by estimate_contacts (the
 # earliest stage where all three signals exist — the residual comes from its force

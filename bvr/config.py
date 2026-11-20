@@ -110,6 +110,25 @@ def fps_scaled_weights(weights: dict[str, float], fps: float) -> dict[str, float
             for term, w in weights.items()}
 
 
+#: kindyn's force / joint-torque smoothness terms: they difference over ``smooth_step`` frames.
+_DYN_SMOOTH = ("force_smooth_mag", "force_smooth_dir", "force_accel_mag", "force_accel_dir",
+               "force_jerk_mag", "force_jerk_dir", "torque_smooth", "torque_accel")
+
+
+def kindyn_weights(weights: dict[str, float], fps: float, smooth_step: int = 1) -> dict[str, float]:
+    """:func:`fps_scaled_weights`, with the force / torque smoothness terms scaled at the rate
+    of their own stencil, ``fps / smooth_step``.
+
+    A stencil of ``round(fps/30)`` frames already differences at the 30 fps time step, so
+    those terms then need (almost) no scaling and one force history costs the same at
+    every frame rate. ``smooth_step = 1`` is plain :func:`fps_scaled_weights`.
+    """
+    out = fps_scaled_weights(weights, fps)
+    out.update(fps_scaled_weights({t: weights[t] for t in _DYN_SMOOTH if t in weights},
+                                  float(fps) / smooth_step))
+    return out
+
+
 @dataclass(frozen=True)
 class HumanOptimConfig:
     run: tuple[str, ...]                    # default stage chain

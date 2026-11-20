@@ -368,3 +368,16 @@ def test_fps_scaling_treats_torque_accel_as_order_two():
     assert scaled["torque_magnitude"] == pytest.approx(1.0)
     assert scaled["torque_smooth"] == pytest.approx(4.0)
     assert scaled["torque_accel"] == pytest.approx(16.0)
+
+
+def test_smoothness_loss_masks_are_the_adjacent_masks_at_step_one_and_span_the_stencil_above():
+    mask = torch.tensor([[1.0], [1.0], [0.0], [1.0], [1.0], [1.0], [1.0], [1.0]])
+    spec = _spec([0], num_steps=8)
+    spec.mask, spec.fpair = mask, mask[1:] * mask[:-1]
+    spec.__post_init__()
+    assert all(torch.equal(a, b) for a, b in zip(spec.smooth_masks, (spec.fpair, spec.ftrip, spec.fquad)))
+    spec.smooth_step = 2
+    spec.__post_init__()
+    pair, trip, _ = spec.smooth_masks
+    assert pair[:, 0].tolist() == [0.0, 0.0, 0.0, 1.0, 1.0, 1.0]      # frames t..t+2 all held
+    assert trip[:, 0].tolist() == [0.0, 0.0, 0.0, 1.0]                # frames t..t+4 all held
