@@ -63,7 +63,7 @@ STEPS = (
     Step("vggt", "estimate_camera_vggt", ("vggt",), (VIDEO,), (paths.VGGT,)),
     Step("sapiens", "estimate_sapiens", ("sapiens",), (VIDEO, paths.SAM3_BBOXES), (paths.SAPIENS,)),
     Step("sam3d", "estimate_body_sam3d", ("sam3d",), (VIDEO, paths.SAM3, paths.SAM3_BBOXES, paths.VGGT_CAMERA),
-         (paths.SAM3D_PARAMS,)),
+         (paths.SAM3D_PARAMS, paths.SAM3D_OVERLAY)),
     Step("smplx", "convert_mhr_to_smplx", ("smplx",), (paths.SAM3D_PARAMS,), (paths.SMPLX_PARAMS,)),
     Step("fuse", "fuse_geometry", ("fuse",),
          (VIDEO, paths.VGGT_CAMERA, paths.VGGT_DEPTH, paths.SAM3, paths.SAM3_BBOXES, paths.SMPLX_PARAMS),

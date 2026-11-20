@@ -13,7 +13,7 @@ from bvr.paths import Clip
 REPO_ROOT = Path(__file__).resolve().parents[1]
 
 #: Rows of the stage table whose module the rebuild has not written yet; a row leaves with its module.
-PENDING = {"estimate_gravity", "refine_kinematics", "solve_dynamics"}
+PENDING = {"refine_kinematics", "solve_dynamics"}
 
 
 @pytest.fixture

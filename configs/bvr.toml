@@ -25,7 +25,6 @@ part_length = 200           # frames per propagation part
 overlay = true              # render sam3/mask_overlay.mp4
 fps = ""                    # overlay rate; empty uses the source's
 checkpoint = ""             # SAM 3 checkpoint path; empty uses the Hugging Face cache
-dtype = "fp16"              # model precision
 
 [vggt]                      # VGGT-Omega cameras and depth -> vggt/ (up to scale)
 max_frames = 500            # longer clips are uniformly subsampled to this many frames
@@ -35,10 +34,8 @@ image_resolution = 512      # model input resolution (px)
 mode = "balanced"           # image sizing: balanced | max_size
 save_depth = true           # write per-frame depth and confidence (fuse and scale need them)
 checkpoint = "facebook/VGGT-Omega"  # local .pt path or Hugging Face repository
-dtype = "fp16"              # model precision
 
 [sapiens]                   # Sapiens2 keypoints -> sapiens/
-tasks = "pose"              # subset of pose, pointmap, normal
 overlay = true              # render the skeleton overlay
 label = "person"            # bboxes.npz label selected for pose
 batch_size = 1              # box crops per forward
@@ -58,7 +55,6 @@ fps = ""                    # overlay rate; empty uses the source's
 iterations = 300            # Adam iterations of the fine phase
 gender = "neutral"          # neutral | male | female
 batch_size = 64             # frames per fit batch
-overlay = true              # render sam3d/smplx_overlay.mp4
 
 [fuse]                      # up-to-scale point clouds -> geometry/fused/
 voxel_px = 5.5              # scene merge voxel, in pixel footprints at the median scene depth
@@ -99,7 +95,6 @@ conf_floor = 0.01           # minimum reliable GeoCalib confidence
 min_diversity_deg = 8.0     # minimum spread of the selected camera rotations
 max_spread_deg = 5.0        # maximum spread of the gravity inliers
 fallback_gravity = "0,1,0"  # world down when the estimate is unreliable
-ground = true               # fit a floor plane to the scene; its normal wins when accepted
 ground_min_points = 500     # reject the floor fit below this many inlier points
 ground_max_tilt_deg = 30.0  # reject the floor when its normal is this far from the prior down
 weights = "pinhole"         # GeoCalib checkpoint: pinhole | distorted
