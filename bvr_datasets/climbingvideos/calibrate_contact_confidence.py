@@ -5,16 +5,15 @@ This script measures it: it pairs every automatic label on an annotated corpus s
 with the manual label for the same joint and frame, fits one small logistic model per
 label class over three witnesses (which joint, how still it was, how far it is from a
 label change), and prints how well the result is calibrated. With ``--write`` it
-replaces the ``[contact_confidence]`` section of the given TOMLs with the fitted
-numbers.
+replaces the ``[contact_confidence]`` tables of the given TOMLs (``configs/bvr.toml``
+by default) with the fitted numbers.
 
 The annotated scenes are the downstream learner's TEST split, so these coefficients are
 fitted on data that learner never trains on — but they are also not a held-out set for
 the confidence itself. The printout says what the fit looks like on held-out videos
 (grouped cross-validation), which is the honest number.
 
-    uv run --no-sync python bvr_datasets/climbingvideos/calibrate_contact_confidence.py \\
-        --config configs/human_optimization.toml --write
+    uv run python bvr_datasets/climbingvideos/calibrate_contact_confidence.py [--contacts 1|2] [--write]
 """
 
 from __future__ import annotations
@@ -29,17 +28,16 @@ from sklearn.linear_model import LogisticRegression
 from sklearn.metrics import roc_auc_score
 from sklearn.model_selection import GroupKFold
 
-from bvr.paths import REPO_ROOT
-
-from bvr_datasets.examples.score_frame_contacts import fold_for_schema
-from bvr.old_config import load_config
-from bvr.human_optim.confidence import (
-    CONTACT_CONFIDENCE_METHOD, GROUP_NAMES, REPORT_GROUPS, fold_contacts, fold_drift,
-    frame_report_joints, transition_seconds, witness_features,
+from bvr import config, files
+from bvr.contacts.confidence import (
+    REPORT_GROUPS, fold_contacts, fold_drift, report_joints, transition_seconds, witness_features,
 )
+from bvr.stages.estimate_contacts import CONFIDENCE_METHOD
+from bvr_datasets.climbingvideos.paths import CLIMBING
+from bvr_datasets.examples.score_frame_contacts import fold_for_schema
 
-_DEFAULT_CONFIG = REPO_ROOT / "configs" / "human_optimization.toml"
-_CORPUS_CONFIG = Path(__file__).resolve().parent / "configs" / "corpus.toml"
+#: The joint groups, in the order the coefficients are written.
+GROUP_NAMES = tuple(dict.fromkeys(REPORT_GROUPS.values()))
 
 DRIFT_FLOOR_M = 0.005        # log(drift + floor): a perfectly still joint needs a floor
 TRANSITION_CAP_S = 1.0       # a label change further away than this is just "far"
@@ -73,8 +71,8 @@ def scene_rows(scene: str, data_root: Path, tag: str, video_id: str,
     aa, bb = scene[:2], scene[2:4]
     ann = np.load(data_root / "features" / "annotation" / aa / bb / scene / "annotation.npz",
                   allow_pickle=True)
-    pred = np.load(data_root / "features" / "human_optim" / aa / bb / scene / f"contacts_{tag}.npz",
-                   allow_pickle=True)
+    pred = files.load_npz(data_root / "features" / "human_optim" / aa / bb / scene / f"contacts_{tag}.npz",
+                          "bvr-contacts")
     notes: list[str] = []
 
     ann_names = [str(n) for n in ann["joint_names"]]
@@ -86,7 +84,7 @@ def scene_rows(scene: str, data_root: Path, tag: str, video_id: str,
 
     joint_names = [str(n) for n in pred["joint_names"]]
     parents = np.asarray(pred["parents"], dtype=np.int32)
-    report_joint = frame_report_joints(pred["frame_parent_joint"], joint_names, parents)
+    report_joint = report_joints(pred["frame_parent_joint"], joint_names, parents)
     frame_index = {str(n): i for i, n in enumerate(pred["contact_frame_names"])}
     valid = pred["valid_mask"].astype(bool)
     fps = float(pred["fps"])
@@ -98,9 +96,9 @@ def scene_rows(scene: str, data_root: Path, tag: str, video_id: str,
     joint_contact = fold_contacts(pred["frame_contact"].astype(bool), report_joint, len(parents))
     joint_drift = fold_drift(np.asarray(pred["frame_drift_m"]), report_joint, len(parents))
     # The previous weight, for the side-by-side — only where an artifact still carries it.
-    old_method = str(pred["confidence_method"]) if "confidence_method" in pred.files else ""
+    old_method = str(pred["confidence_method"]) if "confidence_method" in pred else ""
     old_confidence = (np.asarray(pred["joint_label_confidence"])
-                      if old_method and old_method != CONTACT_CONFIDENCE_METHOD else None)
+                      if old_method and old_method != CONFIDENCE_METHOD else None)
 
     rows: list[dict] = []
     for person, object_id in enumerate([int(o) for o in pred["object_ids"]]):
@@ -113,7 +111,7 @@ def scene_rows(scene: str, data_root: Path, tag: str, video_id: str,
             continue
         x_drift, x_trans = witness_features(
             joint_drift[person], transition_seconds(joint_contact[person], valid[person], fps),
-            DRIFT_FLOOR_M, TRANSITION_CAP_S)
+            drift_floor_m=DRIFT_FLOOR_M, transition_cap_s=TRANSITION_CAP_S)
 
         for name, frames in fold.items():
             columns = [frame_index[f] for f in frames if f in frame_index]
@@ -338,22 +336,17 @@ def report(table: dict[str, np.ndarray], heads: dict[str, dict[str, float]]) -> 
 # ─────────────────────────────── the TOML ──────────────────────────────────
 
 _HEADER = re.compile(r"^\s*\[([^\]]+)\]")
-_DROP = ("contact_confidence", "depth_fit")
+_DROP = ("contact_confidence",)
 
-_BLOCK = """# Label confidence — P(the label agrees with a human annotator), one logistic head per label
-# class over three witnesses: the joint group, its drift over the readout window, and the time
-# to the nearest change of its own label. Fitted by bvr_datasets/climbingvideos/calibrate_contact_confidence.py on
-# the annotated corpus scenes (docs/contact_confidence.md). `intercept` is 0 by construction:
-# each group term IS that group's intercept. Do not hand-edit the numbers.
-[contact_confidence]
-drift_floor_m = {floor}         # log(drift + floor)
-transition_cap_s = {cap}        # seconds to the nearest label change, capped
+_BLOCK = """[contact_confidence]        # probability that a label agrees with an annotator; fitted, do not edit
+drift_floor_m = {floor}       # log(drift + floor)
+transition_cap_s = {cap}      # seconds to the nearest label change, capped
 fit = "{note}"
 
-[contact_confidence.contact]    # the label says contact
+[contact_confidence.contact]  # the label says contact
 {contact}
 
-[contact_confidence.free]       # the label says free
+[contact_confidence.free]   # the label says free
 {free}
 """
 
@@ -366,7 +359,7 @@ def toml_block(heads: dict[str, dict[str, float]]) -> str:
 
 
 def write_config(path: Path, block: str) -> None:
-    """Replace the ``[contact_confidence*]`` and ``[depth_fit]`` tables by ``block``."""
+    """Replace the ``[contact_confidence*]`` tables by ``block``."""
     lines = path.read_text().splitlines(keepends=True)
     out: list[str] = []
     i, inserted = 0, False
@@ -395,15 +388,13 @@ def write_config(path: Path, block: str) -> None:
 
 def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
-    ap.add_argument("--config", type=Path, nargs="+", default=[_DEFAULT_CONFIG],
-                    help="human-optimization TOML(s) to update")
+    ap.add_argument("--config", type=Path, nargs="+", default=[config.BASE],
+                    help="config TOML(s) whose [contact_confidence] tables to replace")
     ap.add_argument("--contacts", default="1", choices=("1", "2"), help="contacts_<tag>.npz")
     ap.add_argument("--write", action="store_true", help="rewrite the given TOMLs")
     args = ap.parse_args(argv)
 
-    data_root = Path(load_config(_CORPUS_CONFIG)["corpus"]["data_root"])
-    if not data_root.is_absolute():
-        data_root = (REPO_ROOT / data_root).resolve()
+    data_root = CLIMBING
     print(f"corpus: {data_root}   contacts_{args.contacts}.npz")
     print("NOTE: the annotated scenes are the downstream learner's TEST split; the fit "
           "below uses all of them,\n      so the held-out number to read is the "

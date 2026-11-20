@@ -259,8 +259,7 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--data-root", type=Path, default=None)
     p.add_argument("--scenes", default=None, help="comma-separated scene_ids")
     p.add_argument("--sample", type=int, default=None,
-                   help="a deterministic random subset (--sample 200 --seed 0 is the "
-                        "set `view_3d.py --bedlam` browses)")
+                   help="a deterministic random subset, drawn with --seed")
     p.add_argument("--limit", type=int, default=None)
     p.add_argument("--seed", type=int, default=0)
     p.add_argument("--workers", type=int, default=4)

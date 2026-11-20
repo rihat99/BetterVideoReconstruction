@@ -50,8 +50,7 @@ no definition of the gap reproduces it. The classic
 ``body_pose`` arrays are AMASS axis-angle copied verbatim, including rotation
 vectors past 2*pi, so they do not match ``better_human.to_classic(identity, q)`` elementwise
 — ``q`` is the canonical form. And no *stage* in this repo reads ``features/gt``;
-it is a ground-truth tree for training, not a drop-in for the corpus chain. The
-viewer does read it: ``scripts/view_3d.py --bedlam``.
+it is a ground-truth tree for training, not a drop-in for the corpus chain.
 
 World frame: Unreal's world, mapped to OpenCV axes by ``unreal2cv2`` and metres.
 Up is ``-y``, so gravity is ``+y`` — the same convention the geocalib stage uses.
