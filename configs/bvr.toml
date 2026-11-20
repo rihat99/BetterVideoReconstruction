@@ -117,7 +117,7 @@ lbfgs_history = 10          # L-BFGS memory of the kinematics_1 polish and of ki
 lbfgs_line_search = 10      # step sizes an L-BFGS step tries, each half the one before
 
 # Objective weights, one table per stage. Difference terms are per change over 1/30 s.
-# neighbour_* prices the acceleration between neighbouring frames; it acts where the stride is above one frame (60 fps up).
+# neighbour_* prices the acceleration between neighbouring frames, where a stride is more than one frame (60 fps up).
 
 [stages.root]               # first phase of kinematics_1: root coordinates only
 iterations = 150            # Adam
