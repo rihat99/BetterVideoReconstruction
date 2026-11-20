@@ -46,21 +46,33 @@ _KEYPOINTS = 308
 def load(stage: run.Stage) -> Callable[[paths.Clip], None]:
     """Load Sapiens2-5B pose once; return the per-clip keypoint estimate."""
     from huggingface_hub import hf_hub_download
+    from safetensors.torch import load_file
+    from sapiens.engine.config import Config
+    from sapiens.engine.datasets import Compose
+    from sapiens.pose import models  # noqa: F401  registers the pose models with MODELS
     from sapiens.pose.datasets import UDPHeatmap, parse_pose_metainfo
-    from sapiens.pose.models import init_model
+    from sapiens.registry import MODELS
 
     settings = stage.config["sapiens"]
     local = Path(settings["checkpoint_root"]) / "pose" / _WEIGHTS[1] if settings["checkpoint_root"] else None
     weights = str(local) if local is not None and local.is_file() else hf_hub_download(*_WEIGHTS)
     with contextlib.chdir(_POSE_FOLDER):
-        # Built and cast on the CPU: on the GPU the float32 model is a 20 GB transient.
-        model = init_model(_CONFIG, weights, device="cpu")
+        # What sapiens.pose.models.init_model does, except that the model is built on the meta device: its random
+        # initialisation of the 5B weights took 50 s, only to be overwritten by the checkpoint.
+        config = Config.fromfile(_CONFIG)
+        config.model["backbone"].pop("init_cfg", None)
+        with torch.device("meta"):
+            model = MODELS.build(config.model)
+        model.load_state_dict(load_file(weights), assign=True)
+        model.cfg, model.data_preprocessor = config, MODELS.build(config.data_preprocessor)
+        model.pipeline = Compose(config.test_pipeline)
         metainfo = parse_pose_metainfo(dict(from_file="configs/_base_/keypoints308.py"))
     codec = dict(model.cfg.codec)
     if codec.pop("type") != "UDPHeatmap":
         raise NotImplementedError(f"Sapiens2 pose codec {model.cfg.codec['type']} is not UDPHeatmap")
     codec = UDPHeatmap(**codec)
-    model = model.to(dtype=_DTYPES[settings["dtype"]]).to(stage.device)
+    # Cast on the CPU: on the GPU the float32 model is a 20 GB transient.
+    model = model.to(dtype=_DTYPES[settings["dtype"]]).to(stage.device).eval()
     flip_indices = metainfo["flip_indices"] if model.cfg.val_cfg.get("flip_test", False) else None
 
     def crop(image: np.ndarray, box: np.ndarray) -> tuple[torch.Tensor, dict]:
