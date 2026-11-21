@@ -85,7 +85,7 @@ confidence is low there.
 | `frame_contact (P, N, 35)` | where a force was allowed: the labels of `contacts_2` on tracked frames |
 | `contact_forces_world (P, N, 52, 3)` | the forces summed onto each frame's parent joint; `contact_frame_parents (35,)` |
 | `joint_contact (P, N, 52)` | the labels folded onto joints |
-| `joint_torques (P, N, 159)` | inverse dynamics with the forces, the six root rows first |
+| `joint_torques (P, N, 159)` | inverse dynamics with the forces, the six root rows first; zero where the stencil reaches an untracked frame |
 | `base_wrench (P, N, 6)` | the root residual in the root's frame, zero where the frame does not count |
 | `torque_mag (P, N, 52)` | one size per joint: the root's six rows, then three rows per joint |
 | `joints_world (P, N, 52, 3)` | the joint positions |
