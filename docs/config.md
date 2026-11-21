@@ -69,8 +69,8 @@ settings of those tools, not deltas.
   output, at 15 to 20 % more time. Without it the human steps repeat to a mean body-joint distance of 0.1 to 2.3 mm
   (`kinematic_1` to `kindyn_1`) on a single-person clip, and only to 9 to 16 mm in `kindyn_1` on the three-person
   `competition_2` (p95 near 30 mm).
-- `[vggt].max_frames` (500): VGGT sees at most that many frames of a clip, spread evenly. The wild clips were run
-  with 2100, so that every frame has its own camera; one forward holds about 1150 frames on a 96 GB card
-  (`docs/pipeline.md`).
+- `[vggt].max_frames` (500): the longest clip the `vggt` step takes; a longer one stops it, so raise the key or
+  trim the clip. VGGT sees every frame in one forward, which holds about 1150 frames on a 96 GB card; the wild
+  clips were run with 2100 (`docs/pipeline.md`).
 - `[sam3].top_k` and `min_area_frac` decide who is tracked: every person grounded on frame 0 by default. In-the-wild
   clips were run on the largest person only (`top_k = 1`, `min_area_frac = 0.001`, and `[sam3d].overlay = false`).

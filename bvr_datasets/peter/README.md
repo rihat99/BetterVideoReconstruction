@@ -19,6 +19,9 @@ the 2026-09 session: two climbers, wall at 0 / 16 / 32 deg), two or three synchr
   `python -m bvr_datasets.peter.chain --measured --source <videos> --save-dir <run 2> --upstream <run> --config …` re-runs
   contacts_1 → kindyn_1 on the boards' labels into a second root.
 - **Score:** `compare_gt_contact.py --estimated <run> --measured <run 2>` (estimated vs measured labels and forces).
+  A stored run keeps its measured run inside each clip, `<clip>/_gt_contact/`, so `--measured` takes a folder of
+  links, one per clip: `mkdir -p <links> && for c in <data root>/peter/out_climb_wall_3_single/[!_]*/; do ln -s "${c}_gt_contact" "<links>/$(basename $c)"; done`,
+  then `--estimated <data root>/peter/out_climb_wall_3_single --measured <links>`.
 - **Ground truth (`gt/`, climb_wall_3):** three calibrated cameras place a body that one camera cannot. A trial has a
   prepared tree, `peter/climb_wall_3_gt/human/<trial>/`: `cameras.npz` (the calibration, the cameras' frame offsets and
   how well each one's keypoints agree), each camera's model outputs under `views/<camera>/`, the wall's cloud and plane in

@@ -5,7 +5,8 @@ This step builds the clouds in that unscaled world; ``scale`` measures the facto
 and writes the metric files. Per frame, the depth loses its flying pixels at depth edges, and the
 SAM 3 masks split it: the human points are the own pixels of every person with a reconstructed body,
 tagged with the person and the frame; the scene is the rest, less a band of ``human_dilate`` pixels
-around every tracked person and less its least confident ``conf_drop_q``. The scene then:
+around every tracked person and less the pixels under the ``conf_drop_q`` quantile of the confidence
+of every valid pixel, the people's included. The scene then:
 
 1. merges into voxels ``voxel_px`` pixel footprints wide at the median scene depth, so the size holds
    in the unscaled world. It merges twice, the second time on the grid shifted by half a voxel: a
@@ -62,7 +63,7 @@ def fuse(clip: paths.Clip, options: dict, device: torch.device) -> None:
     camera = files.load_npz(clip.find(paths.VGGT_CAMERA), "bvr-camera")
     tracked = files.load_npz(clip.find(paths.SAM3_BBOXES), "bvr-bboxes")["object_ids"]
     climbers = files.load_npz(clip.find(paths.SMPLX_PARAMS), "bvr-smplx")["object_ids"]
-    rows, extrinsics, intrinsics = camera["frame_indices"], camera["extrinsics"], camera["intrinsics_px"]
+    extrinsics, intrinsics = camera["extrinsics"], camera["intrinsics_px"]
     size = int(camera["vggt_height"]), int(camera["vggt_width"])
 
     def prepare(index: int, image: np.ndarray) -> tuple[np.ndarray, ...]:
@@ -83,7 +84,7 @@ def fuse(clip: paths.Clip, options: dict, device: torch.device) -> None:
         return depth, confidence, colors, scene, human, owner
 
     scene, human, medians = [], [], []
-    for row, maps in enumerate(_prefetched(prepare, zip(rows.tolist(), _frames(clip.video, rows)))):
+    for row, maps in enumerate(_prefetched(prepare, enumerate(_frames(clip.video, len(extrinsics))))):
         depth, confidence, colors, scene_pixels, human_pixels, owner = maps
         if scene_pixels.any():
             medians.append(float(np.median(depth[scene_pixels])))
@@ -113,14 +114,16 @@ def fuse(clip: paths.Clip, options: dict, device: torch.device) -> None:
         files.save_npz(
             folder / "transform.npz", "bvr-transform", extrinsics=extrinsics.astype(np.float32),
             intrinsics_px_orig=intrinsics_video, intrinsics=camera["intrinsics"], fov_x_deg=camera["fov_x_deg"],
-            fov_y_deg=camera["fov_y_deg"], frame_indices=rows.astype(np.int32), image_width=np.int32(width),
+            fov_y_deg=camera["fov_y_deg"], frame_indices=camera["frame_indices"].astype(np.int32),
+            image_width=np.int32(width),
             image_height=np.int32(height), vggt_width=np.int32(size[1]), vggt_height=np.int32(size[0]),
             fps=np.float32(files.frame_rate(clip.video)), static_camera=np.bool_(motion < options["static_motion_max"]),
             camera_motion=np.float32(motion), scale=np.float32(1.0), metric=np.bool_(False))
         files.save_npz(folder / "scene.npz", "bvr-scene", voxel_size=np.float32(voxel), **_numpy(
             points=points, colors=colors, confidence=confidence, normals=normals, count=count))
-        files.save_npz(folder / "human.npz", "bvr-human-points", frame_indices=rows.astype(np.int32), **_numpy(
-            points=human_points, colors=human_colors, confidence=human_confidence, frame_id=frames, obj_id=people))
+        files.save_npz(folder / "human.npz", "bvr-human-points", frame_indices=camera["frame_indices"].astype(np.int32),
+                       **_numpy(points=human_points, colors=human_colors, confidence=human_confidence, frame_id=frames,
+                                obj_id=people))
     log.info("scene %d points (voxel %.4f, %d hidden, %d in small clusters); human %d points of %s; camera slides "
              "%.2f %% of the width", len(points), voxel, int((~seen).sum()), int((seen & ~kept).sum()),
              len(human_points), climbers.tolist(), 100 * motion)
@@ -190,10 +193,14 @@ def _dilate(mask: np.ndarray, radius: int) -> np.ndarray:
     return cv2.dilate(mask.astype(np.uint8), element) > 0
 
 
-def _frames(video, rows: np.ndarray) -> Iterator[np.ndarray]:
-    """The frames of ``video`` at the increasing indices ``rows``, decoded in order."""
-    wanted = set(rows.tolist())
-    return (image for index, image in enumerate(files.frames(video)) if index in wanted)
+def _frames(video, count: int) -> Iterator[np.ndarray]:
+    """The frames of ``video``, decoded in order; raises, after the last, unless there are ``count`` of them."""
+    decoded = 0
+    for decoded, image in enumerate(files.frames(video), 1):
+        if decoded <= count:
+            yield image
+    if decoded != count:
+        raise ValueError(f"{paths.VGGT_CAMERA} has {count} frames, the video {decoded}")
 
 
 def _prefetched(function: Callable[..., tuple], items: Iterable[tuple], ahead: int = 8) -> Iterator[tuple]:

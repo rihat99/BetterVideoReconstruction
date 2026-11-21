@@ -70,9 +70,7 @@ class Bodies:
 def read(clip: paths.Clip, *, human_max_points: int) -> ClipData:
     """Read ``clip``; ``human_max_points`` caps the depth points per frame and person (0 keeps all)."""
     transform = files.load_npz(clip.find(paths.TRANSFORM), "bvr-transform")
-    frames = transform["frame_indices"].astype(np.int64)
-    span = float(frames[-1] - frames[0])
-    fps = float(transform["fps"]) * ((len(frames) - 1) / span if span > 0 else 1.0)  # a subsampled clip plays slower
+    frames = len(transform["extrinsics"])
 
     # A tree without depth (a synthetic scene with known bodies and cameras) has neither cloud.
     scene = human = spacing = None
@@ -82,7 +80,7 @@ def read(clip: paths.Clip, *, human_max_points: int) -> ClipData:
         scene = stored["points"][kept], stored["colors"][kept]
         spacing = float(stored["voxel_size"]) if "voxel_size" in stored else None
     if clip.find(paths.HUMAN).exists():
-        human = _per_frame(files.load_npz(clip.find(paths.HUMAN), "bvr-human-points"), len(frames), human_max_points)
+        human = _per_frame(files.load_npz(clip.find(paths.HUMAN), "bvr-human-points"), frames, human_max_points)
 
     gravity, source, ground = None, "", None
     if clip.find(paths.GRAVITY).exists():
@@ -92,7 +90,8 @@ def read(clip: paths.Clip, *, human_max_points: int) -> ClipData:
             ground = stored["ground_centroid"], stored["ground_normal"], float(stored["ground_extent"])
 
     return ClipData(
-        name=clip.name, fps=fps, extrinsics=transform["extrinsics"], intrinsics=transform["intrinsics_px_orig"],
+        name=clip.name, fps=float(transform["fps"]), extrinsics=transform["extrinsics"],
+        intrinsics=transform["intrinsics_px_orig"],
         size=(int(transform["image_width"]), int(transform["image_height"])),
         scene=scene, spacing=spacing, human=human, gravity=gravity, gravity_source=source,
         ground=ground, sources=tuple(name for name, (file, _, _) in SOURCES.items() if clip.find(file).exists()),
@@ -127,7 +126,9 @@ def read_bodies(clip: paths.Clip, source: str, human: bh.HumanModel, extrinsics:
         labels_file = stored if labelled == path else files.load_npz(labelled, "bvr-contacts")
         if (list(labels_file["contact_frame_names"]) == list(human.contact_frames.names)
                 and np.array_equal(labels_file["object_ids"], stored["object_ids"])):
-            contact, forces = labels_file["frame_contact"].astype(bool), labels_file.get("frame_forces")
+            # A contacts file holds its witness's forces as frame_force; kindyn_1 its solved ones as frame_forces.
+            contact = labels_file["frame_contact"].astype(bool)
+            forces = labels_file["frame_forces" if labelled == path else "frame_force"]
         else:
             log.warning("%s: other people or contact frames than its body; drawn without labels", labelled)
     return Bodies(q=_held(np.asarray(q, np.float32), tracked), betas=np.asarray(betas, np.float32), tracked=tracked,
@@ -159,20 +160,20 @@ def _per_frame(human: dict[str, np.ndarray], frames: int, cap: int) -> tuple[lis
 
 class VideoFrames:
     """``step -> (h, w, 3)`` uint8 RGB frames of the clip's video, decoded on demand, the longer side at most
-    ``max_side`` pixels; ``frames (T,)`` is the video frame each step shows.
+    ``max_side`` pixels; step ``k`` shows frame ``k`` of the first ``frames``.
 
     Playback reads forward, so the decoder skips ahead; a jump back or far ahead seeks. Every decoded frame is kept,
     and a frame past the end of the video is black.
     """
 
-    def __init__(self, video: Path, frames: np.ndarray, *, max_side: int = 480) -> None:
+    def __init__(self, video: Path, frames: int, *, max_side: int = 480) -> None:
         self.video, self.frames, self.max_side = video, frames, max_side
         self._capture: cv2.VideoCapture | None = None
         self._next = 0                                       # video frame the next read returns
         self._kept: dict[int, np.ndarray] = {}
 
     def __call__(self, step: int) -> np.ndarray:
-        index = int(self.frames[min(step, len(self.frames) - 1)])
+        index = min(step, self.frames - 1)
         if index not in self._kept:
             if self._capture is None:
                 self._capture = cv2.VideoCapture(str(self.video))

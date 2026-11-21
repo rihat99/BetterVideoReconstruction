@@ -25,7 +25,8 @@ The sidebar holds BetterRobot's sections and three of its own:
   frame on it, and the camera's path), Gravity, Ground plane (the floor the gravity step fitted), Body (the exact
   posed mesh, see-through, one colour per person: light blue, then salmon, green, lilac, gold), Skeleton (its joints
   coloured by joint torque on a `kindyn_1` body), Contact frames (red in contact, green free, with their normals; grey
-  without labels), Forces (the contact forces), Root wrench (the root's six rows of `joint_torques`, the raw inverse
+  without labels), Forces (the contact forces: `kindyn_1`'s solved ones, and for `kinematics_1` and `kinematics_2` the
+  witness's of their contacts file, `frame_force`), Root wrench (the root's six rows of `joint_torques`, the raw inverse
   dynamics: the residual force and torque the contact forces leave; for a person without contact labels, whom no
   force holds, about the body weight on every frame; nothing where the stencil reaches an untracked frame). A layer
   switched off stays off across switches.

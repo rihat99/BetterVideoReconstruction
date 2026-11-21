@@ -8,7 +8,7 @@
 steps = ["sam3", "vggt", "sapiens", "sam3d", "smplx", "fuse", "scale", "kinematics_1"]  # the default chain; --steps picks any steps of bvr.run.STEPS
 device = "cuda"             # compute device of every stage
 threads = 8                 # torch CPU threads per stage process
-seed = 0                    # seeds torch and the generator handed to each stage
+seed = 0                    # seeds torch (torch.manual_seed) in every step
 deterministic = false       # true: deterministic torch algorithms, bit-reproducible GPU runs
 
 [sam3]                      # SAM 3 video tracker -> sam3/
@@ -27,7 +27,7 @@ fps = ""                    # overlay rate; empty uses the source's
 checkpoint = ""             # SAM 3 checkpoint path; empty uses the Hugging Face cache
 
 [vggt]                      # VGGT-Omega cameras and depth -> vggt/ (up to scale)
-max_frames = 500            # longer clips are uniformly subsampled to this many frames
+max_frames = 500            # a longer clip stops the step: raise this (about 0.076 GB of GPU memory a frame) or trim it
 image_resolution = 512      # model input resolution (px)
 mode = "balanced"           # image sizing: balanced | max_size
 save_depth = true           # write per-frame depth and confidence (fuse and scale need them)
@@ -39,7 +39,7 @@ label = "person"            # bboxes.npz label selected for pose
 batch_size = 1              # box crops per forward
 checkpoint_root = ""        # checkpoint tree; empty uses the Hugging Face cache
 score_thresh = 0.3          # overlay keypoint score threshold
-fps = ""                    # overlay rate; empty uses 30
+fps = ""                    # overlay rate; empty uses the source's
 dtype = "fp16"              # model precision
 
 [sam3d]                     # SAM 3D Body, one MHR body per person and frame -> sam3d/params.npz
@@ -54,7 +54,7 @@ orient_iterations = 40      # Adam iterations of the first phase: the global ori
 body_iterations = 80        # Adam iterations of the second phase: plus the body pose and betas
 hands_iterations = 40       # Adam iterations of the third phase: plus the hand poses
 iterations = 300            # Adam iterations of the fine phase
-gender = "neutral"          # neutral | male | female
+gender = "neutral"          # neutral only: the converter would fit male or female betas, every later step loads neutral
 batch_size = 64             # frames per fit batch
 
 [fuse]                      # up-to-scale point clouds -> geometry/fused/

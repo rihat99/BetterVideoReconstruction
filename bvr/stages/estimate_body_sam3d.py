@@ -125,7 +125,7 @@ def _intrinsics(camera: dict, frame_indices: np.ndarray, height: int, width: int
     rows = {int(frame): row for row, frame in enumerate(camera["frame_indices"])}
     if missing := [int(frame) for frame in frame_indices if int(frame) not in rows]:
         raise ValueError(f"{paths.VGGT_CAMERA} has no camera for {len(missing)} tracked frame(s), first {missing[0]}; "
-                         "VGGT subsampled the clip ([vggt].max_frames)")
+                         "VGGT ran on another cut of the video")
     return denormalize_K(camera["intrinsics"][[rows[int(frame)] for frame in frame_indices]], height, width)
 
 

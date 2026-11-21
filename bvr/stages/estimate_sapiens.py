@@ -134,7 +134,7 @@ def load(stage: run.Stage) -> Callable[[paths.Clip], None]:
                 if settings["overlay"]:
                     (out / "overlay").mkdir()
                     _overlay(out / "overlay" / "pose.mp4", frame_paths, keypoints, scores, valid, metainfo,
-                             settings["score_thresh"], float(settings["fps"] or 30.0))
+                             settings["score_thresh"], float(settings["fps"] or files.frame_rate(clip.video)))
         log.info("%d person(s) x %d frame(s), %d with a box", len(people), count, int(valid.sum()))
 
     return process

@@ -1,6 +1,6 @@
-# OpenCap LabValidation: the force-rig delta (one static iPhone, 720x1280 portrait at 60 fps), with
-# no frame subsampling: one VGGT forward over the longest clip (839 frames) needs about 68 GB.
+# OpenCap LabValidation: the force-rig delta (one static iPhone, 720x1280 portrait at 60 fps); one VGGT
+# forward over the longest clip (839 frames) needs about 68 GB.
 base = "bvr_datasets/peter/configs/peter.toml"
 
 [vggt]
-max_frames = 900            # above the longest clip (subject4_STS1, 839 frames): every row stays one video frame, as the plates are indexed
+max_frames = 900            # above the longest clip (subject4_STS1, 839 frames)

@@ -9,12 +9,13 @@ fuse builds the clouds in that unscaled world, and `scale` measures the factor n
 1. The depth loses its flying pixels at depth edges (`edge_rtol`).
 2. The SAM 3 masks split it. The human points are the pixels of every person SAM 3D Body fitted, tagged with the
    person (`obj_id`) and the frame (`frame_id`). The scene is the rest, less a band of `human_dilate` pixels around
-   every tracked person and less its least confident `conf_drop_q`.
+   every tracked person and less the pixels under the `conf_drop_q` quantile of the frame's confidence. That quantile
+   is taken over every valid pixel of the frame, the people's included.
 3. Both are back-projected with the frame's camera.
 
 ## Once per clip, the scene
 
-1. Voxel merge. The voxel is `voxel_px` pixel footprints wide at the median scene depth, so its size holds in a world
+1. Voxel merge. The voxel is `voxel_px` footprints of a VGGT-canvas pixel wide at the median scene depth, so its size holds in a world
    of unknown scale. The merge runs twice, the second time on the grid shifted by half a voxel: a surface that lies
    on a cell face leaves two copies after one pass.
 2. Hidden points go. VGGT's depth of one wall differs by a few centimetres between frames, which leaves a slab whose
@@ -35,6 +36,6 @@ A shot counts as locked off when the scene slides less than `static_motion_max` 
 | `scene.npz` | `points (M, 3)`, `colors (M, 3)` uint8, `confidence (M,)` (the largest of its voxel), `normals (M, 3)`, `count (M,)` depth pixels merged, `voxel_size` |
 | `human.npz` | `points (n, 3)`, `colors`, `confidence`, `frame_id (n,)` (a row of the transform), `obj_id (n,)`, `frame_indices (T,)` |
 
-`T` is the number of frames VGGT saw: every frame, unless the clip has more than `[vggt].max_frames`, when VGGT sees
-that many, spread evenly. The step holds the per-frame clouds on the GPU until the merge (5 to 13 GB on the example
+`T` is the number of frames of the clip: VGGT sees every frame, and the `vggt` step stops on a clip of more than
+`[vggt].max_frames`. `frame_indices` is `0..T-1`, kept for the readers of older trees. The step holds the per-frame clouds on the GPU until the merge (5 to 13 GB on the example
 clips).

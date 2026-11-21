@@ -33,7 +33,8 @@ uv run python scripts/view_3d.py --source <video> --save-dir <root> --record <fi
 A step alone is `python -m bvr.stages.<module> --source <video|folder> --save-dir <root>`, with `--config`,
 `--upstream`, `--skip-existing`, `--clips a,b` and, for a module that serves two steps, `--step`. A run resumes
 with `--skip-existing`: a step is skipped for a clip while its manifest, `<clip>/manifests/<step>.json`, matches the
-config tables the step reads, the code (commit and diff) and the checksums of its inputs.
+config tables the step reads, the code (commit and diff), the commits of BetterRobot and BetterHuman, the checksum of
+`uv.lock` and the checksums of its inputs.
 
 ## Gates that must not be weakened
 
@@ -77,8 +78,11 @@ Never skip, xfail, loosen a tolerance or delete an assertion to get green; repor
 - VGGT memory. `third_party/vggt-omega` is the authors' code, unchanged: one forward over the whole clip, whose peak
   allocation is 4.3 GB plus 0.076 GB per frame (42 GB at 500 frames, 80 GB at 1000; `mode = "balanced"` keeps about
   1024 tokens a frame at any aspect ratio). A 96 GB card holds about 1150 frames. `nvidia-smi` shows up to 1.6 times
-  the allocation while the card has room; that is the allocator's cache, not a need. Clips longer than
-  `[vggt].max_frames` (500) are subsampled; no such clip has been run through the fitting steps.
+  the allocation while the card has room; that is the allocator's cache, not a need. A clip longer than
+  `[vggt].max_frames` (500) stops at the `vggt` step: raise the key or trim the clip (nothing subsamples; every
+  later step takes row `k` of a file for frame `k`). So does a frame whose height/width lies outside [0.5, 2.0],
+  which the authors' loader would centre-crop. Counting the frames before `sam3` would cost a full decode: a video's
+  stated frame count is no measure (`boulder_1.mp4` states 537 and decodes to 445).
 - The in-the-wild clips need a delta the repository does not hold (the largest person only, a camera per frame):
 
   ```toml
@@ -114,6 +118,10 @@ Never skip, xfail, loosen a tolerance or delete an assertion to get green; repor
 - The scale step pools every tracked person into one factor (`bvr/stages/estimate_scale.py`), so bystanders move
   the whole world: two of them moved `competition_2`'s scale by 15 %. Choose the people to fit with
   `[sam3d].obj_ids`.
+- With `--upstream`, a file a step reads falls back to the upstream run's whenever this run's tree lacks it
+  (`paths.Clip.find`): an own output moved away while its manifest stays is silently replaced by the upstream's.
+- `[scale].prefit = false` with `--upstream`: the scale step writes no `prefit.npz`, so `kinematics_1` starts from
+  the upstream's (bodies fitted at the upstream's scale), not from the converter's.
 - Trees written before the rebuild have no manifests and no `format` key, say `head` for the contact frame
   `head_top`, and their `scale.npz` lacks `smear_median` (the contact steps then measure the smear themselves).
   Read every npz through `bvr.files.load_npz`.

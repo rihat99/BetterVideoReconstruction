@@ -60,8 +60,8 @@ metres, forces in newtons, rotations as quaternions `[qx, qy, qz, qw]`. Every np
 <save-dir>/<clip>/
   sam3/bboxes.npz           bboxes_per_obj (P, N, 4) in pixels, object_ids, labels, the video size
   sam3/<id>/frame_*.png     each person's mask per frame; mask_overlay.mp4 beside them
-  vggt/camera.npz           cameras of the sampled frames (frame_indices): extrinsics, intrinsics, up to scale
-  vggt/depth/frame_*.npz    depth and its confidence per sampled frame
+  vggt/camera.npz           a camera per frame: extrinsics, intrinsics, up to scale
+  vggt/depth/frame_*.npz    depth and its confidence per frame
   sapiens/pose.npz          keypoints (P, N, 308, 2) in pixels (Goliath-308), keypoint_scores; overlay/pose.mp4
   sam3d/params.npz          the MHR body per person and frame: mhr_model_params (204), shape_params (45), pred_cam_t
   sam3d/overlay.mp4         the fitted bodies over the video

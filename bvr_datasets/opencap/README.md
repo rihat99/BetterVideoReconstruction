@@ -11,11 +11,13 @@ OpenCap LabValidation (Uhlrich et al., PLOS Comp Biol 2023): 10 subjects x 17 tr
   (or its kindyn joints) → `sync.json`, then `import_opencap.py --resample-only` re-reads the plates at the corrected times.
 - **Videos:** a run reads a folder of links `<clip>.mp4`:
   `mkdir -p <videos> && for c in <data root>/LabValidation_withVideos/processed/*/; do [ -f "${c}video.mp4" ] && ln -s "${c}video.mp4" "<videos>/$(basename $c).mp4"; done`
-- **Run:** the force-rig recipe of `bvr_datasets/peter/` with `configs/opencap.toml` (the peter delta, no frame
-  subsampling): `scripts/pipeline.py`, then `python -m bvr_datasets.peter.chain` (see its README);
+- **Run:** the force-rig recipe of `bvr_datasets/peter/` with `configs/opencap.toml` (the peter delta, `[vggt].max_frames`
+  above the longest trial): `scripts/pipeline.py`, then `python -m bvr_datasets.peter.chain` (see its README);
   `sensor_forces.py --save-dir <run>` rotates the plates into our world → `<run>/<clip>/human_optim/sensor_forces.npz`.
 - **Score:** `export_opencap_mot.py --save-dir <run>` folds our foot forces into the plates' triple (force, centre of pressure,
   free moment; `plates.py`) → `human_optim/estimated_forces.npz` + OpenSim `.mot`; `compare_opencap_plates.py --save-dir <run>
   [--clips <list>]` scores it with the published GRF protocol (→ `<run>/_plates/summary.md`); `compare_opencap_forces.py
-  --save-dir <run>` compares per-foot newtons (→ `<run>/_compare/`).
+  --save-dir <run>` compares per-foot newtons (→ `<run>/_compare/`). Both write into the run root: never point them at a
+  root inside `data/` you do not own. To score the stored runs, link their clips into a root of your own:
+  `mkdir -p <links> && for c in <data root>/LabValidation_withVideos/processed/out/subject*/; do mkdir -p "<links>/$(basename $c)" && ln -s "${c}human_optim_floorplane" "<links>/$(basename $c)/human_optim"; done`.
 - **Tests:** `tests/test_opencap_forces.py`.

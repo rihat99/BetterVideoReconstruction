@@ -44,7 +44,7 @@ A later `uv sync` keeps that file.
 BetterHuman reads the licensed body models from `$BETTERHUMAN_MODELS_DIR`; set it (BetterHuman's README gives the
 layout). BVR needs:
 
-- `smplx/SMPLX_NEUTRAL.npz`, and `SMPLX_MALE.npz` or `SMPLX_FEMALE.npz` if `[smplx].gender` asks for one;
+- `smplx/SMPLX_NEUTRAL.npz`: every step loads the neutral body, so `[smplx].gender` stays `"neutral"`;
 - `MHR/converted/mhr_lod1.npz`, the MHR body the `smplx` step converts from. BetterHuman's converter
   (`tools/convert/mhr/` in BetterHuman) makes it once, in that tool's own environment with pymomentum; BVR's
   environment has no pymomentum.

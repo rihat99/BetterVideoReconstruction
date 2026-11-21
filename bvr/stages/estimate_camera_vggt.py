@@ -1,8 +1,9 @@
 """VGGT-Omega gives every frame of a clip a camera and a depth map, in one forward over the clip.
 
 VGGT-Omega is a multi-view model: cross-frame attention sees the whole clip at once, so memory
-grows with the frame count. A clip longer than ``[vggt].max_frames`` is subsampled uniformly
-(``frame_indices`` keeps the original frame of each row).
+grows with the frame count. A clip longer than ``[vggt].max_frames`` stops the step, and so does a
+frame whose aspect ratio the authors' loader would crop: every later step takes row ``k`` for
+frame ``k`` and the camera for the whole frame.
 
 Its geometry is up to one unknown scale per clip: depth and camera translation share it, the
 intrinsics do not. ``estimate_scale`` makes it metric later. Intrinsics come out in pixels of the
@@ -13,12 +14,12 @@ Writes, under the clip's directory::
 
     vggt/camera.npz         bvr-camera: extrinsics (T, 4, 4) camera-from-world, OpenCV;
                             intrinsics (T, 3, 3) normalised; intrinsics_px (T, 3, 3) at the VGGT
-                            resolution; fov_x_deg, fov_y_deg (T,); frame_indices (T,);
+                            resolution; fov_x_deg, fov_y_deg (T,); frame_indices (T,) = 0..T-1;
                             image_height, image_width (the video's); vggt_height, vggt_width;
                             num_frames (T), num_frames_total; image_resolution, mode, checkpoint;
                             scale = "up_to_scale"
     vggt/depth/frame_<k:06d>.npz   depth, depth_conf (H, W) float16 at the VGGT resolution, for
-                            original frame k (with [vggt].save_depth)
+                            frame k (with [vggt].save_depth)
 """
 from __future__ import annotations
 
@@ -37,6 +38,9 @@ from bvr.geometry.intrinsics import normalize_K
 log = logging.getLogger(__name__)
 
 _CHECKPOINT_FILE = "vggt_omega_1b_512.pt"
+# Frame height over width that VGGT-Omega takes whole; it centre-crops a frame outside this range
+# (``_crop_to_supported_aspect_ratio`` in ``third_party/vggt-omega/vggt_omega/utils/load_fn.py``).
+_ASPECT_RANGE = (0.5, 2.0)
 
 
 def load(stage: run.Stage) -> Callable[[paths.Clip], None]:
@@ -48,8 +52,15 @@ def load(stage: run.Stage) -> Callable[[paths.Clip], None]:
         with tempfile.TemporaryDirectory(prefix="vggt_") as scratch:
             frame_paths = files.extract_frames(clip.video, Path(scratch) / "frames")
             height, width = cv2.imread(str(frame_paths[0])).shape[:2]
-            kept = _uniform(len(frame_paths), settings["max_frames"])
-            prediction = forward([frame_paths[k] for k in kept])
+            count = len(frame_paths)
+            if count > settings["max_frames"]:
+                raise ValueError(f"{count} frames, more than [vggt].max_frames = {settings['max_frames']}: raise the "
+                                 "key (VGGT's peak memory grows by about 0.076 GB a frame) or trim the clip")
+            if not _ASPECT_RANGE[0] <= height / width <= _ASPECT_RANGE[1]:
+                raise ValueError(f"frames of {width}x{height}, height/width {height / width:.3f} outside "
+                                 f"[{_ASPECT_RANGE[0]}, {_ASPECT_RANGE[1]}]: VGGT-Omega would centre-crop them and the "
+                                 "cameras would not fit the whole frame; crop or pad the video into that range")
+            prediction = forward(frame_paths)
         vggt_height, vggt_width = prediction["depth"].shape[-2:]
         intrinsics_px = prediction["intrinsics_px"]
         with files.staged_directory(clip.path(paths.VGGT)) as out:
@@ -60,20 +71,20 @@ def load(stage: run.Stage) -> Callable[[paths.Clip], None]:
                 intrinsics_px=intrinsics_px,
                 fov_x_deg=np.degrees(2 * np.arctan(vggt_width / 2 / intrinsics_px[:, 0, 0])).astype(np.float32),
                 fov_y_deg=np.degrees(2 * np.arctan(vggt_height / 2 / intrinsics_px[:, 1, 1])).astype(np.float32),
-                frame_indices=kept.astype(np.int32), image_height=np.int32(height), image_width=np.int32(width),
-                vggt_height=np.int32(vggt_height), vggt_width=np.int32(vggt_width),
-                num_frames=np.int32(len(kept)), num_frames_total=np.int32(len(frame_paths)),
+                frame_indices=np.arange(count, dtype=np.int32), image_height=np.int32(height),
+                image_width=np.int32(width), vggt_height=np.int32(vggt_height), vggt_width=np.int32(vggt_width),
+                num_frames=np.int32(count), num_frames_total=np.int32(count),
                 image_resolution=np.int32(settings["image_resolution"]), mode=np.str_(settings["mode"]),
                 checkpoint=np.str_(settings["checkpoint"]), scale=np.str_("up_to_scale"))
             if settings["save_depth"]:
                 depth_dir = out / Path(paths.VGGT_DEPTH).name
                 depth_dir.mkdir()
-                for row, frame in enumerate(kept):
-                    np.savez_compressed(depth_dir / f"frame_{int(frame):06d}.npz",
-                                        depth=prediction["depth"][row].astype(np.float16),
-                                        depth_conf=prediction["depth_conf"][row].astype(np.float16))
-        log.info("%d/%d frame(s) %dx%d -> VGGT %dx%d, mean horizontal field of view %.2f deg", len(kept),
-                 len(frame_paths), width, height, vggt_width, vggt_height,
+                for frame in range(count):
+                    np.savez_compressed(depth_dir / f"frame_{frame:06d}.npz",
+                                        depth=prediction["depth"][frame].astype(np.float16),
+                                        depth_conf=prediction["depth_conf"][frame].astype(np.float16))
+        log.info("%d frame(s) %dx%d -> VGGT %dx%d, mean horizontal field of view %.2f deg", count,
+                 width, height, vggt_width, vggt_height,
                  float(np.degrees(2 * np.arctan(vggt_width / 2 / intrinsics_px[:, 0, 0])).mean()))
 
     return process
@@ -126,13 +137,6 @@ def model(settings: dict, device: torch.device) -> Callable[[list[Path]], dict[s
                                    np.int32)}
 
     return forward
-
-
-def _uniform(count: int, most: int) -> np.ndarray:
-    """Indices of at most ``most`` frames of ``count``, uniformly spaced, first and last kept; 0 keeps all."""
-    if most <= 0 or count <= most:
-        return np.arange(count)
-    return np.unique(np.round(np.linspace(0, count - 1, num=most)).astype(np.int64))
 
 
 if __name__ == "__main__":
