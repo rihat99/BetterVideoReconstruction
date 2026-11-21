@@ -33,7 +33,9 @@ The sidebar holds BetterRobot's sections and three of its own:
   keeps the frame. The default is the newest source the run's own tree wrote.
 - Info: the number of people, the source of gravity, and the sources read from `--upstream`.
 
-The opening view looks at the people from the filming camera's side, from above.
+The opening view holds the people over the whole clip, so a person who travels stays in it, seen from 25 degrees
+above the filming camera's side (BetterRobot's `Viewer.aim`: the body layers of 32 frames spread over the clip fit in
+80 % of a 16:9 view). The scene, the cameras and the floor do not widen it; a clip without people is framed whole.
 
 ## Recording
 
