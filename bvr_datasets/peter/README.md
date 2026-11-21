@@ -19,7 +19,3 @@ the 2026-09 session: two climbers, wall at 0 / 16 / 32 deg), two or three synchr
   `python -m bvr_datasets.peter.chain --measured --source <videos> --save-dir <run 2> --upstream <run> --config …` re-runs
   contacts_1 → kindyn_1 on the boards' labels into a second root.
 - **Score:** `compare_gt_contact.py --estimated <run> --measured <run 2>` (estimated vs measured labels and forces).
-- **Ground truth (`gt/`):** the three-camera chain — chessboard calibration (`calibrate_cameras.py`), the empty-wall cloud
-  (`extract_frames.py`, `reconstruct_vggt.py`, `clean_scene.py`, `rebuild_scene_calibrated.py`, `view_gt.py`), the multi-view
-  fit (`prepare_human.py`, `fit_multiview.py`, `overlay_human.py`, `run_human.py`). Not ported to the rebuilt core: the fit
-  still calls the old optimiser (it fits the shape and gives the hands a free force, which the rebuilt core does not offer).

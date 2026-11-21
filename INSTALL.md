@@ -1,12 +1,13 @@
 # Installation
 
-## Prerequisites
+## What you need
 
-- [uv](https://docs.astral.sh/uv/)
-- A CUDA GPU; the lock pins the PyTorch **cu129** wheels (`pymomentum-gpu`'s ABI).
-- Network access to GitHub: [BetterRobot](https://github.com/rihat99/BetterRobot) and
-  [BetterHuman](https://github.com/rihat99/better_human) are git dependencies
-  (`[tool.uv.sources]`), fetched by `uv sync` at the commits pinned in `uv.lock`.
+- [uv](https://docs.astral.sh/uv/) and git.
+- A CUDA GPU for the model steps. The lock pins torch 2.13 with the CUDA 12.9 wheels (`pytorch-cu129` index), the
+  torch BetterRobot and BetterHuman are developed on.
+- [BetterRobot](https://github.com/rihat99/BetterRobot) and [BetterHuman](https://github.com/rihat99/better_human)
+  checked out beside this repository, as `../BetterRobot` and `../BetterHuman`: `[tool.uv.sources]` of
+  `pyproject.toml` installs both from there, editable.
 
 ## 1. Clone with submodules
 
@@ -15,11 +16,13 @@ git clone --recurse-submodules https://github.com/rihat99/BetterVideoReconstruct
 cd BetterVideoReconstruction
 ```
 
-If already cloned without submodules: `git submodule update --init --recursive`.
+In a clone without them: `git submodule update --init --recursive`. Under `third_party/`:
 
-The five submodules under `third_party/` are `sam3`, `sam-3d-body`, `sapiens2`,
-`MHR` and `geocalib`; `vggt-omega` sits beside them as a vendored copy (patched
-for chunked low-memory inference).
+| folder | what it is |
+|---|---|
+| `sam3`, `sam-3d-body`, `sapiens2`, `geocalib` | the models of the steps `sam3`, `sam3d`, `sapiens`, `gravity` (submodules) |
+| `MHR` | one file of it: the map from MHR's mesh to SMPL-X's that the `smplx` step reads (`tools/mhr_smpl_conversion/assets/mhr2smplx_mapping.npz`; submodule) |
+| `vggt-omega` | the model of the `vggt` step, a copy patched for a chunked low-memory forward |
 
 ## 2. Build the environment
 
@@ -27,133 +30,65 @@ for chunked low-memory inference).
 uv sync --managed-python
 ```
 
-This creates `.venv` with a uv-managed CPython 3.12 (`xtcocotools` builds a C
-extension, so a system Python without headers fails) and installs everything in
-`uv.lock`: `better-robot` and `better-human` from GitHub, the
-`third_party/` packages editable (`sam3`, `mhr`, `sapiens`, `vggt-omega`,
-`geocalib`), `pymomentum-gpu` with the matching torch cu129 build, and every
-`sam-3d-body` dependency (listed in `pyproject.toml`, since that submodule has no
-`pyproject.toml` of its own).
-
-## 3. The manual steps
-
-Two things cannot be declared in the lock; do them once after `uv sync`.
-
-**detectron2** (only needs to be importable for `sam-3d-body`): it is a source
-build whose outcome depends on the build machine — with a GPU visible and a CUDA
-toolkit on the path it compiles CUDA kernels against whatever `nvcc` it finds —
-so it is installed by hand as a CPU build, pinned, without its own dependencies:
-
-```bash
-CUDA_VISIBLE_DEVICES="" uv pip install --python .venv/bin/python 'git+https://github.com/facebookresearch/detectron2.git@a1ce2f9' --no-build-isolation --no-deps
-```
-
-**sam-3d-body** (no `pyproject.toml`): add it to the Python path with a `.pth` file:
+This makes `.venv` with a uv-managed CPython 3.12 (`xtcocotools` builds a C extension, which fails on a system
+Python without headers) and installs the lock: torch, BetterRobot and BetterHuman, the `third_party/` packages
+editable (`sam3`, `sapiens`, `vggt-omega`, `geocalib`), and the dependencies of SAM 3D Body, listed in
+`pyproject.toml` because that submodule has no `pyproject.toml` of its own. For the same reason SAM 3D Body goes on
+the path by hand, once:
 
 ```bash
 echo "$PWD/third_party/sam-3d-body" > "$(.venv/bin/python -c 'import site; print(site.getsitepackages()[0])')/sam-3d-body.pth"
 ```
 
-**MHR model assets**: `mhr` loads FBX + model assets from `third_party/MHR/assets/`:
+A later `uv sync` keeps that file.
 
-```bash
-cd third_party/MHR
-curl -OL https://github.com/facebookresearch/MHR/releases/download/v1.0.0/assets.zip
-unzip assets.zip
-cd ../..
-```
+## 3. Body models
 
-### Developing against local BetterRobot / BetterHuman checkouts
+BetterHuman reads the licensed body models from `$BETTERHUMAN_MODELS_DIR`; set it (BetterHuman's README gives the
+layout). BVR needs:
 
-To run BVR on your own checkouts instead of the pinned GitHub commits, install
-them editable on top of the synced environment:
+- `smplx/SMPLX_NEUTRAL.npz`, and `SMPLX_MALE.npz` or `SMPLX_FEMALE.npz` if `[smplx].gender` asks for one;
+- `MHR/converted/mhr_lod1.npz`, the MHR body the `smplx` step converts from. BetterHuman's converter
+  (`tools/convert/mhr/` in BetterHuman) makes it once, in that tool's own environment with pymomentum; BVR's
+  environment has no pymomentum.
 
-```bash
-uv pip install --python .venv/bin/python -e ../BetterRobot -e ../BetterHuman --no-deps
-```
+## 4. Model weights
 
-A later exact `uv sync` reverts this (see below). When BVR should follow new
-BetterRobot or BetterHuman commits, re-pin and commit the lock:
+Each model step downloads its weights on first use into the Hugging Face cache (GeoCalib into torch's hub cache). The
+repositories marked gated need access: accept the licence on the model's page, then log in once with
+`uv run hf auth login`. A config key points a step at a local copy instead.
 
-```bash
-uv lock --upgrade-package better-robot --upgrade-package better-human
-```
-
-### `uv run` vs `uv sync` afterwards
-
-`uv run python …` is safe: it syncs the lock but never removes a package it does
-not know, so detectron2 and the `.pth` file survive. A plain `uv sync` is an
-*exact* sync and uninstalls detectron2; use `uv sync --inexact`, or repeat the
-detectron2 line after it.
-
-## 4. Environment variables
-
-| Variable | Meaning | Default |
+| step | weights | local copy |
 |---|---|---|
-| `BVR_DATA_ROOT` | where the data lives (`examples/`, `peter/`, the datasets) | `<repo>/../data` |
-| `BETTERHUMAN_MODELS_DIR` | BetterHuman's licensed body models (`smplx/SMPLX_NEUTRAL.npz`, `MHR/converted/`, …; see BetterHuman's README for the layout) | the installed BetterHuman's `models/` (only exists for an editable checkout) — set it |
-| `BVR_DETERMINISTIC` | `1` makes a GPU run bit-reproducible (deterministic torch kernels, no cuDNN autotune) | off |
-| `CUDA_VISIBLE_DEVICES` | the GPU to use; `""` runs on the CPU (tests) | all |
+| `sam3` | `facebook/sam3` (`sam3.pt`), gated | `[sam3].checkpoint` |
+| `vggt` | `facebook/VGGT-Omega` (`vggt_omega_1b_512.pt`), gated | `[vggt].checkpoint`, a `.pt` file |
+| `sapiens` | `facebook/sapiens2-pose-5b` (`sapiens2_5b_pose.safetensors`, 19 GB) | `[sapiens].checkpoint_root`, holding `pose/sapiens2_5b_pose.safetensors` |
+| `sam3d` | `facebook/sam-3d-body-dinov3`, gated; its snapshot carries the TorchScript MHR body the step runs | `[sam3d].hf_repo` |
+| `gravity` | GeoCalib's `pinhole` or `distorted` weights from its GitHub release | `[gravity].weights` picks one |
 
-## 5. Verify
+## 5. Environment variables
+
+| variable | meaning | default |
+|---|---|---|
+| `BVR_DATA_ROOT` | the data root: `examples/` and the datasets | the folder `data` beside the repository |
+| `BETTERHUMAN_MODELS_DIR` | the body models of section 3 | none |
+| `CUDA_VISIBLE_DEVICES` | the GPU a step runs on (`[run].device = "cuda"`); empty for the CPU tests | every GPU |
+| `BETTER_ROBOT_CHROME`, `BETTER_ROBOT_FFMPEG` | a headless Chromium and an ffmpeg for the viewer's `--record` (ffmpeg only for `.mp4`) | found on `PATH` |
+
+## 6. Check
 
 ```bash
-uv run python -c "import better_robot, better_human, bvr, datasets, sam3, sam_3d_body, detectron2, vggt_omega; print(better_robot.__file__)"
-CUDA_VISIBLE_DEVICES="" uv run pytest -q
+uv run python -c "import better_robot, better_human, bvr, bvr_datasets, sam3, sam_3d_body, sapiens, vggt_omega, geocalib"
+CUDA_VISIBLE_DEVICES= uv run pytest tests -q
 ```
 
-The first line prints the installed BetterRobot (under `.venv/` for the GitHub pin, under your checkout for the editable override).
-
-## Model checkpoints
-
-### Sapiens2
-
-`bvr/stages/estimate_sapiens.py` runs Meta's Sapiens2-5B for pose / pointmap /
-normal. The 5B `.safetensors` weights (~10 GB per task) auto-download from
-HuggingFace into the standard HF cache on first use:
-
-- `facebook/sapiens2-pose-5b`     → `sapiens2_5b_pose.safetensors`
-- `facebook/sapiens2-pointmap-5b` → `sapiens2_5b_pointmap.safetensors`
-- `facebook/sapiens2-normal-5b`   → `sapiens2_5b_normal.safetensors`
-
-Pre-download into a fixed location and set `[sapiens] checkpoint_root` in
-`configs/pipeline.toml` to avoid the HF cache; the layout is
-`<root>/<task>/sapiens2_5b_<task>.safetensors`.
-
-### VGGT-Omega
-
-`bvr/stages/estimate_camera_vggt.py` runs VGGT-Omega (multi-view camera + depth,
-right after `sam3`). Its checkpoints are HuggingFace **access-gated**: request
-access at <https://huggingface.co/facebook/VGGT-Omega>, then either download
-`vggt_omega_1b_512.pt` and set `[vggt] checkpoint` in `configs/pipeline.toml`,
-or authenticate (`huggingface-cli login`) and let the stage pull the default
-weight on first use.
-
-VGGT-Omega is multi-view — one forward over the whole clip — so peak GPU memory
-grows with frame count (~43 GB for 500 frames @ 512 on an A100, per the upstream
-benchmark). The stage caps at `[vggt] max_frames` (default 500, uniformly
-subsampled); lower it or the image resolution if you hit OOM. See
-`bvr/adapters/vggt_omega.py`.
+The import prints `Momentum is not enabled`: SAM 3D Body's warning that it runs its TorchScript MHR body, which is
+what BVR wants.
 
 ## Notes
 
-- **pymomentum-gpu libstdc++ preload:** the PyPI wheels are built against GCC 14
-  and ship their own `libstdc++-pymomentum.so.6`; on an older system libstdc++
-  (Ubuntu 22.04) mixing the two segfaults inside `Character.with_blend_shape`
-  ([momentum#939](https://github.com/facebookresearch/momentum/issues/939)).
-  Every pymomentum-using stage in `bvr/stages/` imports `_pym_preload` first,
-  which re-execs the interpreter with `LD_PRELOAD` pointed at the bundled
-  libstdc++. Outside these stages set it yourself:
-
-  ```bash
-  export LD_PRELOAD=$(python -c "import sysconfig,pathlib; print(pathlib.Path(sysconfig.get_paths()['purelib'])/'pymomentum_gpu.libs'/'libstdc++-pymomentum.so.6')")
-  ```
-
-  Import `torch` before `pymomentum` / `mhr` (else `ImportError: initialization failed`).
-- **numpy override:** `sam3` and `vggt-omega` pin `numpy<2` but `better-robot`
-  requires `numpy>=2.0`; `[tool.uv] override-dependencies` forces `numpy>=2.0`
-  (works with all three).
-- **xtcocotools build:** needs numpy/cython at build time; configured via
-  `[tool.uv.extra-build-dependencies]` in `pyproject.toml`.
-- **Torch version:** BetterRobot and BetterHuman run on newer torch in their own
-  envs; this repo stays on torch 2.8 (`pymomentum-gpu`), which both support.
+- `sam3` and `vggt-omega` pin `numpy<2`, BetterRobot needs `numpy>=2.0`; `[tool.uv] override-dependencies` forces
+  `numpy>=2.0`, which all three run with.
+- `xtcocotools` needs numpy and cython at build time: `[tool.uv.extra-build-dependencies]`.
+- To follow new BetterRobot or BetterHuman commits, pull their checkouts and run `uv sync --managed-python`; it
+  re-locks if their dependencies changed.
