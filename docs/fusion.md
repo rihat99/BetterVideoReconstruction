@@ -35,6 +35,6 @@ A shot counts as locked off when the scene slides less than `static_motion_max` 
 | `scene.npz` | `points (M, 3)`, `colors (M, 3)` uint8, `confidence (M,)` (the largest of its voxel), `normals (M, 3)`, `count (M,)` depth pixels merged, `voxel_size` |
 | `human.npz` | `points (n, 3)`, `colors`, `confidence`, `frame_id (n,)` (a row of the transform), `obj_id (n,)`, `frame_indices (T,)` |
 
-`T` is the number of frames VGGT saw: every frame, unless the clip has more than `[vggt].max_frames`, when VGGT sees
-that many, spread evenly. The step holds the per-frame clouds on the GPU until the merge (5 to 13 GB on the example
+`T` is the number of frames of the clip: VGGT sees every frame, and the `vggt` step stops on a clip of more than
+`[vggt].max_frames`. `frame_indices` is `0..T-1`, kept for the readers of older trees. The step holds the per-frame clouds on the GPU until the merge (5 to 13 GB on the example
 clips).

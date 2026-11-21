@@ -27,7 +27,7 @@ fps = ""                    # overlay rate; empty uses the source's
 checkpoint = ""             # SAM 3 checkpoint path; empty uses the Hugging Face cache
 
 [vggt]                      # VGGT-Omega cameras and depth -> vggt/ (up to scale)
-max_frames = 500            # longer clips are uniformly subsampled to this many frames
+max_frames = 500            # a longer clip stops the step: raise this (about 0.076 GB of GPU memory a frame) or trim it
 image_resolution = 512      # model input resolution (px)
 mode = "balanced"           # image sizing: balanced | max_size
 save_depth = true           # write per-frame depth and confidence (fuse and scale need them)
