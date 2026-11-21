@@ -54,7 +54,7 @@ orient_iterations = 40      # Adam iterations of the first phase: the global ori
 body_iterations = 80        # Adam iterations of the second phase: plus the body pose and betas
 hands_iterations = 40       # Adam iterations of the third phase: plus the hand poses
 iterations = 300            # Adam iterations of the fine phase
-gender = "neutral"          # neutral | male | female
+gender = "neutral"          # neutral only: the converter would fit male or female betas, every later step loads neutral
 batch_size = 64             # frames per fit batch
 
 [fuse]                      # up-to-scale point clouds -> geometry/fused/
