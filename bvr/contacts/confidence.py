@@ -124,18 +124,19 @@ def label_confidence(joint_contact: np.ndarray, drift: np.ndarray, tracked: np.n
     return confidence.astype(np.float32)
 
 
-def force_confidence(root: np.ndarray, forces: np.ndarray, tracked: np.ndarray, weight: np.ndarray) -> np.ndarray:
+def force_confidence(root: np.ndarray, forces: np.ndarray, counted: np.ndarray, weight: np.ndarray) -> np.ndarray:
     """How far to trust the solved forces of each person in each frame, ``(P, T)`` in ``[0, 1]``.
 
     ``root (P, T, 6)`` is the root residual after the solve (N, N m), ``forces (P, T, F, 3)`` the contact forces
     (N), ``weight (P,)`` the body weights (N). Three things each cost confidence along ``1 / (1 + (x / x*)^2)``,
     and the result is their product: the residual force (where the solve could not balance the motion, what it
     did assign is an allocation of error), the residual torque, and total force beyond what a person supports,
-    which explains reconstruction error and not motion. 0 on untracked frames.
+    which explains reconstruction error and not motion. 0 where ``counted (P, T)`` is false, the frames whose
+    inverse dynamics did not count: there the solve balanced nothing, and a residual of zero says nothing.
     """
     weight = weight[:, None]
     excess = np.maximum(np.linalg.norm(forces, axis=-1).sum(axis=-1) / weight - LOAD_CAP, 0.0)
     confidence = 1.0 / ((1.0 + np.square(np.linalg.norm(root[..., :3], axis=-1) / (weight * RESIDUAL_FORCE)))
                         * (1.0 + np.square(np.linalg.norm(root[..., 3:], axis=-1) / (weight * LEVER * RESIDUAL_TORQUE)))
                         * (1.0 + np.square(excess)))
-    return np.where(tracked, confidence, 0.0).astype(np.float32)
+    return np.where(counted, confidence, 0.0).astype(np.float32)

@@ -70,7 +70,9 @@ each cost confidence along `1 / (1 + (x / x*)^2)`, and the result is their produ
 - the residual torque, `x*` = 1.5 body weights times 0.2 m;
 - total force beyond 3 body weights, `x*` = 1 body weight: that explains reconstruction error, not motion.
 
-It is 0 on untracked frames. `force_confidence_clip` is its mean over each person's tracked frames. Read forces
+It is 0 where the inverse dynamics do not count: on untracked frames, beside a tracking gap and for a person without
+contact labels, where the solve balanced nothing. `force_confidence_clip` is its mean over each person's tracked
+frames. Read forces
 through it: on clips filmed at 100 fps and more, force spikes remain on people the camera hardly sees, and their
 confidence is low there.
 
