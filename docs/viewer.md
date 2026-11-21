@@ -21,9 +21,10 @@ The sidebar holds BetterRobot's sections and three of its own:
 - Timeline: play, step, speed. Robot: the skeleton's style. Images: the video, in step with the timeline.
 - Layers, one checkbox per tag: Scene points, Human points (off at the start), Cameras (the frustum with the video
   frame on it, and the camera's path), Gravity, Ground plane (the floor the gravity step fitted), Body (the exact
-  posed mesh, one colour per person), Skeleton (its joints coloured by joint torque on a `kindyn_1` body), Contact
-  frames (red in contact, green free, with their normals; grey without labels), Forces (the contact forces), Root
-  wrench (the root residual force and torque). A layer switched off stays off across switches.
+  posed mesh, see-through, one colour per person: light blue, then salmon, green, lilac, gold), Skeleton (its joints
+  coloured by joint torque on a `kindyn_1` body), Contact frames (red in contact, green free, with their normals; grey
+  without labels), Forces (the contact forces), Root wrench (the root residual force and torque). A layer switched
+  off stays off across switches.
 - Clip: a pager over the clips, when there are several. A switch reads the new clip first, so a clip that fails to
   read leaves the old one on screen.
 - Body: the source of the bodies, among those the clip holds: `converter` (`sam3d/smplx_params.npz`), `prefit`,
@@ -32,7 +33,9 @@ The sidebar holds BetterRobot's sections and three of its own:
   keeps the frame. The default is the newest source the run's own tree wrote.
 - Info: the number of people, the source of gravity, and the sources read from `--upstream`.
 
-The opening view looks at the people from the filming camera's side, from above.
+The opening view holds the people over the whole clip, so a person who travels stays in it, seen from 25 degrees
+above the filming camera's side (BetterRobot's `Viewer.aim`: the body layers of 32 frames spread over the clip fit in
+80 % of a 16:9 view). The scene, the cameras and the floor do not widen it; a clip without people is framed whole.
 
 ## Recording
 

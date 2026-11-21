@@ -5,12 +5,14 @@ The sidebar holds BetterRobot's own sections, the Timeline (play, step, speed), 
 of the app's: the clip (a pager over the run's clips), the body source (converter, pre-fit, the two kinematic fits and
 the dynamics fit, each when the clip holds it) and a line of information. A switch of clip reads the new clip before
 the old one goes, so a clip that fails to read leaves the old one on screen; a switch of source replaces only the
-bodies and keeps the frame. A layer switched off stays off across switches. The browsers look at the people from
-the side of the filming camera.
+bodies and keeps the frame. A layer switched off stays off across switches. The view opens on the people over the
+whole clip, so a person who travels stays in it, seen from above the side of the filming camera (BetterRobot's
+``Viewer.aim``).
 """
 from __future__ import annotations
 
 import logging
+import math
 from dataclasses import replace
 from pathlib import Path
 
@@ -32,8 +34,8 @@ class App:
     def __init__(self, clips: list[paths.Clip], settings: dict) -> None:
         self.clips, self.settings = {clip.name: clip for clip in clips}, settings
         self.human = body.load("cpu")
-        self.viewer = Viewer(host="0.0.0.0", port=settings["port"], theme=replace(LIGHT, up=settings["up"]),
-                             ground=False)
+        self.viewer = Viewer(host="0.0.0.0", port=settings["port"],
+                             theme=replace(LIGHT, up=settings["up"], hues=layers.HUES), ground=False)
         self.viewer.aim()           # stop BetterRobot's framing after each add: the app frames the people itself
         self.hidden = set(layers.HIDDEN)
         self.data: clips_module.ClipData | None = None
@@ -62,15 +64,19 @@ class App:
             self._remove(self.viewer.tags)
             self.data, self.source = data, source
             settings = {key: self.settings[key] for key in ("point_size", "human_point_size", "camera_scale")}
-            self._add(layers.scene_layers(data, **settings) + bodies)
+            placed = layers.scene_layers(data, **settings) + bodies
+            # The view frames the people alone, else everything: the scene and the cameras would widen it, so they
+            # are switched on once it is aimed.
+            later = {tag for tag, _, _ in placed if tag not in layers.BODY_TAGS} - self.hidden if bodies else set()
+            self._add(placed, self.hidden | later)
             self.viewer.add(ImagePanel("Video", data.video, nsteps=len(data.extrinsics)), tags="video")
             self.viewer.set_fps(data.fps)
             if source is not None:
                 self.viewer.sidebar.set_value("Body", "Source", value=source)
-            self.view = opening_view(data, bodies, np.asarray(self.viewer.theme.up_vector))
-            for camera in (self.viewer.server.initial_camera,
-                           *(client.camera for client in self.viewer.server.get_clients().values())):
-                camera.position, camera.look_at = self.view     # position first: it drags look_at along
+            self.view = self.viewer.aim(
+                azimuth=opening_azimuth(data, bodies, np.asarray(self.viewer.theme.up_vector)))
+            for tag in later:
+                self.viewer.set_visible(tag, True)
             people = sum(tag == "body" for tag, _, _ in bodies)
             upstream = [name for name in data.sources if name not in data.written]
             self.info.content = (f"**{data.name}** · {len(data.extrinsics)} frames at {data.fps:.2f} fps · "
@@ -85,7 +91,7 @@ class App:
             raise UnknownNameError("body source of this clip", source, valid=list(self.data.sources))
         bodies = self._bodies(self.clips[self.data.name], self.data, source)
         self._remove([tag for tag in self.viewer.tags if tag in layers.BODY_TAGS])
-        self._add(bodies)
+        self._add(bodies, self.hidden)
         self.source = source
 
     def record(self, path: Path) -> Path:
@@ -105,27 +111,25 @@ class App:
             (self.hidden.discard if shown else self.hidden.add)(tag)
             self.viewer.remove(tag)
 
-    def _add(self, placed: list[layers.Placed]) -> None:
+    def _add(self, placed: list[layers.Placed], hidden: set[str]) -> None:
+        """Add ``placed``, the layers of the tags in ``hidden`` switched off."""
         for tag, layer, tracked in placed:
-            if tag in self.hidden:
+            if tag in hidden:
                 layer.set_visible(False)
             self.viewer.add(layer, tags=tag, valid=tracked)
 
 
-def opening_view(data: clips_module.ClipData, bodies: list[layers.Placed],
-                 up: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
-    """``(position, look_at)``: the people (else the scene, else the cameras) seen from the side of the mean camera
-    centre, 25 degrees above it about ``up (3,)`` so that the camera and its frustum stand below the people, at
-    least 2 m away."""
+def opening_azimuth(data: clips_module.ClipData, bodies: list[layers.Placed], up: np.ndarray) -> float:
+    """The azimuth of ``Viewer.aim`` about ``up (3,)`` that looks at the people (else the scene, else the cameras)
+    from the side of the mean camera centre."""
     cameras = layers.camera_poses(data.extrinsics)[:, :3].mean(axis=0)
     roots = [layer.q[:, :3].numpy()[tracked] for tag, layer, tracked in bodies if tag == "skeleton"]
-    look_at = (np.concatenate(roots).mean(axis=0) if roots
-               else cameras if data.scene is None else data.scene[0].mean(axis=0))
-    away = cameras - look_at
-    level = away - (away @ up) * up
-    level = level / max(float(np.linalg.norm(level)), 1e-6)
-    direction = np.cos(np.radians(25.0)) * level + np.sin(np.radians(25.0)) * up
-    return look_at + direction * max(1.2 * float(np.linalg.norm(away)), 2.0), look_at
+    centre = (np.concatenate(roots).mean(axis=0) if roots
+              else cameras if data.scene is None else data.scene[0].mean(axis=0))
+    away = cameras - centre
+    # Viewer.aim looks from `side` at azimuth 0 and from `up x side` at 90 degrees (its code; documented for +z up).
+    side = np.cross([0.0, 0.0, 1.0] if abs(up[2]) < 0.9 else [1.0, 0.0, 0.0], up)
+    return math.atan2(float(away @ np.cross(up, side)), float(away @ side))
 
 
 def serve(clips: list[paths.Clip], settings: dict, *, record: Path | None = None) -> None:
