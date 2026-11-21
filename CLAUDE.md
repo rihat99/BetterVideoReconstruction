@@ -71,11 +71,11 @@ Never skip, xfail, loosen a tolerance or delete an assertion to get green; repor
   `9RvrpYoWDoo_0001` and `PfwFWSoPF_k_0026` differ (0.3 degrees, 3 to 4 %): their videos were re-cut and re-encoded on
   2026-07-03, two days after VGGT ran on the earlier cut, which is gone. Compare changes to the human steps on a fixed
   upstream, never a run from the video against a stored tree.
-- VGGT memory. One forward over the whole clip, whose peak allocation is 4.3 GB plus 0.076 GB per frame (42 GB at
-  500 frames, 80 GB at 1000; `mode = "balanced"` keeps about 1024 tokens a frame at any aspect ratio). A 96 GB card
-  holds about 1150 frames. `nvidia-smi` shows up to 1.6 times the allocation while the card has room; that is the
-  allocator's cache, not a need. Clips longer than `[vggt].max_frames` (500) are subsampled; no such clip has been run
-  through the fitting steps.
+- VGGT memory. `third_party/vggt-omega` is the authors' code, unchanged: one forward over the whole clip, whose peak
+  allocation is 4.3 GB plus 0.076 GB per frame (42 GB at 500 frames, 80 GB at 1000; `mode = "balanced"` keeps about
+  1024 tokens a frame at any aspect ratio). A 96 GB card holds about 1150 frames. `nvidia-smi` shows up to 1.6 times
+  the allocation while the card has room; that is the allocator's cache, not a need. Clips longer than
+  `[vggt].max_frames` (500) are subsampled; no such clip has been run through the fitting steps.
 - The in-the-wild clips need a delta the repository does not hold (the largest person only, a camera per frame):
 
   ```toml

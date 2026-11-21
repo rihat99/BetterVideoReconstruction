@@ -85,8 +85,9 @@ time inside each step without the model load (from the manifests), and torch's p
 | `fuse` | 2.8 | | `kindyn_1` | 8.0 | |
 | `scale` | 8.9 | | whole job | 387 | |
 
-VGGT's memory grows with the frame count: it runs one forward over the clip, and `[vggt].mode = "balanced"` keeps
-about 1024 tokens a frame at any aspect ratio. Torch's peak allocation is 4.3 GB plus 0.076 GB per frame:
+VGGT's memory grows with the frame count: it runs one forward over the clip (the authors' code, unchanged), and
+`[vggt].mode = "balanced"` keeps about 1024 tokens a frame at any aspect ratio. Torch's peak allocation is 4.3 GB plus
+0.076 GB per frame:
 
 | frames | 104 | 250 | 471 | 500 | 750 | 1000 |
 |---|---|---|---|---|---|---|
