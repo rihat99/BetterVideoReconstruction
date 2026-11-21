@@ -20,8 +20,9 @@ a person without a tracked frame or without keypoints is written as they came.
 The file is a body file (``bvr.body.save``) with the solved forces: ``frame_forces`` at the contact
 frames and ``contact_forces_world`` summed onto their parent joints (N, world), ``joint_torques``
 (inverse dynamics, the root rows first), ``base_wrench`` (the root residual, in the root's frame)
-and ``force_confidence``. The residual and the torque sizes are zero on the frames whose inverse
-dynamics do not count.
+and ``force_confidence``. All three inverse-dynamics arrays are zero on the frames whose stencil
+reaches an untracked frame; the residual and the torque sizes are also zero for a person without
+contact labels, whose inverse dynamics do not count.
 """
 from __future__ import annotations
 
@@ -104,8 +105,10 @@ def save(clip: paths.Clip, start: dict[str, np.ndarray], identity: bh.Identity, 
     velocity = motion.velocity(human.model, time)(state.q)
     weight = dynamics.weight(identity)
     forces = dynamics.cone_forces(activation, edges, weight)
-    torques = dynamics.torques(state, velocity, time.difference(velocity), forces, time=time)
-    counted = dynamics.stencil_rows(time, tracked) & held.any(dim=(1, 2))[:, None]
+    # Where the stencil reads an untracked frame, inverse dynamics differences a pose that was never fitted.
+    stencil = dynamics.stencil_rows(time, tracked)
+    torques = dynamics.torques(state, velocity, time.difference(velocity), forces, time=time) * stencil[..., None]
+    counted = stencil & held.any(dim=(1, 2))[:, None]
     root = torques[..., :6] * counted[..., None]
     # One size per joint: the root's six rows, then three rows for each of the other joints.
     sizes = torch.cat((torques[..., :6].norm(dim=-1, keepdim=True),
