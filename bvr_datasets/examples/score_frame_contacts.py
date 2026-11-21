@@ -1,7 +1,6 @@
-"""Score frames-era contact predictions against the manual per-joint annotations.
+"""Score contact predictions against the manual per-joint annotations.
 
-The frames-era detector labels named body contact frames (the legacy 12-frame climbing
-set, or the full-body ``better_contacts`` set with per-foot ball / big_toe frames). The
+The contact steps label the body's 35 named contact frames. The
 manual annotations in ``<data root>/examples/data/<stem>.npz`` label coarse joints (a 10-joint
 or a 14-joint schema). To compare them we fold each coarse joint's frames together with an OR — a
 joint is predicted in contact if ANY of its frames is:
@@ -26,6 +25,7 @@ from __future__ import annotations
 
 import argparse
 import json
+from collections.abc import Mapping
 from pathlib import Path
 
 import numpy as np
@@ -42,20 +42,16 @@ SCHEMA_10 = frozenset({"left_hand", "right_hand", "left_foot", "right_foot", "le
                        "left_hip", "right_hip", "left_elbow", "right_elbow"})
 SCHEMA_14 = SCHEMA_10 | {"left_ankle", "right_ankle", "left_shoulder", "right_shoulder"}
 
-# Which contact frames fold onto which annotated coarse joint, per annotation schema.
-# Names cover BOTH frame sets — the legacy 12-frame set (toe_under) and the full-body
-# better_contacts set (ball_inner / ball_outer / big_toe); names the prediction does
-# not carry are skipped at fold time. The full set's elbow / shoulder / hip / torso
-# frames stay unscored so the metric keeps meaning what it always meant.
+# Which contact frames fold onto which annotated coarse joint, per annotation schema. The
+# elbow / shoulder / hip / torso frames stay unscored so the metric keeps meaning what it
+# always meant.
 _HANDS = {
     "left_hand": ("palm_left", "finger_left", "palm_distal_left", "thumb_left"),
     "right_hand": ("palm_right", "finger_right", "palm_distal_right", "thumb_right"),
 }
 _KNEES = {"left_knee": ("knee_left",), "right_knee": ("knee_right",)}
-_TOES_L = ("toe_under_left", "toe_above_left", "ball_inner_left", "ball_outer_left",
-           "big_toe_left")
-_TOES_R = ("toe_under_right", "toe_above_right", "ball_inner_right", "ball_outer_right",
-           "big_toe_right")
+_TOES_L = ("toe_above_left", "ball_inner_left", "ball_outer_left", "big_toe_left")
+_TOES_R = ("toe_above_right", "ball_inner_right", "ball_outer_right", "big_toe_right")
 _FOLD_10: dict[str, tuple[str, ...]] = {
     **_HANDS,
     "left_foot": (*_TOES_L, "heel_left"),
@@ -133,18 +129,23 @@ def metrics(counts: dict[str, int]) -> dict[str, float | int | None]:
 
 
 def score_scene(scene_dir: Path, tag: str) -> dict:
-    """Score one clip directory ``<run root>/<scene>/`` against ``<data root>/examples/data/<scene>.npz``.
-
-    Reads ``human_optim/contacts_<tag>.npz`` (``frame_contact (P,N,F)``, ``valid_mask (P,N)``,
-    ``object_ids (P,)``) and the annotation ``contacts (P_ann,J_ann,N_ann)`` — note the
-    annotation's time axis is LAST. Returns the per-joint counts pooled over the scored people.
-    """
+    """Score one clip directory ``<run root>/<scene>/`` against ``<data root>/examples/data/<scene>.npz``:
+    :func:`score_prediction` of its ``human_optim/contacts_<tag>.npz``."""
     pred = files.load_npz(scene_dir / CONTACTS[tag], "bvr-contacts")
     ann_path = paths.data_root() / "examples" / "data" / f"{scene_dir.name}.npz"
     if not ann_path.exists():
         raise FileNotFoundError(f"no manual annotation at {ann_path}")
-    ann = np.load(ann_path, allow_pickle=True)
+    return score_prediction(pred, np.load(ann_path, allow_pickle=True))
 
+
+def score_prediction(pred: Mapping[str, np.ndarray], ann: Mapping[str, np.ndarray]) -> dict:
+    """Score one labelling against one manual annotation.
+
+    ``pred`` holds ``frame_contact (P,N,F)``, ``valid_mask (P,N)``, ``object_ids (P,)`` and
+    ``contact_frame_names (F,)`` (a contacts file, or the labels of a kindyn_1 file); ``ann`` holds
+    ``contacts (P_ann,J_ann,N_ann)`` — note the annotation's time axis is LAST — ``joint_names``,
+    ``object_ids`` and ``ignored``. Returns the per-joint counts pooled over the scored people.
+    """
     frame_contact = pred["frame_contact"].astype(bool)          # (P, N, F)
     valid_mask = pred["valid_mask"].astype(bool)                # (P, N)
     pred_ids = [int(o) for o in pred["object_ids"]]
@@ -175,7 +176,7 @@ def score_scene(scene_dir: Path, tag: str) -> dict:
             continue
         scored_ids.append(object_id)
         for name, frames in fold.items():
-            cols = [frame_idx[f] for f in frames if f in frame_idx]
+            cols = [frame_idx[f] for f in frames]
             predicted = np.any(frame_contact[person][:, cols], axis=1)
             labels = ann_contacts[ann_person][:, ann_col[name]]
             keep = (labels >= 0) & valid_mask[person]

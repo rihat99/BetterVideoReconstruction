@@ -16,7 +16,7 @@ degrees, and each side's mean root acceleration (m/s^2, over neighbouring frames
 smoothness check).
 Per contact labelling (``frame_contact`` of contacts_1, contacts_2, kindyn_1): cell agreement,
 F1 between the two label sets, and each side's F1 against the manual annotations where they
-exist (the fold of ``bvr_datasets/examples/score_frame_contacts.py``: hands, feet/ankles, knees; pooled
+exist (scored by ``bvr_datasets/examples/score_frame_contacts.py``: hands, feet/ankles, knees; pooled
 TP/FP/FN).
 kindyn_1 forces in body weights (each side divided by its own ``total_mass * 9.81``): per-frame
 force vector error on entries loaded on either side, total support |sum f| per frame, root
@@ -36,25 +36,13 @@ import torch
 
 from bvr import paths
 from bvr.terms import dynamics, motion
+from bvr_datasets.examples import score_frame_contacts
 
 GRAVITY = 9.81                      # bvr kindyn's gravity magnitude
 BODY_FILES = ("kinematic_1", "kinematic_2", "kindyn_1")
 LABEL_FILES = ("contacts_1", "contacts_2", "kindyn_1")
 SMPLX_52 = [*range(22), *range(25, 55)]      # SMPL-X joints without jaw and eyes = BVR's 52
 FRAME_ALIASES = {"head": "head_top"}         # contact frame renamed in BetterHuman dev
-
-# score_frame_contacts.py's fold: annotated coarse joint <- OR of these contact frames.
-_HANDS = {"left_hand": ("palm_left", "finger_left", "palm_distal_left", "thumb_left"),
-          "right_hand": ("palm_right", "finger_right", "palm_distal_right", "thumb_right")}
-_KNEES = {"left_knee": ("knee_left",), "right_knee": ("knee_right",)}
-_TOES_L = ("toe_under_left", "toe_above_left", "ball_inner_left", "ball_outer_left", "big_toe_left")
-_TOES_R = ("toe_under_right", "toe_above_right", "ball_inner_right", "ball_outer_right", "big_toe_right")
-FOLD_10 = {**_HANDS, "left_foot": (*_TOES_L, "heel_left"), "right_foot": (*_TOES_R, "heel_right"), **_KNEES}
-FOLD_14 = {**_HANDS, "left_foot": _TOES_L, "right_foot": _TOES_R,
-           "left_ankle": ("heel_left",), "right_ankle": ("heel_right",), **_KNEES}
-SCHEMA_10 = {"left_hand", "right_hand", "left_foot", "right_foot", "left_knee", "right_knee",
-             "left_hip", "right_hip", "left_elbow", "right_elbow"}
-SCHEMA_14 = SCHEMA_10 | {"left_ankle", "right_ankle", "left_shoulder", "right_shoulder"}
 
 
 class Skeleton:
@@ -165,43 +153,6 @@ def compare_body(a: dict, b: dict, skeleton: Skeleton) -> tuple[dict, dict]:
     return record, raw
 
 
-def _fold(annotation: dict) -> dict[str, tuple[str, ...]]:
-    names = {str(n) for n in annotation["joint_names"]}
-    if names == SCHEMA_10:
-        return FOLD_10
-    if names == SCHEMA_14:
-        return FOLD_14
-    raise ValueError(f"unrecognized annotation schema {sorted(names)}")
-
-
-def score_against(d: dict, annotation: dict) -> dict[str, int]:
-    """TP/FP/FN/TN of ``frame_contact`` folded to the annotated joints (score_frame_contacts.py rules)."""
-    counts = {"tp": 0, "fp": 0, "fn": 0, "tn": 0}
-    contact = d["frame_contact"].astype(bool)                                      # (P, N, F)
-    valid = d["valid_mask"].astype(bool)
-    column = {n: i for i, n in enumerate(_frame_names(d))}
-    ann_names = [str(n) for n in annotation["joint_names"]]
-    labels_all = np.transpose(annotation["contacts"].astype(np.int8), (0, 2, 1))   # (P_ann, N, J)
-    ann_ids = [int(o) for o in annotation["object_ids"]]
-    if labels_all.shape[1] != contact.shape[1]:
-        raise ValueError(f"frame count {contact.shape[1]} vs annotation {labels_all.shape[1]}")
-    for person, object_id in enumerate(int(o) for o in d["object_ids"]):
-        if object_id not in ann_ids or bool(annotation["ignored"][ann_ids.index(object_id)]):
-            continue
-        labels = labels_all[ann_ids.index(object_id)]
-        for joint, frames in _fold(annotation).items():
-            cols = [column[f] for f in frames if f in column]
-            predicted = contact[person][:, cols].any(axis=1)
-            truth = labels[:, ann_names.index(joint)]
-            keep = (truth >= 0) & valid[person]
-            p, t = predicted[keep], truth[keep] == 1
-            counts["tp"] += int((p & t).sum())
-            counts["fp"] += int((p & ~t).sum())
-            counts["fn"] += int((~p & t).sum())
-            counts["tn"] += int((~p & ~t).sum())
-    return counts
-
-
 def compare_labels(a: dict, b: dict, annotation: dict | None) -> tuple[dict, dict]:
     ia, ib = _people(a, b)
     if a["frame_contact"].shape[1] != b["frame_contact"].shape[1]:
@@ -224,7 +175,7 @@ def compare_labels(a: dict, b: dict, annotation: dict | None) -> tuple[dict, dic
         record["label_confidence_diff"] = _stats(conf)
     if annotation is not None:
         for side, d in (("a", a), ("b", b)):
-            counts = score_against(d, annotation)
+            counts = score_frame_contacts.score_prediction(d, annotation)["pooled"]
             raw[f"ann_{side}"] = counts
             record[f"f1_ann_{side}"] = _f1(counts["tp"], counts["fp"], counts["fn"])
     return record, raw
