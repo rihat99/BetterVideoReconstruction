@@ -103,14 +103,14 @@ def chain(source: Path, save_dir: Path, *, config_path: Path | None = None, step
     config = configuration.load(config_path)
     selected = _steps(config["run"]["steps"] if steps is None else steps)
     clips = paths.clips(source, save_dir, upstream)[shard[0] - 1::shard[1]]
-    code = manifest.code(None if dry_run else save_dir)
+    code, dependencies = manifest.code(None if dry_run else save_dir), manifest.dependencies()
     log.info("%d clip(s) -> %s; steps: %s", len(clips), save_dir, ", ".join(step.name for step in selected))
     failed: set[str] = set()
     rewritten: set[str] = set()
     for step in selected:
         todo = [clip for clip in clips if clip.name not in failed]
         if skip_existing:
-            todo = [clip for clip in todo if clip.name in rewritten or _stale(step, clip, config, code)]
+            todo = [clip for clip in todo if clip.name in rewritten or _stale(step, clip, config, code, dependencies)]
         if not todo:
             log.info("%s: nothing to do", step.name)
             continue
@@ -126,7 +126,9 @@ def chain(source: Path, save_dir: Path, *, config_path: Path | None = None, step
             rewritten.update(clip.name for clip in todo)
             continue
         subprocess.run(command, check=False)
-        failed.update(clip.name for clip in todo if not _complete(step, clip))
+        # Done means a manifest that vouches for this config, code, libraries and inputs: a stage that died before
+        # writing one (a load that raised, a killed process) leaves the previous run's manifest in place.
+        failed.update(clip.name for clip in todo if _stale(step, clip, config, code, dependencies))
     for name in sorted(failed):
         log.error("%s failed; see %s", name, save_dir / name / "manifests")
     return 1 if failed else 0
@@ -182,9 +184,9 @@ def stage(module: str, load: Callable[[Stage], Callable[[Clip], None]], argument
     loggers = [logging.getLogger(name) for name in {"bvr", load.__module__} if name == "bvr" or name[:4] != "bvr."]
     for logger in loggers:
         _log_to_console(logger)
-    code = manifest.code(options.save_dir)
+    code, environment = manifest.code(options.save_dir), manifest.environment()
     if options.skip_existing:
-        clips = [clip for clip in clips if _stale(step, clip, config, code)]
+        clips = [clip for clip in clips if _stale(step, clip, config, code, environment)]
     if not clips:
         log.info("%s: nothing to do", step.name)
         return 0
@@ -203,7 +205,6 @@ def stage(module: str, load: Callable[[Stage], Callable[[Clip], None]], argument
     device = torch.device(settings["device"])
     generator = torch.Generator(device).manual_seed(settings["seed"])
     on_gpu = device.type == "cuda"
-    environment = manifest.environment()
     command = ["python", "-m", f"bvr.stages.{module}", *arguments]
     process = load(Stage(step.name, stage_config, device, generator))
     failed = 0
@@ -265,16 +266,11 @@ def _inputs(step: Step, clip: Clip) -> dict:
     return {name: {"path": str(path), "checksum": manifest.checksum(path)} for name, path in found.items()}
 
 
-def _stale(step: Step, clip: Clip, config: dict, code: dict) -> bool:
+def _stale(step: Step, clip: Clip, config: dict, code: dict, environment: dict) -> bool:
     reason = manifest.stale(manifest.read(clip.manifest(step.name)), config=_config(step, config), code=code,
-                            inputs=_inputs(step, clip))
-    log.info("%s: %s: %s", step.name, clip.name, f"runs ({reason})" if reason else "complete, skipped")
+                            environment=environment, inputs=_inputs(step, clip))
+    log.info("%s: %s: %s", step.name, clip.name, reason or "complete")
     return reason is not None
-
-
-def _complete(step: Step, clip: Clip) -> bool:
-    written = manifest.read(clip.manifest(step.name))
-    return written is not None and written["status"] == "complete"
 
 
 def _clear(step: Step, clip: Clip) -> None:

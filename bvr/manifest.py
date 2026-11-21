@@ -1,9 +1,9 @@
 """Stage manifests: what ran, on what, with which code and config.
 
 Every step of every clip ends by writing ``<clip>/manifests/<step>.json``. A step is done only if
-its manifest says so, and a resume skips it only while the config it read, the code and the
-checksums of its inputs are what the manifest recorded (:func:`stale`). A file that merely exists
-proves nothing: it may be half a run's, or an older config's.
+its manifest says so, and a resume skips it only while the config it read, the code, the libraries
+and the checksums of its inputs are what the manifest recorded (:func:`stale`). A file that merely
+exists proves nothing: it may be half a run's, or an older config's.
 """
 from __future__ import annotations
 
@@ -56,9 +56,10 @@ def read(path: Path) -> dict | None:
     return json.loads(path.read_text()) if path.exists() else None
 
 
-def stale(manifest: dict | None, *, config: dict, code: dict, inputs: dict) -> str | None:
-    """Say why ``manifest`` does not vouch for a step with this config, code and inputs.
+def stale(manifest: dict | None, *, config: dict, code: dict, environment: dict, inputs: dict) -> str | None:
+    """Say why ``manifest`` does not vouch for a step with this config, code, libraries and inputs.
 
+    :param environment: the current :func:`environment`, or at least its :func:`dependencies`.
     :return: ``None`` when the step is complete and nothing it depends on has changed.
     """
     if manifest is None:
@@ -69,6 +70,10 @@ def stale(manifest: dict | None, *, config: dict, code: dict, inputs: dict) -> s
         return "the config changed"
     if (manifest["code"]["commit"], manifest["code"]["diff_sha256"]) != (code["commit"], code["diff_sha256"]):
         return "the code changed"
+    if manifest["environment"]["libraries"] != environment["libraries"]:
+        return "BetterRobot or BetterHuman changed"
+    if manifest["environment"]["uv_lock_sha256"] != environment["uv_lock_sha256"]:
+        return "uv.lock changed"
     recorded = {name: entry["checksum"] for name, entry in manifest["inputs"].items()}
     current = {name: entry["checksum"] for name, entry in inputs.items()}
     changed = sorted(name for name in recorded.keys() | current.keys() if recorded.get(name) != current.get(name))
@@ -129,9 +134,16 @@ def environment() -> dict:
         "python": platform.python_version(),
         "torch": torch.__version__,
         "cuda": torch.version.cuda,
+        **dependencies(),
+        "submodules": submodules,
+    }
+
+
+def dependencies() -> dict:
+    """The part of :func:`environment` a resume compares: the lock file's checksum and the commit of each library."""
+    return {
         "uv_lock_sha256": hashlib.sha256((REPO_ROOT / "uv.lock").read_bytes()).hexdigest(),
         "libraries": {name: _library(name) for name in ("better-robot", "better-human")},
-        "submodules": submodules,
     }
 
 

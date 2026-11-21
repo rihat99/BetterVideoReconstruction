@@ -47,15 +47,18 @@ without a tracked frame or without keypoints is written to the body files as the
   every input and output with a checksum, the seconds and the peak GPU memory. The step's debug log is
   `<clip>/logs/<step>.log`.
 - A clip that fails is data: its manifest says `failed`, the other clips go on, the later steps skip it, and the
-  exit code is 1.
+  exit code is 1. After each step the chain counts a clip done only if its manifest vouches for this run, as
+  `--skip-existing` checks below: a stage process that dies before writing one (at its model load, or killed) leaves
+  an older run's manifest behind, and the clip counts as failed.
 - A rerun first moves what it replaces (the step's outputs and manifest) to `<save-dir>/_trash/<clip>/<step>_<time>/`.
   Nothing is deleted; empty that folder yourself.
 
 ## Resume, upstream, shards
 
 - `--skip-existing` skips a step for a clip while its manifest says `complete` and the config tables it read, the
-  code (commit and uncommitted diff) and the checksums of its inputs are unchanged; the log says which of them
-  changed otherwise. So a new commit reruns every step. A tree written before the rebuild has no manifests: its
+  code (commit and uncommitted diff), the commits of BetterRobot and BetterHuman, the checksum of `uv.lock` and the
+  checksums of its inputs are unchanged; the log says which of them changed otherwise. So a new commit, here or of a
+  library, reruns every step. A tree written before the rebuild has no manifests: its
   files are valid inputs, never completed steps.
 - `--upstream <root>` makes a step read an input it does not find in `<save-dir>/<clip>/` from `<upstream>/<clip>/`
   (`bvr.paths.Clip.find`); outputs always go to `--save-dir`, and the manifest records where each input came from.

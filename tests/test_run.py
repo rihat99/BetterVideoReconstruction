@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
+from types import SimpleNamespace
 
 import numpy as np
 import pytest
@@ -76,7 +77,7 @@ def test_a_stage_writes_a_manifest_with_every_field(tmp_path: Path, arguments: l
 
 
 def test_resume_trusts_the_manifest_and_a_rerun_moves_the_old_output_to_the_trash(
-        tmp_path: Path, arguments: list[str], source: Path) -> None:
+        tmp_path: Path, arguments: list[str], source: Path, monkeypatch) -> None:
     calls: list[str] = []
     run.stage("estimate_gravity", gravity(calls), arguments)
     assert run.stage("estimate_gravity", gravity(calls), [*arguments, "--skip-existing"]) == 0
@@ -96,6 +97,11 @@ def test_resume_trusts_the_manifest_and_a_rerun_moves_the_old_output_to_the_tras
     assert calls[3:] == ["one", "two"]
     assert len(list((tmp_path / "out" / "_trash" / "two").glob("gravity_*"))) == 2   # the first copy is kept
 
+    moved = manifest.dependencies() | {"libraries": {"better-robot": "0.1.0@moved", "better-human": "0.1.0@moved"}}
+    monkeypatch.setattr(manifest, "dependencies", lambda: moved)   # a library moved: both rerun
+    run.stage("estimate_gravity", gravity(calls), [*arguments[:4], "--config", str(changed), "--skip-existing"])
+    assert calls[5:] == ["one", "two"]
+
 
 def test_a_clip_that_fails_is_recorded_and_the_others_run(tmp_path: Path, arguments: list[str]) -> None:
     calls: list[str] = []
@@ -104,7 +110,43 @@ def test_a_clip_that_fails_is_recorded_and_the_others_run(tmp_path: Path, argume
     failed = manifest.read(tmp_path / "out" / "one" / "manifests" / "gravity.json")
     assert (failed["status"], failed["error"]) == ("failed", "RuntimeError: no floor")
     assert manifest.read(tmp_path / "out" / "two" / "manifests" / "gravity.json")["status"] == "complete"
-    assert manifest.stale(failed, config=failed["config"], code=failed["code"], inputs=failed["inputs"]) == "status is failed"
+    assert manifest.stale(failed, config=failed["config"], code=failed["code"], environment=failed["environment"],
+                          inputs=failed["inputs"]) == "status is failed"
+
+
+def test_a_step_whose_stage_dies_leaves_its_clips_failed(tmp_path: Path, source: Path, arguments: list[str],
+                                                         monkeypatch) -> None:
+    calls: list[str] = []
+
+    def kinematics(stage: run.Stage):
+        def process(clip: Clip) -> None:
+            calls.append(clip.name)
+            files.save_npz(clip.path(paths.KINEMATIC_1), "bvr-kinematics", q=np.zeros(1))
+        return process
+
+    def broken(stage: run.Stage):
+        raise RuntimeError("model weights missing")
+
+    loads = {"gravity": gravity(calls), "kinematics_1": kinematics}
+
+    def in_process(command: list[str], check: bool) -> SimpleNamespace:
+        """The stage process of ``command``, run here: a load that raises ends it with exit code 1."""
+        try:
+            return SimpleNamespace(returncode=run.stage(command[2].rpartition(".")[2],
+                                                        loads[command[command.index("--step") + 1]], command[3:]))
+        except RuntimeError:
+            return SimpleNamespace(returncode=1)
+
+    monkeypatch.setattr(run, "subprocess", SimpleNamespace(run=in_process))
+    delta, steps = Path(arguments[-1]), ["gravity", "kinematics_1"]
+    assert run.chain(source, tmp_path / "out", config_path=delta, steps=steps) == 0
+    assert calls == ["one", "two", "one", "two"]
+
+    changed = tmp_path / "changed.toml"
+    changed.write_text(f'base = "{delta}"\n[gravity]\nnum_frames = 12\n')
+    loads["gravity"] = broken           # the first run's gravity manifests stay, "complete" for 48 frames
+    assert run.chain(source, tmp_path / "out", config_path=changed, steps=steps) == 1
+    assert calls == ["one", "two", "one", "two"]                     # kinematics_1 did not run on them
 
 
 def test_a_clip_reads_from_upstream_what_its_run_does_not_have(tmp_path: Path) -> None:

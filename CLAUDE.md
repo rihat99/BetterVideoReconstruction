@@ -33,7 +33,8 @@ uv run python scripts/view_3d.py --source <video> --save-dir <root> --record <fi
 A step alone is `python -m bvr.stages.<module> --source <video|folder> --save-dir <root>`, with `--config`,
 `--upstream`, `--skip-existing`, `--clips a,b` and, for a module that serves two steps, `--step`. A run resumes
 with `--skip-existing`: a step is skipped for a clip while its manifest, `<clip>/manifests/<step>.json`, matches the
-config tables the step reads, the code (commit and diff) and the checksums of its inputs.
+config tables the step reads, the code (commit and diff), the commits of BetterRobot and BetterHuman, the checksum of
+`uv.lock` and the checksums of its inputs.
 
 ## Gates that must not be weakened
 

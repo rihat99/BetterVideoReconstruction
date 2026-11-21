@@ -10,7 +10,7 @@ and their files are the table ``bvr.run.STEPS``; without ``--steps`` the chain i
 
 ``--upstream`` names another run root: a stage reads from it what this run does not have, and
 writes only under ``--save-dir``. ``--skip-existing`` skips a step for a clip while its manifest
-says complete and its config, code and inputs are unchanged. ``--shard i/n`` takes every n-th
+says complete and its config, code, libraries and inputs are unchanged. ``--shard i/n`` takes every n-th
 clip, so n runs on n GPUs fill one root. The exit code is 0 when every step of every clip is
 complete.
 """
