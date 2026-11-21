@@ -32,9 +32,11 @@ uv run python scripts/compare_runs.py <root a> <root b> [--clips a,b] [--annotat
 It reads `kinematic_1`, `contacts_1`, `kinematic_2`, `contacts_2` and `kindyn_1` of every clip present in both roots
 and prints, per clip and pooled: body-joint distance in mm, root orientation, each side's root acceleration, label
 agreement and F1 between the two, each side's F1 against the annotations, and for `kindyn_1` the force difference
-in body weights, support, root residual and force confidence. It uses numpy and the SMPL-X model file only, so it
-compares runs of any two versions of the code; contact frames are matched by name (`head` read as `head_top`). One
-clip takes about 8 s on the CPU.
+in body weights, support, root residual and force confidence. It reads the files with numpy and the poses with the
+SMPL-X model file, so it compares runs of any two versions of the code; contact frames are matched by name (`head`
+read as `head_top`). Support and root residual are each side's own, over the frames where its inverse dynamics count
+by today's rule (stencil tracked, person labelled): a person without contact labels has none. One clip takes about
+8 s on the CPU.
 
 ## The force rigs
 
