@@ -46,9 +46,6 @@ second run root beside the first (`bvr_datasets/peter/board_contacts.md`). These
 and a run names a clip by its video, so a run reads a folder of links `<clip>.mp4`; each README has the one-line loop
 that makes it.
 
-OpenCap's stored scores used a synthetic floor and a 3 cm shoe heel on the contact frames. The rebuilt core has no
-contact frame offset along the normal, so that recipe does not run on it; OpenCap runs the plain rig recipe.
-
 ## The ground truth of climb_wall_3
 
 Three calibrated cameras filmed climb_wall_3, so its trials have a body that does not depend on one camera's depth.
