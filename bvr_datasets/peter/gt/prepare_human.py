@@ -293,8 +293,8 @@ def solve_cam3(clip_dir: Path) -> None:
     VGGT's pose). Sapiens keypoints that all three cameras are sure of and the front pair agrees on are
     triangulated by the front pair, and cam_3's pose is solved from them (RANSAC, then Levenberg-Marquardt, from
     the pose before); it replaces that pose only if it lowers cam_3's median reprojection error.
-    ``view_sigma_px`` is the front pair's median epipolar distance for both and cam_3's median reprojection
-    error. A rerun starts again from ``extrinsics_before_pnp``.
+    ``view_sigma_px`` is the front pair's median epipolar distance for each of the two and cam_3's median
+    reprojection error at the pose kept. A rerun starts again from ``extrinsics_before_pnp``.
     """
     with np.load(clip_dir / "cameras.npz") as stored:
         cams = dict(stored)
