@@ -182,7 +182,7 @@ contact_velocity = 4000
 [stages.kindyn_1]           # pose and contact forces together -> human_optim/kindyn_1.npz
 # L-BFGS: the forces of the held pose, then pose and forces. The joint solve is stopped, not converged: left to
 # run on it keeps trading image evidence for less joint torque, and the body slides off its depth.
-iterations = { forces = 200, joint = 100 }
+iterations = { forces = 200, joint = 125 }
 forces_history = 20         # L-BFGS memory of the forces phase; the joint phase has [optimizer].lbfgs_history
 gradient_tolerance = 1e-9   # the forces phase ends once no gradient entry is above this
 
