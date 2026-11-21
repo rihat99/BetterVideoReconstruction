@@ -50,10 +50,10 @@ Never skip, xfail, loosen a tolerance or delete an assertion to get green; repor
 
 - `bvr` imports neither `bvr_datasets` nor a script; stages never import one another (they meet through files; what
   two share is `bvr.fit`); `bvr.run` starts stages by module name; each package imports only its row of `ALLOWED`
-  in `tests/contract/test_layer_dependencies.py`. Its `UNPORTED` holds the one module outside the table,
-  `bvr_datasets/peter/gt/reconstruct_vggt.py` (below).
+  in `tests/contract/test_layer_dependencies.py`.
 - Each third-party model (`sam3`, `sapiens`, `vggt_omega`, `sam_3d_body`, `geocalib`) is imported by one stage
-  module (`MODELS`, same file).
+  module (`MODELS`, same file). Dataset code that needs a model calls that stage: the scene scripts of
+  `bvr_datasets/peter/gt/` run VGGT on still images through `estimate_camera_vggt.model`.
 - No step reads a config table the base lacks; a delta cannot add a key outside a `weights` table
   (`tests/contract/test_config.py`).
 - No tracked `.py`, `.toml`, `.md` or `.sh` names an absolute path (`tests/contract/test_no_absolute_paths.py`).
@@ -113,12 +113,12 @@ Never skip, xfail, loosen a tolerance or delete an assertion to get green; repor
   records `python -m bvr.stages.<module>` as the manifest's command, and as inputs the files of the step's row in
   `bvr.run.STEPS`: the ground-truth fit reads others (`cameras.npz`, `views/`), which its manifests do not list, so
   `--skip-existing` does not see them change.
-- The ground truth of climb_wall_3 (`bvr_datasets/peter/gt/`) is rebuilt from the prepared trial trees on: the fit
-  (`fit_multiview.py`) and the climbers' shapes (`shape.py`). The scripts that made the trees are from before the
-  rebuild and were not run on it: `calibrate_cameras.py`, `extract_frames.py`, `clean_scene.py`, `prepare_human.py`,
-  `view_gt.py`, and `reconstruct_vggt.py` and `rebuild_scene_calibrated.py`, which start the VGGT stage on a list of
-  still images, a source the rebuilt stage does not take. The steps that synchronised the cameras and re-solved
-  `cam_3` (in `cameras.npz` of every stored tree) have no code here.
+- The ground truth of climb_wall_3 (`bvr_datasets/peter/gt/`): the scene scripts and `prepare_human.py` run on the
+  rebuilt code and write under `--save-dir`, never into the dataset. Two steps that completed the stored trees have
+  no code here: the cameras' frame offsets (`frame_offset`) and `cam_3`'s pose re-solved from the climber with each
+  camera's keypoint spread (`view_sigma_px`), all in `cameras.npz`. A tree `prepare_human.py` writes has offsets of
+  zero and no `view_sigma_px`, and the fit stops on it: run the fit on the stored trees, or refresh their
+  `geometry/` with `prepare_human.py --scene-only`.
 - `uv sync` re-locks when BetterRobot's or BetterHuman's `pyproject.toml` changed (they are path sources): that lock
   change is theirs, commit it on its own.
 

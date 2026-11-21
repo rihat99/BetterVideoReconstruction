@@ -34,7 +34,23 @@ the 2026-09 session: two climbers, wall at 0 / 16 / 32 deg), two or three synchr
       --clips a_00_01_part3,a_16_01_part2,a_32_01_part3,b_00_02_part2,b_16_01_part3,b_32_02_part2
   uv run python -m bvr_datasets.peter.gt.fit_multiview --source <videos> --save-dir <run> --upstream $T --config bvr_datasets/peter/gt/gt.toml
   ```
-  The trees were made before the rebuild by the other scripts of `gt/` (camera calibration, the empty wall's cloud from
-  three stills, the per-trial tree) and by steps that are no longer here (the cameras' frame offsets and `cam_3`'s pose,
-  both in `cameras.npz`). Those scripts were not run on the rebuilt core, and the two that need VGGT on still images
-  (`reconstruct_vggt.py`, `rebuild_scene_calibrated.py`) cannot run on it.
+  The scene and the trees come from the other scripts of `gt/`, run in this order on one root (`<root>/scene/<set>/`,
+  `<root>/human/<trial>/`; the stored one is `<data root>/peter/climb_wall_3_gt`). A set is one placement of the
+  cameras: `00`, `16`, `16b`, `16c`, `32` (`cam_3` was bumped twice at 16 degrees).
+  ```bash
+  G=<root>; P=bvr_datasets/peter/gt
+  uv run python $P/extract_frames.py --save-dir $G            # a people-free frame per camera and set (CPU, 7 s)
+  uv run python $P/calibrate_cameras.py --save-dir $G         # chessboard intrinsics and poses of sets 00, 16, 32 (CPU)
+  uv run python $P/reconstruct_vggt.py --save-dir $G          # VGGT on the three stills: scene.npz in VGGT's cameras
+  uv run python $P/clean_scene.py --save-dir $G               # scene_clean.npz (CPU, 35 s)
+  uv run python $P/rebuild_scene_calibrated.py --save-dir $G  # scene_calib.npz: VGGT's depth in the calibrated cameras
+  uv run python $P/prepare_human.py --save-dir $G --clips <trials>   # the trees; --scene-only refreshes geometry/
+  uv run python $P/view_gt.py --save-dir $G                   # the clouds and both cameras of each set, in a browser
+  ```
+  `scene_calib.npz` is the wall every tree carries (`geometry/scene.npz`, its plane `geometry/wall.npz`);
+  `scene.npz` gives the pose of `cam_3` in sets `16b` and `16c`, which have no calibration of their own, and with
+  `scene_clean.npz` the checks of `rebuild_scene_calibrated.py`. Two steps that completed the stored trees have no
+  code here: the cameras' frame offsets (`frame_offset`, the set's offsets from `calibration.npz`) and the pose of
+  `cam_3` re-solved from the climber's keypoints triangulated by the front pair, with each camera's keypoint spread
+  (`view_sigma_px`), all in `cameras.npz`. A tree `prepare_human.py` writes lacks them, so the fit runs on the stored
+  trees, or on a stored tree whose `geometry/` was refreshed (`--scene-only`).

@@ -35,13 +35,14 @@ A frame only joins a pair if the board moved slower than MAX_SPEED_PX between
 that frame and the next one in both views, so a residual sync error cannot turn
 into a large correspondence error.
 
-Writes ``peter/climb_wall_3_gt/scene/<set>/calibration.{npz,json}``. It also
+Reads ``<save-dir>/scene/<set>/frames/frames.json`` (``extract_frames.py``) for each set's calibration video and
+writes ``<save-dir>/scene/<set>/calibration.{npz,json}``. It also
 triangulates the board through each pair: recovering the 80 mm pitch is a
 *consistency* check on the conventions and on the size of the extrinsics -- it
 is not an independent check of absolute scale, since the 80 mm is what put the
 metre into the fit in the first place.
 
-    uv run --no-sync python bvr_datasets/peter/gt/calibrate_cameras.py
+    uv run python bvr_datasets/peter/gt/calibrate_cameras.py --save-dir <root>
 """
 from __future__ import annotations
 
@@ -56,6 +57,7 @@ import argparse
 import json
 import time
 from concurrent.futures import ProcessPoolExecutor
+from pathlib import Path
 
 import cv2
 import numpy as np
@@ -64,7 +66,6 @@ import numpy as np
 from bvr_datasets.peter.paths import PETER
 
 ORIG = PETER / "climb_wall_3_orig"
-GT = PETER / "climb_wall_3_gt/scene"
 
 CAMS = ["cam_left", "cam_right", "cam_3"]
 REFERENCE = "cam_left"  # world, and the first camera of both pairs
@@ -298,7 +299,7 @@ def run_intrinsics(seen: dict) -> tuple[dict, dict]:
     return intr, report
 
 
-def run_set(name: str, calib_dir: str, seen: dict, intr: dict, intr_report: dict) -> None:
+def run_set(scene: Path, name: str, calib_dir: str, seen: dict, intr: dict, intr_report: dict) -> None:
     print(f"\n=== set {name}  ({calib_dir}) ===", flush=True)
     extrinsics = np.tile(np.eye(4), (3, 1, 1))
     rms_stereo, n_stereo, offsets, pair_info, checks = [], [], [], {}, {}
@@ -353,7 +354,7 @@ def run_set(name: str, calib_dir: str, seen: dict, intr: dict, intr_report: dict
               f"{check['pitch_mean_mm']:.2f} +- {check['pitch_std_mm']:.2f} mm (asserted 80.00), "
               f"planarity rms {check['planarity_rms_mm']:.2f} mm", flush=True)
 
-    out = GT / name
+    out = scene / name
     np.savez(
         out / "calibration.npz",
         view_names=np.array(CAMS),
@@ -388,14 +389,16 @@ def run_set(name: str, calib_dir: str, seen: dict, intr: dict, intr_report: dict
 
 
 def main() -> None:
-    argparse.ArgumentParser(description=__doc__.splitlines()[0]).parse_args()   # --help only; no knobs
-    calib_dirs = {s: json.loads((GT / s / "frames/frames.json").read_text())["calibration"] for s in SETS}
+    ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
+    ap.add_argument("--save-dir", type=Path, required=True, help="the ground truth's root: <save-dir>/scene/<set>/")
+    scene = ap.parse_args().save_dir / "scene"
+    calib_dirs = {s: json.loads((scene / s / "frames/frames.json").read_text())["calibration"] for s in SETS}
     print("=== detection ===", flush=True)
     seen = run_detection(calib_dirs)
     print("\n=== intrinsics, pooled over " + "+".join(SETS) + " ===", flush=True)
     intr, intr_report = run_intrinsics(seen)
     for name in SETS:
-        run_set(name, calib_dirs[name], seen, intr, intr_report)
+        run_set(scene, name, calib_dirs[name], seen, intr, intr_report)
 
 
 if __name__ == "__main__":

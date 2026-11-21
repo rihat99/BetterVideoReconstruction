@@ -23,7 +23,8 @@ config tables it reads, and the files it reads and writes.
 | `kindyn_1` | `solve_dynamics` | pose and contact forces solved together by inverse dynamics | `human_optim/kindyn_1.npz` |
 
 The default chain, `[run].steps`, ends at `kinematics_1`; `--steps` runs any of the 13 in this order. The steps
-`sam3`, `vggt`, `sapiens`, `sam3d` and `gravity` each import their own third-party model, and only they do. `fuse` and `scale` are in
+`sam3`, `vggt`, `sapiens`, `sam3d` and `gravity` each import their own third-party model, and only they do; code
+that needs VGGT on images other than a clip's frames calls `estimate_camera_vggt.model`. `fuse` and `scale` are in
 [`fusion.md`](fusion.md) and [`scale.md`](scale.md), the two kinematic steps in [`fitting.md`](fitting.md), the
 contact steps in [`contacts.md`](contacts.md), `kindyn_1` in [`forces.md`](forces.md). The README lists the files;
 the docstring of each stage module lists every array it writes.

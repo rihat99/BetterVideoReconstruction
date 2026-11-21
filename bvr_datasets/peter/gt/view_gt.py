@@ -1,6 +1,6 @@
 """Viser viewer for the climb_wall_3 ground-truth scenes.
 
-Shows one set at a time: the metric coloured point cloud from ``scene.npz`` or, with
+Shows one set of ``<save-dir>/scene/`` at a time: the metric coloured point cloud from ``scene.npz`` or, with
 the ``cloud`` dropdown, the cleaned ``scene_clean.npz`` (the three VGGT views, toggled
 separately), the VGGT camera frustums in orange and —
 where ``calibration.npz`` exists — the chessboard-calibrated ones in cyan, so the
@@ -8,20 +8,17 @@ two solutions can be eyeballed against each other. Each frustum is drawn from th
 camera's full K, so a shifted principal point or fx != fy is visible as a leaning
 or non-square pyramid. World = cam_left, metres.
 
-    uv run --no-sync python bvr_datasets/peter/gt/view_gt.py
+    uv run python bvr_datasets/peter/gt/view_gt.py --save-dir <root>
 """
 from __future__ import annotations
 
 import argparse
+from pathlib import Path
 
 import numpy as np
 import viser
 import viser.transforms as vt
 
-
-from bvr_datasets.peter.paths import PETER
-
-GT_ROOT = PETER / "climb_wall_3_gt/scene"
 VIEW_NAMES = ["cam_left", "cam_right", "cam_3"]
 VGGT_COLOR = (255, 140, 0)
 CALIB_COLOR = (0, 200, 255)
@@ -66,8 +63,8 @@ def add_frustums(server: viser.ViserServer, path: str, extr: np.ndarray, K: np.n
 class Viewer:
     """One scene at a time; switching the set tears the old nodes down."""
 
-    def __init__(self, server: viser.ViserServer, sets: list[str], point_size: float):
-        self.server = server
+    def __init__(self, server: viser.ViserServer, scene: Path, sets: list[str], point_size: float):
+        self.server, self.scene = server, scene
         self.nodes: list = []
         self.set_dd = server.gui.add_dropdown("set", tuple(sets), initial_value=sets[0])
         self.cloud_dd = server.gui.add_dropdown("cloud", ("raw", "clean"), initial_value="raw")
@@ -87,7 +84,7 @@ class Viewer:
         for node in self.nodes:
             node.remove()
         self.nodes, self.clouds = [], {}
-        set_dir = GT_ROOT / self.set_dd.value
+        set_dir = self.scene / self.set_dd.value
         scene = "scene_clean.npz" if self.cloud_dd.value == "clean" else "scene.npz"
         if not (set_dir / scene).exists():
             self.info.value = f"{scene} missing — run clean_scene.py"
@@ -124,18 +121,20 @@ class Viewer:
 
 def main() -> None:
     ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
+    ap.add_argument("--save-dir", type=Path, required=True, help="the ground truth's root: <save-dir>/scene/<set>/")
     ap.add_argument("--port", type=int, default=8083)
     ap.add_argument("--point-size", type=float, default=0.006)
     args = ap.parse_args()
 
-    sets = sorted(p.parent.name for p in GT_ROOT.glob("*/scene.npz"))
+    scene = args.save_dir / "scene"
+    sets = sorted(p.parent.name for p in scene.glob("*/scene.npz"))
     if not sets:
-        raise FileNotFoundError(f"no <set>/scene.npz under {GT_ROOT} — run reconstruct_vggt.py first")
+        raise FileNotFoundError(f"no <set>/scene.npz under {scene} — run reconstruct_vggt.py first")
 
     server = viser.ViserServer(port=args.port)
     server.scene.set_up_direction("-y")          # world = cam_left, OpenCV y-down
     print(f"[view_gt] {len(sets)} set(s) at http://localhost:{args.port}", flush=True)
-    Viewer(server, sets, args.point_size)
+    Viewer(server, scene, sets, args.point_size)
     server.sleep_forever()
 
 
