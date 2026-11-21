@@ -51,7 +51,7 @@ UNPORTED = {
     "bvr.old_config", "bvr.npz_io", "bvr.mask_io", "bvr.source", "bvr.determinism", "bvr.human_optim",
     "bvr.stages.human_optimization",
     "bvr.stages.measure_contacts", "bvr.stages.build_support_scene",
-    "bvr_datasets.peter.gt", "scripts.scene_quality",
+    "bvr_datasets.peter.gt.reconstruct_vggt", "scripts.scene_quality",
 }
 
 
