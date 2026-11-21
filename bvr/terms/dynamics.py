@@ -99,13 +99,20 @@ def cone_forces(activation: torch.Tensor, edges: torch.Tensor, weight: torch.Ten
 
 
 def stencil_rows(time: motion.Time, tracked: torch.Tensor) -> torch.Tensor:
-    """The frames whose inverse dynamics count, ``(P, T)`` bool: ``t - h`` to ``t + h`` are all ``tracked (P, T)``.
+    """The frames whose stencil is tracked, ``(P, T)`` bool: ``t - h`` to ``t + h`` are all ``tracked (P, T)``.
 
     A frame beyond an end of the clip counts as tracked. The first and last ``h`` frames have no stencil, and
     :func:`rates` takes the body at rest there: the balance of a body at rest still says which contacts hold it.
     A frame beside a tracking gap does not count: what it would be differenced against is a held pose.
     """
     return time.rows(pad(tracked, (time.stride, time.stride), value=True), 2)
+
+
+def counted_rows(time: motion.Time, tracked: torch.Tensor, held: torch.Tensor) -> torch.Tensor:
+    """The frames whose inverse dynamics count, ``(P, T)`` bool: the stencil is tracked (:func:`stencil_rows`) and
+    the person has a contact label, ``held (P, T, F)``, somewhere in the clip. A person without one is fitted
+    kinematically: nothing holds the body up, so no row of theirs counts."""
+    return stencil_rows(time, tracked) & held.any(dim=(1, 2))[:, None]
 
 
 def rates(time: motion.Time, velocity: torch.Tensor, acceleration: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
@@ -175,7 +182,7 @@ def register(problem: optim.Problem, identity: bh.Identity, *, edges: torch.Tens
     a contact has no force to hold the body up with, and the root rows alone would pull the fit into free fall:
     no row counts for such a person, so every term here is zero and the fit stays kinematic.
     """
-    rows = stencil_rows(time, tracked) & held.any(dim=(1, 2))[:, None]
+    rows = counted_rows(time, tracked, held)
     newtons = weight(identity)
     scale = 0.5 / (rows.sum(dim=1).clamp_min(1) * newtons.square())
     costs = joint_weights(identity.model, multipliers)
