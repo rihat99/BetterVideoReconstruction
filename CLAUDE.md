@@ -130,8 +130,9 @@ Never skip, xfail, loosen a tolerance or delete an assertion to get green; repor
   drawn: fresh keypoints that differ by 0.01 px moved `cam_3` by 0.8 and 2 degrees on two trials. The stored trees
   hold `cameras.npz` keys the port does not write, and nothing reads: a lag measurement that was printed, never
   applied (`frame_offset_measured`, `frame_offset_curves_px`, `frame_offset_lags`), and `cam3_pnp_px` (printed now).
-- `uv sync` re-locks when BetterRobot's or BetterHuman's `pyproject.toml` changed (they are path sources): that lock
-  change is theirs, commit it on its own.
+- BetterRobot and BetterHuman are git revisions pinned in `[tool.uv.sources]`; BetterHuman pins BetterRobot too, and
+  uv refuses two different sources for it. To move a pin, move BetterHuman's first, then both here, in a commit of
+  its own.
 
 ## Conventions the code does not announce
 

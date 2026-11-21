@@ -229,38 +229,17 @@ wheels = [
 [[package]]
 name = "better-human"
 version = "0.1.0"
-source = { editable = "../BetterHuman" }
+source = { git = "https://github.com/rihat99/BetterHuman?rev=e13e5c57e5e04b4f637ab2af14ae554515c32e59#e13e5c57e5e04b4f637ab2af14ae554515c32e59" }
 dependencies = [
     { name = "better-robot" },
     { name = "numpy" },
     { name = "torch" },
 ]
 
-[package.metadata]
-requires-dist = [
-    { name = "better-robot", editable = "../BetterRobot" },
-    { name = "better-robot", extras = ["viewer"], marker = "extra == 'studio'", editable = "../BetterRobot" },
-    { name = "numpy", specifier = ">=2.0" },
-    { name = "torch", specifier = ">=2.4", index = "https://download.pytorch.org/whl/cu129" },
-]
-provides-extras = ["studio"]
-
-[package.metadata.requires-dev]
-dev = [
-    { name = "better-robot", extras = ["viewer"], editable = "../BetterRobot" },
-    { name = "matplotlib", specifier = ">=3.8" },
-    { name = "mkdocs", specifier = ">=1.6,<2" },
-    { name = "mkdocs-material", specifier = ">=9.5" },
-    { name = "pre-commit", specifier = ">=3.7" },
-    { name = "pytest", specifier = ">=8.0" },
-    { name = "ruff" },
-    { name = "scipy", specifier = ">=1.11" },
-]
-
 [[package]]
 name = "better-robot"
 version = "0.1.0"
-source = { editable = "../BetterRobot" }
+source = { git = "https://github.com/rihat99/BetterRobot?rev=4b2e21fefdc41af86a0bb41379aa6e286c7e735c#4b2e21fefdc41af86a0bb41379aa6e286c7e735c" }
 dependencies = [
     { name = "numpy" },
     { name = "torch" },
@@ -271,36 +250,6 @@ dependencies = [
 viewer = [
     { name = "pillow" },
     { name = "viser" },
-]
-
-[package.metadata]
-requires-dist = [
-    { name = "mujoco", marker = "extra == 'mjcf'", specifier = ">=3.1" },
-    { name = "numpy", specifier = ">=2.0" },
-    { name = "pillow", marker = "extra == 'viewer'", specifier = ">=10" },
-    { name = "pytest", marker = "extra == 'testing'", specifier = ">=8.0" },
-    { name = "robot-descriptions", marker = "extra == 'demos'", specifier = ">=1.0.0" },
-    { name = "torch", specifier = ">=2.4", index = "https://download.pytorch.org/whl/cu129" },
-    { name = "trimesh", marker = "extra == 'meshes'", specifier = ">=4.0.0" },
-    { name = "viser", marker = "extra == 'viewer'", specifier = ">=1.1.1,<1.2" },
-    { name = "yourdfpy", specifier = ">=0.0.14" },
-]
-provides-extras = ["viewer", "mjcf", "meshes", "demos", "testing"]
-
-[package.metadata.requires-dev]
-dev = [
-    { name = "coverage", specifier = ">=7" },
-    { name = "mkdocs", specifier = ">=1.6,<2" },
-    { name = "mkdocs-material", specifier = ">=9.5" },
-    { name = "mkdocstrings", extras = ["python"], specifier = ">=0.26" },
-    { name = "pre-commit", specifier = ">=3.7" },
-    { name = "pyright" },
-    { name = "pytest", specifier = ">=8.0" },
-    { name = "ruff" },
-]
-test-oracles = [
-    { name = "pin", specifier = ">=2.7" },
-    { name = "scipy", specifier = ">=1.11" },
 ]
 
 [[package]]
@@ -362,8 +311,8 @@ dev = [
 [package.metadata]
 requires-dist = [
     { name = "appdirs" },
-    { name = "better-human", editable = "../BetterHuman" },
-    { name = "better-robot", extras = ["viewer"], editable = "../BetterRobot" },
+    { name = "better-human", git = "https://github.com/rihat99/BetterHuman?rev=e13e5c57e5e04b4f637ab2af14ae554515c32e59" },
+    { name = "better-robot", extras = ["viewer"], git = "https://github.com/rihat99/BetterRobot?rev=4b2e21fefdc41af86a0bb41379aa6e286c7e735c" },
     { name = "cython" },
     { name = "dill" },
     { name = "einops" },

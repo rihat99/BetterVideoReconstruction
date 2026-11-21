@@ -5,9 +5,8 @@
 - [uv](https://docs.astral.sh/uv/) and git.
 - A CUDA GPU for the model steps. The lock pins torch 2.13 with the CUDA 12.9 wheels (`pytorch-cu129` index), the
   torch BetterRobot and BetterHuman are developed on.
-- [BetterRobot](https://github.com/rihat99/BetterRobot) and [BetterHuman](https://github.com/rihat99/better_human)
-  checked out beside this repository, as `../BetterRobot` and `../BetterHuman`: `[tool.uv.sources]` of
-  `pyproject.toml` installs both from there, editable.
+- [BetterRobot](https://github.com/rihat99/BetterRobot) and [BetterHuman](https://github.com/rihat99/BetterHuman)
+  need no checkout: `[tool.uv.sources]` of `pyproject.toml` pins each to a git revision of its `dev` branch.
 
 ## 1. Clone with submodules
 

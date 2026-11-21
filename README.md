@@ -20,8 +20,8 @@ video -> sam3 -> vggt -> sapiens -> sam3d -> smplx -> fuse -> scale -> gravity
 
 ## Install
 
-[`INSTALL.md`](INSTALL.md) has the details. In short: clone with submodules, put BetterRobot and BetterHuman beside
-the repository, `uv sync --managed-python`, add one `.pth` line for SAM 3D Body, point `BETTERHUMAN_MODELS_DIR` at
+[`INSTALL.md`](INSTALL.md) has the details. In short: clone with submodules,
+`uv sync --managed-python`, add one `.pth` line for SAM 3D Body, point `BETTERHUMAN_MODELS_DIR` at
 the SMPL-X and MHR body models, and accept the licences of the gated model repositories on Hugging Face. A CUDA GPU
 is needed for the model steps.
 
