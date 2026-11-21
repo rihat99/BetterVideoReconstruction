@@ -126,7 +126,9 @@ def read_bodies(clip: paths.Clip, source: str, human: bh.HumanModel, extrinsics:
         labels_file = stored if labelled == path else files.load_npz(labelled, "bvr-contacts")
         if (list(labels_file["contact_frame_names"]) == list(human.contact_frames.names)
                 and np.array_equal(labels_file["object_ids"], stored["object_ids"])):
-            contact, forces = labels_file["frame_contact"].astype(bool), labels_file.get("frame_forces")
+            # A contacts file holds its witness's forces as frame_force; kindyn_1 its solved ones as frame_forces.
+            contact = labels_file["frame_contact"].astype(bool)
+            forces = labels_file["frame_forces" if labelled == path else "frame_force"]
         else:
             log.warning("%s: other people or contact frames than its body; drawn without labels", labelled)
     return Bodies(q=_held(np.asarray(q, np.float32), tracked), betas=np.asarray(betas, np.float32), tracked=tracked,
