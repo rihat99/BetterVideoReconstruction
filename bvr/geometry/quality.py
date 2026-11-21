@@ -16,8 +16,7 @@ and balance_beam passes):
   dead-zone edge, one number with one meaning).
 
 Computed and saved by ``estimate_contacts`` (the earliest stage where all three
-signals exist — the residual comes from its force witness); the
-``scripts/scene_quality.py`` table imports the same functions.
+signals exist — the residual comes from its force witness).
 """
 
 from __future__ import annotations

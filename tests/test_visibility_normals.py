@@ -8,7 +8,7 @@ from __future__ import annotations
 
 import torch
 
-from bvr.human_optim.visibility import front_facing_mask, vertex_normals
+from bvr.geometry.normals import vertex_normals
 
 
 def _reference_vertex_normals(vertices: torch.Tensor, faces: torch.Tensor) -> torch.Tensor:
@@ -48,13 +48,3 @@ def test_vertex_normals_of_a_flat_ccw_quad_point_up():
     normals = vertex_normals(vertices[None], faces)[0]
 
     assert torch.allclose(normals, torch.tensor([0.0, 0.0, 1.0]).expand(4, 3), atol=1e-5)
-
-
-def test_front_facing_mask_sees_a_plane_facing_the_camera():
-    # A vertex at +z with a normal pointing back toward the camera (−z) is visible.
-    vertices_cam = torch.tensor([[0.0, 0.0, 2.0], [0.0, 0.0, 2.0]])
-    normals_cam = torch.tensor([[0.0, 0.0, -1.0], [0.0, 0.0, 1.0]])
-
-    mask = front_facing_mask(vertices_cam[None], normals_cam[None])[0]
-
-    assert mask.tolist() == [True, False]

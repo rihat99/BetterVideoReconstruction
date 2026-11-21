@@ -45,14 +45,10 @@ LIBRARIES = {
 #: The third-party models; each is imported by exactly one module, a stage.
 MODELS = {"sam3", "sapiens", "vggt_omega", "sam_3d_body", "geocalib"}
 
-#: Modules of the old core, not held to the table until the rebuild replaces them. An entry leaves
-#: in the commit that ports or removes its module; the list is empty when the rebuild is done.
-UNPORTED = {
-    "bvr.old_config", "bvr.npz_io", "bvr.mask_io", "bvr.source", "bvr.determinism", "bvr.human_optim",
-    "bvr.stages.human_optimization",
-    "bvr.stages.measure_contacts", "bvr.stages.build_support_scene",
-    "bvr_datasets.peter.gt.reconstruct_vggt", "scripts.scene_quality",
-}
+#: Modules not held to the table. ``reconstruct_vggt`` built the wall clouds of the climb_wall_3 ground truth from three
+#: still images: it reads VGGT's own image sizing and starts the VGGT stage on a list of images, which the rebuilt
+#: stage does not take. The entry leaves in the commit that ports or removes the script.
+UNPORTED = {"bvr_datasets.peter.gt.reconstruct_vggt"}
 
 
 def modules() -> dict[str, Path]:
