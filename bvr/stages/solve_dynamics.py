@@ -39,6 +39,9 @@ from bvr.terms import dynamics, motion, objective
 
 log = logging.getLogger(__name__)
 
+#: What a body file hands on to the next one beside the bodies.
+HEADER = ("object_ids", "valid_mask", "fps", "video_width", "video_height", "drift_pre", "auto_labels")
+
 
 def load(stage: run.Stage) -> Callable[[paths.Clip], None]:
     human = body.load(stage.device)
@@ -85,6 +88,18 @@ def kindyn_1(clip: paths.Clip, human: bh.HumanModel, config: dict) -> None:
             fit.lbfgs("joint", iterations["joint"], config, weights=weights, on_start=evidence.scene_refresh(fitted))])
         q[people], activation[people] = objective.posed(fitted, result.x["q"]).q, result.x["activation"]
 
+    save(clip, start, identity, q, activation, edges, held, down, time)
+
+
+def save(clip: paths.Clip, start: dict[str, np.ndarray], identity: bh.Identity, q: torch.Tensor,
+         activation: torch.Tensor, edges: torch.Tensor, held: torch.Tensor, down: np.ndarray,
+         time: motion.Time) -> None:
+    """Write ``kindyn_1.npz``: the bodies at ``q (P, T, 211)`` with the forces of ``activation (P, T, F, 4)``.
+
+    ``start`` is the body file the solve started from, whose :data:`HEADER` passes on; ``identity`` the bodies under
+    the clip's gravity ``down (3,)``; ``edges`` and ``held`` the pyramids and labels the forces were solved with.
+    """
+    human, tracked = identity.human, torch.as_tensor(start["valid_mask"].astype(bool), device=q.device)
     state = objective.posed(identity, q)
     velocity = motion.velocity(human.model, time)(state.q)
     weight = dynamics.weight(identity)
@@ -95,7 +110,7 @@ def kindyn_1(clip: paths.Clip, human: bh.HumanModel, config: dict) -> None:
     # One size per joint: the root's six rows, then three rows for each of the other joints.
     sizes = torch.cat((torques[..., :6].norm(dim=-1, keepdim=True),
                        torques[..., 6:].unflatten(-1, (-1, 3)).norm(dim=-1)), dim=-1) * counted[..., None]
-    parents = tensor(np.array(human.contact_frames.parent_joints))
+    parents = torch.as_tensor(np.array(human.contact_frames.parent_joints), device=q.device)
     joints = len(human.spec.joint_names)
     trust = confidence.force_confidence(root.cpu().numpy(), forces.cpu().numpy(), tracked.cpu().numpy(),
                                         weight.cpu().numpy())
@@ -109,8 +124,7 @@ def kindyn_1(clip: paths.Clip, human: bh.HumanModel, config: dict) -> None:
 
     body.save(
         clip.path(paths.KINDYN_1), "bvr-kindyn", identity, q,
-        **{key: start[key] for key in ("object_ids", "valid_mask", "fps", "video_width", "video_height", "drift_pre",
-                                       "auto_labels")},
+        **{key: start[key] for key in HEADER},
         frame_forces=forces.cpu().numpy(), frame_contact=held.cpu().numpy(),
         contact_frame_parents=parents.cpu().numpy(),
         contact_forces_world=forces.new_zeros(*tracked.shape, joints, 3).index_add(2, parents, forces).cpu().numpy(),

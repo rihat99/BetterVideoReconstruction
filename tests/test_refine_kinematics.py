@@ -5,7 +5,7 @@ import numpy as np
 import pytest
 import torch
 
-from bvr.stages.refine_kinematics import BODY, _smooth_fingers
+from bvr.stages.refine_kinematics import BODY, smooth_fingers
 
 
 def _x_quats(angles: torch.Tensor) -> torch.Tensor:
@@ -37,12 +37,12 @@ def test_a_still_hand_stays_still_when_half_its_quaternions_are_negated() -> Non
     track[6:] *= -1.0  # the same rotations; averaging raw components across the flip would cancel them
     q = _q_with_fingers(track)
 
-    smooth = _smooth_fingers(q, np.ones((1, 12), bool), 2.0)
+    smooth = smooth_fingers(q, np.ones((1, 12), bool), 2.0)
 
     assert torch.allclose(_fingers(smooth).norm(dim=-1), torch.ones(12, 30), atol=1e-5)
     assert float(_angle_deg(_fingers(smooth), still).max()) == pytest.approx(0.0, abs=1e-3)
     assert torch.equal(smooth[..., :BODY], q[..., :BODY])
-    assert _smooth_fingers(q, np.ones((1, 12), bool), 0.0) is q
+    assert smooth_fingers(q, np.ones((1, 12), bool), 0.0) is q
 
 
 def test_jitter_goes_and_the_motion_stays() -> None:
@@ -51,7 +51,7 @@ def test_jitter_goes_and_the_motion_stays() -> None:
     noisy = _x_quats(curl + 0.05 * torch.randn(40)).expand(40, 30, 4).contiguous()
     clean = _x_quats(curl)
 
-    smooth = _fingers(_smooth_fingers(_q_with_fingers(noisy), np.ones((1, 40), bool), 3.0))
+    smooth = _fingers(smooth_fingers(_q_with_fingers(noisy), np.ones((1, 40), bool), 3.0))
 
     step = lambda track: float(_angle_deg(track[1:], track[:-1]).mean())  # noqa: E731
     assert step(smooth) - step(clean) < 0.25 * (step(noisy) - step(clean))
@@ -65,7 +65,7 @@ def test_a_tracking_gap_separates_what_is_smoothed() -> None:
     tracked[0, 8:12] = False
     q = _q_with_fingers(track)
 
-    smooth = _smooth_fingers(q, tracked, 4.0)
+    smooth = smooth_fingers(q, tracked, 4.0)
 
     assert float(_angle_deg(_fingers(smooth)[:8], track[:8]).max()) == pytest.approx(0.0, abs=1e-3)
     assert float(_angle_deg(_fingers(smooth)[12:], track[12:]).max()) == pytest.approx(0.0, abs=1e-3)
