@@ -110,7 +110,6 @@ Never skip, xfail, loosen a tolerance or delete an assertion to get green; repor
 - A clip is named by its video's stem, so datasets with one folder per clip run from a folder of links. A recipe
   that runs a step with its own `load` (`bvr_datasets/peter/chain.py`) still records `python -m bvr.stages.<module>`
   as the manifest's command.
-- The `smplx` step reads the MHR to SMPL-X map from the `third_party/MHR` submodule (`bvr.paths.mhr_to_smplx_mapping`).
 - `uv sync` re-locks when BetterRobot's or BetterHuman's `pyproject.toml` changed (they are path sources): that lock
   change is theirs, commit it on its own.
 

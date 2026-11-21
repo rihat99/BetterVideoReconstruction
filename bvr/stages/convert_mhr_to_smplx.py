@@ -2,7 +2,7 @@
 
 The MHR body of each fitted frame is posed with BetterHuman's MHR family from the parameters
 ``sam3d/params.npz`` stores, moved into the camera frame, and carried onto SMPL-X's mesh with MHR's
-barycentric map (``bvr.paths.mhr_to_smplx_mapping``). SMPL-X (BetterHuman's family, 10 betas, full
+barycentric map (``better_human.io.mhr_to_smplx_mapping``). SMPL-X (BetterHuman's family, 10 betas, full
 axis-angle hands with their mean pose) is then fitted to that target with Adam, following MHR's
 reference converter: the target is centred, then four phases free more and more of the body:
 
@@ -50,10 +50,9 @@ def load(stage: run.Stage) -> Callable[[paths.Clip], None]:
     mhr = bh.load("mhr", device=device, density=None)
     smplx = bh.HumanModel.from_spec(bh.families.smplx(gender=settings["gender"], num_betas=10, num_expression=10,
                                                       flat_hand_mean=False, device=device), density=None)
-    mapping = np.load(paths.mhr_to_smplx_mapping())
     # Each SMPL-X vertex is a barycentric point of one MHR triangle.
-    corners = mhr.spec.faces[torch.as_tensor(mapping["triangle_ids"], device=device)]  # (V, 3)
-    weights = torch.as_tensor(mapping["baryc_coords"], dtype=torch.float32, device=device)  # (V, 3)
+    triangles, weights = bh.io.mhr_to_smplx_mapping(device=device)  # (V,), (V, 3)
+    corners = mhr.spec.faces[triangles]  # (V, 3)
     edges = _edges(smplx.spec.faces)
 
     def target(shape: torch.Tensor, parameters: torch.Tensor, translation: torch.Tensor) -> torch.Tensor:

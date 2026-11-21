@@ -21,7 +21,6 @@ In a clone without them: `git submodule update --init --recursive`. Under `third
 | folder | what it is |
 |---|---|
 | `sam3`, `sam-3d-body`, `sapiens2`, `geocalib` | the models of the steps `sam3`, `sam3d`, `sapiens`, `gravity` (submodules) |
-| `MHR` | one file of it: the map from MHR's mesh to SMPL-X's that the `smplx` step reads (`tools/mhr_smpl_conversion/assets/mhr2smplx_mapping.npz`; submodule) |
 | `vggt-omega` | the model of the `vggt` step, a copy patched for a chunked low-memory forward |
 
 ## 2. Build the environment

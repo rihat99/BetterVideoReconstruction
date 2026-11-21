@@ -106,8 +106,3 @@ def data_root() -> Path:
         raise FileNotFoundError(f"no data root: BVR_DATA_ROOT is not set and {beside} does not exist; set "
                                 "BVR_DATA_ROOT to the folder that holds examples/ and the datasets")
     return beside
-
-
-def mhr_to_smplx_mapping() -> Path:
-    """The barycentric map from MHR's mesh to SMPL-X's (``triangle_ids``, ``baryc_coords``)."""
-    return REPO_ROOT / "third_party/MHR/tools/mhr_smpl_conversion/assets/mhr2smplx_mapping.npz"
