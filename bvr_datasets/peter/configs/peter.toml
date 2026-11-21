@@ -11,10 +11,6 @@ steps = ["sam3", "vggt", "sapiens", "sam3d", "smplx", "fuse", "scale", "gravity"
 top_k = 1                   # the largest frame-0 person only: climb_wall_2's cam_left sees a second person behind
 overlay = false
 
-[vggt]
-frame_chunk = 128           # chunked: the whole-clip forward needs about 43 GB at 500 frames; matches it to bf16 rounding
-token_chunk = 65536
-
 [sapiens]
 overlay = false
 

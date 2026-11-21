@@ -11,8 +11,8 @@ OpenCap LabValidation (Uhlrich et al., PLOS Comp Biol 2023): 10 subjects x 17 tr
   (or its kindyn joints) → `sync.json`, then `import_opencap.py --resample-only` re-reads the plates at the corrected times.
 - **Videos:** a run reads a folder of links `<clip>.mp4`:
   `mkdir -p <videos> && for c in <data root>/LabValidation_withVideos/processed/*/; do [ -f "${c}video.mp4" ] && ln -s "${c}video.mp4" "<videos>/$(basename $c).mp4"; done`
-- **Run:** the force-rig recipe of `bvr_datasets/peter/` with `configs/opencap.toml` (the peter delta, no frame subsampling,
-  leaner VGGT chunks): `scripts/pipeline.py`, then `python -m bvr_datasets.peter.chain` (see its README);
+- **Run:** the force-rig recipe of `bvr_datasets/peter/` with `configs/opencap.toml` (the peter delta, no frame
+  subsampling): `scripts/pipeline.py`, then `python -m bvr_datasets.peter.chain` (see its README);
   `sensor_forces.py --save-dir <run>` rotates the plates into our world → `<run>/<clip>/human_optim/sensor_forces.npz`.
   The stored `floorplane` runs (a synthetic support scene, feet and sit-bone frames, shod heels) are not reproducible on the
   rebuilt core: it has no way to push a contact frame out along its normal (the 3 cm heel of a running shoe).

@@ -13,8 +13,7 @@ repository root (the defaults, or another delta), and lists only what it changes
 base = "configs/bvr.toml"
 
 [vggt]
-frame_chunk = 64            # a long clip: the chunked forward needs less than half the memory
-token_chunk = 100000
+max_frames = 2100           # a long clip: a camera for every frame
 
 [stages.kindyn_1.weights]
 neighbour_root = 0          # 0 turns a term off in that stage
@@ -58,8 +57,8 @@ terms of `kindyn_1` are in body weights squared. `[contact_confidence]` is fitte
 
 | file | for |
 |---|---|
-| `bvr_datasets/peter/configs/peter.toml` | the static-camera force rigs (peter, Parkour, OpenCap): one person, overlays off, chunked VGGT, no confidence cut in fuse and scale, no pre-fit, kinematic chamfer off |
-| `bvr_datasets/opencap/configs/opencap.toml` | OpenCap over `peter.toml`: up to 900 VGGT frames, smaller chunks |
+| `bvr_datasets/peter/configs/peter.toml` | the static-camera force rigs (peter, Parkour, OpenCap): one person, overlays off, no confidence cut in fuse and scale, no pre-fit, kinematic chamfer off |
+| `bvr_datasets/opencap/configs/opencap.toml` | OpenCap over `peter.toml`: up to 900 VGGT frames |
 
 The other TOML files under `bvr_datasets/` (`bedlam2/configs/bedlam.toml`, `climbingvideos/configs/corpus.toml`) are
 settings of those tools, not deltas.
@@ -70,6 +69,7 @@ settings of those tools, not deltas.
   output, at 15 to 20 % more time. Without it the human steps repeat to about 0.3, 2 and 2.3 mm (`kinematic_1`,
   `kinematic_2`, `kindyn_1`).
 - `[vggt].max_frames` (500): VGGT sees at most that many frames of a clip, spread evenly. The wild clips were run
-  with 2100, so that every frame has its own camera, and with the chunks above.
+  with 2100, so that every frame has its own camera; one forward holds about 1150 frames on a 96 GB card
+  (`docs/pipeline.md`).
 - `[sam3].top_k` and `min_area_frac` decide who is tracked: every person grounded on frame 0 by default. In-the-wild
   clips were run on the largest person only (`top_k = 1`, `min_area_frac = 0.001`, and `[sam3d].overlay = false`).

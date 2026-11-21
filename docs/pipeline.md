@@ -85,6 +85,14 @@ time inside each step without the model load (from the manifests), and torch's p
 | `fuse` | 2.8 | | `kindyn_1` | 8.0 | |
 | `scale` | 8.9 | | whole job | 387 | |
 
-VGGT's memory grows with the frame count. With the default `[vggt] frame_chunk = 0` a 471-frame clip needs about
-65 GB (estimated from 5 GB plus 0.127 GB per frame); with `frame_chunk = 64, token_chunk = 100000` it took 26 GB.
-Chunked and whole, the forward gave the same cameras and depth on the one clip compared.
+VGGT's memory grows with the frame count: it runs one forward over the clip (the authors' code, unchanged), and
+`[vggt].mode = "balanced"` keeps about 1024 tokens a frame at any aspect ratio. Torch's peak allocation is 4.3 GB plus
+0.076 GB per frame:
+
+| frames | 104 | 250 | 471 | 500 | 750 | 1000 |
+|---|---|---|---|---|---|---|
+| peak allocation | 12.2 GB | 22.9 GB | 39.3 GB | 42.2 GB | 61.1 GB | 80.1 GB |
+| forward | 5 s | 20 s | 62 s | 72 s | 163 s | 280 s |
+
+A 96 GB card holds about 1150 frames, a 48 GB card about 560. `nvidia-smi` shows more while the card has room (62 GB
+at 471 frames): blocks the allocator keeps cached and gives back under pressure.

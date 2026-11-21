@@ -28,8 +28,6 @@ checkpoint = ""             # SAM 3 checkpoint path; empty uses the Hugging Face
 
 [vggt]                      # VGGT-Omega cameras and depth -> vggt/ (up to scale)
 max_frames = 500            # longer clips are uniformly subsampled to this many frames
-frame_chunk = 0             # frames per chunk of the frame-local blocks; 0 runs them at once
-token_chunk = 0             # query tokens per chunk of the cross-frame attention; 0 runs them at once
 image_resolution = 512      # model input resolution (px)
 mode = "balanced"           # image sizing: balanced | max_size
 save_depth = true           # write per-frame depth and confidence (fuse and scale need them)

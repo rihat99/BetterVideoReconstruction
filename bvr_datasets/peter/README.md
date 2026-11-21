@@ -8,8 +8,8 @@ the 2026-09 session: two climbers, wall at 0 / 16 / 32 deg), two or three synchr
   single-view runs in `peter/out_<rig>_single/<clip>/`, the climb_wall_3 ground truth in `peter/climb_wall_3_gt/`.
 - **Videos:** the pipeline names a clip by its video, so a run reads a folder of links `<clip>.mp4`:
   `mkdir -p <videos> && for c in <data root>/peter/climb_wall_3/*/; do ln -s "${c}cam_left.mp4" "<videos>/$(basename $c).mp4"; done`
-- **Run** (`configs/peter.toml`, also used by Parkour and OpenCap: one tracked person, overlays off, chunked VGGT, no
-  pre-fit, kinematic chamfer off; `chain.py` runs the human steps on a body with contact frames on the hands and feet only):
+- **Run** (`configs/peter.toml`, also used by Parkour and OpenCap: one tracked person, overlays off, no pre-fit,
+  kinematic chamfer off; `chain.py` runs the human steps on a body with contact frames on the hands and feet only):
   ```bash
   uv run python scripts/pipeline.py --source <videos> --save-dir <run> --config bvr_datasets/peter/configs/peter.toml
   uv run python -m bvr_datasets.peter.chain --source <videos> --save-dir <run> --config bvr_datasets/peter/configs/peter.toml
