@@ -4,7 +4,8 @@ Each ``Term`` here is built once from a clip's evidence and returns a function o
 the fit (``body``, the ``HumanState`` of the trajectory, or ``pose``, the trajectory itself) that
 gives one loss per person, ``(P,)``. Evidence carries people first and frames second,
 ``(P, T, ...)``; ``tracked (P, T)`` says on which frames a person is tracked, and an untracked frame
-carries no evidence. ``cameras`` is the pair ``(extrinsics (T, 4, 4), intrinsics (T, 3, 3))``.
+carries no evidence. The terms average over a person's tracked frames, except the two priors, which divide
+by every frame of the clip, tracked or not. ``cameras`` is the pair ``(extrinsics (T, 4, 4), intrinsics (T, 3, 3))``.
 
 The two reprojection terms are robust: a squared pixel error ``r2`` costs ``r2 / (c^2 + r2)``, which
 grows like a square near 0 and levels off at 1, so a wrong detection cannot drag the pose.
@@ -137,7 +138,8 @@ def chamfer(human: bh.HumanModel, cloud: torch.Tensor, counted: torch.Tensor, ca
 
 
 def pose_prior(start: torch.Tensor) -> Term:
-    """Term: the body joints near their start rotations, the mean of ``1 - <q, q_start>^2`` over the 51 joints.
+    """Term: the body joints near their start rotations: ``1 - <q, q_start>^2`` summed over the 21 body joints and
+    divided by the 51 joints and by every frame of the clip, tracked or not.
 
     ``start (P, T, 211)`` is the start trajectory. The 30 fingers add nothing: where they are fitted, the start
     hand pose is what is no longer trusted. The root is :func:`orientation_prior`'s.
@@ -149,7 +151,8 @@ def pose_prior(start: torch.Tensor) -> Term:
 
 
 def orientation_prior(start: torch.Tensor) -> Term:
-    """Term: the root near its start orientation, the mean of ``1 - <q, q_start>^2`` over the frames."""
+    """Term: the root near its start orientation, the mean of ``1 - <q, q_start>^2`` over every frame of the clip,
+    tracked or not."""
     def loss(pose: torch.Tensor) -> torch.Tensor:
         return (1.0 - (pose[..., 3:7] * start[..., 3:7]).sum(dim=-1).square()).mean(dim=1)
     return loss

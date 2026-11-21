@@ -297,7 +297,7 @@ conf_thresh = 0.1           # scene points below this confidence are ignored
 
 [contact_gate]              # what kinematics_1's detector and the contact readout share
 window_s = 0.35             # drift window (s)
-still_m = 0.04              # net drift at which stillness is one half (m)
+still_m = 0.04              # a frame is still while its net drift over window_s is under twice this (m)
 still_override_m = 0.01     # a frame pressing closer than this counts however fast it moves (m)
 detect_min_frames = 3       # shortest raw detection, in frames at every rate (the fused labels have min_span_s)
 

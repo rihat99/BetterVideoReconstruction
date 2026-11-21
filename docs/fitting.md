@@ -7,8 +7,9 @@ to the video. `kindyn_1` adds forces to the same problem ([`forces.md`](forces.m
 
 A fit is a BetterRobot `optim.Problem` (`bvr.terms.objective.kinematics_problem`). Its batch is the people of the
 clip and its variable is the trajectory `q (P, T, 211)`: per frame the root pose in the world and 51 joint
-quaternions. Every term returns one loss per person, `(P,)`, a mean over that person's tracked frames, so the people
-of a clip are solved together but independently. Cached values are computed at most once per evaluation: `pose`
+quaternions. Every term returns one loss per person, `(P,)`, a mean over that person's tracked frames (the two
+priors divide by every frame of the clip, tracked or not), so the people of a clip are solved together but
+independently. Cached values are computed at most once per evaluation: `pose`
 (`q` with unit quaternions), `body` (BetterHuman's `HumanState`: joints, vertices, contact frames), `frames` (the 35
 contact-frame poses), the strided derivatives `velocity` to `snap` ([`frame_rate.md`](frame_rate.md)), and
 `distance` (each contact frame against the scene).
@@ -59,7 +60,7 @@ wrong detection cannot drag the pose. A difference is per reference step of 1/30
 | `reprojection_keypoints` | Sapiens keypoints against the joints and landmarks they name, `sum s g(r2, 40 px) / sum s`, `s` the score (0 below `score_thresh`); the tracks smoothed over `smooth_window_s` first | none |
 | `reprojection_start` | the 22 body joints against where the start pose projects them, `g(r2, 30 px)`: holds the body on the image while the depth terms move it along the rays | none |
 | `chamfer` | the visible body surface against the person's depth points, both ways; a distance counts as `0.25 tanh(d / 0.25)`; hands and feet weigh more (`emphasis_*`), smeared frames less | m |
-| `pose_prior`, `orientation_prior` | the mean of `1 - <q, q_start>^2` over the 51 joints, or over the root | none |
+| `pose_prior`, `orientation_prior` | `1 - <q, q_start>^2` summed over the 21 body joints and divided by the 51 joints, or of the root; each a mean over every frame of the clip, tracked or not | none |
 | `acceleration_*`, `jerk_*`, `snap_*` | the mean square of the strided second, third and fourth difference of the pose; `_root` is the root's 6 coordinates, `_joint` the other 153 | rad^2 or m^2 |
 | `neighbour_root`, `neighbour_joint` | the acceleration between neighbouring frames, zero at a stride of 1 ([`frame_rate.md`](frame_rate.md)) | rad^2 or m^2 |
 | `radial_velocity` | the squared speed of the joints along their viewing rays, where one camera sees worst | m^2 |
