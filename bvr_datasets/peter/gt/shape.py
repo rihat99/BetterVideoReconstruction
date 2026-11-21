@@ -80,7 +80,7 @@ def fitted(trial: Trial) -> torch.Tensor:
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     parser.add_argument("--source", type=Path, required=True, help="a folder of links <trial>.mp4")
-    parser.add_argument("--save-dir", type=Path, required=True, help="the run root; the shapes go to <save-dir>/_shapes/")
+    parser.add_argument("--save-dir", type=Path, required=True, help="the run root; shapes go to <save-dir>/_shapes/")
     parser.add_argument("--upstream", type=Path, help="the trials' trees")
     parser.add_argument("--config", type=Path, required=True, help="bvr_datasets/peter/gt/gt.toml")
     parser.add_argument("--clips", required=True, help="comma-separated trials; each climber's shape is their mean")
@@ -91,7 +91,8 @@ def main() -> None:
     human = _rigs.human(config["run"]["device"])
     clips = {clip.name: clip for clip in paths.clips(options.source, options.save_dir, options.upstream)}
     names = options.clips.split(",")
-    files = {climber: options.save_dir / "_shapes" / f"{climber.upper()}.npz" for climber in sorted({n[0] for n in names})}
+    files = {climber: options.save_dir / "_shapes" / f"{climber.upper()}.npz"
+             for climber in sorted({name[0] for name in names})}
     if kept := [str(file) for file in files.values() if file.exists()]:
         parser.error(f"{', '.join(kept)} exist; a shape is fitted once (move the file away to fit it again)")
     shapes: dict[str, dict[str, torch.Tensor]] = {climber: {} for climber in files}

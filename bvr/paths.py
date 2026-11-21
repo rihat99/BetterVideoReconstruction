@@ -94,7 +94,7 @@ def clips(source: Path, save_dir: Path, upstream: Path | None = None) -> list[Cl
 
 
 def data_root() -> Path:
-    """The folder the example clips and the datasets live under: ``$BVR_DATA_ROOT``, else ``data`` beside the repository.
+    """The folder the example clips and the datasets live under: ``$BVR_DATA_ROOT``, else ``data`` beside the checkout.
 
     Raises ``FileNotFoundError`` when the variable is not set and that folder does not exist, as from a worktree: a
     dataset path under it would point nowhere.
