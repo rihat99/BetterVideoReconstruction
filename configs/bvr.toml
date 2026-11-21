@@ -100,7 +100,8 @@ weights = "pinhole"         # GeoCalib checkpoint: pinhole | distorted
 
 [viewer]                    # scripts/view_3d.py
 port = 8082                 # server port
-point_size = 0.02           # scene point radius (m)
+point_size = 0.02           # scene point radius (m) where the scene does not record its sample spacing
+point_size_spacings = 0.7   # scene point radius in the cloud's sample spacings (fuse's voxel): a surface reads closed
 human_point_size = 0.01     # human point radius (m)
 camera_scale = 0.1          # camera frustum size (m)
 up = "-y"                   # up direction

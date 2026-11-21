@@ -63,7 +63,8 @@ class App:
             bodies = self._bodies(clip, data, source)
             self._remove(self.viewer.tags)
             self.data, self.source = data, source
-            settings = {key: self.settings[key] for key in ("point_size", "human_point_size", "camera_scale")}
+            settings = {key: self.settings[key] for key in
+                        ("point_size", "point_size_spacings", "human_point_size", "camera_scale")}
             placed = layers.scene_layers(data, **settings) + bodies
             # The view frames the people alone, else everything: the scene and the cameras would widen it, so they
             # are switched on once it is aimed.
