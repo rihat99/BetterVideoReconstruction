@@ -1,4 +1,5 @@
-"""The geometry steps: the scene merge and visibility of ``fuse``, its split of a frame, and two pre-fit terms."""
+"""The geometry steps: the scene merge and visibility of ``fuse``, its split of a frame, one camera through every
+convention, the scale's direction, and two pre-fit terms."""
 from __future__ import annotations
 
 from pathlib import Path
@@ -8,12 +9,15 @@ import cv2
 import numpy as np
 import pytest
 import torch
+from better_robot.lie import so3
 
-from bvr import config, files, paths
+from bvr import body, camera, config, files, paths
+from bvr.geometry.backproject import backproject
 from bvr.geometry.camera_motion import image_motion
 from bvr.geometry.normals import estimate_point_normals
 from bvr.geometry.voxel import voxel_downsample
 from bvr.paths import Clip
+from bvr.stages import estimate_scale
 from bvr.stages.estimate_scale import _chamfer, _start_velocity
 from bvr.stages.fuse_geometry import _merge, _visible, fuse
 from bvr.terms.motion import Time
@@ -85,6 +89,71 @@ def test_fuse_splits_a_frame_into_scene_and_human_points(tmp_path: Path):
     np.testing.assert_allclose(np.linalg.norm(scene["normals"], axis=1), 1.0, atol=1e-5)
     assert (scene["normals"][:, 2] < 0).all()                        # toward the camera
     assert not transform["metric"] and transform["static_camera"] and float(transform["fps"]) == pytest.approx(30.0)
+
+
+def _turned_camera() -> tuple[np.ndarray, np.ndarray]:
+    """A camera-from-world ``(4, 4)`` turned about three axes and moved, and pixel intrinsics ``(3, 3)``."""
+    extrinsic = np.eye(4)
+    extrinsic[:3, :3], extrinsic[:3, 3] = cv2.Rodrigues(np.array([0.3, -0.5, 0.2]))[0], [0.4, -0.2, 1.5]
+    return extrinsic, np.array([[300.0, 0.0, 4.0], [0.0, 280.0, 3.0], [0.0, 0.0, 1.0]])
+
+
+def test_a_turned_camera_means_the_same_to_fuse_the_body_and_scale():
+    extrinsic, intrinsic = _turned_camera()
+    depth = 2.0 + np.random.default_rng(0).uniform(0.0, 1.0, (6, 8))
+    v, u = np.mgrid[:6, :8]
+    pixels = np.stack([u.ravel(), v.ravel()], axis=-1).astype(np.float64)                       # (48, 2)
+    in_camera = np.c_[(pixels - intrinsic[:2, 2]) / np.diag(intrinsic)[:2], np.ones(48)] * depth.reshape(-1, 1)
+
+    world = backproject(torch.tensor(depth), torch.tensor(intrinsic), torch.tensor(extrinsic))  # fuse's points
+    projected = camera.project(world[None], torch.tensor(extrinsic)[None], torch.tensor(intrinsic)[None])[0]
+    np.testing.assert_allclose(projected.numpy(), pixels, atol=1e-9)
+
+    # A body whose root sits at a pixel's point in the camera frame stands at the fused point in the world.
+    q = torch.zeros(48, 1, 211, dtype=torch.float64)
+    q[..., :3], q[..., 6], q[..., 10::4] = torch.tensor(in_camera)[:, None], 1.0, 1.0
+    root = body.to_world(q, torch.tensor(extrinsic)[None])[:, 0, :7]
+    np.testing.assert_allclose(root[:, :3].numpy(), world.numpy(), atol=1e-9)
+    np.testing.assert_allclose(so3.to_matrix(root[0, 3:]).numpy(), extrinsic[:3, :3].T, atol=1e-9)
+
+    # The scale step's clouds take the fused points back to the camera frame.
+    clouds = estimate_scale.Clouds({"points": world.numpy(), "confidence": np.ones(48), "obj_id": np.zeros(48, int),
+                                    "frame_id": np.zeros(48, int)}, np.array([0]), extrinsic[None])
+    np.testing.assert_allclose(clouds(0, 0)[0], in_camera, atol=1e-9)
+
+
+def test_a_cloud_at_half_the_body_depth_reads_s_2_and_doubles_the_world(tmp_path: Path, monkeypatch):
+    options = config.load()["scale"] | {"prefit": False}
+    extrinsic, intrinsic = _turned_camera()
+    rays = np.c_[np.random.default_rng(0).uniform(-0.01, 0.01, (400, 2)), np.ones(400)]    # within the 8 x 6 canvas
+    log_scale, weight = estimate_scale._reading(rays * 2.0, rays * 1.0, np.ones(400), intrinsic, (6, 8), options)
+    assert np.exp(log_scale) == pytest.approx(2.0) and weight > 0
+
+    clip = Clip("one", tmp_path / "one.mp4", tmp_path / "out" / "one")
+    fused = clip.path(paths.FUSED)
+    extrinsics = np.stack([extrinsic, extrinsic]).astype(np.float32)
+    human = (rays * 1.0 - extrinsic[:3, 3]) @ extrinsic[:3, :3]                                # the cloud, in the world
+    files.save_npz(fused / "transform.npz", "bvr-transform", extrinsics=extrinsics, frame_indices=np.arange(2),
+                   scale=np.float32(1.0), metric=np.bool_(False))
+    files.save_npz(fused / "scene.npz", "bvr-scene", points=human[:5].astype(np.float32), voxel_size=np.float32(0.01))
+    files.save_npz(fused / "human.npz", "bvr-human-points", points=np.r_[human, human].astype(np.float32),
+                   confidence=np.ones(800, np.float32), frame_id=np.repeat([0, 1], 400), obj_id=np.zeros(800, int))
+    files.save_npz(clip.path(paths.SMPLX_PARAMS), "bvr-smplx", valid_mask=np.ones((1, 2), bool),
+                   object_ids=np.array([0]))
+    # The ruler's per-frame reading needs the body model; each frame reads what _reading read above.
+    monkeypatch.setattr(estimate_scale, "_ruler", lambda *_: (np.full((1, 2), log_scale), np.full((1, 2), weight)))
+
+    estimate_scale.estimate_scale(clip, None, options)
+
+    metric = {name: files.load_npz(clip.path(file), format) for name, file, format in (
+        ("transform", paths.TRANSFORM, "bvr-transform"), ("scene", paths.SCENE, "bvr-scene"),
+        ("human", paths.HUMAN, "bvr-human-points"), ("scale", paths.SCALE, "bvr-scale"))}
+    assert float(metric["scale"]["scale"]) == pytest.approx(2.0) and metric["transform"]["metric"]
+    np.testing.assert_allclose(metric["transform"]["extrinsics"][:, :3, 3], 2 * extrinsics[:, :3, 3], rtol=1e-6)
+    np.testing.assert_array_equal(metric["transform"]["extrinsics"][:, :3, :3], extrinsics[:, :3, :3])
+    np.testing.assert_allclose(metric["scene"]["points"], 2 * human[:5], rtol=1e-5)
+    assert float(metric["scene"]["voxel_size"]) == pytest.approx(0.02)
+    np.testing.assert_allclose(metric["human"]["points"], 2 * np.r_[human, human], rtol=1e-5)
 
 
 def test_estimate_point_normals_edge_cases():
