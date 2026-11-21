@@ -49,5 +49,7 @@ in 67 s on the CPU.
 - Bodies are BetterHuman's exact meshes, sent each frame, not skinned in the browser: viser 1.1.1 turns the page white
   when a skinned mesh is removed with a browser open, and the app removes the bodies on every switch.
 - Bodies are posed once per clip and source, on the CPU, when the source is chosen.
+- The floor has no fill: viser draws a filled grid see-through, yet it hides what lies beyond it, so a body that the
+  fitted plane cuts, or seen from under the floor, would lose that part of its mesh while the skeleton stays whole.
 - A tree written before the rebuild opens too: `bvr.files.load_npz` reads it and maps its contact frame `head` to
   `head_top`.
