@@ -5,7 +5,8 @@ This step builds the clouds in that unscaled world; ``scale`` measures the facto
 and writes the metric files. Per frame, the depth loses its flying pixels at depth edges, and the
 SAM 3 masks split it: the human points are the own pixels of every person with a reconstructed body,
 tagged with the person and the frame; the scene is the rest, less a band of ``human_dilate`` pixels
-around every tracked person and less its least confident ``conf_drop_q``. The scene then:
+around every tracked person and less the pixels under the ``conf_drop_q`` quantile of the confidence
+of every valid pixel, the people's included. The scene then:
 
 1. merges into voxels ``voxel_px`` pixel footprints wide at the median scene depth, so the size holds
    in the unscaled world. It merges twice, the second time on the grid shifted by half a voxel: a

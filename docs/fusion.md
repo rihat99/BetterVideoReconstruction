@@ -9,7 +9,8 @@ fuse builds the clouds in that unscaled world, and `scale` measures the factor n
 1. The depth loses its flying pixels at depth edges (`edge_rtol`).
 2. The SAM 3 masks split it. The human points are the pixels of every person SAM 3D Body fitted, tagged with the
    person (`obj_id`) and the frame (`frame_id`). The scene is the rest, less a band of `human_dilate` pixels around
-   every tracked person and less its least confident `conf_drop_q`.
+   every tracked person and less the pixels under the `conf_drop_q` quantile of the frame's confidence. That quantile
+   is taken over every valid pixel of the frame, the people's included.
 3. Both are back-projected with the frame's camera.
 
 ## Once per clip, the scene

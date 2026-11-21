@@ -14,3 +14,5 @@ vault `sv`), one subject each, one static 720x576 camera. Truth: Vicon (16 joint
   `world_aligned = False`: the MoCap yaw is not ours, so readers compare sizes only); `chain --measured` for the boards' labels.
 - **Score:** `score_parkour_pose.py --save-dir <run> [--measured <run 2>]` (the dataset's own per-frame Procrustes MPJPE);
   `bvr_datasets/peter/compare_gt_contact.py --estimated <run> --measured <run 2>` (forces against the plates and the bar).
+  The stored runs keep the measured run inside each clip, `processed/out/<clip>/_gt_contact/`: `--measured` takes a folder
+  of links, `mkdir -p <links> && for c in <data root>/Parkour-dataset/processed/out/*/; do ln -s "${c}_gt_contact" "<links>/$(basename $c)"; done`.

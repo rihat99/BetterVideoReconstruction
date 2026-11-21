@@ -118,6 +118,10 @@ Never skip, xfail, loosen a tolerance or delete an assertion to get green; repor
 - The scale step pools every tracked person into one factor (`bvr/stages/estimate_scale.py`), so bystanders move
   the whole world: two of them moved `competition_2`'s scale by 15 %. Choose the people to fit with
   `[sam3d].obj_ids`.
+- With `--upstream`, a file a step reads falls back to the upstream run's whenever this run's tree lacks it
+  (`paths.Clip.find`): an own output moved away while its manifest stays is silently replaced by the upstream's.
+- `[scale].prefit = false` with `--upstream`: the scale step writes no `prefit.npz`, so `kinematics_1` starts from
+  the upstream's (bodies fitted at the upstream's scale), not from the converter's.
 - Trees written before the rebuild have no manifests and no `format` key, say `head` for the contact frame
   `head_top`, and their `scale.npz` lacks `smear_median` (the contact steps then measure the smear themselves).
   Read every npz through `bvr.files.load_npz`.
