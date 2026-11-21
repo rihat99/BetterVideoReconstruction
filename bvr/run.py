@@ -141,7 +141,6 @@ class Stage:
     step: str                   # the step's name; a module that serves two steps reads it
     config: dict                # the config tables of the step's row, and [run]
     device: torch.device
-    generator: torch.Generator  # seeded from [run].seed, on ``device``
 
 
 def main(load: Callable[[Stage], Callable[[Clip], None]]) -> None:
@@ -203,10 +202,9 @@ def stage(module: str, load: Callable[[Stage], Callable[[Clip], None]], argument
         torch.use_deterministic_algorithms(True, warn_only=True)
         torch.backends.cudnn.benchmark = False
     device = torch.device(settings["device"])
-    generator = torch.Generator(device).manual_seed(settings["seed"])
     on_gpu = device.type == "cuda"
     command = ["python", "-m", f"bvr.stages.{module}", *arguments]
-    process = load(Stage(step.name, stage_config, device, generator))
+    process = load(Stage(step.name, stage_config, device))
     failed = 0
     for clip in clips:
         inputs = _inputs(step, clip)

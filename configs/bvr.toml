@@ -8,7 +8,7 @@
 steps = ["sam3", "vggt", "sapiens", "sam3d", "smplx", "fuse", "scale", "kinematics_1"]  # the default chain; --steps picks any steps of bvr.run.STEPS
 device = "cuda"             # compute device of every stage
 threads = 8                 # torch CPU threads per stage process
-seed = 0                    # seeds torch and the generator handed to each stage
+seed = 0                    # seeds torch (torch.manual_seed) in every step
 deterministic = false       # true: deterministic torch algorithms, bit-reproducible GPU runs
 
 [sam3]                      # SAM 3 video tracker -> sam3/
