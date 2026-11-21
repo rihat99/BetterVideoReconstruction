@@ -4,14 +4,16 @@ The steps before it fit the motion first and read contacts from it. Here the pos
 at the labelled contact frames are solved as one problem, so that the physics can reshape the
 motion: what the forces cannot explain of the root's six rows is a residual that pulls on the pose
 too (:mod:`bvr.terms.dynamics`). The problem is the kinematic one of ``kinematics_2`` without the
-wall patches, with one more variable, the force activations, and the dynamics terms. Two phases
-of L-BFGS, which moves pose and forces together under a line search::
+wall patches, with one more variable, the force activations, and the dynamics terms. Two solves
+of L-BFGS::
 
     forces  the pose is held; the forces find what the motion needs
-    joint   pose and forces, with the scene
+    joint   pose and forces move together under one line search, with the scene
 
-The first phase is there because forces start at zero, where the root residual says the body is
-in free fall and its gradient on the pose means nothing. The people of a clip are one batch. A
+The first is there because forces start at zero, where the root residual says the body is in free
+fall and its gradient on the pose means nothing. At a held pose inverse dynamics runs once and
+the torques are affine in the forces (:func:`bvr.terms.dynamics.balance`), so that solve is a
+problem of its own with the forces as its one variable. The people of a clip are one batch. A
 person without contact labels has no dynamics term and is fitted kinematically, with no forces;
 a person without a tracked frame or without keypoints is written as they came.
 
@@ -68,16 +70,18 @@ def kindyn_1(clip: paths.Clip, human: bh.HumanModel, config: dict) -> None:
 
     if len(people):
         fitted = dynamics.under_gravity(body.bake(human, tensor(start["betas"])[people]), tensor(down))
-        problem = evidence.problem(fitted, q[people], config["contact_attraction"],
-                                   variables={"activation": activation[people]})
-        dynamics.register(problem, fitted, edges=edges[people], held=held[people], tracked=evidence.tracked, time=time,
-                          multipliers=config["torque_multipliers"])
+        physics = {"edges": edges[people], "held": held[people], "tracked": evidence.tracked, "time": time,
+                   "multipliers": config["torque_multipliers"]}
         weights, iterations = options["weights"], options["iterations"]
+        forces_alone = optim.Problem({"activation": activation[people]})
+        dynamics.register(forces_alone, fitted, **physics, fixed=objective.posed(fitted, q[people]))
+        warm = optim.run(forces_alone, [fit.lbfgs(
+            "forces", iterations["forces"], config, history=options["forces_history"],
+            gradient_tolerance=options["gradient_tolerance"],
+            weights={name: weights[name] for name in dynamics.TERMS})]).x["activation"]
+        problem = evidence.problem(fitted, q[people], config["contact_attraction"], variables={"activation": warm})
+        dynamics.register(problem, fitted, **physics)
         result = optim.run(problem.with_(data={"labels": held[people]}), [
-            fit.lbfgs("forces", iterations["forces"], config, history=options["forces_history"],
-                      gradient_tolerance=options["gradient_tolerance"],
-                      weights={name: weights[name] for name in dynamics.TERMS},
-                      free={"q": torch.zeros(human.model.nq, dtype=torch.bool, device=device)}),
             fit.lbfgs("joint", iterations["joint"], config, weights=weights, on_start=evidence.scene_refresh(fitted))])
         q[people], activation[people] = objective.posed(fitted, result.x["q"]).q, result.x["activation"]
 
