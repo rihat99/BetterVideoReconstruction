@@ -19,3 +19,18 @@ the 2026-09 session: two climbers, wall at 0 / 16 / 32 deg), two or three synchr
   `python -m bvr_datasets.peter.chain --measured --source <videos> --save-dir <run 2> --upstream <run> --config …` re-runs
   contacts_1 → kindyn_1 on the boards' labels into a second root.
 - **Score:** `compare_gt_contact.py --estimated <run> --measured <run 2>` (estimated vs measured labels and forces).
+- **Ground truth (`gt/`, climb_wall_3):** three calibrated cameras place a body that one camera cannot. A trial has a
+  prepared tree, `peter/climb_wall_3_gt/human/<trial>/`: `cameras.npz` (the calibration, the cameras' frame offsets and
+  how well each one's keypoints agree), each camera's model outputs under `views/<camera>/`, the wall's cloud and plane in
+  `geometry/`, gravity and `sensor_forces.npz`. `gt/fit_multiview.py` runs the human steps on it with the image terms of all
+  three cameras, the boards' contact labels and the wall's plane, and pulls each limb's solved force to its board; it reads
+  the trees as the upstream and writes `<run>/<trial>/human_optim/`. `gt/shape.py` first fits one shape per climber to
+  their measured height and mass, from the trials given (three of each, one per wall angle); a run without shapes of its own
+  reads the upstream's `_shapes/`.
+  ```bash
+  T=<data root>/peter/climb_wall_3_gt/human
+  mkdir -p <videos> && for c in $T/[ab]_*/; do ln -s "${c}views/cam_left/video.mp4" "<videos>/$(basename $c).mp4"; done
+  uv run python -m bvr_datasets.peter.gt.shape --source <videos> --save-dir <run> --upstream $T --config bvr_datasets/peter/gt/gt.toml \
+      --clips a_00_01_part3,a_16_01_part2,a_32_01_part3,b_00_02_part2,b_16_01_part3,b_32_02_part2
+  uv run python -m bvr_datasets.peter.gt.fit_multiview --source <videos> --save-dir <run> --upstream $T --config bvr_datasets/peter/gt/gt.toml
+  ```
