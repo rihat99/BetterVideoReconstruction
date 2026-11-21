@@ -1,207 +1,76 @@
-# The scale stage: making the world metric
+# Scale: making the world metric
 
-`bvr/stages/estimate_scale.py` — runs **after** `fuse_geometry`, before the
-kinematic refinement.
+VGGT reconstructs the cameras and the depth right up to one unknown factor `s` per clip: nothing in the video says
+whether the wall is three metres away or thirty. The SMPL-X bodies of the converter have metric size and sit in the
+same cameras, so over a person's pixels the body's depth and the cloud's depth differ by `s`. The step `scale`
+(`bvr/stages/estimate_scale.py`) reads `s` there, seats the bodies on their depth, and writes the metric world.
 
-This doc explains how the one number that turns VGGT's world into metres is
-measured, how the **pre-fit** refines that number together with the body
-placement, what exactly gets rescaled, and where the method can be wrong.
+## The ruler
 
-## The problem
+Per person and tracked frame, the converter's body is posed with that frame's own shape. Each vertex that faces the
+camera looks up the fused human point at its pixel; the least confident `conf_drop_q` drop, and the
+confidence-weighted median of `log z_body - log z_cloud` is the frame's reading. A frame with fewer than
+`min_inlier_verts` such vertices has none. The readings of all people pool into one `s`: frames beyond `mad_k`
+median absolute deviations drop, and the rest are averaged by weight.
 
-VGGT-Omega reconstructs the camera path and a depth map for every frame. The
-shape is right, but the size is not: the whole reconstruction is off by one
-unknown factor per clip. Depth and camera translations share that factor.
-Nothing in the video tells VGGT whether the wall is three metres away or thirty.
-Fuse therefore hands over an *up-to-scale* world (`metric=False`), and this
-stage finds the factor `s` and applies it.
+- Log ratios, so that a factor too large and one too small weigh alike.
+- Medians inside a frame, because depth has gross outliers at mask edges and on smeared limbs.
+- One scale per clip: VGGT has one by construction, and the per-frame readings are measurements to pool.
 
-## The idea: the human body is a ruler
+## The pre-fit
 
-SAM-3D-Body fits a body of real, metric size to each frame, and it does so in
-the same camera VGGT uses. So over the pixels of the person we have two depth
-readings for the same surface: the body's metric depth, and the fused human
-cloud's unscaled depth. Their ratio is exactly the unknown factor `s`.
+The converter's bodies sit a little off their depth, and that offset is in the ruler's `s`. With `[scale].prefit`
+(the default) the bodies of the people with keypoints are fitted to their depth points and keypoints, and `s` is read
+again from the fit, for up to `rounds` rounds of `iters` Adam steps. The rounds stop once `s` moves less than 0.1 %.
 
-The measurement happens twice, in two forms. First the **ruler** reads `s` off
-the converter's bodies exactly as they were stored — that gives a solid starting
-value. Then the **pre-fit** refines it: the converter's body placement is itself
-imperfect (translated a little off the depth, pose slightly wrong), and that
-error leaks into `s`. The pre-fit alternates *aligning the bodies to the depth*
-with *re-reading the scale from the aligned bodies* until the two agree.
+- In the first round each person's `log s` is a variable of the fit: depth points cannot tell a nearer body from a
+  smaller world, so the keypoints set the depth and the scale follows. The later rounds hold every person at the
+  pooled `s`.
+- After a round, each depth point's nearest visible vertex votes its log ratio, weighted by the robust kernel's own
+  weight for that match, and the votes pool as the ruler's do. Reading through the fit's own matches gives the
+  rounds a fixed point.
+- A person's shape is the median of their `betas` and stays fixed: the body's size is the ruler. The fingers stay
+  too.
 
-## The ruler, step by step
+The objective, one loss per person, weighted by `[scale.weights]`:
 
-For each person, for each frame where their body fit is valid:
+| term | what it asks |
+|---|---|
+| `chamfer` | every depth point near its nearest visible vertex, Geman-McClure at `gm_chamfer_m`. One-sided: the cloud sees only the front, and pulling hidden vertices onto it folds limbs. It is measured in the cloud's units (body and kernel divided by `s`); in metres the cloud's noise grows with `s`, and the term would shrink the world whatever the evidence |
+| `reprojection` | the Sapiens body and face keypoints, Geman-McClure at `gm_reproj_px` |
+| `pose`, `orientation` | the joints and the root near the converter's rotations |
+| `translation` | the root near the converter's position (m^2): holds the depth where the image says little |
+| `start_velocity` | the joints move as the converter's do, per reference step ([`frame_rate.md`](frame_rate.md)) |
 
-1. **Pose the body** with that frame's own shape (betas) and pose, at the
-   converter's translation — exactly as `sam3d/smplx_params.npz` stores it.
-   Nothing is re-fit or nudged first (see *Known biases* below).
-2. **Keep only camera-facing vertices.** A depth map sees only the front of the
-   person; comparing a back vertex against the cloud would compare the person's
-   far side with their near side and bias the ratio by the body's thickness.
-   Facing is decided by the vertex normal against the view ray.
-3. **Project each kept vertex into the image** and look up the fused human cloud
-   at that pixel. The cloud (`geometry/human.npz`) stores world points per frame
-   and person; transforming them back to the camera and projecting them recovers
-   exactly the pixels fuse backprojected them from, so the lookup is a sparse
-   depth map containing only person pixels that survived fuse's edge filter.
-   A vertex whose pixel holds no cloud point is dropped — that automatically
-   applies the person mask, the validity checks and the flying-pixel filter,
-   without this stage re-reading any raw depth or mask files.
-4. **Drop the least confident 30%** of the surviving vertices (per-frame
-   quantile of the cloud's VGGT confidence, `conf_drop_q = 0.3`).
-5. **Reduce the frame to one number**: the confidence-weighted median of
-   `log(body depth) − log(cloud depth)` over the vertices. A frame with fewer
-   than 50 surviving vertices (`min_inlier_verts`) is skipped — a handful of
-   pixels cannot give a trustworthy ratio.
+## Depth smear
 
-Then the per-frame numbers are pooled into one clip scale:
+When a person moves fast, VGGT can streak their depth along the view ray into a streak metres long. The smear of a
+frame (`bvr.geometry.depth_smear`) is the extent of the person's points along the ray over their largest extent
+across it: well below 1 for a real body, several for a streak. A frame above 2 weighs `(2 / smear)^p` (about 0.4 at
+2.5, 0.2 at 3) in every reading of `s` and in the pre-fit; a frame at or below 2 keeps weight 1. The median smear
+over people and frames is stored as `smear_median` for the quality flag of the contact steps
+([`contacts.md`](contacts.md)).
 
-6. Frames more than 3 MADs (`mad_k`; median absolute deviations — a robust
-   version of "standard deviations") from the median log-scale are dropped.
-7. The survivors are averaged, weighted by each frame's confidence mass, and
-   `s = exp` of the result.
+## Output
 
-### The deliberate choices
+Points, camera translations and the voxel size of `geometry/fused/` times `s`, in metres:
 
-- **Log space.** Scale is multiplicative. In log space a 2× error up and a 2×
-  error down are the same distance, so the pooling is not biased toward large
-  scales.
-- **Medians inside a frame, no means.** Depth has gross outliers (mask edges,
-  smeared limbs). A median ignores them; a mean would chase them.
-- **Every visible vertex counts the same.** No body-part weighting. VGGT
-  distorts hands and feet the most, so weighting extremities up would push their
-  error into the scale.
-- **One scale per clip.** VGGT has a single scale by construction. The per-frame
-  scales are only measurements to be pooled, never applied per frame. The
-  diagnostics plot makes a drifting or bimodal clip visible at a glance.
-- **Smeared frames vote less.** A frame whose human cloud is streaked along the
-  view ray (VGGT's fast-motion failure — see `docs/quality.md`) would size the
-  world to the streak; its vote is multiplied by the depth-smear weight, which
-  is exactly 1 on clean frames and near 0 on streaked ones. The same weight
-  multiplies the pre-fit's per-frame chamfer and scale measurements.
+| file | holds |
+|---|---|
+| `geometry/transform.npz` | the fused transform with metric extrinsics, `scale = s`, `metric = true` |
+| `geometry/scene.npz`, `geometry/human.npz` | the clouds in metres |
+| `geometry/scale.npz` | `scale`, `scale_ruler` (the ruler's reading), `log_scale`, `scale_mad`, `n_frames_used`, `n_people`, `method` (`prefit-dual` or `human-log-ratio`), `per_frame_scale` and `per_frame_weight (P, T)` of the last reading, `smear_median` |
+| `geometry/prefit.npz` | the classic SMPL-X fields of `sam3d/smplx_params.npz`, the fitted people's tracked frames replaced by the fit; `valid_mask`, `object_ids`, `scale` |
 
-## The pre-fit: move the body to the depth, move the scale to the body
+`kinematics_1` starts from `prefit.npz` when it exists, from the converter otherwise. A large gap between `scale`
+and `scale_ruler` means the pre-fit moved the world far from the converter's opinion.
 
-`prefit = true` in `[scale]` (the default). The dual refinement alternates two
-moves until they agree, starting from the ruler's `s`:
+## Limits
 
-1. **The body move** (`bvr/human_optim/prefit.py`). Every person's per-frame
-   pose `q` is refined so the body sits on its fused depth points — **and the
-   scale moves with it**: `log s` is a variable of the same optimization, so
-   the cloud enters the fit as `s ×` its unscaled points. This matters because
-   body depth and world scale are one soft direction (the depth match cannot
-   tell "body nearer" from "world smaller"); if the round pinned the cloud at a
-   fixed scale, the body could approach the image evidence only by a tiny
-   offset per round (measured: a constant ~0.4%/round crawl that never
-   terminates). Optimized jointly, the tug-of-war resolves inside the round —
-   the image evidence decides how deep the body sits, and `s` follows.
-
-   Joint rotations may change but are pulled back toward the converter pose,
-   so bigger changes cost more; fingers are frozen (the cloud is far too
-   coarse to see them). The root gets *gentle* pulls, not locks: orientation
-   (a ~180° flip is nearly free on weak frames once the robust terms saturate)
-   and translation (on a far, small person the reprojection barely changes
-   over ±5% depth — without an anchor the body and `s` wander that valley
-   together). **Shape is frozen** to one canonical betas per person — the
-   per-coefficient median over the valid frames. The body's size *is* the
-   ruler; a scale optimization that could stretch its own ruler would be
-   circular (this, plus per-frame shape freedom, is what made the old
-   "overfit" produce strange bodies).
-
-2. **The scale move.** After each body round, `s` is re-read — not with the
-   projection ruler. Each depth point matches its nearest *visible* body
-   vertex (exactly the pairing the body move minimized) and votes
-   `log(vertex depth) − log(cloud depth)`, weighted by the robust kernel's own
-   weight for that match, so a point the fit treated as an outlier barely
-   votes here either. Per frame: weighted median; across frames: the same
-   MAD-gated pooling as the ruler. Reading through the fit's own
-   correspondences gives the alternation a true fixed point — a converged
-   round measures back the very `s` it fitted (a projection readout also sees
-   grazing silhouette vertices the fit never matched, a small bias that would
-   compound). With several people this pooled reading is also what reconciles
-   their per-person fits into the one world scale.
-
-Rounds repeat (`rounds`, default 4) and stop early once `s` changes by less
-than 0.1% — typically after round 2 or 3. The per-frame scale spread (MAD)
-after the pre-fit is typically several times tighter than the ruler's — the
-frames agree about the scale once the bodies actually sit on their depth.
-
-The body move's loss terms (a BetterRobot `Problem`, run through `bvr/human_optim/solve.py`):
-
-| term | weight | what it does |
-|---|---|---|
-| `chamfer` | 1.0 | every depth point is pulled toward its nearest **visible** vertex (one-sided, Geman-McClure). The reverse direction is deliberately absent: the cloud sees only the person's front, and pulling occluded vertices into the observed patch collapses limbs. Evaluated in *cloud units* (`body / s` against the raw cloud, kernel converted at the current `s`): in metric units every cloud-noise residual is proportional to `s`, so a fixed metric kernel would reward shrinking the world regardless of evidence. |
-| `reproj` | 0.5 | robust reprojection to the Sapiens keypoints — holds the body on the image and is the evidence that sets its absolute depth |
-| `pose` | 2.0 | pull of the joint rotations toward the converter pose ("bigger changes cost more") |
-| `orient` | 1.0 | the gentle root-orientation pull |
-| `transl` | 0.5 | the gentle root-translation pull (quadratic, metres) — negligible for cm-scale corrections, firm against metre-scale wander |
-| `smooth` | 0.1 | tiny tie of consecutive-frame joint velocities to the converter's — damps jitter without fighting real motion |
-
-The front-facing vertex mask is recomputed at the start of every round from the
-current pose, so an earlier round's root rotation cannot leave it stale.
-
-The refined bodies are saved to `geometry/prefit.npz` (classic SMPL-X params in
-the camera frame, canonical betas repeated per frame) and show in the viewer as
-body source **prefit**. The kinematic stage starts from them: when the file
-exists, `human_optimization` reads its starting pose (and its priors' anchor)
-from the pre-fit instead of the raw converter output.
-
-## Metricization: what actually gets rescaled
-
-The measured `s` is applied **in place** to the three files fuse wrote:
-
-| file | what multiplies by `s` | what stays |
-|---|---|---|
-| `transform.npz` | camera translations (`extrinsics[:, :3, 3]`) | rotations, all intrinsics, FOVs |
-| `scene.npz` | points, the stored voxel size | colours, confidence, counts, normals (unit directions) |
-| `human.npz` | points | frame/object ids, confidence, colours |
-
-`transform.npz` then records `metric=True`, the cumulative `scale`, and the
-method. Downstream stages (kinematics, contacts) refuse to run on a world still
-marked `metric=False`, so forgetting this stage fails loudly instead of fitting
-a body into a five-times-too-small world.
-
-**Re-running is safe.** The measurement always compares the body against the
-world *as currently saved*. On an already-metric world the ruler reads back
-the (unchanged) converter disagreement, the pre-fit re-runs from the same
-deterministic converter init and lands at ~1.001, and the cumulative scale
-stays put within 0.1% (verified). `scale.npz` stores the factor the latest run
-applied (`scale`), the ruler's reading (`scale_ruler`) and the cumulative
-world scale (`scale_total`).
-
-## Known biases and limits (things a future update could attack)
-
-- **The scale ends where the reprojection evidence ends.** The pre-fit lets the
-  Sapiens keypoints, not the converter's translation, decide how deep the body
-  sits — that was the point. But when the keypoints are weak (blur, occlusion),
-  the pull toward the converter placement is what remains, so a systematic
-  converter depth bias can still leak into `s` on hard clips. Watch the
-  `scale_ruler` vs `scale` gap in `scale.npz`: a large gap means the pre-fit
-  moved the world substantially away from the converter's opinion.
-- **The ruler makes the *person* right, not the wall.** The scale compares the
-  body with the person's own depth pixels. If VGGT placed the person's depth at
-  the wrong distance *relative to the wall* (the "floater" failure), the
-  measurement is internally consistent and `s` is still recovered cleanly — but
-  the body, placed at its own depth, hovers off the wall in the fused world.
-  Detecting and repairing that is deliberately out of scope here (the old fuse
-  body anchor was removed; a more general mechanism is planned).
-- **Baggy clothes and motion blur** put the cloud surface a few cm outside the
-  skin surface the SMPL-X body models. Both are handled statistically (medians,
-  MAD gate), not modelled.
-- **A systematic converter shape bias is invisible.** The canonical betas kill
-  the frame-to-frame shape jitter, but if the converter thinks the person is 5%
-  taller than they are, every measurement inherits it. Only an external size
-  cue could fix that.
-
-## Outputs
-
-- `geometry/scale.npz` — `scale` (the final factor this run applied),
-  `scale_ruler` (the converter-body starting value), `scale_total` (cumulative
-  world scale), `log_scale`, per-frame scales and weights, the MAD, and how
-  many frames survived pooling.
-- `geometry/prefit.npz` — the aligned bodies (see the pre-fit section).
-- `geometry/diagnostics/scale_over_time.png` — per-frame scale (per person) and
-  frame weight over time, with the pooled global `s`.
-- The rescaled `transform.npz`, `scene.npz`, `human.npz` (see above).
+- The ruler sizes the person, not the wall. If VGGT puts the person's depth at the wrong distance from the wall,
+  `s` is still clean but the body, seated on its own depth, hovers off the wall.
+- Where the keypoints are weak (blur, occlusion), the pull towards the converter's position is what remains, so a
+  depth bias of the converter can leak into `s`.
+- A shape bias of the converter is invisible: if it makes the person 5 % too tall, the world is 5 % too large.
+- A static camera has no parallax, so its human depth can sit at the wrong depth; the force-rig recipe turns the
+  pre-fit and the kinematic chamfer off (`bvr_datasets/peter/configs/peter.toml`).

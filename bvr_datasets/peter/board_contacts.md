@@ -128,7 +128,7 @@ carries what the boards said, which is what makes it auditable:
 | `frame_scene_dist_m (1, N, F)` | how far each point was from the wall |
 | `limb_contact (1, N, 4)` | the boards' own per-limb on/off |
 | `limb_force_world (1, N, 4, 3)` | the measured force vectors |
-| `contact_label_method` | `boards-v3: …`, the same rule the three-camera GT chain stamps |
+| `contact_label_method` | `boards-v3: …`, the rule above in words |
 
 ## The same stage on the Parkour clips
 
@@ -164,97 +164,3 @@ the file, so no reader has to know which dataset it is looking at:
 
 Neither touches the labels: whether a force is big enough to count as contact
 does not depend on which way the world is facing.
-
-## What it showed on climb_wall_3
-
-All 68 single-view clips, both runs, compared against the same boards
-(`bvr_datasets/peter/compare_gt_contact.py`).
-
-The estimated labels turn out to be decent: pooled against the boards they score
-precision 0.89, recall 0.93, F1 0.91 — they over-claim contact slightly more
-often than they miss it. So there was never a huge amount of label error to
-remove, and pooled over everything the measured labels buy a modest amount:
-limb force error 80.1 → 72.0 N, correlation 0.65 → 0.71, load-share error 10.8 →
-10.0 pp.
-
-The pooled number hides the actual result, though, and the `rescued` flag is what
-splits it. Across the tree **15.6 % of measured contact labels are rescued** —
-the board says the limb was loaded, and no point of that limb was within 5 cm of
-the reconstructed wall. Nine clips have none at all; thirteen are more than half
-rescued, with median gaps of 10–29 cm (mostly the 32° overhang clips).
-
-Split on that, the two halves say opposite things:
-
-| | limb MAE [N] | corr | share err [pp] | root resid [BW] |
-|---|---|---|---|---|
-| **22 clips, body on the wall** — estimated | 67.0 | 0.761 | 9.27 | 0.058 |
-| **22 clips, body on the wall** — measured | **53.4** | **0.867** | **7.19** | 0.076 |
-| **13 clips, body off the wall** — estimated | 85.9 | 0.588 | 12.38 | 0.093 |
-| **13 clips, body off the wall** — measured | 87.8 | 0.489 | 13.09 | 0.171 |
-
-Where the reconstruction has the body in roughly the right place, perfect
-contacts are worth about 20 % of the limb force error and lift the correlation
-from 0.76 to 0.87. Where it does not, they make things worse: `kinematics_2` pulls
-the limb onto a wall patch that is not the one it was really on, and `kindyn_1`
-then solves forces on a pose that has been bent to fit a true label.
-
-Two things follow. First, on these clips contact detection is not the bottleneck —
-the single-view reconstruction geometry is, and no amount of label quality fixes
-a hand that is 29 cm from where it should be. Second, the root residual gets
-*worse* with true labels (0.068 → 0.095 BW pooled). That is not a regression: our
-estimated labels over-claim contact, and every spurious contact is one more handle
-the solve can use to absorb residual it cannot otherwise explain. A lower residual
-bought that way is flattery, not physics.
-
-## What it showed on Parkour
-
-All 28 clips, both runs, against the plates and the bar.
-
-Here the estimated labels are *not* decent, and the failure is one-sided. Pooled
-they score precision 0.69 and recall 0.97 — the pipeline almost never misses a
-real contact, and constantly invents ones that were not there. Split by limb, it
-is the feet:
-
-| limb | measured frames | claimed | precision | recall |
-|---|---|---|---|---|
-| left hand | 1333 | 1600 | 0.83 | 0.99 |
-| right hand | 1145 | 1404 | 0.80 | 0.98 |
-| left foot | 855 | 1357 | 0.62 | 0.98 |
-| right foot | 547 | 1067 | **0.46** | 0.89 |
-
-A parkour foot is near the ground and moving slowly a lot of the time without
-carrying any weight, which is exactly the situation the near-and-still test
-cannot tell from a real landing. The right foot is claimed in contact roughly
-twice as often as the plates say.
-
-That has a clean price, and removing it a clean payoff:
-
-| | limb MAE [N] | corr | share err [pp] | total MAE [N] | root resid [BW] |
-|---|---|---|---|---|---|
-| Estimated contacts (video) | 92.3 | 0.629 | 16.23 | 110.6 | 0.086 |
-| Measured contacts (boards) | **47.5** | **0.851** | **5.48** | 110.6 | 0.130 |
-
-The per-limb force error halves and the load-share error drops by two thirds,
-while the **total** force is identical to within 0.1 N. That is the signature of
-a distribution error, not a magnitude error: the solve always knew how hard the
-body was pushing, and was putting a large part of it through the wrong limb.
-
-Unlike climb_wall_3, the split by `rescued` does not reverse the result. No
-Parkour clip is more than 25 % rescued (climb_wall_3 had thirteen above 50 %),
-so every clip here is a clip whose body is roughly in the right place, and all of
-them gain — the five worst-placed go 82.5 → 46.9 N, the fifteen best 104.5 →
-48.1 N. The single-view geometry on these clips is good enough that contact
-detection really is the bottleneck, which is the opposite of what the climbing
-wall said.
-
-The root residual rises with true labels here too (0.086 → 0.130 BW), for the
-same reason as on the wall: spurious contacts are extra handles for absorbing
-residual, and a low residual bought that way is flattery, not physics.
-
-## Shared with the ground-truth chain
-
-The reading itself lives in [`bvr_datasets/_rigs.py`](../_rigs.py) (`limb_contact`,
-`frame_contact`) and is meant for two callers: this single-view chain, and the
-three-camera ground-truth chain in `bvr_datasets/peter/gt/fit_multiview.py`, which has
-always labelled from the boards (it still calls the old copy until it is ported).
-One implementation, so the two cannot drift into disagreeing about what the sensors said.
