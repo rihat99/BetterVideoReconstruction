@@ -230,12 +230,7 @@ def main() -> None:
     print(_HEADER)
     print("-" * len(_HEADER))
     for scene_dir in scenes:
-        try:
-            result = score_scene(scene_dir, args.contacts)
-        except Exception as exc:  # a broken scene must not kill the sweep
-            report["scenes"][scene_dir.name] = {"error": f"{type(exc).__name__}: {exc}"}
-            print(f"{scene_dir.name:22s} ERROR        {type(exc).__name__}: {exc}")
-            continue
+        result = score_scene(scene_dir, args.contacts)
         report["scenes"][scene_dir.name] = result
         uncovered |= set(result["uncovered_joints"])
         for name in _JOINT_ORDER:
@@ -244,7 +239,7 @@ def main() -> None:
         print(_row(scene_dir.name, "ALL", result["pooled"]))
         print()
 
-    scored = [r for r in report["scenes"].values() if "error" not in r]
+    scored = list(report["scenes"].values())
     by_joint = {name: _pool([r["joints"][name] for r in scored if name in r["joints"]])
                 for name in _JOINT_ORDER}
     by_group = {group: _pool([by_joint[n] for n in names]) for group, names in _GROUPS.items()}
@@ -257,7 +252,7 @@ def main() -> None:
     for group, counts in by_group.items():
         print(_row("POOLED", group, counts))
     print(_row("POOLED", "ALL", overall))
-    print(f"\nscenes scored: {len(scored)}/{len(scenes)}    "
+    print(f"\nscenes scored: {len(scored)}    "
           f"uncovered (never scored): {', '.join(sorted(uncovered))}")
 
     report["pooled"] = {"by_joint": {n: metrics(c) for n, c in by_joint.items()},
