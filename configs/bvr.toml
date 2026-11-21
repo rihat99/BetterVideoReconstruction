@@ -95,6 +95,7 @@ max_spread_deg = 5.0        # maximum spread of the gravity inliers
 fallback_gravity = "0,1,0"  # world down when the estimate is unreliable
 ground_min_points = 500     # reject the floor fit below this many inlier points
 ground_max_tilt_deg = 30.0  # reject the floor when its normal is this far from the prior down
+ground_min_camera_height = 0.0  # reject the floor unless the filming camera's median height over it is above this (m)
 weights = "pinhole"         # GeoCalib checkpoint: pinhole | distorted
 
 [viewer]                    # scripts/view_3d.py
