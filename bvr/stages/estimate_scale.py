@@ -21,7 +21,7 @@ Depths are compared as ``log z_body - log z_cloud``, so a factor too large and o
 3. The metric world: points, camera translations and the voxel size times ``s``.
 
 A frame whose human points smear along the view ray (``bvr.geometry.depth_smear``) weighs less in every reading
-and in the fit.
+and in the fit. The median smear over the clip is stored for the quality flag of the contacts steps.
 
 The pre-fit objective, one loss per person, weighted by ``[scale.weights]``:
 
@@ -41,7 +41,8 @@ Writes, under the clip's directory (the files of ``geometry/fused/``, in metres)
     geometry/human.npz       bvr-human-points: points in metres
     geometry/scale.npz       bvr-scale: scale, scale_ruler, log_scale, scale_mad, n_frames_used, n_people, method
                              ("prefit-dual" or "human-log-ratio"); per_frame_scale, per_frame_weight (P, T) of the
-                             last reading; frame_indices, object_ids
+                             last reading; frame_indices, object_ids; smear_median, the median depth smear of the
+                             human points over people and frames (``bvr.geometry.quality.smear_stats``)
     geometry/prefit.npz      bvr-prefit: the classic SMPL-X fields of sam3d/smplx_params.npz in the camera frames,
                              the fitted people's tracked frames replaced by the fit; valid_mask, object_ids, scale
 """
@@ -61,6 +62,7 @@ from bvr.geometry.depth_smear import alongray_smear, smear_weight
 from bvr.geometry.human_scale import combine_log_scales, weighted_median
 from bvr.geometry.intrinsics import denormalize_K
 from bvr.geometry.normals import vertex_normals
+from bvr.geometry.quality import smear_stats
 from bvr.terms import Term, motion, objective, visual
 
 log = logging.getLogger(__name__)
@@ -97,8 +99,10 @@ def estimate_scale(clip: paths.Clip, human: bh.HumanModel, options: dict) -> Non
         else:
             log.warning("no person with a tracked frame and keypoints: the pre-fit keeps the converter's bodies")
     scale = pooled["scale"]
-    log.info("scale %.4f (ruler %.4f), MAD %.4f, %d of %d frames", scale, ruler["scale"], pooled["mad"],
-             pooled["n_used"], int(np.isfinite(readings[0]).sum()))
+    # A ratio of extents, so it reads the same before and after the scale.
+    smear, _ = smear_stats(points["points"], points["frame_id"], points["obj_id"], transform["extrinsics"])
+    log.info("scale %.4f (ruler %.4f), MAD %.4f, %d of %d frames; median depth smear %.2f", scale, ruler["scale"],
+             pooled["mad"], pooled["n_used"], int(np.isfinite(readings[0]).sum()), smear)
 
     scene = files.load_npz(fused / "scene.npz", "bvr-scene")
     extrinsics = transform["extrinsics"].copy()
@@ -115,7 +119,7 @@ def estimate_scale(clip: paths.Clip, human: bh.HumanModel, options: dict) -> Non
         n_frames_used=np.int32(pooled["n_used"]), n_people=np.int32(len(tracked)),
         method=np.array("prefit-dual" if options["prefit"] else "human-log-ratio"),
         per_frame_scale=np.exp(readings[0]).astype(np.float32), per_frame_weight=readings[1].astype(np.float32),
-        frame_indices=rows.astype(np.int32), object_ids=smplx["object_ids"])
+        frame_indices=rows.astype(np.int32), object_ids=smplx["object_ids"], smear_median=np.float32(smear))
     if options["prefit"]:
         _save_prefit(clip.path(paths.PREFIT), smplx, rows, tracked, fitted, scale)
 

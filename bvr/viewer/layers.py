@@ -49,10 +49,15 @@ Placed = tuple[str, Layer, np.ndarray | None]
 def scene_layers(data: ClipData, *, point_size: float, human_point_size: float, camera_scale: float) -> list[Placed]:
     """The layers of ``data`` that every body source shares."""
     poses = camera_poses(data.extrinsics)
-    placed: list[Placed] = [
-        ("scene", PointsLayer("points", data.scene[0], colors=data.scene[1] / 255.0, point_size=point_size), None),
-        ("human_points", PointsLayer("points", data.human[0], colors=[colors / 255.0 for colors in data.human[1]],
-                                     point_size=human_point_size), None),
+    placed: list[Placed] = []
+    if data.scene is not None:
+        placed.append(("scene", PointsLayer("points", data.scene[0], colors=data.scene[1] / 255.0,
+                                            point_size=point_size), None))
+    if data.human is not None:
+        colors = [colors / 255.0 for colors in data.human[1]]
+        placed.append(("human_points", PointsLayer("points", data.human[0], colors=colors,
+                                                   point_size=human_point_size), None))
+    placed += [
         ("cameras", CameraLayer("camera", poses, intrinsics=np.median(data.intrinsics, axis=0), size=data.size,
                                 scale=camera_scale, color=CAMERA, image=data.video), None),
         ("cameras", LinesLayer("path", np.stack([poses[:-1, :3], poses[1:, :3]], axis=1), colors=PATH), None),

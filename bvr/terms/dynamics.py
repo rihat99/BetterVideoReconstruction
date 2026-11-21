@@ -136,25 +136,26 @@ def torques(body: bh.HumanState, velocity: torch.Tensor, acceleration: torch.Ten
 
 
 @torch.no_grad()
-def root_balance(state: bh.HumanState, time: motion.Time) -> tuple[torch.Tensor, torch.Tensor]:
-    """The root rows of a fixed motion, split: without contact, ``(P, T, 6)``, and what each contact frame adds.
+def balance(state: bh.HumanState, time: motion.Time) -> tuple[torch.Tensor, torch.Tensor]:
+    """Inverse dynamics of a fixed motion, split: without contact, ``(P, T, nv)``, and what each contact frame adds.
 
-    At a fixed pose inverse dynamics is affine in the contact forces: with forces ``f (P, T, F, 3)`` the root rows
-    are ``free - einsum("ptfdr,ptfd->ptr", jacobians, f)``, where ``jacobians (P, T, F, 3, 6)`` are the root
-    columns of the contact frames' translation Jacobians. One product per evaluation instead of an inverse
-    dynamics pass: the form a solve of forces alone reads.
+    At a fixed pose inverse dynamics is affine in the contact forces: with forces ``f (P, T, F, 3)`` it is
+    ``free - einsum("ptfdr,ptfd->ptr", jacobians, f)``, where ``jacobians (P, T, F, 3, nv)`` are the contact
+    frames' translation Jacobians. One product per evaluation instead of an inverse dynamics pass: the form a
+    solve of forces alone reads. The first six columns are the root's rows.
     """
     model, names = state.model, state.identity.human.contact_frames.names
     velocity = motion.velocity(model, time)(state.q)
     v, a = rates(time, velocity, time.difference(velocity))
-    free = inverse_dynamics(model, state.kinematics, v=v, a=a)[..., :6]
+    free = inverse_dynamics(model, state.kinematics, v=v, a=a)
     jacobians = kinematics.point_jacobian(model, state.kinematics, frames=names, points=free.new_zeros(len(names), 3))
-    return free, jacobians[..., :6]
+    return free, jacobians
 
 
 def register(problem: optim.Problem, identity: bh.Identity, *, edges: torch.Tensor, held: torch.Tensor,
-             tracked: torch.Tensor, time: motion.Time, multipliers: dict[str, float]) -> None:
-    """Put the physics on a kinematic problem whose variables include ``activation (P, T, F, 4)``.
+             tracked: torch.Tensor, time: motion.Time, multipliers: dict[str, float],
+             fixed: bh.HumanState | None = None) -> None:
+    """Put the physics on a problem whose variables include ``activation (P, T, F, 4)``.
 
     :param identity: the bodies, under the clip's gravity (:func:`under_gravity`).
     :param held: ``(P, T, F)`` bool, where a contact frame may carry force: labelled, on a tracked frame.
@@ -163,6 +164,10 @@ def register(problem: optim.Problem, identity: bh.Identity, *, edges: torch.Tens
         force cheap.
     :param tracked: ``(P, T)`` bool.
     :param multipliers: ``[torque_multipliers]``.
+    :param fixed: the posed bodies of a motion that the solve does not move. Without it the problem is a kinematic
+        one (:func:`bvr.terms.objective.kinematics_problem`) and the torques follow its pose. With it the forces
+        are all there is to solve: inverse dynamics runs once (:func:`balance`), and ``activation`` is the one
+        variable the terms read.
 
     Cached values: ``forces`` (:func:`cone_forces`) and ``torques`` (:func:`torques`). The terms are
     :data:`TERMS`, each off until a phase weights it: the root residual, then force and joint torque and their
@@ -175,7 +180,13 @@ def register(problem: optim.Problem, identity: bh.Identity, *, edges: torch.Tens
     scale = 0.5 / (rows.sum(dim=1).clamp_min(1) * newtons.square())
     costs = joint_weights(identity.model, multipliers)
     problem.cached(partial(cone_forces, edges=edges, weight=newtons), name="forces", reads=("activation",))
-    problem.cached(partial(torques, time=time), name="torques", reads=("body", "velocity", "acceleration", "forces"))
+    if fixed is None:
+        problem.cached(partial(torques, time=time), name="torques",
+                       reads=("body", "velocity", "acceleration", "forces"))
+    else:
+        free, jacobians = balance(fixed, time)
+        problem.cached(lambda forces: free - torch.einsum("ptfdr,ptfd->ptr", jacobians, forces), name="torques",
+                       reads=("forces",))
 
     term = partial(problem.scalar, weight=0.0)
     term("root_force", _squares(scale, rows[..., None], slice(0, 3)), reads=("torques",))

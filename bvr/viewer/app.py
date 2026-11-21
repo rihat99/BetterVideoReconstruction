@@ -114,11 +114,13 @@ class App:
 
 def opening_view(data: clips_module.ClipData, bodies: list[layers.Placed],
                  up: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
-    """``(position, look_at)``: the people (else the scene) seen from the side of the mean camera centre, 25 degrees
-    above it about ``up (3,)`` so that the camera and its frustum stand below the people, at least 2 m away."""
+    """``(position, look_at)``: the people (else the scene, else the cameras) seen from the side of the mean camera
+    centre, 25 degrees above it about ``up (3,)`` so that the camera and its frustum stand below the people, at
+    least 2 m away."""
     cameras = layers.camera_poses(data.extrinsics)[:, :3].mean(axis=0)
     roots = [layer.q[:, :3].numpy()[tracked] for tag, layer, tracked in bodies if tag == "skeleton"]
-    look_at = np.concatenate(roots).mean(axis=0) if roots else data.scene[0].mean(axis=0)
+    look_at = (np.concatenate(roots).mean(axis=0) if roots
+               else cameras if data.scene is None else data.scene[0].mean(axis=0))
     away = cameras - look_at
     level = away - (away @ up) * up
     level = level / max(float(np.linalg.norm(level)), 1e-6)

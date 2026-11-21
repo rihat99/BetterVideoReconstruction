@@ -123,6 +123,18 @@ def extract_frames(video: Path, directory: Path) -> list[Path]:
     return paths
 
 
+def video_writer(path: Path, rate: float, size: tuple[int, int]) -> cv2.VideoWriter:
+    """Open an MPEG-4 writer of frames of ``size`` (width, height) at ``rate`` frames per second.
+
+    The rate is rounded to a hundredth. MPEG-4 holds a time base of at most 65535 ticks, and the exact rate of
+    a frame-interpolated video (119.683 fps) needs more: the writer would not open.
+    """
+    writer = cv2.VideoWriter(str(path), cv2.VideoWriter_fourcc(*"mp4v"), round(rate, 2), size)
+    if not writer.isOpened():
+        raise OSError(f"cannot write video {path}")
+    return writer
+
+
 def read_mask(path: Path) -> np.ndarray:
     """Read a mask image as a boolean ``(H, W)`` array."""
     image = cv2.imread(str(path), cv2.IMREAD_UNCHANGED)

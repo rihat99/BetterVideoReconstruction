@@ -105,9 +105,7 @@ def contacts(clip: paths.Clip, human: bh.HumanModel, config: dict, bodies: str, 
     before = np.where(heard, (solved.before / weight[:, None]).cpu().numpy(), np.nan)
     unexplained = float(np.nanmedian(before)) if heard.any() else float("nan")
     travel = quality.cam_motion_ratio(transform["extrinsics"], static["points"])
-    human_points = files.load_npz(clip.find(paths.HUMAN), "bvr-human-points")
-    smear, _ = quality.smear_stats(
-        human_points["points"], human_points["frame_id"], human_points["obj_id"], transform["extrinsics"])
+    smear = _smear(clip, transform["extrinsics"])
     flag = quality.quality_flag(travel, unexplained, smear, **config["quality"])
     log.info("quality: camera travel %.2f, smear %.2f, residual before forces %.2f body weights: %s",
              travel, smear, unexplained, flag or "pass")
@@ -136,6 +134,18 @@ def contacts(clip: paths.Clip, human: bh.HumanModel, config: dict, bodies: str, 
         frame_vertex=np.array(human.contact_frames.vertex_ids), joint_names=np.array(spec.joint_names),
         parents=np.array(spec.parents, np.int32), object_ids=fitted["object_ids"], valid_mask=fitted["valid_mask"],
         num_people=np.int32(len(tracked)), num_frames=np.int32(tracked.shape[1]), fps=np.float32(time.fps))
+
+
+def _smear(clip: paths.Clip, extrinsics: np.ndarray) -> float:
+    """The median depth smear of the clip's human points, which the scale step measures and stores.
+
+    A tree whose scale step ran before it stored the smear is measured here, as the contacts steps did then.
+    """
+    scale = files.load_npz(clip.find(paths.SCALE), "bvr-scale")
+    if "smear_median" in scale:
+        return float(scale["smear_median"])
+    points = files.load_npz(clip.find(paths.HUMAN), "bvr-human-points")
+    return quality.smear_stats(points["points"], points["frame_id"], points["obj_id"], extrinsics)[0]
 
 
 if __name__ == "__main__":

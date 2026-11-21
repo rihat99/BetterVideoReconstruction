@@ -23,6 +23,7 @@ from bvr import camera
 from bvr.body import BODY_JOINTS
 from bvr.camera import Cameras
 from bvr.geometry.depth_smear import padded_frame_weights
+from bvr.geometry.normals import vertex_normals
 from bvr.terms import Term
 
 # Sapiens keypoints (Goliath-308 indices) and the body points they name.
@@ -113,7 +114,7 @@ def chamfer(human: bh.HumanModel, cloud: torch.Tensor, counted: torch.Tensor, ca
     @torch.no_grad()
     def visible(body: bh.HumanState) -> torch.Tensor:
         mesh = body.vertices
-        normals = _vertex_normals(mesh, spec.faces)[..., sample, :] @ extrinsics[:, :3, :3].mT
+        normals = vertex_normals(mesh, spec.faces)[..., sample, :] @ extrinsics[:, :3, :3].mT
         return ((normals * camera.to_camera(mesh[..., sample, :], extrinsics)).sum(dim=-1) < 0).flatten(0, 1)
 
     def loss(body: bh.HumanState) -> torch.Tensor:
@@ -244,14 +245,6 @@ def _take(points: torch.Tensor, index: torch.Tensor) -> torch.Tensor:
 def _joint_quaternions(pose: torch.Tensor) -> torch.Tensor:
     """The 51 joint quaternions ``(..., 51, 4)`` of a trajectory ``(..., 211)``."""
     return pose[..., 7:].unflatten(-1, (-1, 4))
-
-
-def _vertex_normals(vertices: torch.Tensor, faces: torch.Tensor) -> torch.Tensor:
-    """Unit normals ``(..., V, 3)`` of mesh vertices ``(..., V, 3)``: the area-weighted mean of the face normals."""
-    a, b, c = (vertices[..., faces[:, corner], :] for corner in range(3))
-    normals = torch.zeros_like(vertices).index_add_(
-        -2, faces.reshape(-1), torch.linalg.cross(b - a, c - a).repeat_interleave(3, dim=-2))
-    return torch.nn.functional.normalize(normals, dim=-1)
 
 
 def _limbs(joint_names: tuple[str, ...]) -> np.ndarray:

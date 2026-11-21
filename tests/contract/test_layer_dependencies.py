@@ -2,7 +2,8 @@
 
 ``bvr`` is the core, ``bvr_datasets`` builds on it, ``scripts`` are entry points that nothing
 imports. Inside the core the foundation (config, paths, files, manifest, camera) knows only itself,
-stages meet through files and never import one another, and ``bvr.run`` starts stages by module
+stages meet through files and never import one another (what two of them share is ``bvr.fit``), and
+``bvr.run`` starts stages by module
 name without importing them. Each third-party model is imported by one stage module.
 """
 from __future__ import annotations
@@ -13,7 +14,7 @@ from pathlib import Path
 REPO_ROOT = Path(__file__).resolve().parents[2]
 
 FOUNDATION = {"bvr.config", "bvr.paths", "bvr.files", "bvr.manifest", "bvr.camera"}
-CORE = FOUNDATION | {"bvr.body", "bvr.geometry", "bvr.terms", "bvr.contacts"}
+CORE = FOUNDATION | {"bvr.body", "bvr.geometry", "bvr.terms", "bvr.contacts", "bvr.fit"}
 
 #: package -> the packages of this repository it may import, besides itself.
 ALLOWED = {
@@ -22,6 +23,7 @@ ALLOWED = {
     "bvr.geometry": {"bvr.camera"},
     "bvr.terms": {"bvr.camera", "bvr.body", "bvr.geometry"},
     "bvr.contacts": {"bvr.terms", "bvr.camera", "bvr.body", "bvr.geometry"},
+    "bvr.fit": {"bvr.files", "bvr.paths", "bvr.camera", "bvr.body", "bvr.geometry", "bvr.terms"},
     "bvr.stages": CORE | {"bvr.run"},  # bvr.run.main is the entry point of every stage module
     "bvr.run": {"bvr.config", "bvr.paths", "bvr.manifest"},
     "bvr.viewer": {"bvr.files", "bvr.paths", "bvr.body", "bvr.camera"},
@@ -34,6 +36,7 @@ LIBRARIES = {
     "bvr.body": {"better_robot", "better_human"},
     "bvr.terms": {"better_robot", "better_human"},
     "bvr.contacts": {"better_robot", "better_human"},
+    "bvr.fit": {"better_robot", "better_human"},
     "bvr.stages": {"better_robot", "better_human"},
     "bvr.viewer": {"better_robot", "better_human"},
     "bvr_datasets": {"better_robot", "better_human"},

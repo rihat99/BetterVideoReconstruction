@@ -30,10 +30,9 @@ import numpy as np
 import torch
 from better_robot import optim
 
-from bvr import body, camera, files, paths, run
+from bvr import body, files, fit, paths, run
 from bvr.contacts import detector
-from bvr.geometry.normals import load_scene_cloud
-from bvr.terms import motion, objective, scene, visual
+from bvr.terms import objective
 
 log = logging.getLogger(__name__)
 
@@ -53,7 +52,7 @@ def kinematics_1(clip: paths.Clip, human: bh.HumanModel, config: dict) -> None:
     prefit = clip.find(paths.PREFIT)
     start = (files.load_npz(prefit, "bvr-prefit") if prefit.exists()
              else files.load_npz(clip.find(paths.SMPLX_PARAMS), "bvr-smplx"))
-    evidence = Evidence(clip, human, config, start)
+    evidence = fit.Evidence(clip, human, config, start)
     options, tensor = config["stages"]["kinematics_1"], evidence.tensor
     tracked = start["valid_mask"].astype(bool)
     # One shape per person, the mean over their tracked frames; an untracked frame holds the nearest tracked pose.
@@ -72,16 +71,16 @@ def kinematics_1(clip: paths.Clip, human: bh.HumanModel, config: dict) -> None:
         iterations, weights, root = options["iterations"], options["weights"], config["stages"]["root"]
         free = _first(BODY, human) if options["freeze_fingers"] else None
         placed = optim.run(problem, [
-            _adam("root", root["iterations"], config, weights=root["weights"], free=_first(ROOT, human)),
-            _adam("full", iterations["full"], config, free=free,
+            fit.adam("root", root["iterations"], config, weights=root["weights"], free=_first(ROOT, human)),
+            fit.adam("full", iterations["full"], config, free=free,
                   weights=weights | dict.fromkeys(objective.CONTACT_TERMS, 0.0)),
         ])
         labels[evidence.people], drift[evidence.people] = _detect_contacts(
             objective.posed(fitted, placed.x["q"]), evidence, config)
         look = evidence.scene_refresh(fitted)
         result = optim.run(problem.with_(data={"labels": labels[evidence.people]}), [
-            _adam("refine", iterations["refine"], config, weights=weights, free=free, on_start=look),
-            _lbfgs("polish", iterations["polish"], config, weights=weights, free=free, on_start=look),
+            fit.adam("refine", iterations["refine"], config, weights=weights, free=free, on_start=look),
+            fit.lbfgs("polish", iterations["polish"], config, weights=weights, free=free, on_start=look),
         ], x=placed.x)
         q[evidence.people] = objective.posed(fitted, result.x["q"]).q
 
@@ -95,7 +94,7 @@ def kinematics_2(clip: paths.Clip, human: bh.HumanModel, config: dict) -> None:
     contacts = files.load_npz(clip.find(paths.CONTACTS_1), "bvr-contacts")
     if list(contacts["contact_frame_names"]) != list(human.contact_frames.names):
         raise ValueError(f"{clip.find(paths.CONTACTS_1)} names other contact frames than the body; rerun contacts_1")
-    evidence = Evidence(clip, human, config, start)
+    evidence = fit.Evidence(clip, human, config, start)
     options, tensor = config["stages"]["kinematics_2"], evidence.tensor
     betas, q = tensor(start["betas"]), tensor(start["q"])
 
@@ -109,7 +108,7 @@ def kinematics_2(clip: paths.Clip, human: bh.HumanModel, config: dict) -> None:
         problem = evidence.problem(fitted, q[evidence.people], config["contact_attraction"])
         look = evidence.scene_refresh(fitted, labels)
         result = optim.run(problem.with_(data={"labels": labels}), [
-            _adam(name, options["iterations"][name], config, weights=options["weights"], free=free, on_start=look)
+            fit.adam(name, options["iterations"][name], config, weights=options["weights"], free=free, on_start=look)
             for name, free in (("root", _first(ROOT, human)), ("full", None), ("refine", None))])
         q[evidence.people] = objective.posed(fitted, result.x["q"]).q
 
@@ -117,73 +116,7 @@ def kinematics_2(clip: paths.Clip, human: bh.HumanModel, config: dict) -> None:
               drift_pre=start["drift_pre"], auto_labels=start["auto_labels"])
 
 
-class Evidence:
-    """What a clip's files say about the people a step can fit, on the device.
-
-    ``people`` are the rows of the start file with a tracked frame and Sapiens keypoints, and ``tracked (P, T)``
-    their tracked frames; ``cameras`` and ``time`` are the clip's, ``scene`` its static cloud.
-    """
-
-    def __init__(self, clip: paths.Clip, human: bh.HumanModel, config: dict, start: dict[str, np.ndarray]) -> None:
-        self.clip, self.human, self.config, device = clip, human, config, human.spec.device
-        self.tensor = lambda array: torch.as_tensor(array, device=device)
-        transform = files.load_npz(clip.find(paths.TRANSFORM), "bvr-transform")
-        self.cameras = self.tensor(transform["extrinsics"]), self.tensor(transform["intrinsics_px_orig"])
-        self.time = motion.Time(float(transform["fps"]))
-        self.image_size = self.tensor([int(transform["image_width"]), int(transform["image_height"])])
-        self.scene = scene.Scene(*load_scene_cloud(
-            files.load_npz(clip.find(paths.SCENE), "bvr-scene"), camera.centers(self.cameras[0]),
-            conf_drop_q=config["penetration"]["conf_drop_q"], k=config["penetration"]["normal_k"], device=device))
-        self.keypoints = files.load_npz(clip.find(paths.SAPIENS_POSE), "bvr-keypoints")
-        tracked = start["valid_mask"].astype(bool)
-        self.people = np.flatnonzero(tracked.any(axis=1) & np.isin(start["object_ids"], self.keypoints["object_ids"]))
-        self.object_ids, self.tracked = start["object_ids"][self.people], self.tensor(tracked[self.people])
-
-    def depth_points(self, identity: bh.Identity, start: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
-        """Each person's depth points for the chamfer, ``(P, T, M, 3)`` and their mask, sampled around ``start``."""
-        points = files.load_npz(self.clip.find(paths.HUMAN), "bvr-human-points")
-        pixels = camera.project(objective.posed(identity, start).joint_translations, *self.cameras)
-        sampling = {key: self.config["chamfer"][key] for key in ("conf_drop_q", "max_points", "limb_quota")}
-        clouds = []
-        for person, start_pixels, seen in zip(self.object_ids, pixels, self.tracked.cpu().numpy()):
-            own = points["obj_id"] == person
-            clouds.append(visual.human_points(
-                self.human, points["points"][own], points["confidence"][own], points["frame_id"][own],
-                start_pixels, seen, self.cameras, **sampling))
-        return tuple(self.tensor(np.stack(part)) for part in zip(*clouds))
-
-    def problem(self, identity: bh.Identity, start: torch.Tensor, attraction: dict, cloud=None) -> optim.Problem:
-        """The kinematic problem of the people, whose bodies are ``identity`` and start at ``start (P, T, 211)``."""
-        rows = [list(self.keypoints["object_ids"]).index(person) for person in self.object_ids]
-        return objective.kinematics_problem(
-            identity, start, keypoints=self.tensor(self.keypoints["keypoints"][rows]),
-            scores=self.tensor(self.keypoints["keypoint_scores"][rows]), tracked=self.tracked, cameras=self.cameras,
-            time=self.time, attraction=attraction, config=self.config, cloud=cloud)
-
-    def scene_refresh(self, identity: bh.Identity, labels: torch.Tensor | None = None):
-        """A phase's ``on_start``: the scene candidates around the standing body and, given ``labels``, the patches."""
-        prune = {key: self.config["penetration"][key] for key in ("prune_margin_m", "max_candidates")}
-        patch = {key: self.config["contact_acquisition"][key] for key in ("radius_px", "patch_k", "conf_thresh")}
-
-        def on_start(problem: optim.Problem, x: dict[str, torch.Tensor]) -> tuple[dict, dict]:
-            state = objective.posed(identity, x["q"])
-            data = {"scene": scene.candidates(self.scene, objective.reach(state), self.tracked, **prune)}
-            if labels is not None:
-                data["patches"] = scene.patches(
-                    self.scene, body.contact_frames(state), labels, self.cameras, self.image_size, **patch)
-                log.info("contact patches: %d of %d labelled contacts resolved",
-                         len(data["patches"].person), int(labels.sum()))
-            return x, data
-        return on_start
-
-    def header(self, start: dict[str, np.ndarray]) -> dict[str, np.ndarray]:
-        """The arrays every body file of the clip carries beside the bodies."""
-        width, height = self.image_size.tolist()
-        return {"object_ids": start["object_ids"], "valid_mask": start["valid_mask"],
-                "fps": np.float32(self.time.fps), "video_width": np.int32(width), "video_height": np.int32(height)}
-
-
-def _detect_contacts(state: bh.HumanState, evidence: Evidence, config: dict) -> tuple[torch.Tensor, torch.Tensor]:
+def _detect_contacts(state: bh.HumanState, evidence: fit.Evidence, config: dict) -> tuple[torch.Tensor, torch.Tensor]:
     """Where each person's contact frames touch the scene, ``(P, T, F)`` bool, and their drift ``(P, T, F)`` in m.
 
     A frame touches where it is near the scene and still. The drift is the distance a frame covers across the
@@ -208,43 +141,9 @@ def _detect_contacts(state: bh.HumanState, evidence: Evidence, config: dict) -> 
     return labels, torch.stack(drifts)
 
 
-def _adam(name: str, iterations: int, config: dict, **phase) -> optim.Phase:
-    """A phase of Adam at the config's learning rate, cut by its decay at one half and at three quarters."""
-    rate, decay = config["optimizer"]["learning_rate"], config["optimizer"]["learning_rate_decay"]
-    solver = optim.TorchOptim(
-        lambda parameters: torch.optim.Adam(parameters, lr=rate),
-        scheduler=lambda optimizer: torch.optim.lr_scheduler.MultiStepLR(
-            optimizer, [iterations // 2, 3 * iterations // 4], gamma=decay))
-    return optim.Phase(solver, iterations, name=name, on_step=_report(name, iterations), stop_every=0, **phase)
-
-
-def _lbfgs(name: str, iterations: int, config: dict, **phase) -> optim.Phase:
-    """A phase of BetterRobot's L-BFGS, which keeps one memory and one line search per person; it ends early once
-    no person's search finds a step."""
-    solver = optim.LBFGS(history=config["optimizer"]["lbfgs_history"],
-                         line_search=config["optimizer"]["lbfgs_line_search"])
-    return optim.Phase(solver, iterations, name=name, on_step=_report(name, iterations), **phase)
-
-
 def _first(coordinates: int, human: bh.HumanModel) -> dict[str, torch.Tensor]:
     """A phase's ``free``: the first ``coordinates`` of every frame's ``q`` move, the rest stay."""
     return {"q": torch.arange(human.model.nq, device=human.spec.device) < coordinates}
-
-
-def _report(name: str, iterations: int) -> Callable[[optim.Problem, optim.State], None]:
-    """A phase's ``on_step``: log each person's loss and terms at every quarter of the phase and at its end."""
-    def on_step(problem: optim.Problem, state: optim.State) -> None:
-        step = state.iteration - 1
-        if step % max(1, iterations // 4) and step != iterations - 1:
-            return
-        values = {term: loss / problem.weights[term] for term, loss in state.extra["terms"].items()}
-        log.info("%-6s %4d  loss %s  %s", name, step, _numbers(state.loss),
-                 "  ".join(f"{term} {_numbers(value)}" for term, value in values.items()))
-    return on_step
-
-
-def _numbers(values: torch.Tensor) -> str:
-    return "/".join(f"{value:.4g}" for value in values.tolist())
 
 
 def _held(values: np.ndarray, tracked: np.ndarray) -> np.ndarray:

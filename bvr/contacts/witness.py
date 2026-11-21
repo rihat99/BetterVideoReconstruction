@@ -1,7 +1,7 @@
 """The force witness of contact: which contact frames must carry load for the motion to be possible.
 
 Inverse dynamics of the fixed trajectory with nothing touching the body leaves, on the six rows of
-the root, the wrench that contact must have supplied (:func:`bvr.terms.dynamics.root_balance`). The
+the root, the wrench that contact must have supplied (:func:`bvr.terms.dynamics.balance`). The
 witness asks which forces at the contact frames explain it, for all frames of the clip at once.
 
 Friction cones are what give the answer a meaning. A free force at any one limb can absorb almost
@@ -56,7 +56,7 @@ def solve(state: bh.HumanState, tracked: torch.Tensor, drift: torch.Tensor, dist
     bound enforced after every step, its learning rate decaying from ``learning_rate`` to ``learning_rate_final``.
     """
     weight = dynamics.weight(state.identity)[:, None, None]
-    free, jacobians = dynamics.root_balance(state, time)
+    free, jacobians = (part[..., :6] for part in dynamics.balance(state, time))  # the root's rows
     heard = dynamics.stencil_rows(time, tracked)
     candidate = heard[..., None] & distance.isfinite() & drift.isfinite()
     edges = dynamics.cone_edges(body.frame_normals(body.contact_frames(state)), half_angle_deg)
