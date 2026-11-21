@@ -27,7 +27,8 @@ is needed for the model steps.
 
 ## Run a clip
 
-Data lives outside the repository under `$BVR_DATA_ROOT` (default: the folder `data` beside the repository).
+Data lives outside the repository under `$BVR_DATA_ROOT` (default: the folder `data` beside the repository). The
+dataset tools read it and stop with an error if neither exists; a run names its own `--source` and `--save-dir`.
 
 ```bash
 uv run python scripts/pipeline.py --source $BVR_DATA_ROOT/examples/data/boulder_1.mp4 --save-dir ../runs

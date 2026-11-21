@@ -1,4 +1,4 @@
-"""Where the peter rig recordings live: ``<data root>/peter`` (``bvr.paths.DATA_ROOT``)."""
-from bvr.paths import DATA_ROOT
+"""Where the peter rig recordings live: ``<data root>/peter`` (``bvr.paths.data_root``)."""
+from bvr.paths import data_root
 
-PETER = DATA_ROOT / "peter"
+PETER = data_root() / "peter"

@@ -1,4 +1,4 @@
-"""Where the LAAS Parkour dataset lives: ``<data root>/Parkour-dataset`` (``bvr.paths.DATA_ROOT``)."""
-from bvr.paths import DATA_ROOT
+"""Where the LAAS Parkour dataset lives: ``<data root>/Parkour-dataset`` (``bvr.paths.data_root``)."""
+from bvr.paths import data_root
 
-PARKOUR = DATA_ROOT / "Parkour-dataset"
+PARKOUR = data_root() / "Parkour-dataset"

@@ -1,4 +1,4 @@
-"""Where the ClimbingVideos scene DB lives: ``<data root>/ClimbingVideos`` (``bvr.paths.DATA_ROOT``)."""
-from bvr.paths import DATA_ROOT
+"""Where the ClimbingVideos scene DB lives: ``<data root>/ClimbingVideos`` (``bvr.paths.data_root``)."""
+from bvr.paths import data_root
 
-CLIMBING = DATA_ROOT / "ClimbingVideos"
+CLIMBING = data_root() / "ClimbingVideos"

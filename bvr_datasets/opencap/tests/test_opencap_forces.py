@@ -136,10 +136,7 @@ def test_dataset_force_files_round_trip(trial: str) -> None:
     This is the check that the inversion matches the convention the DATA was written
     with, not merely a self-consistent one of our own.
     """
-    path = LAB_VALIDATION / "subject2" / "ForceData" / f"{trial}_forces.mot"
-    if not path.exists():
-        pytest.skip(f"{path} is not on this machine")     # external dataset, not an edge case
-    names, values = read_mot(path)
+    names, values = read_mot(LAB_VALIDATION / "subject2" / "ForceData" / f"{trial}_forces.mot")
     for side in ("R", "L"):
         column = lambda stem: values[:, names.index(f"{side}_ground_{stem}")]  # noqa: E731
         force = np.stack([column(f"force_v{a}") for a in "xyz"], 1)

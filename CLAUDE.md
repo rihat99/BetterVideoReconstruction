@@ -59,10 +59,12 @@ Never skip, xfail, loosen a tolerance or delete an assertion to get green; repor
 
 ## Traps
 
-- The data root. `bvr.paths.DATA_ROOT` is `$BVR_DATA_ROOT`, else the folder `data` beside the checkout. From the
-  dev worktree (`dev/BetterVideoReconstruction`) that is `dev/data`, from a lane `dev/.lanes/data`; neither exists.
-  Set `BVR_DATA_ROOT` to the workspace's `data/` (`../../data` from the dev worktree, `../../../data` from a lane).
-  Without it the dataset paths point nowhere and `pytest bvr_datasets` skips four OpenCap tests instead of failing.
+- The data root. `bvr.paths.data_root()` is `$BVR_DATA_ROOT`, else the folder `data` beside the checkout. From the
+  dev worktree (`dev/BetterVideoReconstruction`) that is `dev/data`, from a lane `dev/.lanes/data`; neither exists,
+  and the function raises. Set `BVR_DATA_ROOT` to the workspace's `data/` (`../../data` from the dev worktree,
+  `../../../data` from a lane). Every dataset module reads its folder from it when imported, so without a data root
+  `pytest bvr_datasets` stops at collection; `bvr` and a run with `--source` and `--save-dir` need none. Four OpenCap
+  tests read raw trials of LabValidation and fail where the data root does not hold them.
 - `BETTERHUMAN_MODELS_DIR` has no default. The steps `smplx`, `scale` and every step after `gravity` load SMPL-X
   through it, and `smplx` also `MHR/converted/mhr_lod1.npz`.
 - Model outputs move with the environment. SAM 3D Body on torch 2.13 (its cuDNN) differs from the torch 2.8 runs by

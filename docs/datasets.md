@@ -75,5 +75,6 @@ untouched) or into the corpus's feature tree. Both write the files PACT's loader
 uv run pytest bvr_datasets -q
 ```
 
-36 tests on the CPU in about 10 s, with `BETTERHUMAN_MODELS_DIR` set. Four OpenCap plate tests read raw trials from
-the data root and skip when it does not hold them.
+36 tests on the CPU in about 10 s, with `BETTERHUMAN_MODELS_DIR` and the data root set. Four OpenCap plate tests read
+raw trials of LabValidation and fail where the data root does not hold them, as a test of a body fails without the
+body models: nothing skips.

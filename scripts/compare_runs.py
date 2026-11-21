@@ -276,7 +276,7 @@ def main() -> None:
     parser.add_argument("--clips", default=None, help="comma-separated; default: every clip in both roots")
     parser.add_argument("--dir-a", default="human_optim")
     parser.add_argument("--dir-b", default="human_optim")
-    parser.add_argument("--annotations", type=Path, default=paths.EXAMPLES / "data")
+    parser.add_argument("--annotations", type=Path, help="default: <data root>/examples/data")
     parser.add_argument("--model", type=Path, help="default: $BETTERHUMAN_MODELS_DIR/smplx/SMPLX_NEUTRAL.npz")
     parser.add_argument("--json", type=Path, default=None)
     args = parser.parse_args()
@@ -290,8 +290,9 @@ def main() -> None:
     report: dict = {"root_a": str(args.root_a), "root_b": str(args.root_b), "dir_a": args.dir_a,
                     "dir_b": args.dir_b, "clips": {}, "pooled": {}}
     raws: dict[str, list[dict]] = {}
+    annotations = args.annotations or paths.data_root() / "examples" / "data"
     for clip in clips:
-        ann_path = args.annotations / f"{clip}.npz"
+        ann_path = annotations / f"{clip}.npz"
         annotation = _load(ann_path)
         files = {name: (_load(args.root_a / clip / args.dir_a / f"{name}.npz"),
                         _load(args.root_b / clip / args.dir_b / f"{name}.npz"))
