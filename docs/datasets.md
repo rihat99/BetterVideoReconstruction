@@ -9,7 +9,7 @@ under `$BVR_DATA_ROOT`, and the commands. Run every command from the repository 
 | `examples/` | the short annotated climbing clips, `examples/data/<clip>.mp4` with a manual contact annotation `<clip>.npz` | scores a run's contact labels against the annotations |
 | `bedlam2/` | BEDLAM2 synthetic renders with exact SMPL-X ground truth | imports the scenes; labels masks, floor contacts and frozen-pose forces from the ground truth (PACT's BEDLAM2 labels) |
 | `climbingvideos/` | the ClimbingVideos scene corpus PACT trains on | runs any steps of the chain over the corpus; fits `[contact_confidence]`; assigns the train and test split |
-| `peter/` | the climbing force rigs, a force board under each limb's hold | the recipe of the static-camera rigs; reads measured contacts from the boards; scores estimated against measured |
+| `peter/` | the climbing force rigs, a force board under each limb's hold | the recipe of the static-camera rigs; reads measured contacts from the boards; scores estimated against measured; the three-camera ground truth of climb_wall_3 |
 | `parkour/` | LAAS Parkour: floor plates and an instrumented bar | imports the clips and forces; scores pose (Procrustes MPJPE) and forces, through the peter recipe |
 | `opencap/` | OpenCap LabValidation: two floor force plates, motion capture | imports and synchronises the trials; scores ground reaction forces against the plates, through the peter recipe |
 
@@ -46,8 +46,20 @@ second run root beside the first (`bvr_datasets/peter/board_contacts.md`). These
 and a run names a clip by its video, so a run reads a folder of links `<clip>.mp4`; each README has the one-line loop
 that makes it.
 
-OpenCap's stored scores used a synthetic floor and a 3 cm shoe heel on the contact frames. The rebuilt core has no
-contact frame offset along the normal, so that recipe does not run on it; OpenCap runs the plain rig recipe.
+## The ground truth of climb_wall_3
+
+Three calibrated cameras filmed climb_wall_3, so its trials have a body that does not depend on one camera's depth.
+`python -m bvr_datasets.peter.gt.fit_multiview` runs the human steps on a trial with the same problem, terms and
+solvers as the pipeline and these differences: the keypoints and the SAM 3D Body estimate of every camera stand where
+one camera's stood, each camera weighing by how well its keypoints agree; the contact labels are the boards';
+nothing of the body may be behind the wall's plane; and in `kindyn_1` each limb's summed force is pulled to what its
+board measured. The climber's shape is frozen, one per climber: `python -m bvr_datasets.peter.gt.shape` fits it to
+their measured height and mass and the three cameras. The weights are the delta `bvr_datasets/peter/gt/gt.toml`.
+
+The run reads prepared trees (`peter/climb_wall_3_gt/human/<trial>/`: the calibrated cameras, each camera's model
+outputs, the wall's cloud and plane, gravity, the boards' forces) as its upstream and writes
+`<run>/<trial>/human_optim/`; `bvr_datasets/peter/README.md` has the commands. PACT's ForceWall benchmark reads
+`kindyn_1.npz` (`q`, `betas`, `valid_mask`) and `contacts_1.npz` (`limb_contact`) of these trials.
 
 ## Labelling for PACT
 
@@ -63,5 +75,6 @@ untouched) or into the corpus's feature tree. Both write the files PACT's loader
 uv run pytest bvr_datasets -q
 ```
 
-36 tests on the CPU in about 10 s, with `BETTERHUMAN_MODELS_DIR` set. Four OpenCap plate tests read raw trials from
-the data root and skip when it does not hold them.
+36 tests on the CPU in about 10 s, with `BETTERHUMAN_MODELS_DIR` and the data root set. Four OpenCap plate tests read
+raw trials of LabValidation and fail where the data root does not hold them, as a test of a body fails without the
+body models: nothing skips.

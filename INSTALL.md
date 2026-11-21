@@ -21,7 +21,6 @@ In a clone without them: `git submodule update --init --recursive`. Under `third
 | folder | what it is |
 |---|---|
 | `sam3`, `vggt-omega`, `sam-3d-body`, `sapiens2`, `geocalib` | the models of the steps `sam3`, `vggt`, `sam3d`, `sapiens`, `gravity` (submodules) |
-| `MHR` | one file of it: the map from MHR's mesh to SMPL-X's that the `smplx` step reads (`tools/mhr_smpl_conversion/assets/mhr2smplx_mapping.npz`; submodule) |
 
 ## 2. Build the environment
 
@@ -69,7 +68,7 @@ repositories marked gated need access: accept the licence on the model's page, t
 
 | variable | meaning | default |
 |---|---|---|
-| `BVR_DATA_ROOT` | the data root: `examples/` and the datasets | the folder `data` beside the repository |
+| `BVR_DATA_ROOT` | the data root: `examples/` and the datasets | the folder `data` beside the repository; an error if that does not exist |
 | `BETTERHUMAN_MODELS_DIR` | the body models of section 3 | none |
 | `CUDA_VISIBLE_DEVICES` | the GPU a step runs on (`[run].device = "cuda"`); empty for the CPU tests | every GPU |
 | `BETTER_ROBOT_CHROME`, `BETTER_ROBOT_FFMPEG` | a headless Chromium and an ffmpeg for the viewer's `--record` (ffmpeg only for `.mp4`) | found on `PATH` |

@@ -1,6 +1,6 @@
 """Where things are: the repository, the data root, and every file of a clip's output tree.
 
-Data lives outside the repository under one root, ``$BVR_DATA_ROOT`` (default ``../data``). A run
+Data lives outside the repository under one root (:func:`data_root`). A run
 writes one directory per clip, ``<save-dir>/<clip>/``, and every stage reads and writes the files
 named here, relative to that directory. With an upstream root a stage reads what its own run does
 not have from ``<upstream>/<clip>/`` (:meth:`Clip.find`); outputs always go to the run's own tree.
@@ -12,8 +12,6 @@ from dataclasses import dataclass
 from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
-DATA_ROOT = Path(os.environ.get("BVR_DATA_ROOT", REPO_ROOT.parent / "data"))
-EXAMPLES = DATA_ROOT / "examples"
 
 VIDEO_SUFFIXES = (".mp4", ".mov", ".avi", ".mkv", ".webm")
 
@@ -95,6 +93,16 @@ def clips(source: Path, save_dir: Path, upstream: Path | None = None) -> list[Cl
             for video in videos]
 
 
-def mhr_to_smplx_mapping() -> Path:
-    """The barycentric map from MHR's mesh to SMPL-X's (``triangle_ids``, ``baryc_coords``)."""
-    return REPO_ROOT / "third_party/MHR/tools/mhr_smpl_conversion/assets/mhr2smplx_mapping.npz"
+def data_root() -> Path:
+    """The folder the example clips and the datasets live under: ``$BVR_DATA_ROOT``, else ``data`` beside the checkout.
+
+    Raises ``FileNotFoundError`` when the variable is not set and that folder does not exist, as from a worktree: a
+    dataset path under it would point nowhere.
+    """
+    if named := os.environ.get("BVR_DATA_ROOT"):
+        return Path(named)
+    beside = REPO_ROOT.parent / "data"
+    if not beside.is_dir():
+        raise FileNotFoundError(f"no data root: BVR_DATA_ROOT is not set and {beside} does not exist; set "
+                                "BVR_DATA_ROOT to the folder that holds examples/ and the datasets")
+    return beside

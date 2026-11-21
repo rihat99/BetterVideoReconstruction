@@ -59,9 +59,9 @@ def kinematics_1(clip: paths.Clip, human: bh.HumanModel, config: dict) -> None:
     betas = np.where(tracked[..., None], start["betas"], 0.0).sum(axis=1) / np.maximum(tracked.sum(axis=1), 1)[:, None]
     betas = tensor(betas.astype(np.float32))
     identity, q, _ = bh.from_classic(human, bh.families.SMPLXClassic(betas=betas[:, None], **{
-        name: tensor(np.nan_to_num(_held(start[name], tracked))) for name in POSE_FIELDS}))
+        name: tensor(np.nan_to_num(held(start[name], tracked))) for name in POSE_FIELDS}))
     q = body.to_world(q, evidence.cameras[0])
-    q = _smooth_fingers(q, tracked, options["finger_smooth_s"] * evidence.time.fps)
+    q = smooth_fingers(q, tracked, options["finger_smooth_s"] * evidence.time.fps)
     drift = torch.full((*tracked.shape, len(human.contact_frames.names)), torch.nan, device=q.device)
     labels = torch.zeros_like(drift, dtype=torch.bool)
 
@@ -69,9 +69,9 @@ def kinematics_1(clip: paths.Clip, human: bh.HumanModel, config: dict) -> None:
         fitted, own = body.bake(human, betas[evidence.people]), q[evidence.people]
         problem = evidence.problem(fitted, own, config["auto_contact"], cloud=evidence.depth_points(fitted, own))
         iterations, weights, root = options["iterations"], options["weights"], config["stages"]["root"]
-        free = _first(BODY, human) if options["freeze_fingers"] else None
+        free = first(BODY, human) if options["freeze_fingers"] else None
         placed = optim.run(problem, [
-            fit.adam("root", root["iterations"], config, weights=root["weights"], free=_first(ROOT, human)),
+            fit.adam("root", root["iterations"], config, weights=root["weights"], free=first(ROOT, human)),
             fit.adam("full", iterations["full"], config, free=free,
                   weights=weights | dict.fromkeys(objective.CONTACT_TERMS, 0.0)),
         ])
@@ -109,7 +109,7 @@ def kinematics_2(clip: paths.Clip, human: bh.HumanModel, config: dict) -> None:
         look = evidence.scene_refresh(fitted, labels)
         result = optim.run(problem.with_(data={"labels": labels}), [
             fit.adam(name, options["iterations"][name], config, weights=options["weights"], free=free, on_start=look)
-            for name, free in (("root", _first(ROOT, human)), ("full", None), ("refine", None))])
+            for name, free in (("root", first(ROOT, human)), ("full", None), ("refine", None))])
         q[evidence.people] = objective.posed(fitted, result.x["q"]).q
 
     body.save(clip.path(paths.KINEMATIC_2), "bvr-kinematics", body.bake(human, betas), q, **evidence.header(start),
@@ -141,12 +141,12 @@ def _detect_contacts(state: bh.HumanState, evidence: fit.Evidence, config: dict)
     return labels, torch.stack(drifts)
 
 
-def _first(coordinates: int, human: bh.HumanModel) -> dict[str, torch.Tensor]:
+def first(coordinates: int, human: bh.HumanModel) -> dict[str, torch.Tensor]:
     """A phase's ``free``: the first ``coordinates`` of every frame's ``q`` move, the rest stay."""
     return {"q": torch.arange(human.model.nq, device=human.spec.device) < coordinates}
 
 
-def _held(values: np.ndarray, tracked: np.ndarray) -> np.ndarray:
+def held(values: np.ndarray, tracked: np.ndarray) -> np.ndarray:
     """``values (P, N, ...)`` with each untracked frame replaced by its person's nearest tracked frame."""
     frames = np.arange(tracked.shape[1])
     distance = np.abs(frames[:, None] - np.where(tracked[:, None, :], frames, np.inf))
@@ -154,7 +154,7 @@ def _held(values: np.ndarray, tracked: np.ndarray) -> np.ndarray:
     return np.take_along_axis(values, nearest, axis=1)
 
 
-def _smooth_fingers(q: torch.Tensor, tracked: np.ndarray, sigma: float) -> torch.Tensor:
+def smooth_fingers(q: torch.Tensor, tracked: np.ndarray, sigma: float) -> torch.Tensor:
     """``q (P, T, 211)`` with the finger quaternions smoothed over time by a Gaussian of ``sigma`` frames.
 
     The fingers are not fitted: they keep the converter's hand pose, and this removes its frame-to-frame jitter.

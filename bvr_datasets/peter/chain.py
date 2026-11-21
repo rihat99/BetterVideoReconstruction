@@ -60,7 +60,7 @@ def chain(arguments: Sequence[str]) -> int:
     def load(stage: run.Stage):
         human = _rigs.human(stage.device)
         if stage.step in CONTACT_FILES and options.measured:
-            return lambda clip: measured_contacts(clip, human, *CONTACT_FILES[stage.step])
+            return lambda clip: measured_contacts(clip, human, *CONTACT_FILES[stage.step], _rigs.SENSOR_FORCES)
         if stage.step in CONTACT_FILES:
             return lambda clip: estimate_contacts.contacts(clip, human, stage.config, *CONTACT_FILES[stage.step])
         process = {"kinematics_1": refine_kinematics.kinematics_1, "kinematics_2": refine_kinematics.kinematics_2,
@@ -71,8 +71,9 @@ def chain(arguments: Sequence[str]) -> int:
     return max([run.stage(modules[step], load, [*rest, "--step", step]) for step in steps], default=0)
 
 
-def measured_contacts(clip: paths.Clip, human: bh.HumanModel, bodies: str, written: str) -> None:
-    """Read the contact labels of the body file ``bodies`` off the clip's sensors and write them to ``written``.
+def measured_contacts(clip: paths.Clip, human: bh.HumanModel, bodies: str, written: str, sensors: str) -> None:
+    """Read the contact labels of the body file ``bodies`` off the clip's sensor file ``sensors`` and write them to
+    ``written``.
 
     The file has the contacts schema the kinematic and dynamic steps read, plus what the sensors said.
     """
@@ -92,8 +93,8 @@ def measured_contacts(clip: paths.Clip, human: bh.HumanModel, bodies: str, writt
         positions = body.contact_frames(state)[0, ..., :3].cpu().numpy()
     scene = files.load_npz(clip.find(paths.SCENE), "bvr-scene")["points"]
     distance = cKDTree(scene).query(positions.reshape(-1, 3), workers=-1)[0].reshape(positions.shape[:2])
-    with np.load(clip.find(_rigs.SENSOR_FORCES)) as sensors:
-        limb_on, force = _rigs.limb_contact(dict(sensors), len(positions))
+    with np.load(clip.find(sensors)) as measured:
+        limb_on, force = _rigs.limb_contact(dict(measured), len(positions))
     contact, rescued = _rigs.frame_contact(limb_on, fitted["valid_mask"][0].astype(bool), distance, names)
     owners = np.array([_rigs.limb_of_frame(name) for name in names])
     for limb, loaded in zip(_rigs.LIMBS, limb_on.T):

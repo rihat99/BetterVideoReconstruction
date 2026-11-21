@@ -27,7 +27,8 @@ is needed for the model steps.
 
 ## Run a clip
 
-Data lives outside the repository under `$BVR_DATA_ROOT` (default: the folder `data` beside the repository).
+Data lives outside the repository under `$BVR_DATA_ROOT` (default: the folder `data` beside the repository). The
+dataset tools read it and stop with an error if neither exists; a run names its own `--source` and `--save-dir`.
 
 ```bash
 uv run python scripts/pipeline.py --source $BVR_DATA_ROOT/examples/data/boulder_1.mp4 --save-dir ../runs
@@ -106,7 +107,8 @@ of a folder. `--record <file.mp4>` writes the first clip to a video instead (`do
 
 `bvr_datasets/` holds the code around the measured and labelled datasets, on top of the same chain: the contact
 scorer of the annotated example clips, the BEDLAM2 and ClimbingVideos tools that make PACT's training labels, and
-the force-rig recipes and scorers of the peter climbing walls, LAAS Parkour and OpenCap LabValidation.
+the force-rig recipes and scorers of the peter climbing walls, LAAS Parkour and OpenCap LabValidation, with the
+three-camera ground truth of one climbing wall.
 [`docs/datasets.md`](docs/datasets.md) says what each one does and how to run it; each folder's `README.md` has the
 commands.
 

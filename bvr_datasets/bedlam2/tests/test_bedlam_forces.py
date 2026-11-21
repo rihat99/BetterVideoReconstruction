@@ -7,7 +7,6 @@ else, and a body without a label must carry nothing, its weight left unexplained
 from __future__ import annotations
 
 import numpy as np
-import torch
 
 from bvr import body, config
 from bvr_datasets.bedlam2.forces import scene_forces

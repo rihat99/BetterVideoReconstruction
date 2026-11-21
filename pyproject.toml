@@ -59,9 +59,6 @@ dependencies = [
     "geocalib",
     "scikit-learn>=1.4",
     "trimesh>=4.0",
-    # SMPL-X body model (pip package): only bvr_datasets/parkour/score_parkour_pose.py still uses
-    # it; the stages pose SMPL-X with BetterHuman.
-    "smplx>=0.1.28",
     # sam3 still uses pkg_resources, which setuptools 80+ no longer ships by
     # default; pin below that cutoff so ``import pkg_resources`` keeps working.
     "setuptools<80",

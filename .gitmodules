@@ -7,9 +7,6 @@
 [submodule "third_party/sapiens2"]
 	path = third_party/sapiens2
 	url = https://github.com/facebookresearch/sapiens2
-[submodule "third_party/MHR"]
-	path = third_party/MHR
-	url = https://github.com/facebookresearch/MHR
 [submodule "third_party/geocalib"]
 	path = third_party/geocalib
 	url = https://github.com/cvg/GeoCalib.git

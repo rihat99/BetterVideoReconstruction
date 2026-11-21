@@ -1,0 +1,52 @@
+# The climb_wall_3 ground truth: the human steps on a trial that three calibrated cameras see
+# (bvr_datasets/peter/gt/fit_multiview.py). A delta over the defaults. The image terms of one camera are off and the
+# tool's own take their weight: views_keypoints (Sapiens keypoints in every camera) and views_estimates (each
+# camera's own SAM 3D Body estimate, projected into that camera), the cameras sharing a weight by how well their
+# keypoints agree. There is no depth cloud, so no chamfer and no radial damping: three cameras triangulate.
+base = "configs/bvr.toml"
+
+[stages.root.weights]
+reprojection_keypoints = 0
+reprojection_start = 0
+views_keypoints = 8
+views_estimates = 30        # an estimate is a guess, not an observation: strong only while the root finds its place
+
+[stages.kinematics_1.weights]
+reprojection_keypoints = 0
+reprojection_start = 0
+views_keypoints = 8
+views_estimates = 5
+radial_velocity = 0
+penetration = 300           # 40 times below the pipeline's: the images decide the pose, the scene only keeps it out
+contact_attraction = 0      # no labels are detected: the boards say which limbs are loaded
+contact_velocity = 4000     # every contact frame of a limb its board calls loaded stays put
+wall_penetration = 100      # no vertex behind the wall's plane (m^2, summed over the points of a frame)
+
+[stages.kinematics_2.weights]
+reprojection_keypoints = 0
+reprojection_start = 0
+views_keypoints = 8
+views_estimates = 5
+radial_velocity = 0
+penetration = 300
+wall_penetration = 100
+
+[stages.kindyn_1.weights]
+reprojection_keypoints = 0
+reprojection_start = 0
+views_keypoints = 8
+views_estimates = 5
+radial_velocity = 0
+penetration = 300
+contact_acquisition = 300   # a loaded limb the fit left off the wall would carry its force in mid-air
+wall_penetration = 100
+board_force = 50            # each limb's summed force against its board's measurement, in body weights squared
+force_rate_magnitude = 80
+force_rate_direction = 40
+force_acceleration_magnitude = 320
+force_acceleration_direction = 160
+force_jerk_magnitude = 160
+force_jerk_direction = 80
+torque_magnitude = 15
+torque_rate = 15
+torque_acceleration = 60

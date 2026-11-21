@@ -140,7 +140,7 @@ def score_scene(scene_dir: Path, tag: str) -> dict:
     annotation's time axis is LAST. Returns the per-joint counts pooled over the scored people.
     """
     pred = files.load_npz(scene_dir / CONTACTS[tag], "bvr-contacts")
-    ann_path = paths.EXAMPLES / "data" / f"{scene_dir.name}.npz"
+    ann_path = paths.data_root() / "examples" / "data" / f"{scene_dir.name}.npz"
     if not ann_path.exists():
         raise FileNotFoundError(f"no manual annotation at {ann_path}")
     ann = np.load(ann_path, allow_pickle=True)

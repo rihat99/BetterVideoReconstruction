@@ -50,7 +50,8 @@ Never skip, xfail, loosen a tolerance or delete an assertion to get green; repor
 
 - `bvr` imports neither `bvr_datasets` nor a script; stages never import one another (they meet through files; what
   two share is `bvr.fit`); `bvr.run` starts stages by module name; each package imports only its row of `ALLOWED`
-  in `tests/contract/test_layer_dependencies.py`, whose `UNPORTED` lists the modules not yet held to it.
+  in `tests/contract/test_layer_dependencies.py`. Its `UNPORTED` holds the one module outside the table,
+  `bvr_datasets/peter/gt/reconstruct_vggt.py` (below).
 - Each third-party model (`sam3`, `sapiens`, `vggt_omega`, `sam_3d_body`, `geocalib`) is imported by one stage
   module (`MODELS`, same file).
 - No step reads a config table the base lacks; a delta cannot add a key outside a `weights` table
@@ -59,10 +60,12 @@ Never skip, xfail, loosen a tolerance or delete an assertion to get green; repor
 
 ## Traps
 
-- The data root. `bvr.paths.DATA_ROOT` is `$BVR_DATA_ROOT`, else the folder `data` beside the checkout. From the
-  dev worktree (`dev/BetterVideoReconstruction`) that is `dev/data`, from a lane `dev/.lanes/data`; neither exists.
-  Set `BVR_DATA_ROOT` to the workspace's `data/` (`../../data` from the dev worktree, `../../../data` from a lane).
-  Without it the dataset paths point nowhere and `pytest bvr_datasets` skips four OpenCap tests instead of failing.
+- The data root. `bvr.paths.data_root()` is `$BVR_DATA_ROOT`, else the folder `data` beside the checkout. From the
+  dev worktree (`dev/BetterVideoReconstruction`) that is `dev/data`, from a lane `dev/.lanes/data`; neither exists,
+  and the function raises. Set `BVR_DATA_ROOT` to the workspace's `data/` (`../../data` from the dev worktree,
+  `../../../data` from a lane). Every dataset module reads its folder from it when imported, so without a data root
+  `pytest bvr_datasets` stops at collection; `bvr` and a run with `--source` and `--save-dir` need none. Four OpenCap
+  tests read raw trials of LabValidation and fail where the data root does not hold them.
 - `BETTERHUMAN_MODELS_DIR` has no default. The steps `smplx`, `scale` and every step after `gravity` load SMPL-X
   through it, and `smplx` also `MHR/converted/mhr_lod1.npz`.
 - Model outputs move with the environment. SAM 3D Body on torch 2.13 (its cuDNN) differs from the torch 2.8 runs by
@@ -106,9 +109,16 @@ Never skip, xfail, loosen a tolerance or delete an assertion to get green; repor
   `head_top`, and their `scale.npz` lacks `smear_median` (the contact steps then measure the smear themselves).
   Read every npz through `bvr.files.load_npz`.
 - A clip is named by its video's stem, so datasets with one folder per clip run from a folder of links. A recipe
-  that runs a step with its own `load` (`bvr_datasets/peter/chain.py`) still records `python -m bvr.stages.<module>`
-  as the manifest's command.
-- The `smplx` step reads the MHR to SMPL-X map from the `third_party/MHR` submodule (`bvr.paths.mhr_to_smplx_mapping`).
+  that runs a step with its own `load` (`bvr_datasets/peter/chain.py`, `bvr_datasets/peter/gt/fit_multiview.py`) still
+  records `python -m bvr.stages.<module>` as the manifest's command, and as inputs the files of the step's row in
+  `bvr.run.STEPS`: the ground-truth fit reads others (`cameras.npz`, `views/`), which its manifests do not list, so
+  `--skip-existing` does not see them change.
+- The ground truth of climb_wall_3 (`bvr_datasets/peter/gt/`) is rebuilt from the prepared trial trees on: the fit
+  (`fit_multiview.py`) and the climbers' shapes (`shape.py`). The scripts that made the trees are from before the
+  rebuild and were not run on it: `calibrate_cameras.py`, `extract_frames.py`, `clean_scene.py`, `prepare_human.py`,
+  `view_gt.py`, and `reconstruct_vggt.py` and `rebuild_scene_calibrated.py`, which start the VGGT stage on a list of
+  still images, a source the rebuilt stage does not take. The steps that synchronised the cameras and re-solved
+  `cam_3` (in `cameras.npz` of every stored tree) have no code here.
 - `uv sync` re-locks when BetterRobot's or BetterHuman's `pyproject.toml` changed (they are path sources): that lock
   change is theirs, commit it on its own.
 
