@@ -28,7 +28,7 @@ ALLOWED = {
     "bvr.run": {"bvr.config", "bvr.paths", "bvr.manifest"},
     "bvr.viewer": {"bvr.files", "bvr.paths", "bvr.body", "bvr.camera"},
     "bvr_datasets": CORE | {"bvr.stages", "bvr.run", "bvr.viewer"},
-    "scripts": {"bvr.run", "bvr.viewer", "bvr.config", "bvr.paths", "bvr_datasets"},
+    "scripts": {"bvr.run", "bvr.viewer", "bvr.config", "bvr.paths", "bvr.terms", "bvr_datasets"},
 }
 
 #: package -> the sibling libraries it may import.

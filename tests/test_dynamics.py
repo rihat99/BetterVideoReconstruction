@@ -45,10 +45,10 @@ def test_inverse_dynamics_count_only_where_the_whole_stencil_is_tracked() -> Non
 def test_the_force_split_sends_a_change_of_size_and_a_turn_to_different_parts() -> None:
     time, frames = Time(30.0), torch.arange(8.0)
     growing = torch.stack((torch.zeros(8), torch.zeros(8), 100.0 + 10.0 * frames), dim=-1)[None, :, None]
-    rate = dynamics._split(growing, time=time, order=1)
+    rate = dynamics.force_split(growing, time=time, order=1)
     assert torch.allclose(rate[..., 0].norm(dim=-1), torch.tensor(10.0)) and rate[..., 1].abs().max() < 1e-4
-    assert dynamics._split(growing, time=time, order=2).abs().max() < 1e-4  # a ramp has no acceleration
+    assert dynamics.force_split(growing, time=time, order=2).abs().max() < 1e-4  # a ramp has no acceleration
     turning = 100.0 * torch.stack((torch.cos(0.1 * frames), torch.sin(0.1 * frames), torch.zeros(8)), dim=-1)
-    rate = dynamics._split(turning[None, :, None], time=time, order=1)
+    rate = dynamics.force_split(turning[None, :, None], time=time, order=1)
     assert rate[..., 0].abs().max() < 1e-3 and torch.allclose(
         rate[..., 1].norm(dim=-1), torch.tensor(200.0 * math.sin(0.05)), atol=1e-3)

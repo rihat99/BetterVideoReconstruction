@@ -25,8 +25,10 @@ The sidebar holds BetterRobot's sections and three of its own:
   frame on it, and the camera's path), Gravity, Ground plane (the floor the gravity step fitted), Body (the exact
   posed mesh, see-through, one colour per person: light blue, then salmon, green, lilac, gold), Skeleton (its joints
   coloured by joint torque on a `kindyn_1` body), Contact frames (red in contact, green free, with their normals; grey
-  without labels), Forces (the contact forces), Root wrench (the root residual force and torque). A layer switched
-  off stays off across switches.
+  without labels), Forces (the contact forces), Root wrench (the root's six rows of `joint_torques`, the raw inverse
+  dynamics: the residual force and torque the contact forces leave; for a person without contact labels, whom no
+  force holds, about the body weight on every frame; nothing where the stencil reaches an untracked frame). A layer
+  switched off stays off across switches.
 - Clip: a pager over the clips, when there are several. A switch reads the new clip first, so a clip that fails to
   read leaves the old one on screen.
 - Body: the source of the bodies, among those the clip holds: `converter` (`sam3d/smplx_params.npz`), `prefit`,

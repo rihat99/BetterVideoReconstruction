@@ -108,7 +108,7 @@ def save(clip: paths.Clip, start: dict[str, np.ndarray], identity: bh.Identity, 
     # Where the stencil reads an untracked frame, inverse dynamics differences a pose that was never fitted.
     stencil = dynamics.stencil_rows(time, tracked)
     torques = dynamics.torques(state, velocity, time.difference(velocity), forces, time=time) * stencil[..., None]
-    counted = stencil & held.any(dim=(1, 2))[:, None]
+    counted = dynamics.counted_rows(time, tracked, held)
     root = torques[..., :6] * counted[..., None]
     # One size per joint: the root's six rows, then three rows for each of the other joints.
     sizes = torch.cat((torques[..., :6].norm(dim=-1, keepdim=True),

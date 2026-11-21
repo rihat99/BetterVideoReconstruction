@@ -260,7 +260,7 @@ def kindyn_1(clip: paths.Clip, human: bh.HumanModel, config: dict) -> None:
         weights={name: weights[name] for name in dynamics.TERMS})]).x["activation"]
     problem = trial.problem(identity, q, variables={"activation": warm})
     dynamics.register(problem, identity, **physics)
-    counted = dynamics.stencil_rows(time, trial.tracked) & held.any(dim=(1, 2))[:, None]
+    counted = dynamics.counted_rows(time, trial.tracked, held)
     problem.scalar("board_force", board_force(human, tensor(contacts["limb_force_world"]), counted,
                                               dynamics.weight(identity)), weight=0.0, reads=("forces",))
     result = optim.run(problem.with_(data={"labels": held}), [

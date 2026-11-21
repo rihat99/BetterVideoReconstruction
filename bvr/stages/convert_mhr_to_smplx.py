@@ -6,10 +6,12 @@ barycentric map (``better_human.io.mhr_to_smplx_mapping``). SMPL-X (BetterHuman'
 axis-angle hands with their mean pose) is then fitted to that target with Adam, following MHR's
 reference converter: the target is centred, then four phases free more and more of the body:
 
-1. 40 steps, global orientation, against the mesh edges;
-2. 80 steps, plus body pose and betas;
-3. 40 steps, plus the hand poses;
-4. ``[smplx].iterations`` steps, everything, against the vertices; the edges stay for the first 50.
+1. ``orient_iterations`` steps, global orientation, against the mesh edges;
+2. ``body_iterations`` steps, plus body pose and betas;
+3. ``hands_iterations`` steps, plus the hand poses;
+4. ``iterations`` steps, everything, against the vertices; the edges stay for the first 50.
+
+The step counts are keys of ``[smplx]``.
 
 Jaw, eyes and expression stay zero: MHR does not predict them. Body models come from
 BetterHuman's models folder (``$BETTERHUMAN_MODELS_DIR``).
@@ -77,7 +79,7 @@ def load(stage: run.Stage) -> Callable[[paths.Clip], None]:
                 batch = frames[start:start + settings["batch_size"]]
                 goal = target(*(torch.as_tensor(bodies[key][person, batch], device=device)
                                 for key in ("shape_params", "mhr_model_params", "pred_cam_t")))
-                result, fit_error[person, batch] = _fit(smplx, goal, edges, settings["iterations"])
+                result, fit_error[person, batch] = _fit(smplx, goal, edges, settings)
                 for name, value in result.items():
                     fitted[name][person, batch] = value
             log.info("person %d: %d/%d frames, median fit error %.1f mm", int(bodies["object_ids"][person]),
@@ -95,8 +97,10 @@ def load(stage: run.Stage) -> Callable[[paths.Clip], None]:
 
 
 def _fit(smplx: bh.HumanModel, goal: torch.Tensor, edges: torch.Tensor,
-         iterations: int) -> tuple[dict[str, np.ndarray], np.ndarray]:
+         settings: dict) -> tuple[dict[str, np.ndarray], np.ndarray]:
     """SMPL-X fields ``{name: (B, k)}`` fitted to ``goal (B, V, 3)``, and each frame's mean vertex distance ``(B,)``.
+
+    ``settings`` is the ``[smplx]`` table, which holds the step count of each phase.
 
     Every frame is its own problem. The goal is centred first, so the template at the origin
     overlaps it before any pose moves; the translation is found in the centred frame and the centre
@@ -134,14 +138,16 @@ def _fit(smplx: bh.HumanModel, goal: torch.Tensor, edges: torch.Tensor,
             return {**x, "transl": x["transl"] + (centred - vertices(**x)).mean(dim=1)}, {}
 
     coarse = optim.TorchOptim(lambda parameters: torch.optim.Adam(parameters, lr=0.1))
+    iterations = settings["iterations"]
     milestones = [iterations // 3, 2 * iterations // 3]
     fine = optim.TorchOptim(lambda parameters: torch.optim.Adam(parameters, lr=0.01),
                             scheduler=lambda optimizer: MultiStepLR(optimizer, milestones, 0.1))
     x = optim.run(problem, [
-        optim.Phase(coarse, 40, stop_every=0,
+        optim.Phase(coarse, settings["orient_iterations"], stop_every=0,
                     free=frozen("betas", "body_pose", "transl", "left_hand_pose", "right_hand_pose")),
-        optim.Phase(coarse, 80, free=frozen("transl", "left_hand_pose", "right_hand_pose"), stop_every=0),
-        optim.Phase(coarse, 40, free=frozen("transl"), stop_every=0),
+        optim.Phase(coarse, settings["body_iterations"], free=frozen("transl", "left_hand_pose", "right_hand_pose"),
+                    stop_every=0),
+        optim.Phase(coarse, settings["hands_iterations"], free=frozen("transl"), stop_every=0),
         optim.Phase(fine, iterations, weights={"vertex": 1.0}, on_start=centre_translation, stop_every=0,
                     on_step=lambda view, state: with_edges.__setitem__(0, state.iteration < 50)),
     ]).x

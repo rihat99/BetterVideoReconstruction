@@ -103,8 +103,17 @@ Never skip, xfail, loosen a tolerance or delete an assertion to get green; repor
 - `[run].threads` caps torch and OpenCV, not numpy's BLAS: keep `OMP_NUM_THREADS` set (uncapped runs were 7 times
   slower here). Sapiens' heatmap decode is also slow on this host from glibc returning memory;
   `MALLOC_MMAP_THRESHOLD_=33554432` in the environment before Python starts cut the step from 97 to 84 s.
-- Without `[run].deterministic = true` two runs of the human steps differ by about 0.3, 2 and 2.3 mm
-  (`kinematic_1`, `kinematic_2`, `kindyn_1`); with it they are identical and 15 to 20 % slower.
+- Without `[run].deterministic = true` two runs of the human steps differ, by an amount that depends on the clip:
+  a mean body-joint distance of 0.1 to 2.3 mm (`kinematic_1` to `kindyn_1`) on a single-person clip, up to 9 to
+  16 mm in `kindyn_1` on the three-person `competition_2`, p95 near 30 mm. Noise bands measured on easy clips are
+  therefore no floor for every clip. With it the runs are identical and 15 to 20 % slower.
+- `force_confidence` is 0 where the inverse dynamics do not count (a stencil that reaches an untracked frame, a
+  person without contact labels) only from commit cfe4ef9 on. Trees written before it, the example and wild trees of
+  2026-11-21 among them (their manifests name the commit), say 1.0 there: `competition_2`'s unlabelled bystander
+  has a clip force confidence of 1.0. Against a newer tree that swing is the rule, not a regression.
+- The scale step pools every tracked person into one factor (`bvr/stages/estimate_scale.py`), so bystanders move
+  the whole world: two of them moved `competition_2`'s scale by 15 %. Choose the people to fit with
+  `[sam3d].obj_ids`.
 - Trees written before the rebuild have no manifests and no `format` key, say `head` for the contact frame
   `head_top`, and their `scale.npz` lacks `smear_median` (the contact steps then measure the smear themselves).
   Read every npz through `bvr.files.load_npz`.

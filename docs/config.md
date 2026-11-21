@@ -66,8 +66,9 @@ settings of those tools, not deltas.
 ## Settings worth knowing
 
 - `[run].deterministic = true`: deterministic torch algorithms; two runs from the video are then identical in every
-  output, at 15 to 20 % more time. Without it the human steps repeat to about 0.3, 2 and 2.3 mm (`kinematic_1`,
-  `kinematic_2`, `kindyn_1`).
+  output, at 15 to 20 % more time. Without it the human steps repeat to a mean body-joint distance of 0.1 to 2.3 mm
+  (`kinematic_1` to `kindyn_1`) on a single-person clip, and only to 9 to 16 mm in `kindyn_1` on the three-person
+  `competition_2` (p95 near 30 mm).
 - `[vggt].max_frames` (500): VGGT sees at most that many frames of a clip, spread evenly. The wild clips were run
   with 2100, so that every frame has its own camera; one forward holds about 1150 frames on a 96 GB card
   (`docs/pipeline.md`).

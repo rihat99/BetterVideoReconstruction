@@ -151,7 +151,9 @@ def floor(points: np.ndarray, prior: np.ndarray, extrinsics: np.ndarray,
     :returns: the floor's world down ``(3,)``, or None when no plane passes the gates; why it was rejected ("" when
         accepted); and the fitted plane's fields of ``gravity.npz`` (none when no plane was found).
     """
-    plane = fit_ground_plane(points, prior, max_tilt_deg=settings["ground_max_tilt_deg"])
+    plane = fit_ground_plane(points, prior, max_tilt_deg=settings["ground_max_tilt_deg"],
+                             iters=settings["ground_iters"], min_planarity=settings["ground_min_planarity"],
+                             seed=settings["ground_seed"])
     if plane is None:
         return None, "no planar floor in the lowest band", {}
     centroid, up, extent, inliers = plane

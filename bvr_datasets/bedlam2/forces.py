@@ -97,7 +97,7 @@ def scene_forces(gt_dir: Path, *, human: bh.HumanModel, config: dict, edge_weigh
     up = -torch.nn.functional.normalize(torch.as_tensor(down, device=device), dim=0)
     edge = edge_weights(held, state.joint_translations[..., 0, :] @ up, fps=fps, speed_m_s=edge_speed_m_s)
     weight = dynamics.weight(identity)
-    rows = dynamics.stencil_rows(time, tracked) & held.any(dim=(1, 2))[:, None]
+    rows = dynamics.counted_rows(time, tracked, held)
     scale = 0.5 / (rows.sum(dim=1).clamp_min(1) * weight.square())
 
     problem = optim.Problem({"q": q, "activation": q.new_zeros(*held.shape, 4)}, time=("q",))

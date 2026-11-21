@@ -7,7 +7,7 @@ from __future__ import annotations
 import numpy as np
 
 
-def clean_depth(depth: np.ndarray, *, edge_rtol: float = 0.04) -> np.ndarray:
+def clean_depth(depth: np.ndarray, *, edge_rtol: float) -> np.ndarray:
     """Boolean validity mask for ``depth`` ``(H, W)``.
 
     Drops non-finite / non-positive depth and flying boundary pixels

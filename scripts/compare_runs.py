@@ -5,21 +5,24 @@
 
 Reads ``<root>/<clip>/<dir>/{kinematic_1,contacts_1,kinematic_2,contacts_2,kindyn_1}.npz`` on both
 sides (default: every clip present in both roots), so it compares a run of today's code with a run
-of any earlier code. Numpy only, independent of the code that wrote the files: joint positions come
+of any earlier code. It reads the files with numpy, not through ``bvr.files``, and joint positions come
 from a small SMPL-X forward kinematics read straight from the model file
 (``$BETTERHUMAN_MODELS_DIR/smplx/SMPLX_NEUTRAL.npz``), checked against ``kindyn_1.npz``'s
 ``joints_world``. People are matched by ``object_ids``,
 contact frames by name (``head`` read as ``head_top``), frames over ``valid_mask`` on both sides.
 
 Per body file: body-joint (22) position error in mm, all 52 joints, pelvis mm, root orientation
-degrees, and each side's mean root acceleration (m/s^2, a smoothness check).
+degrees, and each side's mean root acceleration (m/s^2, over neighbouring frames at every frame rate: a
+smoothness check).
 Per contact labelling (``frame_contact`` of contacts_1, contacts_2, kindyn_1): cell agreement,
 F1 between the two label sets, and each side's F1 against the manual annotations where they
-exist (the fold of ``bvr_datasets/examples/score_frame_contacts.py``: hands, feet/ankles, knees; pooled
+exist (scored by ``bvr_datasets/examples/score_frame_contacts.py``: hands, feet/ankles, knees; pooled
 TP/FP/FN).
 kindyn_1 forces in body weights (each side divided by its own ``total_mass * 9.81``): per-frame
 force vector error on entries loaded on either side, total support |sum f| per frame, root
-residual |base_wrench[:3]|, and force confidence. Pooled rows concatenate every clip's entries.
+residual |base_wrench[:3]|, and force confidence. Support and residual are each side's own, over the frames where
+its inverse dynamics count by today's rule (``bvr.terms.dynamics.counted_rows`` of its ``valid_mask`` and labels);
+a person without contact labels has none. Pooled rows concatenate every clip's entries.
 """
 from __future__ import annotations
 
@@ -29,27 +32,17 @@ import os
 from pathlib import Path
 
 import numpy as np
+import torch
 
 from bvr import paths
+from bvr.terms import dynamics, motion
+from bvr_datasets.examples import score_frame_contacts
 
 GRAVITY = 9.81                      # bvr kindyn's gravity magnitude
 BODY_FILES = ("kinematic_1", "kinematic_2", "kindyn_1")
 LABEL_FILES = ("contacts_1", "contacts_2", "kindyn_1")
 SMPLX_52 = [*range(22), *range(25, 55)]      # SMPL-X joints without jaw and eyes = BVR's 52
 FRAME_ALIASES = {"head": "head_top"}         # contact frame renamed in BetterHuman dev
-
-# score_frame_contacts.py's fold: annotated coarse joint <- OR of these contact frames.
-_HANDS = {"left_hand": ("palm_left", "finger_left", "palm_distal_left", "thumb_left"),
-          "right_hand": ("palm_right", "finger_right", "palm_distal_right", "thumb_right")}
-_KNEES = {"left_knee": ("knee_left",), "right_knee": ("knee_right",)}
-_TOES_L = ("toe_under_left", "toe_above_left", "ball_inner_left", "ball_outer_left", "big_toe_left")
-_TOES_R = ("toe_under_right", "toe_above_right", "ball_inner_right", "ball_outer_right", "big_toe_right")
-FOLD_10 = {**_HANDS, "left_foot": (*_TOES_L, "heel_left"), "right_foot": (*_TOES_R, "heel_right"), **_KNEES}
-FOLD_14 = {**_HANDS, "left_foot": _TOES_L, "right_foot": _TOES_R,
-           "left_ankle": ("heel_left",), "right_ankle": ("heel_right",), **_KNEES}
-SCHEMA_10 = {"left_hand", "right_hand", "left_foot", "right_foot", "left_knee", "right_knee",
-             "left_hip", "right_hip", "left_elbow", "right_elbow"}
-SCHEMA_14 = SCHEMA_10 | {"left_ankle", "right_ankle", "left_shoulder", "right_shoulder"}
 
 
 class Skeleton:
@@ -160,43 +153,6 @@ def compare_body(a: dict, b: dict, skeleton: Skeleton) -> tuple[dict, dict]:
     return record, raw
 
 
-def _fold(annotation: dict) -> dict[str, tuple[str, ...]]:
-    names = {str(n) for n in annotation["joint_names"]}
-    if names == SCHEMA_10:
-        return FOLD_10
-    if names == SCHEMA_14:
-        return FOLD_14
-    raise ValueError(f"unrecognized annotation schema {sorted(names)}")
-
-
-def score_against(d: dict, annotation: dict) -> dict[str, int]:
-    """TP/FP/FN/TN of ``frame_contact`` folded to the annotated joints (score_frame_contacts.py rules)."""
-    counts = {"tp": 0, "fp": 0, "fn": 0, "tn": 0}
-    contact = d["frame_contact"].astype(bool)                                      # (P, N, F)
-    valid = d["valid_mask"].astype(bool)
-    column = {n: i for i, n in enumerate(_frame_names(d))}
-    ann_names = [str(n) for n in annotation["joint_names"]]
-    labels_all = np.transpose(annotation["contacts"].astype(np.int8), (0, 2, 1))   # (P_ann, N, J)
-    ann_ids = [int(o) for o in annotation["object_ids"]]
-    if labels_all.shape[1] != contact.shape[1]:
-        raise ValueError(f"frame count {contact.shape[1]} vs annotation {labels_all.shape[1]}")
-    for person, object_id in enumerate(int(o) for o in d["object_ids"]):
-        if object_id not in ann_ids or bool(annotation["ignored"][ann_ids.index(object_id)]):
-            continue
-        labels = labels_all[ann_ids.index(object_id)]
-        for joint, frames in _fold(annotation).items():
-            cols = [column[f] for f in frames if f in column]
-            predicted = contact[person][:, cols].any(axis=1)
-            truth = labels[:, ann_names.index(joint)]
-            keep = (truth >= 0) & valid[person]
-            p, t = predicted[keep], truth[keep] == 1
-            counts["tp"] += int((p & t).sum())
-            counts["fp"] += int((p & ~t).sum())
-            counts["fn"] += int((~p & t).sum())
-            counts["tn"] += int((~p & ~t).sum())
-    return counts
-
-
 def compare_labels(a: dict, b: dict, annotation: dict | None) -> tuple[dict, dict]:
     ia, ib = _people(a, b)
     if a["frame_contact"].shape[1] != b["frame_contact"].shape[1]:
@@ -219,10 +175,16 @@ def compare_labels(a: dict, b: dict, annotation: dict | None) -> tuple[dict, dic
         record["label_confidence_diff"] = _stats(conf)
     if annotation is not None:
         for side, d in (("a", a), ("b", b)):
-            counts = score_against(d, annotation)
+            counts = score_frame_contacts.score_prediction(d, annotation)["pooled"]
             raw[f"ann_{side}"] = counts
             record[f"f1_ann_{side}"] = _f1(counts["tp"], counts["fp"], counts["fn"])
     return record, raw
+
+
+def _counted(d: dict) -> np.ndarray:
+    """The frames where the inverse dynamics of a kindyn_1 file count, ``(P, T)`` bool (kindyn_1's own rule)."""
+    return dynamics.counted_rows(motion.Time(float(d["fps"])), torch.as_tensor(d["valid_mask"].astype(bool)),
+                                 torch.as_tensor(d["frame_contact"].astype(bool))).numpy()
 
 
 def compare_forces(a: dict, b: dict) -> tuple[dict, dict]:
@@ -231,6 +193,7 @@ def compare_forces(a: dict, b: dict) -> tuple[dict, dict]:
     common = [n for n in names_a if n in names_b]
     ca, cb = [names_a.index(n) for n in common], [names_b.index(n) for n in common]
     valid = a["valid_mask"][ia].astype(bool) & b["valid_mask"][ib].astype(bool)
+    counted_a, counted_b = _counted(a)[ia][valid], _counted(b)[ib][valid]               # (M,)
     bw_a = (a["total_mass"][ia].astype(np.float64) * GRAVITY)[:, None, None, None]
     bw_b = (b["total_mass"][ib].astype(np.float64) * GRAVITY)[:, None, None, None]
     fa = (a["frame_forces"][ia][:, :, ca] / bw_a)[valid]                               # (M, F, 3) in BW
@@ -240,8 +203,9 @@ def compare_forces(a: dict, b: dict) -> tuple[dict, dict]:
     resid_a = (np.linalg.norm(a["base_wrench"][ia][..., :3], axis=-1) / bw_a[..., 0, 0])[valid]
     resid_b = (np.linalg.norm(b["base_wrench"][ib][..., :3], axis=-1) / bw_b[..., 0, 0])[valid]
     raw = {"force_err_bw": np.linalg.norm(fa - fb, axis=-1)[loaded],
-           "support_diff_bw": np.abs(support_a - support_b), "support_a": support_a, "support_b": support_b,
-           "residual_a": resid_a, "residual_b": resid_b,
+           "support_diff_bw": np.abs(support_a - support_b),
+           "support_a": support_a[counted_a], "support_b": support_b[counted_b],
+           "residual_a": resid_a[counted_a], "residual_b": resid_b[counted_b],
            "fconf_diff": np.abs(a["force_confidence"][ia] - b["force_confidence"][ib])[valid],
            "fconf_clip_a": a["force_confidence_clip"][ia], "fconf_clip_b": b["force_confidence_clip"][ib]}
     record = {"mass_a_kg": [float(m) for m in a["total_mass"][ia]],
