@@ -59,7 +59,7 @@ Points, camera translations and the voxel size of `geometry/fused/` times `s`, i
 |---|---|
 | `geometry/transform.npz` | the fused transform with metric extrinsics, `scale = s`, `metric = true` |
 | `geometry/scene.npz`, `geometry/human.npz` | the clouds in metres |
-| `geometry/scale.npz` | `scale`, `scale_ruler` (the ruler's reading), `log_scale`, `scale_mad`, `n_frames_used`, `n_people`, `method` (`prefit-dual` or `human-log-ratio`), `per_frame_scale` and `per_frame_weight (P, T)` of the last reading, `smear_median` |
+| `geometry/scale.npz` | `scale`, `scale_ruler` (the ruler's reading), `log_scale`, `scale_mad`, `n_frames_used`, `n_people`, `method` (`prefit-dual` or `human-log-ratio`), `per_frame_scale` and `per_frame_weight (P, T)` of the last reading, `frame_indices`, `object_ids`, `smear_median` |
 | `geometry/prefit.npz` | the classic SMPL-X fields of `sam3d/smplx_params.npz`, the fitted people's tracked frames replaced by the fit; `valid_mask`, `object_ids`, `scale` |
 
 `kinematics_1` starts from `prefit.npz` when it exists, from the converter otherwise. A large gap between `scale`

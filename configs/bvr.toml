@@ -39,7 +39,7 @@ label = "person"            # bboxes.npz label selected for pose
 batch_size = 1              # box crops per forward
 checkpoint_root = ""        # checkpoint tree; empty uses the Hugging Face cache
 score_thresh = 0.3          # overlay keypoint score threshold
-fps = ""                    # overlay rate; empty uses 30
+fps = ""                    # overlay rate; empty uses the source's
 dtype = "fp16"              # model precision
 
 [sam3d]                     # SAM 3D Body, one MHR body per person and frame -> sam3d/params.npz

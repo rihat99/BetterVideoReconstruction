@@ -15,7 +15,7 @@ fuse builds the clouds in that unscaled world, and `scale` measures the factor n
 
 ## Once per clip, the scene
 
-1. Voxel merge. The voxel is `voxel_px` pixel footprints wide at the median scene depth, so its size holds in a world
+1. Voxel merge. The voxel is `voxel_px` footprints of a VGGT-canvas pixel wide at the median scene depth, so its size holds in a world
    of unknown scale. The merge runs twice, the second time on the grid shifted by half a voxel: a surface that lies
    on a cell face leaves two copies after one pass.
 2. Hidden points go. VGGT's depth of one wall differs by a few centimetres between frames, which leaves a slab whose
