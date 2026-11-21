@@ -114,11 +114,13 @@ Never skip, xfail, loosen a tolerance or delete an assertion to get green; repor
   `bvr.run.STEPS`: the ground-truth fit reads others (`cameras.npz`, `views/`), which its manifests do not list, so
   `--skip-existing` does not see them change.
 - The ground truth of climb_wall_3 (`bvr_datasets/peter/gt/`): the scene scripts and `prepare_human.py` run on the
-  rebuilt code and write under `--save-dir`, never into the dataset. Two steps that completed the stored trees have
-  no code here: the cameras' frame offsets (`frame_offset`) and `cam_3`'s pose re-solved from the climber with each
-  camera's keypoint spread (`view_sigma_px`), all in `cameras.npz`. A tree `prepare_human.py` writes has offsets of
-  zero and no `view_sigma_px`, and the fit stops on it: run the fit on the stored trees, or refresh their
-  `geometry/` with `prepare_human.py --scene-only`.
+  rebuilt code and write under `--save-dir`, never into the dataset. A tree `prepare_human.py` writes is fit-ready
+  only after the model steps ran on its three views and `prepare_human.py --cam3` wrote `view_sigma_px` (the fit
+  stops on a `KeyError` without it). `--cam3` reproduces the stored poses bit for bit from the stored keypoints, but
+  its RANSAC threshold (8 px) lies below `cam_3`'s keypoint spread (20 to 30 px), so the pose depends on the samples
+  drawn: fresh keypoints that differ by 0.01 px moved `cam_3` by 0.8 and 2 degrees on two trials. The stored trees
+  hold `cameras.npz` keys the port does not write, and nothing reads: a lag measurement that was printed, never
+  applied (`frame_offset_measured`, `frame_offset_curves_px`, `frame_offset_lags`), and `cam3_pnp_px` (printed now).
 - `uv sync` re-locks when BetterRobot's or BetterHuman's `pyproject.toml` changed (they are path sources): that lock
   change is theirs, commit it on its own.
 

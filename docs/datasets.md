@@ -65,9 +65,11 @@ The wall and the trees come from the scene scripts of `bvr_datasets/peter/gt/`, 
 (`<root>/scene/<set>/`, `<root>/human/<trial>/`): a people-free frame per camera, the chessboard calibration of the
 three cameras, VGGT on the three stills (through the `vggt` stage's `model`), and the wall's cloud as VGGT's depth
 placed by the calibrated cameras, one scale per camera measured against them (`scene_calib.npz`). `prepare_human.py`
-then writes a trial's tree from its videos, the calibration, that cloud and its plane, gravity and the boards. The
-cameras' frame offsets and `cam_3`'s pose re-solved from the climber, which the stored trees also hold, have no code
-here, so the fit runs on the stored trees.
+then writes a trial's tree from its videos, the calibration (with each camera's frame lag behind `cam_left`), that
+cloud and its plane, gravity and the boards. The pipeline's model steps run on each camera of the trial, and
+`prepare_human.py --cam3` completes the cameras for the fit: `cam_3`, bumped between recordings, gets its pose
+re-solved from the climber's keypoints triangulated by the front pair, and each camera the spread of its keypoints,
+which weighs it in the fit.
 
 ## Labelling for PACT
 
