@@ -1,7 +1,7 @@
 """Build the per-clip working tree for the climb_wall_3 human ground truth.
 
-For every selected clip of ``peter/climb_wall_3/`` this writes
-``peter/climb_wall_3_gt/human/<clip>/``:
+For every selected clip of ``peter/climb_wall_3/`` this writes ``<save-dir>/human/<clip>/``, from the set's
+scene in ``<save-dir>/scene/<set>/`` (``calibration.npz``, ``scene_calib.npz``; ``scene.npz`` for 16b and 16c):
 
 * ``views/<view>/video.mp4`` — the clip's three cameras, **undistorted** with the
   chessboard calibration and, for ``cam_3``, turned upright (the camera was mounted
@@ -14,7 +14,8 @@ For every selected clip of ``peter/climb_wall_3/`` this writes
   cam_left, metres) the multi-view fit uses.
 * ``geometry/scene.npz`` + ``geometry/transform.npz`` — the set's cleaned
   human-free scene cloud with outward normals, plus a cam_left transform, in the
-  layout the contact and viewer tools expect.
+  pipeline's formats (``bvr-scene``, ``bvr-transform``); ``geometry/wall.npz`` — the
+  wall's plane.
 * ``geocalib/gravity.npz`` — the inclination's gravity (copied from the
   single-view run: same world, the cam_left camera frame).
 * ``sensor_forces.npz`` — the four boards' measured forces per video frame,
@@ -26,7 +27,7 @@ The camera set (cam_3 pose) follows the recording, see
 16c: cam_3 was bumped) take cam_3's pose from the scaled VGGT solution and its
 intrinsics from set 16.
 
-    uv run --no-sync python bvr_datasets/peter/gt/prepare_human.py [--clips a_00_01_part3,...]
+    uv run python bvr_datasets/peter/gt/prepare_human.py --save-dir <root> [--clips a_00_01_part3,...]
 """
 from __future__ import annotations
 
@@ -37,25 +38,21 @@ import subprocess
 from pathlib import Path
 
 import cv2
+import imageio_ffmpeg
 import numpy as np
 import torch
 
-
-from bvr_datasets.peter.sensor_forces import R_CW3_WALL_TO_WORLD, per_frame
+from bvr import files, paths
 from bvr.geometry.intrinsics import normalize_K
 from bvr.geometry.normals import estimate_point_normals
-from bvr.paths import REPO_ROOT
-from bvr_datasets.peter.paths import PETER
-
 from bvr_datasets.peter.gt.extract_frames import SETS
+from bvr_datasets.peter.paths import PETER
+from bvr_datasets.peter.sensor_forces import R_CW3_WALL_TO_WORLD, per_frame
 
 CLIPS_DIR = PETER / "climb_wall_3"
 SINGLE_OUT = PETER / "out_climb_wall_3_single"
-GT_SCENE = PETER / "climb_wall_3_gt/scene"
-HUMAN_ROOT = PETER / "climb_wall_3_gt/human"
 VIEW_NAMES = ["cam_left", "cam_right", "cam_3"]
 CALIB_REF = {"16b": "16", "16c": "16"}
-FFMPEG = next((REPO_ROOT / ".venv/lib/python3.12/site-packages/imageio_ffmpeg/binaries").glob("ffmpeg-*"))
 FPS = 30.0
 #: The six first clips: both climbers at every inclination, mid-climb parts, and
 #: only 16-degree recordings whose cam_3 pose the calibration video saw (set 16).
@@ -72,16 +69,16 @@ def camera_set(clip: str) -> str:
     raise KeyError(f"{clip}: recording {recording} is in no camera set")
 
 
-def load_cameras(set_name: str) -> dict:
+def load_cameras(scene: Path, set_name: str) -> dict:
     """Calibrated K / dist / camera-from-world per view; cam_3 from VGGT when uncalibrated."""
-    calib = np.load(GT_SCENE / CALIB_REF.get(set_name, set_name) / "calibration.npz", allow_pickle=True)
+    calib = np.load(scene / CALIB_REF.get(set_name, set_name) / "calibration.npz", allow_pickle=True)
     assert [str(v) for v in calib["view_names"]] == VIEW_NAMES
     extr = np.asarray(calib["extrinsics"], np.float64).copy()
     cam3_source = "chessboard"
     if set_name in CALIB_REF:
-        scene = np.load(GT_SCENE / set_name / "scene.npz")
-        extr[2] = np.asarray(scene["extrinsics"][2], np.float64)
-        cam3_source = f"vggt ({str(scene['scale_source'])})"
+        cloud = np.load(scene / set_name / "scene.npz")
+        extr[2] = np.asarray(cloud["extrinsics"][2], np.float64)
+        cam3_source = f"vggt ({str(cloud['scale_source'])})"
         print(f"  cam_3 pose of set {set_name} is NOT calibrated — using the scaled VGGT pose")
     return {"K": np.asarray(calib["K"], np.float64), "dist": np.asarray(calib["dist"], np.float64),
             "extrinsics": extr, "image_size": np.asarray(calib["image_size"], int),
@@ -102,7 +99,7 @@ def write_video(src: Path, dst: Path, n_frames: int, K: np.ndarray, dist: np.nda
     w, h = size_wh
     map1, map2 = cv2.initUndistortRectifyMap(K, dist, None, K, (w, h), cv2.CV_16SC2)
     dst.parent.mkdir(parents=True, exist_ok=True)
-    cmd = [str(FFMPEG), "-y", "-loglevel", "error", "-f", "rawvideo", "-pix_fmt", "bgr24",
+    cmd = [imageio_ffmpeg.get_ffmpeg_exe(), "-y", "-loglevel", "error", "-f", "rawvideo", "-pix_fmt", "bgr24",
            "-s", f"{w}x{h}", "-r", str(FPS), "-i", "-",
            "-c:v", "libx264", "-preset", "fast", "-crf", "12", "-pix_fmt", "yuv420p", str(dst)]
     cap = cv2.VideoCapture(str(src))
@@ -173,16 +170,16 @@ def wall_plane(points: np.ndarray, normals: np.ndarray, camera: np.ndarray,
     return normal, centre, frac
 
 
-def write_scene(clip_dir: Path, set_name: str, cams: dict, n_frames: int) -> None:
+def write_scene(clip_dir: Path, scene: Path, set_name: str, cams: dict, n_frames: int) -> None:
     """The set's wall cloud + a cam_left transform in the pipeline's layout.
 
     ``scene_calib.npz`` (the cloud rebuilt in the calibrated cameras' frame) when the set
     has one, else the older ``scene_clean.npz`` (VGGT's own poses, similarity-aligned —
     cm to dm off the calibrated cameras at the wall).
     """
-    src = GT_SCENE / set_name / "scene_calib.npz"
+    src = scene / set_name / "scene_calib.npz"
     if not src.exists():
-        src = GT_SCENE / set_name / "scene_clean.npz"
+        src = scene / set_name / "scene_clean.npz"
         print(f"  WARNING: {set_name} has no scene_calib.npz — using the VGGT-frame scene_clean.npz")
     z = np.load(src)
     pts = np.asarray(z["points"], np.float32)
@@ -192,28 +189,27 @@ def write_scene(clip_dir: Path, set_name: str, cams: dict, n_frames: int) -> Non
     rig = cams["extrinsics_before_pnp"] if "extrinsics_before_pnp" in cams else cams["extrinsics"]
     centres = np.stack([-e[:3, :3].T @ e[:3, 3] for e in rig]).astype(np.float32)
     normals = estimate_point_normals(torch.from_numpy(pts), torch.from_numpy(centres), k=16).numpy()
-    geo = clip_dir / "geometry"
-    geo.mkdir(parents=True, exist_ok=True)
-    np.savez(geo / "scene.npz", points=pts, colors=np.asarray(z["colors"]),
-             confidence=np.asarray(z["conf"], np.float32), normals=normals,
-             view_id=np.asarray(z["view_id"]), metric=np.bool_(True), scale=np.float32(1.0),
-             source=np.str_(str(src.relative_to(PETER.parent))), camera_set=np.str_(set_name))
+    source = np.str_(str(src.relative_to(scene.parent)))
+    files.save_npz(clip_dir / paths.SCENE, "bvr-scene", points=pts, colors=np.asarray(z["colors"]),
+                   confidence=np.asarray(z["conf"], np.float32), normals=normals,
+                   view_id=np.asarray(z["view_id"]), metric=np.bool_(True), scale=np.float32(1.0),
+                   source=source, camera_set=np.str_(set_name))
     normal, point, inliers = wall_plane(pts, normals, centres[0])
-    np.savez(geo / "wall.npz", normal=normal.astype(np.float32), point=point.astype(np.float32),
-             inlier_frac=np.float32(inliers), source=np.str_(str(src.relative_to(PETER.parent))),
+    np.savez(clip_dir / "geometry" / "wall.npz", normal=normal.astype(np.float32), point=point.astype(np.float32),
+             inlier_frac=np.float32(inliers), source=source,
              note=np.str_("the climbing wall's plane: normal points out of the wall toward the cameras; "
                           "holds stand in front of it, nothing of the climber can be behind it"))
     print(f"  wall plane: normal {normal.round(3)}, {inliers:.0%} of the cloud within 1.5 cm")
     K_left = cams["K"][0].astype(np.float32)
     w, h = (int(x) for x in cams["image_size"][0])
-    np.savez(geo / "transform.npz",
-             scale=np.float32(1.0), metric=np.bool_(True), static_camera=np.bool_(True),
-             extrinsics=np.repeat(np.eye(4, dtype=np.float32)[None], n_frames, 0),
-             intrinsics_px_orig=np.repeat(K_left[None], n_frames, 0),
-             intrinsics=np.repeat(normalize_K(K_left, h, w)[None].astype(np.float32), n_frames, 0),
-             frame_indices=np.arange(n_frames, dtype=np.int32),
-             image_height=np.int32(h), image_width=np.int32(w), fps=np.float32(FPS),
-             scale_method=np.str_("chessboard calibration (metres)"))
+    files.save_npz(clip_dir / paths.TRANSFORM, "bvr-transform",
+                   scale=np.float32(1.0), metric=np.bool_(True), static_camera=np.bool_(True),
+                   extrinsics=np.repeat(np.eye(4, dtype=np.float32)[None], n_frames, 0),
+                   intrinsics_px_orig=np.repeat(K_left[None], n_frames, 0),
+                   intrinsics=np.repeat(normalize_K(K_left, h, w)[None].astype(np.float32), n_frames, 0),
+                   frame_indices=np.arange(n_frames, dtype=np.int32),
+                   image_height=np.int32(h), image_width=np.int32(w), fps=np.float32(FPS),
+                   scale_method=np.str_("chessboard calibration (metres)"))
 
 
 def write_sensor_forces(clip: str, clip_dir: Path, n_frames: int) -> None:
@@ -234,11 +230,11 @@ def write_sensor_forces(clip: str, clip_dir: Path, n_frames: int) -> None:
                           "(+x up the wall, +y right, +z out toward the climber)"))
 
 
-def prepare(clip: str, skip_existing: bool, scene_only: bool = False) -> None:
-    clip_dir = HUMAN_ROOT / clip
+def prepare(root: Path, clip: str, skip_existing: bool, scene_only: bool = False) -> None:
+    clip_dir, scene = root / "human" / clip, root / "scene"
     if scene_only:       # a rebuilt wall cloud: refresh geometry/ only (cameras.npz keeps its frame offsets)
         cams = np.load(clip_dir / "cameras.npz", allow_pickle=True)
-        write_scene(clip_dir, str(cams["camera_set"]), cams, int(cams["num_frames"]))
+        write_scene(clip_dir, scene, str(cams["camera_set"]), cams, int(cams["num_frames"]))
         print(f"{clip}: scene refreshed")
         return
     if skip_existing and (clip_dir / "clip.json").exists():      # written last = the clip is complete
@@ -246,7 +242,7 @@ def prepare(clip: str, skip_existing: bool, scene_only: bool = False) -> None:
         return
     set_name = camera_set(clip)
     print(f"{clip}: camera set {set_name}")
-    cams = load_cameras(set_name)
+    cams = load_cameras(scene, set_name)
     src_dir = CLIPS_DIR / clip
     forces = np.load(src_dir / "forces.npz")
     assert float(forces["video_fps"]) == FPS, (clip, float(forces["video_fps"]))
@@ -268,7 +264,7 @@ def prepare(clip: str, skip_existing: bool, scene_only: bool = False) -> None:
              frame_offset=np.zeros(3, np.int32),
              cam3_pose_source=np.str_(cams["cam3_pose_source"]), num_frames=np.int32(n_frames),
              fps=np.float32(FPS), world=np.str_("cam_left camera frame, metres"))
-    write_scene(clip_dir, set_name, cams, n_frames)
+    write_scene(clip_dir, scene, set_name, cams, n_frames)
     gravity = SINGLE_OUT / clip / "geocalib" / "gravity.npz"
     (clip_dir / "geocalib").mkdir(exist_ok=True)
     shutil.copy2(gravity, clip_dir / "geocalib" / "gravity.npz")
@@ -282,12 +278,13 @@ def prepare(clip: str, skip_existing: bool, scene_only: bool = False) -> None:
 
 def main() -> None:
     ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
+    ap.add_argument("--save-dir", type=Path, required=True, help="the ground truth's root: <save-dir>/human/<clip>/")
     ap.add_argument("--clips", default=",".join(DEFAULT_CLIPS), help="comma-separated clip names")
     ap.add_argument("--skip-existing", action="store_true")
     ap.add_argument("--scene-only", action="store_true", help="only rewrite geometry/ from the set's wall cloud")
     args = ap.parse_args()
     for clip in [c.strip() for c in args.clips.split(",") if c.strip()]:
-        prepare(clip, args.skip_existing, scene_only=args.scene_only)
+        prepare(args.save_dir, clip, args.skip_existing, scene_only=args.scene_only)
 
 
 if __name__ == "__main__":

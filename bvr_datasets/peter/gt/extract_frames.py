@@ -9,12 +9,14 @@ climber ``b`` recordings start with nobody in shot, so frame 0 of those is
 used. ``cam_3`` was mounted 90 degrees off: its frames are rotated to upright
 (real "down" was the image's right edge, so a 90-degree clockwise turn).
 
-Writes ``peter/climb_wall_3_gt/scene/<set>/frames/<cam>.png`` + ``frames.json``.
+Writes ``<save-dir>/scene/<set>/frames/<cam>.png`` + ``frames.json``; the stored ground truth's root is
+``<data root>/peter/climb_wall_3_gt``.
 
-    uv run --no-sync python bvr_datasets/peter/gt/extract_frames.py
+    uv run python bvr_datasets/peter/gt/extract_frames.py --save-dir <root>
 """
 from __future__ import annotations
 
+import argparse
 import json
 from pathlib import Path
 
@@ -24,7 +26,6 @@ import cv2
 from bvr_datasets.peter.paths import PETER
 
 ORIG = PETER / "climb_wall_3_orig"
-OUT = PETER / "climb_wall_3_gt/scene"
 CAMS = ["cam_left", "cam_right", "cam_3"]
 
 # set -> (recording per camera, calibration folder or None, recordings using this cam_3 pose)
@@ -57,8 +58,11 @@ def upright(cam: str, frame: cv2.typing.MatLike) -> cv2.typing.MatLike:
 
 
 def main() -> None:
+    ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
+    ap.add_argument("--save-dir", type=Path, required=True, help="the ground truth's root: <save-dir>/scene/<set>/")
+    args = ap.parse_args()
     for name, spec in SETS.items():
-        out = OUT / name / "frames"
+        out = args.save_dir / "scene" / name / "frames"
         out.mkdir(parents=True, exist_ok=True)
         for cam, rec in spec["frames"].items():
             cv2.imwrite(str(out / f"{cam}.png"), upright(cam, read_frame(ORIG / rec / f"{cam}.mkv", FRAME)))

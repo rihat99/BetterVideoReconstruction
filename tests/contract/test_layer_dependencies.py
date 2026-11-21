@@ -45,12 +45,6 @@ LIBRARIES = {
 #: The third-party models; each is imported by exactly one module, a stage.
 MODELS = {"sam3", "sapiens", "vggt_omega", "sam_3d_body", "geocalib"}
 
-#: Modules not held to the table. ``reconstruct_vggt`` built the wall clouds of the climb_wall_3 ground truth from three
-#: still images: it reads VGGT's own image sizing and starts the VGGT stage on a list of images, which the rebuilt
-#: stage does not take. The entry leaves in the commit that ports or removes the script.
-UNPORTED = {"bvr_datasets.peter.gt.reconstruct_vggt"}
-
-
 def modules() -> dict[str, Path]:
     """Dotted name -> file, for every Python module of ``bvr``, ``bvr_datasets`` and ``scripts``."""
     found = {}
@@ -78,16 +72,10 @@ def imports(path: Path) -> set[str]:
     return names
 
 
-def unported(module: str) -> bool:
-    return any(module == entry or module.startswith(entry + ".") for entry in UNPORTED)
-
-
 def test_every_import_is_an_edge_of_the_table() -> None:
     known = modules()
     violations = []
     for module, path in known.items():
-        if unported(module):
-            continue
         own = package(module)
         for name in imports(path):
             top = name.split(".")[0]
@@ -105,16 +93,10 @@ def test_every_import_is_an_edge_of_the_table() -> None:
 def test_each_model_is_imported_by_one_stage() -> None:
     importers: dict[str, set[str]] = {model: set() for model in MODELS}
     for module, path in modules().items():
-        if not unported(module):
-            for name in imports(path):
-                if name.split(".")[0] in MODELS:
-                    importers[name.split(".")[0]].add(module)
+        for name in imports(path):
+            if name.split(".")[0] in MODELS:
+                importers[name.split(".")[0]].add(module)
     wrong = {model: sorted(users) for model, users in importers.items()
              if len(users) > 1 or any(package(user) != "bvr.stages" for user in users)}
     assert not wrong, wrong
 
-
-def test_unported_modules_still_exist() -> None:
-    known = modules()
-    gone = sorted(entry for entry in UNPORTED if not any(m == entry or m.startswith(entry + ".") for m in known))
-    assert not gone, f"remove from UNPORTED: {gone}"

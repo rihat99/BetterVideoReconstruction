@@ -25,21 +25,21 @@ throws VGGT's poses and intrinsics away and keeps only its depth maps:
 Sets 16b / 16c have no calibrated cam_3 (it was bumped between recordings), so
 they get the front pair only.
 
-Writes per set ``scene_calib.npz`` (the keys ``scene_clean.npz`` has, plus the
-per-view scales), ``scene_calib.ply``, and ``check_calib/`` — ``<view>.png`` and
-``<view>_old.png``, where the *other* views' points are drawn over this view's
+Reads ``<save-dir>/scene/<set>/``: ``frames/``, ``calibration.npz`` and, for the checks, the
+older clouds ``scene.npz`` (with ``vggt/``) and ``scene_clean.npz``; the checks also read the
+inclination's gravity from the single-camera runs. Writes per set ``scene_calib.npz`` (the keys
+``scene_clean.npz`` has, plus the per-view scales), ``scene_calib.ply``, and ``check_calib/`` —
+``<view>.png`` and ``<view>_old.png``, where the *other* views' points are drawn over this view's
 undistorted frame (holds have to land on holds), plus ``report.json``.
 
-    uv run --no-sync python bvr_datasets/peter/gt/rebuild_scene_calibrated.py
-    uv run --no-sync python bvr_datasets/peter/gt/rebuild_scene_calibrated.py --sets 00 32
+    uv run python bvr_datasets/peter/gt/rebuild_scene_calibrated.py --save-dir <root> [--sets 00 32]
 """
 from __future__ import annotations
 
 import argparse
 import json
-import subprocess
-import sys
 import tempfile
+from collections.abc import Callable
 from pathlib import Path
 
 import cv2
@@ -58,21 +58,19 @@ from bvr_datasets.peter.gt.clean_scene import (
 )
 from bvr_datasets.peter.gt.reconstruct_vggt import (
     CALIB_REF,
-    CONFIG,
-    GT_ROOT,
     SETS,
     VIEW_NAMES,
     centres,
-    content_window,
+    vggt_model,
+    window_of,
     write_ply,
 )
 from bvr.geometry.backproject import backproject
 from bvr.geometry.clean import clean_depth
-from bvr.paths import REPO_ROOT
 from bvr_datasets.peter.paths import PETER
 
-HUMAN_ROOT = PETER / "climb_wall_3_gt/human"
-#: One prepared clip per inclination — its gravity says which way is down.
+SINGLE_OUT = PETER / "out_climb_wall_3_single"
+#: One clip per inclination — the gravity of its single-camera run says which way is down.
 GRAVITY_CLIP = {"00": "b_00_02_part2", "16": "b_16_01_part3", "32": "b_32_02_part2"}
 
 SIFT_CONTRAST = 0.005    # low, so the wall's screw holes and hold edges all count
@@ -89,9 +87,9 @@ PLANE_TRIALS = 2000
 # Inputs
 # --------------------------------------------------------------------------- #
 
-def load_calibration(name: str) -> dict:
+def load_calibration(scene: Path, name: str) -> dict:
     """Calibrated cameras of a set; 16b / 16c keep only the front pair."""
-    z = np.load(GT_ROOT / CALIB_REF.get(name, name) / "calibration.npz", allow_pickle=True)
+    z = np.load(scene / CALIB_REF.get(name, name) / "calibration.npz", allow_pickle=True)
     n = 2 if name in CALIB_REF else 3
     return {"K": np.asarray(z["K"], np.float64)[:n],
             "dist": np.asarray(z["dist"], np.float64)[:n],
@@ -107,22 +105,14 @@ def undistort(img: np.ndarray, K: np.ndarray, dist: np.ndarray) -> np.ndarray:
     return cv2.remap(img, map1, map2, cv2.INTER_LINEAR)
 
 
-def run_vggt(names: list[str], work: Path) -> None:
-    """Undistort every set's frames into ``work`` and run one VGGT stage call over them."""
-    entries = []
-    for name in names:
-        calib = load_calibration(name)
-        out = work / "frames" / name
-        out.mkdir(parents=True, exist_ok=True)
-        for k in range(calib["n_views"]):
-            img = cv2.imread(str(GT_ROOT / name / "frames" / f"{VIEW_NAMES[k]}.png"))
-            cv2.imwrite(str(out / f"{VIEW_NAMES[k]}.png"), undistort(img, calib["K"][k], calib["dist"][k]))
-        views = [str(out / f"{VIEW_NAMES[k]}.png") for k in range(calib["n_views"])]
-        entries.append({"source": views[0], "sources": views, "out_dir": str(work / "vggt" / name)})
-    manifest = work / "manifest.json"
-    manifest.write_text(json.dumps(entries, indent=2))
-    subprocess.run([sys.executable, "-m", "bvr.stages.estimate_camera_vggt", "--source", str(manifest),
-                    "--save-dir", str(work / "vggt"), "--config", str(CONFIG)], cwd=REPO_ROOT, check=True)
+def undistorted_frames(set_dir: Path, calib: dict, work: Path) -> list[Path]:
+    """The set's frames, undistorted, as PNG files in ``work`` (VGGT reads files)."""
+    frames = []
+    for k in range(calib["n_views"]):
+        img = cv2.imread(str(set_dir / "frames" / f"{VIEW_NAMES[k]}.png"))
+        frames.append(work / f"{VIEW_NAMES[k]}.png")
+        cv2.imwrite(str(frames[-1]), undistort(img, calib["K"][k], calib["dist"][k]))
+    return frames
 
 
 def grid_K(K: np.ndarray, shape: tuple[int, int], size_wh: tuple[int, int]) -> np.ndarray:
@@ -135,19 +125,15 @@ def grid_K(K: np.ndarray, shape: tuple[int, int], size_wh: tuple[int, int]) -> n
                      [0.0, 0.0, 1.0]])
 
 
-def load_views(name: str, work: Path, calib: dict) -> list[dict]:
+def load_views(frames: list[Path], prediction: dict[str, np.ndarray], calib: dict) -> list[dict]:
     """Per view: the undistorted frame, VGGT's depth + confidence on their own grid."""
-    cam = np.load(work / "vggt" / name / "vggt" / "camera.npz", allow_pickle=True)
-    vh, vw = int(cam["vggt_height"]), int(cam["vggt_width"])
-    resolution, mode = int(cam["image_resolution"]), str(cam["mode"])
     views = []
     for k in range(calib["n_views"]):
-        image = cv2.imread(str(work / "frames" / name / f"{VIEW_NAMES[k]}.png"))
+        image = cv2.imread(str(frames[k]))
         h0, w0 = image.shape[:2]
-        top, left, th, tw = content_window(w0, h0, vh, vw, resolution, mode)
-        z = np.load(work / "vggt" / name / "vggt" / "depth" / VIEW_NAMES[k] / "frame_000000.npz")
-        depth = np.asarray(z["depth"], np.float64)[top:top + th, left:left + tw]
-        conf = np.asarray(z["depth_conf"], np.float32)[top:top + th, left:left + tw]
+        depth, conf, _ = window_of(prediction, k)
+        depth, conf = depth.astype(np.float64), conf.astype(np.float32)
+        th, tw = depth.shape
         views.append({"name": VIEW_NAMES[k], "image": image, "depth": depth, "conf": conf,
                       "colors": cv2.resize(image, (tw, th), interpolation=cv2.INTER_AREA),
                       "K": calib["K"][k], "extr": calib["extrinsics"][k], "size": (w0, h0),
@@ -383,10 +369,10 @@ def wall_plane(points: np.ndarray, calib: dict, gravity: np.ndarray) -> dict:
                                   for k, c in enumerate(centres(calib["extrinsics"]))}}
 
 
-def old_before_cleaning(name: str) -> tuple[np.ndarray, np.ndarray]:
+def old_before_cleaning(set_dir: Path) -> tuple[np.ndarray, np.ndarray]:
     """The old cloud with only its per-pixel masks applied, so it compares like for like."""
-    scene = np.load(GT_ROOT / name / "scene.npz")
-    keep = pixel_masks(GT_ROOT / name, scene)
+    scene = np.load(set_dir / "scene.npz")
+    keep = pixel_masks(set_dir, scene)
     return np.asarray(scene["points"], np.float64)[keep], np.asarray(scene["view_id"])[keep]
 
 
@@ -406,21 +392,21 @@ def anchor_distance(points: np.ndarray, anchors: np.ndarray) -> dict:
             "p90_mm": float(np.percentile(d, 90) * 1e3)}
 
 
-def checks(name: str, views: list[dict], calib: dict, raw: dict, keep: np.ndarray,
+def checks(set_dir: Path, views: list[dict], calib: dict, raw: dict, keep: np.ndarray,
            anchors: np.ndarray) -> dict:
     """Overlays + the numbers, new cloud against the old one, both through the calibrated cameras."""
-    out_dir = GT_ROOT / name / "check_calib"
+    out_dir = set_dir / "check_calib"
     out_dir.mkdir(exist_ok=True)
     new_pts, new_vid = raw["points"][keep], raw["view_id"][keep]
-    old = np.load(GT_ROOT / name / "scene_clean.npz")
+    old = np.load(set_dir / "scene_clean.npz")
     old_pts, old_vid = np.asarray(old["points"], np.float64), np.asarray(old["view_id"])
     for k, view in enumerate(views):
         render_overlay(new_pts[new_vid != k], view["image"], view["K"], view["extr"],
                        out_dir / f"{view['name']}.png")
         render_overlay(old_pts[old_vid != k], view["image"], view["K"], view["extr"],
                        out_dir / f"{view['name']}_old.png")
-    gravity = np.load(HUMAN_ROOT / GRAVITY_CLIP[name[:2]] / "geocalib" / "gravity.npz")["gravity_world"]
-    old_raw_pts, old_raw_vid = old_before_cleaning(name)
+    gravity = np.load(SINGLE_OUT / GRAVITY_CLIP[set_dir.name[:2]] / "geocalib" / "gravity.npz")["gravity_world"]
+    old_raw_pts, old_raw_vid = old_before_cleaning(set_dir)
     return {
         "anchor_distance_new": anchor_distance(new_pts, anchors),
         "anchor_distance_old": anchor_distance(old_pts, anchors),
@@ -435,22 +421,24 @@ def checks(name: str, views: list[dict], calib: dict, raw: dict, keep: np.ndarra
 
 # --------------------------------------------------------------------------- #
 
-def rebuild(name: str, work: Path) -> None:
-    calib = load_calibration(name)
-    views = load_views(name, work, calib)
+def rebuild(scene: Path, name: str, vggt: Callable[[list[Path]], dict[str, np.ndarray]]) -> None:
+    calib = load_calibration(scene, name)
+    set_dir = scene / name
+    with tempfile.TemporaryDirectory(prefix="rebuild_scene_") as work:
+        frames = undistorted_frames(set_dir, calib, Path(work))
+        views = load_views(frames, vggt(frames), calib)
     scales, scale_report, anchors = view_scales(views)
     raw = build_cloud(views, scales)
     keep = clean(raw, calib)
     points = raw["points"][keep].astype(np.float32)
 
-    set_dir = GT_ROOT / name
     np.savez(set_dir / "scene_calib.npz", points=points, colors=raw["colors"][keep],
              view_id=raw["view_id"][keep], conf=raw["conf"][keep],
              extrinsics=calib["extrinsics"].astype(np.float32), K=calib["K"].astype(np.float32),
              image_size=calib["image_size"], scale=np.float64(np.median(scales)),
              view_scale=scales.astype(np.float64),
              scale_source=np.str_("calibrated-anchors"), metric=np.bool_(True),
-             view_names=np.array(VIEW_NAMES[:calib["n_views"]]), cam3_input=np.str_("upright"))
+             view_names=np.array(VIEW_NAMES[:calib["n_views"]]))
     write_ply(set_dir / "scene_calib.ply", points, raw["colors"][keep])
 
     report = {"set": name, "views": VIEW_NAMES[:calib["n_views"]],
@@ -458,7 +446,7 @@ def rebuild(name: str, work: Path) -> None:
               "points": {"before_cleaning": int(len(keep)), "kept": int(keep.sum())},
               "points_per_view": {VIEW_NAMES[k]: int((raw["view_id"][keep] == k).sum())
                                   for k in range(calib["n_views"])},
-              **checks(name, views, calib, raw, keep, anchors)}
+              **checks(set_dir, views, calib, raw, keep, anchors)}
     (set_dir / "check_calib" / "report.json").write_text(json.dumps(report, indent=2, default=float))
     print(f"\n=== {name} -> {set_dir/'scene_calib.npz'}")
     print(json.dumps(report, indent=2, default=float))
@@ -466,13 +454,12 @@ def rebuild(name: str, work: Path) -> None:
 
 def main() -> None:
     ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
+    ap.add_argument("--save-dir", type=Path, required=True, help="the ground truth's root: <save-dir>/scene/<set>/")
     ap.add_argument("--sets", nargs="+", default=SETS, choices=SETS, help="camera sets to rebuild")
     args = ap.parse_args()
-    with tempfile.TemporaryDirectory(prefix="rebuild_scene_") as tmp:
-        work = Path(tmp)
-        run_vggt(args.sets, work)
-        for name in args.sets:
-            rebuild(name, work)
+    vggt = vggt_model()
+    for name in args.sets:
+        rebuild(args.save_dir / "scene", name, vggt)
 
 
 if __name__ == "__main__":

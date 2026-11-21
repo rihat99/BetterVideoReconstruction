@@ -1,6 +1,7 @@
 """Clean the raw climb_wall_3 GT cloud: drop low-confidence points and flying pixels.
 
-Four passes on ``scene.npz`` (per set, written by ``reconstruct_vggt.py``):
+Four passes on ``<save-dir>/scene/<set>/scene.npz`` (written by ``reconstruct_vggt.py``, with the depth maps
+under ``vggt/``):
 
 1. confidence — per view, drop the least confident ``CONF_QUANTILE`` of the
    VGGT depth pixels;
@@ -17,18 +18,18 @@ Four passes on ``scene.npz`` (per set, written by ``reconstruct_vggt.py``):
 Writes ``scene_clean.npz`` (same keys as ``scene.npz``, subset of rows) and
 ``scene_clean.ply``; the raw cloud is left as is.
 
-    uv run --no-sync python bvr_datasets/peter/gt/clean_scene.py [SET ...]
+    uv run python bvr_datasets/peter/gt/clean_scene.py --save-dir <root> [--sets 00 16 ...]
 """
 from __future__ import annotations
 
-import sys
+import argparse
 from pathlib import Path
 
 import numpy as np
 from scipy.spatial import cKDTree
 
-from bvr_datasets.peter.gt.reconstruct_vggt import GT_ROOT, SETS, VIEW_NAMES, content_window, write_ply
 from bvr.geometry.clean import clean_depth
+from bvr_datasets.peter.gt.reconstruct_vggt import SETS, VIEW_NAMES, write_ply
 
 CONF_QUANTILE = 0.4    # per view, the least confident 40 % goes
 EDGE_RTOL = 0.04       # depth-edge relative tolerance (fuse stage default)
@@ -39,16 +40,11 @@ SIDE_VIEW = 2          # index of cam_3 in view_names
 
 def pixel_masks(set_dir: Path, scene: np.lib.npyio.NpzFile) -> np.ndarray:
     """Per-point keep flag from the confidence and depth-edge tests, in scene row order."""
-    cam = np.load(set_dir / "vggt" / "camera.npz")
-    vh, vw = int(cam["vggt_height"]), int(cam["vggt_width"])
-    resolution, mode = int(cam["image_resolution"]), str(cam["mode"])
     keep_rows = []
     for k, name in enumerate(VIEW_NAMES):
-        w0, h0 = (int(x) for x in scene["image_size"][k])
-        top, left, th, tw = content_window(w0, h0, vh, vw, resolution, mode)
-        z = np.load(set_dir / "vggt" / "depth" / name / "frame_000000.npz")
-        depth = np.asarray(z["depth"], np.float64)[top:top + th, left:left + tw]
-        conf = np.asarray(z["depth_conf"], np.float32)[top:top + th, left:left + tw]
+        z = np.load(set_dir / "vggt" / f"{name}.npz")
+        depth = np.asarray(z["depth"], np.float64)
+        conf = np.asarray(z["depth_conf"], np.float32)
         valid = np.isfinite(depth) & (depth > 0)
         n_view = int((scene["view_id"] == k).sum())
         assert valid.sum() == n_view, f"{name}: {valid.sum()} depth pixels vs {n_view} scene points"
@@ -80,10 +76,9 @@ def isolated(points: np.ndarray) -> np.ndarray:
     return mean > np.median(mean) + STD_RATIO * mean.std()
 
 
-def clean(name: str) -> None:
-    set_dir = GT_ROOT / name
+def clean(set_dir: Path) -> None:
     scene = np.load(set_dir / "scene.npz")
-    print(f"{name}:")
+    print(f"{set_dir.name}:")
     keep = pixel_masks(set_dir, scene)
     pts = scene["points"].astype(np.float64)
     side = scene["view_id"] == SIDE_VIEW
@@ -102,8 +97,12 @@ def clean(name: str) -> None:
 
 
 def main() -> None:
-    for name in sys.argv[1:] or SETS:
-        clean(name)
+    ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
+    ap.add_argument("--save-dir", type=Path, required=True, help="the ground truth's root: <save-dir>/scene/<set>/")
+    ap.add_argument("--sets", nargs="+", default=SETS, choices=SETS, help="camera sets to clean")
+    args = ap.parse_args()
+    for name in args.sets:
+        clean(args.save_dir / "scene" / name)
 
 
 if __name__ == "__main__":
