@@ -43,7 +43,7 @@ FRAME_RADIUS, NORMAL_LENGTH = 0.012, 0.06
 CONTACT, FREE, UNLABELLED = (0.92, 0.18, 0.18), (0.24, 0.78, 0.35), (0.55, 0.58, 0.62)
 FORCE, ROOT_FORCE, ROOT_TORQUE = (0.92, 0.18, 0.18), (0.24, 0.86, 0.35), (0.86, 0.24, 0.86)
 CAMERA, PATH, DOWN, FALLBACK_DOWN = (0.92, 0.16, 0.16), (1.0, 0.55, 0.0), (0.92, 0.16, 0.16), (0.96, 0.67, 0.16)
-FLOOR = (0.43, 0.43, 0.43), (0.27, 0.27, 0.27), (0.59, 0.59, 0.59)   # cell lines, section lines, fill
+FLOOR = (0.43, 0.43, 0.43), (0.27, 0.27, 0.27)   # cell lines, section lines
 FORCE_ARROW = {"shaft_radius": 0.012, "head_radius": 0.028, "head_length": 0.05}
 
 Placed = tuple[str, Layer, np.ndarray | None]
@@ -73,8 +73,10 @@ def scene_layers(data: ClipData, *, point_size: float, human_point_size: float, 
         placed.append(("gravity", down, None))
     if data.ground is not None:
         centroid, normal, extent = data.ground
+        # Lines only: the browser draws a filled grid as see-through but it still hides what lies beyond it, so a
+        # see-through body that crosses the plane, or is seen from under it, would lose that part.
         floor = GroundLayer("floor", size=10.0 * extent, cell_size=0.5, section_size=2.5, origin=centroid,
-                            normal=normal, fill=0.25, cell_color=FLOOR[0], section_color=FLOOR[1], fill_color=FLOOR[2])
+                            normal=normal, cell_color=FLOOR[0], section_color=FLOOR[1])
         placed.append(("ground_plane", floor, None))
     return placed
 
