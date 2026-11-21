@@ -42,5 +42,5 @@ def test_no_inverse_dynamics_is_written_where_its_stencil_reads_an_untracked_fra
     root = np.linalg.norm(written["joint_torques"][..., :3], axis=-1)
     weight = np.broadcast_to(written["total_mass"][:, None] * dynamics.GRAVITY, root.shape)
     assert np.allclose(root[counted], weight[counted], rtol=1e-3)
-    for key in ("joint_torques", "base_wrench", "torque_mag"):
+    for key in ("joint_torques", "base_wrench", "torque_mag", "force_confidence"):
         assert not written[key][~counted].any(), key

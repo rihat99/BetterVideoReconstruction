@@ -115,7 +115,7 @@ def save(clip: paths.Clip, start: dict[str, np.ndarray], identity: bh.Identity, 
                        torques[..., 6:].unflatten(-1, (-1, 3)).norm(dim=-1)), dim=-1) * counted[..., None]
     parents = torch.as_tensor(np.array(human.contact_frames.parent_joints), device=q.device)
     joints = len(human.spec.joint_names)
-    trust = confidence.force_confidence(root.cpu().numpy(), forces.cpu().numpy(), tracked.cpu().numpy(),
+    trust = confidence.force_confidence(root.cpu().numpy(), forces.cpu().numpy(), counted.cpu().numpy(),
                                         weight.cpu().numpy())
     clip_trust = np.array([values[rows].mean() if rows.any() else np.nan
                            for values, rows in zip(trust, tracked.cpu().numpy())], np.float32)
