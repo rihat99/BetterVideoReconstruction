@@ -200,7 +200,7 @@ def register(problem: optim.Problem, identity: bh.Identity, *, edges: torch.Tens
     term("root_torque", _squares(scale, rows[..., None], slice(3, 6)), reads=("torques",))
     term("force_magnitude", _squares(scale, 1.0), reads=("forces",))
     for order, name in enumerate(("rate", "acceleration", "jerk"), start=1):
-        problem.cached(partial(_split, time=time, order=order), name=f"force_{name}", reads=("forces",))
+        problem.cached(partial(force_split, time=time, order=order), name=f"force_{name}", reads=("forces",))
         steady = time.rows(held, order)[..., None]
         term(f"force_{name}_magnitude", _squares(scale, steady, 0), reads=(f"force_{name}",))
         term(f"force_{name}_direction", _squares(scale, steady, 1), reads=(f"force_{name}",))
@@ -210,7 +210,7 @@ def register(problem: optim.Problem, identity: bh.Identity, *, edges: torch.Tens
         term(name, _squares(scale, time.rows(rows, order)[..., None] * costs, slice(6, None)), reads=(name,))
 
 
-def _split(forces: torch.Tensor, *, time: motion.Time, order: int) -> torch.Tensor:
+def force_split(forces: torch.Tensor, *, time: motion.Time, order: int) -> torch.Tensor:
     """The strided derivative of ``forces (P, T, F, 3)`` of ``order``, along and across the force's mean direction.
 
     Returns ``(P, T - order h, F, 3, 2)``: the part of the derivative that changes the force's size, and the part

@@ -109,8 +109,8 @@ def lbfgs(name: str, iterations: int, config: dict, *, history: int | None = Non
     and ``gradient_tolerance`` to the solver's own.
     """
     search = config["optimizer"]
-    solver = optim.LBFGS(history=history or search["lbfgs_history"], line_search=search["lbfgs_line_search"],
-                         gradient_tolerance=gradient_tolerance)
+    solver = optim.LBFGS(history=search["lbfgs_history"] if history is None else history,
+                         line_search=search["lbfgs_line_search"], gradient_tolerance=gradient_tolerance)
     return optim.Phase(solver, iterations, name=name, on_step=_report(name, iterations), **phase)
 
 
