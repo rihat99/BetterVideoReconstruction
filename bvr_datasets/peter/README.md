@@ -34,3 +34,7 @@ the 2026-09 session: two climbers, wall at 0 / 16 / 32 deg), two or three synchr
       --clips a_00_01_part3,a_16_01_part2,a_32_01_part3,b_00_02_part2,b_16_01_part3,b_32_02_part2
   uv run python -m bvr_datasets.peter.gt.fit_multiview --source <videos> --save-dir <run> --upstream $T --config bvr_datasets/peter/gt/gt.toml
   ```
+  The trees were made before the rebuild by the other scripts of `gt/` (camera calibration, the empty wall's cloud from
+  three stills, the per-trial tree) and by steps that are no longer here (the cameras' frame offsets and `cam_3`'s pose,
+  both in `cameras.npz`). Those scripts were not run on the rebuilt core, and the two that need VGGT on still images
+  (`reconstruct_vggt.py`, `rebuild_scene_calibrated.py`) cannot run on it.
