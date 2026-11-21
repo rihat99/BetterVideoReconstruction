@@ -32,8 +32,8 @@ class App:
     def __init__(self, clips: list[paths.Clip], settings: dict) -> None:
         self.clips, self.settings = {clip.name: clip for clip in clips}, settings
         self.human = body.load("cpu")
-        self.viewer = Viewer(host="0.0.0.0", port=settings["port"], theme=replace(LIGHT, up=settings["up"]),
-                             ground=False)
+        self.viewer = Viewer(host="0.0.0.0", port=settings["port"],
+                             theme=replace(LIGHT, up=settings["up"], hues=layers.HUES), ground=False)
         self.viewer.aim()           # stop BetterRobot's framing after each add: the app frames the people itself
         self.hidden = set(layers.HIDDEN)
         self.data: clips_module.ClipData | None = None

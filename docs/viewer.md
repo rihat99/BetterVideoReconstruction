@@ -21,9 +21,10 @@ The sidebar holds BetterRobot's sections and three of its own:
 - Timeline: play, step, speed. Robot: the skeleton's style. Images: the video, in step with the timeline.
 - Layers, one checkbox per tag: Scene points, Human points (off at the start), Cameras (the frustum with the video
   frame on it, and the camera's path), Gravity, Ground plane (the floor the gravity step fitted), Body (the exact
-  posed mesh, one colour per person), Skeleton (its joints coloured by joint torque on a `kindyn_1` body), Contact
-  frames (red in contact, green free, with their normals; grey without labels), Forces (the contact forces), Root
-  wrench (the root residual force and torque). A layer switched off stays off across switches.
+  posed mesh, see-through, one colour per person: light blue, then salmon, green, lilac, gold), Skeleton (its joints
+  coloured by joint torque on a `kindyn_1` body), Contact frames (red in contact, green free, with their normals; grey
+  without labels), Forces (the contact forces), Root wrench (the root residual force and torque). A layer switched
+  off stays off across switches.
 - Clip: a pager over the clips, when there are several. A switch reads the new clip first, so a clip that fails to
   read leaves the old one on screen.
 - Body: the source of the bodies, among those the clip holds: `converter` (`sam3d/smplx_params.npz`), `prefit`,
