@@ -10,8 +10,10 @@ when GeoCalib's best confidence is above a floor, the kept frames agree, and the
 camera orientations different enough that their agreement means something.
 
 The fused scene is the second witness: a plane fitted to its lowest points, accepted when it has
-enough points and lies within ``[gravity].ground_max_tilt_deg`` of the expected down direction.
-Its upward normal is world-up.
+enough points, lies within ``[gravity].ground_max_tilt_deg`` of the expected down direction, and
+has the filming camera above it (its median height over the plane above
+``[gravity].ground_min_camera_height``): a camera that looks up at a wall finds planes in the wall,
+not a floor. Its upward normal is world-up.
 
 Which one wins: reliable GeoCalib, else an accepted floor, else ``[gravity].fallback_gravity``.
 GeoCalib outranks the floor because it validates only outdoors, where visible ground can slope;
@@ -103,25 +105,11 @@ def load(stage: run.Stage) -> Callable[[paths.Clip], None]:
 
         # The floor: the prior down (GeoCalib when reliable, else the fallback) seeds the lowest band and the tilt gate.
         prior = geocalib if reliable else fallback
-        ground, plane = None, fit_ground_plane(files.load_npz(clip.find(paths.SCENE), "bvr-scene")["points"], prior,
-                                               max_tilt_deg=settings["ground_max_tilt_deg"])
-        if plane is None:
-            ground_reject = "no planar floor in the lowest band"
-        else:
-            centroid, up, extent, inliers = plane
-            tilt = float(np.degrees(np.arccos(np.clip(up @ -prior, -1.0, 1.0))))
-            if inliers < settings["ground_min_points"]:
-                ground_reject = f"{inliers} inlier points < {settings['ground_min_points']}"
-            elif tilt > settings["ground_max_tilt_deg"]:
-                ground_reject = f"normal {tilt:.1f} deg from expected down (> {settings['ground_max_tilt_deg']:g} deg)"
-            else:
-                ground, ground_reject = -up, ""
+        ground, ground_reject, plane_fields = floor(
+            files.load_npz(clip.find(paths.SCENE), "bvr-scene")["points"], prior, extrinsics, settings)
         gravity, source = ((geocalib, "geocalib") if reliable else (ground, "ground") if ground is not None
                            else (fallback, "fallback_down"))
 
-        plane_fields = {} if plane is None else dict(
-            ground_centroid=centroid.astype(np.float32), ground_normal=up.astype(np.float32),
-            ground_extent=np.float32(extent), ground_points=np.int32(inliers), ground_angle_deg=np.float32(tilt))
         estimates = [estimate for _, _, estimate in found]
         files.save_npz(
             clip.path(paths.GRAVITY), "bvr-gravity", **plane_fields,
@@ -150,6 +138,36 @@ def load(stage: run.Stage) -> Callable[[paths.Clip], None]:
                  "accepted" if ground is not None else f"rejected: {ground_reject}")
 
     return process
+
+
+def floor(points: np.ndarray, prior: np.ndarray, extrinsics: np.ndarray,
+          settings: dict) -> tuple[np.ndarray | None, str, dict[str, np.ndarray]]:
+    """Fit the floor to the scene and judge it.
+
+    :param points: ``(N, 3)`` the metric scene cloud.
+    :param prior: ``(3,)`` the expected world down, which seeds the lowest band and the tilt gate.
+    :param extrinsics: ``(T, 4, 4)`` camera-from-world of the filming camera.
+    :param settings: the ``[gravity]`` table.
+    :returns: the floor's world down ``(3,)``, or None when no plane passes the gates; why it was rejected ("" when
+        accepted); and the fitted plane's fields of ``gravity.npz`` (none when no plane was found).
+    """
+    plane = fit_ground_plane(points, prior, max_tilt_deg=settings["ground_max_tilt_deg"])
+    if plane is None:
+        return None, "no planar floor in the lowest band", {}
+    centroid, up, extent, inliers = plane
+    tilt = float(np.degrees(np.arccos(np.clip(up @ -prior, -1.0, 1.0))))
+    centres = -np.einsum("tji,tj->ti", extrinsics[:, :3, :3], extrinsics[:, :3, 3])     # -R^T t
+    camera = float(np.median((centres - centroid) @ up))
+    fields = dict(ground_centroid=centroid.astype(np.float32), ground_normal=up.astype(np.float32),
+                  ground_extent=np.float32(extent), ground_points=np.int32(inliers), ground_angle_deg=np.float32(tilt))
+    if inliers < settings["ground_min_points"]:
+        return None, f"{inliers} inlier points < {settings['ground_min_points']}", fields
+    if tilt > settings["ground_max_tilt_deg"]:
+        return None, f"normal {tilt:.1f} deg from expected down (> {settings['ground_max_tilt_deg']:g} deg)", fields
+    if camera <= settings["ground_min_camera_height"]:
+        return None, (f"filming camera {camera:+.2f} m over the plane "
+                      f"(not above {settings['ground_min_camera_height']:g} m)"), fields
+    return -up, "", fields
 
 
 def _combine(worlds: np.ndarray, confidence: np.ndarray, *, conf_rel: float, inlier_deg: float,

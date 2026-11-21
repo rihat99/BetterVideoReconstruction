@@ -12,7 +12,9 @@ It opens every clip of `--source` whose tree has `geometry/transform.npz` (the s
 `http://localhost:<port>` (`[viewer].port`, 8082). Each file is read from the clip's own tree, else from
 `--upstream`'s, so a run that redid a few steps shows on top of the run it continued. The video comes from
 `--source`. Display settings are `[viewer]`: point sizes, camera size, the up axis, and how many human points to draw
-per frame and person.
+per frame and person. A scene point's radius is `point_size_spacings` times the cloud's own sample spacing (the voxel
+the fuse step merged it on, `voxel_size` of `geometry/scene.npz`, 1.8 to 7 cm on the example clips), so a wall reads as
+a surface at any spacing; a tree that does not record its spacing gets `point_size`.
 
 ## What it shows
 

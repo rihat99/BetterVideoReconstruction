@@ -15,7 +15,7 @@ config tables it reads, and the files it reads and writes.
 | `smplx` | `convert_mhr_to_smplx` | fits SMPL-X to each MHR body, frame by frame | `sam3d/smplx_params.npz` |
 | `fuse` | `fuse_geometry` | the depth maps as one static scene cloud and per-frame human points, still up to scale | `geometry/fused/` |
 | `scale` | `estimate_scale` | reads the metric scale off the bodies, seats the bodies on their depth, writes the metric world | `geometry/*.npz` |
-| `gravity` | `estimate_gravity` | the direction of gravity, from GeoCalib or the floor | `geocalib/gravity.npz` |
+| `gravity` | `estimate_gravity` | the direction of gravity, from GeoCalib or the floor under the filming camera | `geocalib/gravity.npz` |
 | `kinematics_1` | `refine_kinematics` | fits every body trajectory to the keypoints, the depth points and the scene | `human_optim/kinematic_1.npz` |
 | `contacts_1` | `estimate_contacts` | which contact frames touch the scene, and how far to trust each label | `human_optim/contacts_1.npz` |
 | `kinematics_2` | `refine_kinematics` | pulls each labelled contact onto the wall the camera sees there | `human_optim/kinematic_2.npz` |

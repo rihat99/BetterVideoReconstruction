@@ -43,6 +43,7 @@ class ClipData:
     intrinsics: np.ndarray           #: (T, 3, 3) camera to pixels of the video frame
     size: tuple[int, int]            #: video frame (width, height) in pixels
     scene: tuple[np.ndarray, np.ndarray] | None         #: points (N, 3), colours (N, 3) uint8; None without the file
+    spacing: float | None            #: the scene's sample spacing (fuse's voxel) in metres; None where not recorded
     #: per frame: depth points (N_t, 3), colours (N_t, 3) uint8; None without the file
     human: tuple[list[np.ndarray], list[np.ndarray]] | None
     gravity: np.ndarray | None       #: (3,) unit vector down, in the world
@@ -74,11 +75,12 @@ def read(clip: paths.Clip, *, human_max_points: int) -> ClipData:
     fps = float(transform["fps"]) * ((len(frames) - 1) / span if span > 0 else 1.0)  # a subsampled clip plays slower
 
     # A tree without depth (a synthetic scene with known bodies and cameras) has neither cloud.
-    scene = human = None
+    scene = human = spacing = None
     if clip.find(paths.SCENE).exists():
         stored = files.load_npz(clip.find(paths.SCENE), "bvr-scene")
         kept = stored["confidence"] >= np.quantile(stored["confidence"], SCENE_CONFIDENCE_DROP)
         scene = stored["points"][kept], stored["colors"][kept]
+        spacing = float(stored["voxel_size"]) if "voxel_size" in stored else None
     if clip.find(paths.HUMAN).exists():
         human = _per_frame(files.load_npz(clip.find(paths.HUMAN), "bvr-human-points"), len(frames), human_max_points)
 
@@ -92,7 +94,7 @@ def read(clip: paths.Clip, *, human_max_points: int) -> ClipData:
     return ClipData(
         name=clip.name, fps=fps, extrinsics=transform["extrinsics"], intrinsics=transform["intrinsics_px_orig"],
         size=(int(transform["image_width"]), int(transform["image_height"])),
-        scene=scene, human=human, gravity=gravity, gravity_source=source,
+        scene=scene, spacing=spacing, human=human, gravity=gravity, gravity_source=source,
         ground=ground, sources=tuple(name for name, (file, _, _) in SOURCES.items() if clip.find(file).exists()),
         written=tuple(name for name, (file, _, _) in SOURCES.items() if clip.path(file).exists()),
         video=VideoFrames(clip.video, frames))

@@ -49,13 +49,16 @@ FORCE_ARROW = {"shaft_radius": 0.012, "head_radius": 0.028, "head_length": 0.05}
 Placed = tuple[str, Layer, np.ndarray | None]
 
 
-def scene_layers(data: ClipData, *, point_size: float, human_point_size: float, camera_scale: float) -> list[Placed]:
-    """The layers of ``data`` that every body source shares."""
+def scene_layers(data: ClipData, *, point_size: float, point_size_spacings: float, human_point_size: float,
+                 camera_scale: float) -> list[Placed]:
+    """The layers of ``data`` that every body source shares; the scene's points are ``point_size_spacings`` of its
+    sample spacing in radius, so a surface reads closed at any spacing, or ``point_size`` where it is not recorded."""
     poses = camera_poses(data.extrinsics)
     placed: list[Placed] = []
     if data.scene is not None:
+        size = point_size if data.spacing is None else point_size_spacings * data.spacing
         placed.append(("scene", PointsLayer("points", data.scene[0], colors=data.scene[1] / 255.0,
-                                            point_size=point_size), None))
+                                            point_size=size), None))
     if data.human is not None:
         colors = [colors / 255.0 for colors in data.human[1]]
         placed.append(("human_points", PointsLayer("points", data.human[0], colors=colors,
