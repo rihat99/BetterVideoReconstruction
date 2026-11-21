@@ -83,19 +83,18 @@ def estimate_scale(clip: paths.Clip, human: bh.HumanModel, options: dict) -> Non
     transform = files.load_npz(fused / "transform.npz", "bvr-transform")
     points = files.load_npz(fused / "human.npz", "bvr-human-points")
     smplx = files.load_npz(clip.find(paths.SMPLX_PARAMS), "bvr-smplx")
-    rows = transform["frame_indices"]
-    tracked = smplx["valid_mask"][:, rows].astype(bool)
+    tracked = smplx["valid_mask"].astype(bool)
     clouds = Clouds(points, smplx["object_ids"], transform["extrinsics"])
 
-    readings = _ruler(human, smplx, rows, tracked, clouds, transform, options)
+    readings = _ruler(human, smplx, tracked, clouds, transform, options)
     ruler = combine_log_scales(*(reading.ravel() for reading in readings), mad_k=options["mad_k"])
     pooled, fitted = ruler, None
     if options["prefit"]:
         keypoints = files.load_npz(clip.find(paths.SAPIENS_POSE), "bvr-keypoints")
         people = np.flatnonzero(tracked.any(axis=1) & np.isin(smplx["object_ids"], keypoints["object_ids"]))
         if len(people):
-            pooled, readings, fitted = _prefit(human, smplx, keypoints, rows, tracked, people, clouds, transform,
-                                               ruler, options)
+            pooled, readings, fitted = _prefit(human, smplx, keypoints, tracked, people, clouds, transform, ruler,
+                                               options)
         else:
             log.warning("no person with a tracked frame and keypoints: the pre-fit keeps the converter's bodies")
     scale = pooled["scale"]
@@ -119,9 +118,10 @@ def estimate_scale(clip: paths.Clip, human: bh.HumanModel, options: dict) -> Non
         n_frames_used=np.int32(pooled["n_used"]), n_people=np.int32(len(tracked)),
         method=np.array("prefit-dual" if options["prefit"] else "human-log-ratio"),
         per_frame_scale=np.exp(readings[0]).astype(np.float32), per_frame_weight=readings[1].astype(np.float32),
-        frame_indices=rows.astype(np.int32), object_ids=smplx["object_ids"], smear_median=np.float32(smear))
+        frame_indices=transform["frame_indices"].astype(np.int32), object_ids=smplx["object_ids"],
+        smear_median=np.float32(smear))
     if options["prefit"]:
-        _save_prefit(clip.path(paths.PREFIT), smplx, rows, tracked, fitted, scale)
+        _save_prefit(clip.path(paths.PREFIT), smplx, tracked, fitted, scale)
 
 
 class Clouds:
@@ -141,8 +141,8 @@ class Clouds:
         return self.points[own] @ rotation.T + translation, self.confidence[own]
 
 
-def _ruler(human: bh.HumanModel, smplx: dict, rows: np.ndarray, tracked: np.ndarray, clouds: Clouds,
-           transform: dict, options: dict) -> tuple[np.ndarray, np.ndarray]:
+def _ruler(human: bh.HumanModel, smplx: dict, tracked: np.ndarray, clouds: Clouds, transform: dict,
+           options: dict) -> tuple[np.ndarray, np.ndarray]:
     """The ruler's log-scale and weight per person and frame, ``(P, T)`` each, ``nan`` and 0 where there is none."""
     size = int(transform["vggt_height"]), int(transform["vggt_width"])
     intrinsics = denormalize_K(transform["intrinsics"], *size)  # the pixels the cloud was back-projected from
@@ -153,7 +153,7 @@ def _ruler(human: bh.HumanModel, smplx: dict, rows: np.ndarray, tracked: np.ndar
             continue
         with torch.no_grad():
             identity, q, _ = bh.from_classic(human, bh.families.SMPLXClassic(**{
-                name: torch.as_tensor(smplx[name][person, rows[frames]], device=human.spec.device)
+                name: torch.as_tensor(smplx[name][person, frames], device=human.spec.device)
                 for name in ("betas", *POSE_FIELDS)}))
             mesh = identity.forward(q).vertices
             facing = (vertex_normals(mesh, human.spec.faces) * mesh).sum(dim=-1) < 0  # the camera is the origin
@@ -194,8 +194,8 @@ def _reading(vertices: np.ndarray, cloud: np.ndarray, trust: np.ndarray, intrins
     return np.nan, 0.0
 
 
-def _prefit(human: bh.HumanModel, smplx: dict, keypoints: dict, rows: np.ndarray, tracked: np.ndarray,
-            people: np.ndarray, clouds: Clouds, transform: dict, ruler: dict,
+def _prefit(human: bh.HumanModel, smplx: dict, keypoints: dict, tracked: np.ndarray, people: np.ndarray,
+            clouds: Clouds, transform: dict, ruler: dict,
             options: dict) -> tuple[dict, tuple[np.ndarray, np.ndarray], tuple[np.ndarray, bh.Identity, torch.Tensor]]:
     """Fit ``people`` (rows of the body file) and the scale together, round by round.
 
@@ -205,16 +205,16 @@ def _prefit(human: bh.HumanModel, smplx: dict, keypoints: dict, rows: np.ndarray
     device = human.spec.device
     tensor = partial(torch.as_tensor, device=device)
     seen = tracked[people]
-    betas = np.stack([np.median(smplx["betas"][person, rows[seen[row]]], axis=0) for row, person in enumerate(people)])
+    betas = np.stack([np.median(smplx["betas"][person, seen[row]], axis=0) for row, person in enumerate(people)])
     identity, start, _ = bh.from_classic(human, bh.families.SMPLXClassic(betas=tensor(betas)[:, None], **{
-        name: tensor(np.where(seen[..., None], np.nan_to_num(smplx[name][people][:, rows]), 0.0))
+        name: tensor(np.where(seen[..., None], np.nan_to_num(smplx[name][people]), 0.0))
         for name in POSE_FIELDS}))
     cloud, counted, smear = (tensor(array) for array in _depth_points(clouds, people, seen, options))
     sample = torch.arange(options["vertex_subsample"], device=device) * (human.spec.num_vertices
                                                                           / options["vertex_subsample"])
     sample = torch.unique(sample.long().clamp_max(human.spec.num_vertices - 1))
     sapiens = [list(keypoints["object_ids"]).index(person) for person in smplx["object_ids"][people]]
-    cameras = (torch.eye(4, device=device).expand(len(rows), 4, 4), tensor(transform["intrinsics_px_orig"]))
+    cameras = (torch.eye(4, device=device).expand(tracked.shape[1], 4, 4), tensor(transform["intrinsics_px_orig"]))
     time, seen = motion.Time(float(transform["fps"])), tensor(seen)
 
     problem = optim.Problem({"q": start, "log_scale": start.new_full((len(people), 1), ruler["log_scale"])},
@@ -224,7 +224,7 @@ def _prefit(human: bh.HumanModel, smplx: dict, keypoints: dict, rows: np.ndarray
     term = partial(problem.scalar, weight=0.0)
     term("chamfer", _chamfer(cloud, counted, smear, sample, gm_scale_m=options["gm_chamfer_m"]))
     term("reprojection", visual.keypoint_reprojection(
-        human, tensor(keypoints["keypoints"][sapiens][:, rows]), tensor(keypoints["keypoint_scores"][sapiens][:, rows]),
+        human, tensor(keypoints["keypoints"][sapiens]), tensor(keypoints["keypoint_scores"][sapiens]),
         seen, cameras, time.fps, score_thresh=options["score_thresh"], include_hands=False,
         gm_scale_px=options["gm_reproj_px"], smooth_window_s=0.0))
     term("pose", visual.pose_prior(start))
@@ -254,8 +254,8 @@ def _prefit(human: bh.HumanModel, smplx: dict, keypoints: dict, rows: np.ndarray
     return pooled, (logs, weights), (people, identity, terms.RobotManifold(human.model).project(x["q"]))
 
 
-def _save_prefit(path, smplx: dict, rows: np.ndarray, tracked: np.ndarray,
-                 fitted: tuple[np.ndarray, bh.Identity, torch.Tensor] | None, scale: float) -> None:
+def _save_prefit(path, smplx: dict, tracked: np.ndarray, fitted: tuple[np.ndarray, bh.Identity, torch.Tensor] | None,
+                 scale: float) -> None:
     """Write the converter's classic fields with the fitted people's tracked frames replaced by their fit."""
     fields = {name: smplx[name].astype(np.float32) for name in ("betas", *POSE_FIELDS)}
     if fitted is not None:
@@ -265,7 +265,7 @@ def _save_prefit(path, smplx: dict, rows: np.ndarray, tracked: np.ndarray,
         fit["betas"] = identity.values["betas"].expand(*q.shape[:2], -1).cpu().numpy()
         for row, person in enumerate(people):
             for name, values in fit.items():
-                fields[name][person, rows[tracked[person]]] = values[row, tracked[person]]
+                fields[name][person, tracked[person]] = values[row, tracked[person]]
     files.save_npz(path, "bvr-prefit", **fields, scale=np.float32(scale), **{
         name: smplx[name] for name in ("valid_mask", "object_ids", "num_people", "num_frames", "video_height",
                                        "video_width")})
