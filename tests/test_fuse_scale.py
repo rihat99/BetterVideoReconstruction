@@ -89,8 +89,8 @@ def test_fuse_splits_a_frame_into_scene_and_human_points(tmp_path: Path):
 
 def test_estimate_point_normals_edge_cases():
     cameras = torch.zeros((1, 3))
-    assert estimate_point_normals(torch.zeros((0, 3)), cameras).shape == (0, 3)
-    one = estimate_point_normals(torch.tensor([[0.0, 0.0, 2.0]]), cameras)  # k collapses to 1
+    assert estimate_point_normals(torch.zeros((0, 3)), cameras, k=16).shape == (0, 3)
+    one = estimate_point_normals(torch.tensor([[0.0, 0.0, 2.0]]), cameras, k=16)  # k collapses to 1
     assert one.shape == (1, 3) and float(one.norm()) == pytest.approx(1.0, abs=1e-5)
 
 

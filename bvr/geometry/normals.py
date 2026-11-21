@@ -21,7 +21,7 @@ def estimate_point_normals(
     points: torch.Tensor,          # (M, 3) world points
     camera_centers: torch.Tensor,  # (T, 3) world camera centers
     *,
-    k: int = 16,
+    k: int,
 ) -> torch.Tensor:
     """Unit normals ``(M, 3)`` for an unstructured cloud, oriented toward cameras.
 

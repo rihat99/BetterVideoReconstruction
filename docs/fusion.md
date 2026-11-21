@@ -20,7 +20,7 @@ fuse builds the clouds in that unscaled world, and `scale` measures the factor n
 2. Hidden points go. VGGT's depth of one wall differs by a few centimetres between frames, which leaves a slab whose
    back no camera sees; a point stays only if it is in front in some frame.
 3. Connected clusters of fewer than `min_scene_voxels` voxels go: floating fragments.
-4. Every point gets a normal, turned towards the nearest camera. The contact steps and the scene terms use these.
+4. Every point gets a normal, from its `normal_k` nearest neighbours, turned towards the nearest camera. The contact steps and the scene terms use these.
 
 A shot counts as locked off when the scene slides less than `static_motion_max` of the image width across the frames
 (`bvr.geometry.camera_motion`); `transform.npz` stores `static_camera` and `camera_motion`.

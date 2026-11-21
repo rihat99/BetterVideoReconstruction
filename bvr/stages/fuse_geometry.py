@@ -103,7 +103,7 @@ def fuse(clip: paths.Clip, options: dict, device: torch.device) -> None:
     kept[seen] = large_component_mask(cells[seen], options["min_scene_voxels"])
     points, confidence, colors, count = points[kept], confidence[kept], colors[kept], count[kept]
     centers = torch.from_numpy(-np.einsum("tji,tj->ti", extrinsics[:, :3, :3], extrinsics[:, :3, 3])).to(points)
-    normals = estimate_point_normals(points, centers)
+    normals = estimate_point_normals(points, centers, k=options["normal_k"])
 
     height, width = int(camera["image_height"]), int(camera["image_width"])
     intrinsics_video = denormalize_K(camera["intrinsics"], height, width)

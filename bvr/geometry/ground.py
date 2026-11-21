@@ -25,8 +25,7 @@ def _unit(v: np.ndarray) -> np.ndarray:
 
 
 def fit_ground_plane(points: np.ndarray, prior_down: np.ndarray, *,
-                     max_tilt_deg: float = 30.0, iters: int = 4000,
-                     min_planarity: float = 0.15, seed: int = 0
+                     max_tilt_deg: float, iters: int, min_planarity: float, seed: int
                      ) -> tuple[np.ndarray, np.ndarray, float, int] | None:
     """RANSAC + TLS floor fit over a world-frame point cloud.
 
@@ -46,6 +45,7 @@ def fit_ground_plane(points: np.ndarray, prior_down: np.ndarray, *,
     :param min_planarity: reject when the inliers' middle-to-largest singular
         ratio falls below this — the "plane" is really a line (a wall's bottom
         edge), so its normal is undetermined.
+    :param seed: seed of the random draws.
     :returns: ``(centroid (3,), up_normal (3,), extent, n_inliers)`` — the plane
         centroid, its unit normal oriented against the prior down, a planar size
         for drawing a grid, and the final inlier count — or ``None`` when no

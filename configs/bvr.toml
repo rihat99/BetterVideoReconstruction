@@ -50,6 +50,9 @@ hf_repo = "facebook/sam-3d-body-dinov3"  # Hugging Face repository of the model
 fps = ""                    # overlay rate; empty uses the source's
 
 [smplx]                     # MHR -> SMPL-X fit -> sam3d/smplx_params.npz
+orient_iterations = 40      # Adam iterations of the first phase: the global orientation, against the mesh edges
+body_iterations = 80        # Adam iterations of the second phase: plus the body pose and betas
+hands_iterations = 40       # Adam iterations of the third phase: plus the hand poses
 iterations = 300            # Adam iterations of the fine phase
 gender = "neutral"          # neutral | male | female
 batch_size = 64             # frames per fit batch
@@ -58,6 +61,7 @@ batch_size = 64             # frames per fit batch
 voxel_px = 5.5              # scene merge voxel, in pixel footprints at the median scene depth
 conf_drop_q = 0.3           # drop this lowest-confidence fraction of scene depth
 edge_rtol = 0.04            # depth-edge (flying pixel) filter tolerance; 0 disables
+normal_k = 16               # neighbours of a scene point's normal
 human_dilate = 8            # grow the human mask this many px before cutting it from the scene
 min_scene_voxels = 25       # drop scene clusters smaller than this many connected voxels
 static_motion_max = 0.02    # the shot counts as locked while the scene slides less than this fraction of the image width
@@ -96,6 +100,9 @@ fallback_gravity = "0,1,0"  # world down when the estimate is unreliable
 ground_min_points = 500     # reject the floor fit below this many inlier points
 ground_max_tilt_deg = 30.0  # reject the floor when its normal is this far from the prior down
 ground_min_camera_height = 0.0  # reject the floor unless the filming camera's median height over it is above this (m)
+ground_iters = 4000         # RANSAC hypotheses of the floor fit
+ground_min_planarity = 0.15 # reject the floor when its inliers' 2nd singular value is under this fraction of the 1st (a line)
+ground_seed = 0             # seed of the floor fit's random draws
 weights = "pinhole"         # GeoCalib checkpoint: pinhole | distorted
 
 [viewer]                    # scripts/view_3d.py
