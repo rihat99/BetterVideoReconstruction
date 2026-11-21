@@ -1,14 +1,12 @@
 # VGGT-Omega knobs for the climb_wall_3 ground-truth sets (bvr_datasets/peter/gt/reconstruct_vggt.py).
 # A copy of [vggt] from bvr_datasets/peter/configs/pipeline_peter.toml: three still images per set, so the
-# whole forward fits at once and the chunking of the video runs is not needed.
+# whole forward fits at once.
 
 [runtime]
 device = "cuda"
 
 [vggt]
 max_frames = 500            # cap per view; a set has one frame per view anyway
-frame_chunk = 0             # 0 = whole sequence in one go (3 images)
-token_chunk = 0             # 0 = no cross-frame attention chunking
 image_resolution = 512      # VGGT input resolution
 mode = "balanced"           # load_and_preprocess_images sizing
 save_depth = true           # per-view depth + confidence; the cloud needs it

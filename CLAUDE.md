@@ -66,14 +66,16 @@ Never skip, xfail, loosen a tolerance or delete an assertion to get green; repor
 - `BETTERHUMAN_MODELS_DIR` has no default. The steps `smplx`, `scale` and every step after `gravity` load SMPL-X
   through it, and `smplx` also `MHR/converted/mhr_lod1.npz`.
 - Model outputs move with the environment. SAM 3D Body on torch 2.13 (its cuDNN) differs from the torch 2.8 runs by
-  about 1 mm on joints, up to 87 mm at fingertips; accepted. Today's VGGT-Omega puts the scene of the stored example
-  trees elsewhere than their July outputs (26 to 36 mm on a run from the video), cause not found; the wild trees of
-  September reproduce. Compare changes to the human steps on a fixed upstream, never a run from the video against a
-  stored tree.
-- VGGT memory. The default `[vggt] frame_chunk = 0, token_chunk = 0` runs the whole clip at once: about 65 GB at 471
-  frames. `frame_chunk = 64, token_chunk = 100000` took 26 GB with the same output on the clip compared; use a delta
-  for long clips. Clips longer than `[vggt].max_frames` (500) are subsampled; no such clip has been run through the
-  fitting steps.
+  about 1 mm on joints, up to 87 mm at fingertips; accepted. VGGT-Omega reproduces the stored outputs of 11 of the 13
+  example clips and of the two wild clips checked (field of view within 0.04 degrees, median depth within 0.1 %).
+  `9RvrpYoWDoo_0001` and `PfwFWSoPF_k_0026` differ (0.3 degrees, 3 to 4 %): their videos were re-cut and re-encoded on
+  2026-07-03, two days after VGGT ran on the earlier cut, which is gone. Compare changes to the human steps on a fixed
+  upstream, never a run from the video against a stored tree.
+- VGGT memory. One forward over the whole clip, whose peak allocation is 4.3 GB plus 0.076 GB per frame (42 GB at
+  500 frames, 80 GB at 1000; `mode = "balanced"` keeps about 1024 tokens a frame at any aspect ratio). A 96 GB card
+  holds about 1150 frames. `nvidia-smi` shows up to 1.6 times the allocation while the card has room; that is the
+  allocator's cache, not a need. Clips longer than `[vggt].max_frames` (500) are subsampled; no such clip has been run
+  through the fitting steps.
 - The in-the-wild clips need a delta the repository does not hold (the largest person only, a camera per frame):
 
   ```toml
@@ -82,9 +84,7 @@ Never skip, xfail, loosen a tolerance or delete an assertion to get green; repor
   top_k = 1                 # 2 for parkour_duo, which needs its own run: SAM 3 takes no per-clip prompt
   min_area_frac = 0.001
   [vggt]
-  max_frames = 2100
-  frame_chunk = 64
-  token_chunk = 100000
+  max_frames = 2100         # a camera per frame; the two clips over 1150 frames do not fit one forward on 96 GB
   [sam3d]
   overlay = false
   ```

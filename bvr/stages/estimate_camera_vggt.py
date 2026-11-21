@@ -2,8 +2,7 @@
 
 VGGT-Omega is a multi-view model: cross-frame attention sees the whole clip at once, so memory
 grows with the frame count. A clip longer than ``[vggt].max_frames`` is subsampled uniformly
-(``frame_indices`` keeps the original frame of each row); ``frame_chunk`` and ``token_chunk``
-split the forward when even that does not fit.
+(``frame_indices`` keeps the original frame of each row).
 
 Its geometry is up to one unknown scale per clip: depth and camera translation share it, the
 intrinsics do not. ``estimate_scale`` makes it metric later. Intrinsics come out in pixels of the
@@ -54,8 +53,6 @@ def load(stage: run.Stage) -> Callable[[paths.Clip], None]:
     model = VGGTOmega(enable_alignment=False).eval()
     model.load_state_dict(torch.load(weights, map_location="cpu"))
     model = model.to(stage.device)
-    model.aggregator.frame_chunk = settings["frame_chunk"] or None
-    model.aggregator.token_chunk = settings["token_chunk"] or None
 
     def process(clip: paths.Clip) -> None:
         with tempfile.TemporaryDirectory(prefix="vggt_") as scratch:
