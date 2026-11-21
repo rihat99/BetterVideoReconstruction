@@ -41,38 +41,21 @@ _CHECKPOINT_FILE = "vggt_omega_1b_512.pt"
 
 def load(stage: run.Stage) -> Callable[[paths.Clip], None]:
     """Load VGGT-Omega once; return the per-clip camera and depth estimate."""
-    from huggingface_hub import hf_hub_download
-    from vggt_omega.models import VGGTOmega
-    from vggt_omega.utils.load_fn import load_and_preprocess_images
-    from vggt_omega.utils.pose_enc import encoding_to_camera
-
     settings = stage.config["vggt"]
-    checkpoint = settings["checkpoint"]
-    weights = (checkpoint if Path(checkpoint).is_file()
-               else hf_hub_download(repo_id=checkpoint, filename=_CHECKPOINT_FILE))
-    model = VGGTOmega(enable_alignment=False).eval()
-    model.load_state_dict(torch.load(weights, map_location="cpu"))
-    model = model.to(stage.device)
+    forward = model(settings, stage.device)
 
     def process(clip: paths.Clip) -> None:
         with tempfile.TemporaryDirectory(prefix="vggt_") as scratch:
             frame_paths = files.extract_frames(clip.video, Path(scratch) / "frames")
             height, width = cv2.imread(str(frame_paths[0])).shape[:2]
             kept = _uniform(len(frame_paths), settings["max_frames"])
-            images = load_and_preprocess_images([str(frame_paths[k]) for k in kept], mode=settings["mode"],
-                                                image_resolution=settings["image_resolution"]).to(stage.device)
-            with torch.inference_mode():
-                prediction = model(images)
-        vggt_height, vggt_width = (int(size) for size in prediction["images"].shape[-2:])
-        extrinsics, intrinsics_px = encoding_to_camera(prediction["pose_enc"], (vggt_height, vggt_width))
-        extrinsics = extrinsics[0].float().cpu().numpy()  # (T, 3, 4)
-        intrinsics_px = intrinsics_px[0].float().cpu().numpy()
-        homogeneous = np.tile(np.eye(4, dtype=np.float32), (len(kept), 1, 1))
-        homogeneous[:, :3] = extrinsics
+            prediction = forward([frame_paths[k] for k in kept])
+        vggt_height, vggt_width = prediction["depth"].shape[-2:]
+        intrinsics_px = prediction["intrinsics_px"]
         with files.staged_directory(clip.path(paths.VGGT)) as out:
             files.save_npz(
                 out / Path(paths.VGGT_CAMERA).name, "bvr-camera",
-                extrinsics=homogeneous,
+                extrinsics=prediction["extrinsics"],
                 intrinsics=normalize_K(intrinsics_px, vggt_height, vggt_width).astype(np.float32),
                 intrinsics_px=intrinsics_px,
                 fov_x_deg=np.degrees(2 * np.arctan(vggt_width / 2 / intrinsics_px[:, 0, 0])).astype(np.float32),
@@ -81,20 +64,68 @@ def load(stage: run.Stage) -> Callable[[paths.Clip], None]:
                 vggt_height=np.int32(vggt_height), vggt_width=np.int32(vggt_width),
                 num_frames=np.int32(len(kept)), num_frames_total=np.int32(len(frame_paths)),
                 image_resolution=np.int32(settings["image_resolution"]), mode=np.str_(settings["mode"]),
-                checkpoint=np.str_(checkpoint), scale=np.str_("up_to_scale"))
+                checkpoint=np.str_(settings["checkpoint"]), scale=np.str_("up_to_scale"))
             if settings["save_depth"]:
                 depth_dir = out / Path(paths.VGGT_DEPTH).name
                 depth_dir.mkdir()
-                depth = prediction["depth"][0, ..., 0].float().cpu().numpy()
-                confidence = prediction["depth_conf"][0].float().cpu().numpy()
                 for row, frame in enumerate(kept):
-                    np.savez_compressed(depth_dir / f"frame_{int(frame):06d}.npz", depth=depth[row].astype(np.float16),
-                                        depth_conf=confidence[row].astype(np.float16))
+                    np.savez_compressed(depth_dir / f"frame_{int(frame):06d}.npz",
+                                        depth=prediction["depth"][row].astype(np.float16),
+                                        depth_conf=prediction["depth_conf"][row].astype(np.float16))
         log.info("%d/%d frame(s) %dx%d -> VGGT %dx%d, mean horizontal field of view %.2f deg", len(kept),
                  len(frame_paths), width, height, vggt_width, vggt_height,
                  float(np.degrees(2 * np.arctan(vggt_width / 2 / intrinsics_px[:, 0, 0])).mean()))
 
     return process
+
+
+def model(settings: dict, device: torch.device) -> Callable[[list[Path]], dict[str, np.ndarray]]:
+    """Load VGGT-Omega; return its forward over a list of images, which it sees as one scene.
+
+    ``settings`` is the ``[vggt]`` table. The forward returns ``extrinsics (N, 4, 4)``, camera-from-world (OpenCV),
+    ``intrinsics_px (N, 3, 3)``, ``depth`` and ``depth_conf (N, H, W)``, all on the canvas the model saw, and
+    ``window (N, 4)``: where each image sits on that canvas, as top, left, height, width. The frames of a clip fill
+    the canvas. A scene of still images may mix aspect ratios (a camera mounted on its side): the authors' loader
+    resizes each image on its own and pads it to the common canvas with white, and the window is what of the canvas
+    is the image.
+    """
+    from huggingface_hub import hf_hub_download
+    from PIL import Image
+    from vggt_omega.models import VGGTOmega
+    from vggt_omega.utils.load_fn import load_and_preprocess_images
+    from vggt_omega.utils.pose_enc import encoding_to_camera
+
+    checkpoint = settings["checkpoint"]
+    weights = (checkpoint if Path(checkpoint).is_file()
+               else hf_hub_download(repo_id=checkpoint, filename=_CHECKPOINT_FILE))
+    network = VGGTOmega(enable_alignment=False).eval()
+    network.load_state_dict(torch.load(weights, map_location="cpu"))
+    network = network.to(device)
+
+    def preprocess(images: list[Path]) -> torch.Tensor:
+        return load_and_preprocess_images([str(path) for path in images], mode=settings["mode"],
+                                          image_resolution=settings["image_resolution"])
+
+    def forward(images: list[Path]) -> dict[str, np.ndarray]:
+        with torch.inference_mode():
+            prediction = network(preprocess(images).to(device))
+        height, width = (int(size) for size in prediction["images"].shape[-2:])
+        extrinsics, intrinsics_px = encoding_to_camera(prediction["pose_enc"], (height, width))
+        homogeneous = np.tile(np.eye(4, dtype=np.float32), (len(images), 1, 1))
+        homogeneous[:, :3] = extrinsics[0].float().cpu().numpy()
+        # One image of each size, loaded alone, has the shape that size takes on the canvas.
+        sizes = []
+        for path in images:
+            with Image.open(path) as image:
+                sizes.append(image.size)
+        shapes = {size: preprocess([images[sizes.index(size)]]).shape[-2:] for size in set(sizes)}
+        return {"extrinsics": homogeneous, "intrinsics_px": intrinsics_px[0].float().cpu().numpy(),
+                "depth": prediction["depth"][0, ..., 0].float().cpu().numpy(),
+                "depth_conf": prediction["depth_conf"][0].float().cpu().numpy(),
+                "window": np.array([((height - h) // 2, (width - w) // 2, h, w) for h, w in map(shapes.get, sizes)],
+                                   np.int32)}
+
+    return forward
 
 
 def _uniform(count: int, most: int) -> np.ndarray:
