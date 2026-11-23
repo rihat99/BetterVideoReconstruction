@@ -35,8 +35,8 @@ class App:
     def __init__(self, clips: list[paths.Clip], settings: dict) -> None:
         self.clips, self.settings = {clip.name: clip for clip in clips}, settings
         self.human = body.load("cpu")
-        self.viewer = Viewer(host="0.0.0.0", port=settings["port"],
-                             theme=replace(LIGHT, up=settings["up"], hues=layers.HUES), ground=False)
+        theme = replace(LIGHT, up=settings["up"], hues=layers.HUES, accent=layers.ACCENT)
+        self.viewer = Viewer(host="0.0.0.0", port=settings["port"], theme=theme, ground=False)
         self.viewer.aim()           # stop BetterRobot's framing after each add: the app frames the people itself
         self.viewer.timeline.play_button = True
         self.hidden = set(layers.HIDDEN)
@@ -135,7 +135,8 @@ class App:
         bodies = clips_module.read_bodies(clip, source, self.human, data.extrinsics)
         return layers.body_layers(bodies, self.human, self.viewer.theme, opacity=self.body_opacity,
                                   joint_radius=self.settings["joint_radius"],
-                                  finger_joint_radius=self.settings["finger_joint_radius"], torque_size=self.torque_size)
+                                  finger_joint_radius=self.settings["finger_joint_radius"], torque_size=self.torque_size,
+                                  torque_growth=self.settings["torque_growth"])
 
     def _tagged(self, tag: str) -> list[Layer]:
         return [layer for layer in self.viewer.layers if tag in layer.tags]

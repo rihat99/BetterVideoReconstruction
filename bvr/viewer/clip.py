@@ -4,12 +4,15 @@ The viewer reads a clip the way a stage does: each file from the clip's own tree
 upstream run's (``paths.Clip.find``), so a run that wrote a few steps shows on top of the run it
 continued. Every npz goes through ``files.load_npz``, the one reader of new and old trees, which
 returns the old contact frame name ``head`` as ``head_top``. :func:`read` takes the scene, the
-cameras and gravity; :func:`read_bodies` takes the people of one body source, when it is chosen.
+cameras and gravity, and leaves the human depth points (310 MB on boulder_1) to a reader called when
+they are first shown; :func:`read_bodies` takes the people of one body source, when it is chosen.
 """
 from __future__ import annotations
 
 import logging
+from collections.abc import Callable
 from dataclasses import dataclass
+from functools import partial
 from pathlib import Path
 
 import better_human as bh
@@ -44,8 +47,8 @@ class ClipData:
     size: tuple[int, int]            #: video frame (width, height) in pixels
     scene: tuple[np.ndarray, np.ndarray] | None         #: points (N, 3), colours (N, 3) uint8; None without the file
     spacing: float | None            #: the scene's sample spacing (fuse's voxel) in metres; None where not recorded
-    #: per frame: depth points (N_t, 3), colours (N_t, 3) uint8; None without the file
-    human: tuple[list[np.ndarray], list[np.ndarray]] | None
+    #: reads the human depth points per frame: points (N_t, 3), colours (N_t, 3) uint8; None without the file
+    human: Callable[[], tuple[list[np.ndarray], list[np.ndarray]]] | None
     gravity: np.ndarray | None       #: (3,) unit vector down, in the world
     gravity_source: str              #: "geocalib", "ground" or "fallback_down"
     ground: tuple[np.ndarray, np.ndarray, float] | None  #: the fitted floor: centroid (3,), up normal (3,), extent
@@ -80,7 +83,7 @@ def read(clip: paths.Clip, *, human_max_points: int) -> ClipData:
         scene = stored["points"][kept], stored["colors"][kept]
         spacing = float(stored["voxel_size"]) if "voxel_size" in stored else None
     if clip.find(paths.HUMAN).exists():
-        human = _per_frame(files.load_npz(clip.find(paths.HUMAN), "bvr-human-points"), frames, human_max_points)
+        human = partial(_human_points, clip.find(paths.HUMAN), frames, human_max_points)
 
     gravity, source, ground = None, "", None
     if clip.find(paths.GRAVITY).exists():
@@ -143,8 +146,10 @@ def _held(q: np.ndarray, tracked: np.ndarray) -> np.ndarray:
     return np.take_along_axis(q, distance.argmin(axis=-1)[..., None], axis=1)
 
 
-def _per_frame(human: dict[str, np.ndarray], frames: int, cap: int) -> tuple[list[np.ndarray], list[np.ndarray]]:
-    """The human depth points as one array per frame, at most ``cap`` per frame and person, drawn at random."""
+def _human_points(path: Path, frames: int, cap: int) -> tuple[list[np.ndarray], list[np.ndarray]]:
+    """The human depth points of ``path`` as one array per frame, at most ``cap`` per frame and person, drawn at
+    random."""
+    human = files.load_npz(path, "bvr-human-points")
     frame, person = human["frame_id"].astype(np.int64), human["obj_id"].astype(np.int64)
     order = np.random.default_rng(0).permutation(len(frame))
     if cap:
