@@ -229,7 +229,7 @@ wheels = [
 [[package]]
 name = "better-human"
 version = "0.1.0"
-source = { git = "https://github.com/rihat99/BetterHuman?rev=e13e5c57e5e04b4f637ab2af14ae554515c32e59#e13e5c57e5e04b4f637ab2af14ae554515c32e59" }
+source = { git = "https://github.com/rihat99/BetterHuman?rev=84637c820de12c8832c94610cd353aba9f7d3291#84637c820de12c8832c94610cd353aba9f7d3291" }
 dependencies = [
     { name = "better-robot" },
     { name = "numpy" },
@@ -239,7 +239,7 @@ dependencies = [
 [[package]]
 name = "better-robot"
 version = "0.1.0"
-source = { git = "https://github.com/rihat99/BetterRobot?rev=4b2e21fefdc41af86a0bb41379aa6e286c7e735c#4b2e21fefdc41af86a0bb41379aa6e286c7e735c" }
+source = { git = "https://github.com/rihat99/BetterRobot?rev=c142030b54461237f9edbbdab69083c4a565c45d#c142030b54461237f9edbbdab69083c4a565c45d" }
 dependencies = [
     { name = "numpy" },
     { name = "torch" },
@@ -311,8 +311,8 @@ dev = [
 [package.metadata]
 requires-dist = [
     { name = "appdirs" },
-    { name = "better-human", git = "https://github.com/rihat99/BetterHuman?rev=e13e5c57e5e04b4f637ab2af14ae554515c32e59" },
-    { name = "better-robot", extras = ["viewer"], git = "https://github.com/rihat99/BetterRobot?rev=4b2e21fefdc41af86a0bb41379aa6e286c7e735c" },
+    { name = "better-human", git = "https://github.com/rihat99/BetterHuman?rev=84637c820de12c8832c94610cd353aba9f7d3291" },
+    { name = "better-robot", extras = ["viewer"], git = "https://github.com/rihat99/BetterRobot?rev=c142030b54461237f9edbbdab69083c4a565c45d" },
     { name = "cython" },
     { name = "dill" },
     { name = "einops" },

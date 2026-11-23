@@ -87,8 +87,8 @@ url = "https://download.pytorch.org/whl/cu129"
 explicit = true
 
 [tool.uv.sources]
-better-robot = { git = "https://github.com/rihat99/BetterRobot", rev = "4b2e21fefdc41af86a0bb41379aa6e286c7e735c" }
-better-human = { git = "https://github.com/rihat99/BetterHuman", rev = "e13e5c57e5e04b4f637ab2af14ae554515c32e59" }
+better-robot = { git = "https://github.com/rihat99/BetterRobot", rev = "c142030b54461237f9edbbdab69083c4a565c45d" }
+better-human = { git = "https://github.com/rihat99/BetterHuman", rev = "84637c820de12c8832c94610cd353aba9f7d3291" }
 sam3 = { path = "third_party/sam3", editable = true }
 sapiens = { path = "third_party/sapiens2", editable = true }
 # VGGT-Omega is not on PyPI: installed editable from its submodule.
