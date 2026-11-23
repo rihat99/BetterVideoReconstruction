@@ -39,7 +39,7 @@ from .clip import Bodies, ClipData
 
 #: The tags of the body layers, which a switch of source replaces, and the tags hidden until switched on.
 BODY_TAGS = ("body", "skeleton", "contact_frames", "forces", "root_wrench")
-HIDDEN = ("human_points",)
+HIDDEN = ("human_points", "contact_frames")
 
 #: The people's colours in order: the light blue, then the salmon, green, lilac and gold of the viewer before the rebuild.
 HUES = tuple((red / 255, green / 255, blue / 255) for red, green, blue in

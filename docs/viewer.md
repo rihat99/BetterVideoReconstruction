@@ -37,12 +37,12 @@ The sidebar holds, in the order of the viewer before the rebuild:
   half-metre cells, a see-through grey fill; none where the gravity step found no floor), Body (the exact posed mesh,
   see-through, one colour per person: navy, then salmon, green, lilac, gold), Skeleton (the joint
   tree, each joint a sphere of one size, smaller on the fingers, coloured by joint torque on a `kindyn_1` body),
-  Contact frames (red in contact, green free, with their normals and a thin link to the joint each hangs on; grey
-  without labels), Forces (the contact forces: `kindyn_1`'s solved ones, and for `kinematics_1` and `kinematics_2` the
-  witness's of their contacts file, `frame_force`), Root wrench (the root's six rows of `joint_torques`, the raw inverse
-  dynamics: the residual force and torque the contact forces leave; for a person without contact labels, whom no
-  force holds, about the body weight on every frame; nothing where the stencil reaches an untracked frame). A layer
-  switched off stays off across switches.
+  Contact frames (off at the start; red in contact, green free, with their normals and a thin link to the joint each
+  hangs on; grey without labels), Forces (the contact forces: `kindyn_1`'s solved ones, and for `kinematics_1` and
+  `kinematics_2` the witness's of their contacts file, `frame_force`), Root wrench (the root's six rows of
+  `joint_torques`, the raw inverse dynamics: the residual force and torque the contact forces leave; for a person
+  without contact labels, whom no force holds, about the body weight on every frame; nothing where the stencil reaches
+  an untracked frame). A layer switched off stays off across switches.
 - Display: the bodies' opacity (kept across switches) and the scene's point size (each clip starts at its own).
 - Robot: BetterRobot's skeleton style and joint frames.
 - Info: the number of people, the source of gravity, and the sources read from `--upstream`.
