@@ -70,9 +70,13 @@ def scene_layers(data: ClipData, *, point_size: float, point_size_spacings: floa
         colors = [colors / 255.0 for colors in data.human[1]]
         placed.append(("human_points", PointsLayer("points", data.human[0], colors=colors,
                                                    point_size=human_point_size), None))
+    intrinsics = np.median(data.intrinsics, axis=0)
+    # The frustum is cut where its volume is 4 camera_scale^3, as viser sizes one, at any field of view.
+    halves = np.asarray(data.size) / (2.0 * intrinsics[[0, 1], [0, 1]])   # tan of the half fields of view, x and y
     placed += [
-        ("cameras", CameraLayer("camera", poses, intrinsics=np.median(data.intrinsics, axis=0), size=data.size,
-                                scale=camera_scale, color=CAMERA, image=data.video), None),
+        ("cameras", CameraLayer("camera", poses, intrinsics=intrinsics, size=data.size,
+                                scale=camera_scale / float(np.cbrt(halves.prod() / 3.0)), color=CAMERA,
+                                image=data.video), None),
         ("cameras", LinesLayer("path", np.stack([poses[:-1, :3], poses[1:, :3]], axis=1), colors=PATH), None),
     ]
     if data.gravity is not None:
