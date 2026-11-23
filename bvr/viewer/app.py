@@ -113,10 +113,11 @@ class App:
         self.source = source
 
     def show_torque_size(self, on: bool) -> None:
-        """Let a dynamics body's joint torque size the joint spheres (``on``) or colour them."""
+        """Let a dynamics body's joint torque size the joint spheres (``on``) or colour them: the bodies are drawn
+        again, since the spheres start smaller when torque sizes them."""
         self.torque_size = on
-        for layer in self._tagged("skeleton"):
-            layer.set_joint_values(layer.joint_values, values_as="size" if on else "color")
+        if self.source is not None:
+            self.show_source(self.source)
 
     def show_force_display(self, display: str) -> None:
         """Draw the contact forces as ``display``, one of ``layers.FORCE_DISPLAYS``: the bodies are drawn again."""
@@ -146,6 +147,7 @@ class App:
         return layers.body_layers(bodies, self.human, self.viewer.theme, opacity=self.body_opacity,
                                   joint_radius=self.settings["joint_radius"],
                                   finger_joint_radius=self.settings["finger_joint_radius"], torque_size=self.torque_size,
+                                  torque_shrink=self.settings["torque_shrink"],
                                   torque_growth=self.settings["torque_growth"],
                                   force_display=self.force_display)
 

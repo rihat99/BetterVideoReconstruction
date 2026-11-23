@@ -102,11 +102,12 @@ def scene_layers(data: ClipData, *, point_size: float, point_size_spacings: floa
 
 
 def body_layers(bodies: Bodies, human: bh.HumanModel, theme: Theme, *, opacity: float, joint_radius: float,
-                finger_joint_radius: float, torque_size: bool, torque_growth: float,
-                force_display: str) -> list[Placed]:
+                finger_joint_radius: float, torque_size: bool, torque_shrink: float,
+                torque_growth: float, force_display: str) -> list[Placed]:
     """The layers of the people of one body source, in the theme's hue of each person, the meshes at ``opacity``;
     the skeleton's joints are spheres of ``joint_radius``, ``finger_joint_radius`` on the fingers, and with
-    ``torque_size`` a dynamics body's torque sizes them, up to ``torque_growth`` times, instead of colouring them.
+    ``torque_size`` a dynamics body's torque sizes them instead of colouring them, from ``torque_shrink`` times that
+    radius at no torque to ``torque_growth`` times it at the clip's 95th percentile.
     The contact forces are drawn as ``force_display``, one of :data:`FORCE_DISPLAYS`."""
     placed: list[Placed] = []
     radii = {name: finger_joint_radius if any(finger in name for finger in FINGERS) else joint_radius
@@ -114,8 +115,13 @@ def body_layers(bodies: Bodies, human: bh.HumanModel, theme: Theme, *, opacity: 
     # A joint with a torque is drawn in the top colour of the torque ramp, orange: torque as colour paints over it,
     # torque as size keeps it, and it stands out of the person's hue.
     torqued = {} if bodies.torques is None else dict.fromkeys(human.model.joint_names[2:], theme.ramp[1])
-    medium = SkeletonRecipe(joint_radius=radii, bodies=False, color=torqued, growth=torque_growth)
-    minimal = replace(MINIMAL, bodies=False, color=torqued, growth=torque_growth)
+    growth = 1.0
+    if torque_size and bodies.torques is not None:
+        # The recipe grows a sphere from its own radius, so a small sphere at no torque is a small radius to grow.
+        radii = {name: radius * torque_shrink for name, radius in radii.items()}
+        growth = torque_growth / torque_shrink
+    medium = SkeletonRecipe(joint_radius=radii, bodies=False, color=torqued, growth=growth)
+    minimal = replace(MINIMAL, bodies=False, color=torqued, growth=growth)
     # The joint each contact frame hangs on, in joint_poses, which leaves out the universe (joint 0 of the model).
     hung = [human.model.frame_parent_joint_ids[frame] - 1 for frame in human.contact_frames.frame_ids]
     forces, per_joint = bodies.forces, force_display == FORCE_DISPLAYS[0]

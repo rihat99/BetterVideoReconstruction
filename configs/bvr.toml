@@ -116,6 +116,7 @@ human_max_points = 6000     # human points per frame and person; 0 keeps all
 joint_radius = 0.028        # skeleton joint sphere radius (m)
 finger_joint_radius = 0.0084  # skeleton finger joint sphere radius (m)
 torque_size = false         # at the start, a dynamics body's joint torque sizes the joint spheres instead of colouring them
+torque_shrink = 0.35        # torque as size: a joint sphere's radius at no torque over its own
 torque_growth = 1.4         # torque as size: a joint sphere's radius at the clip's 95th-percentile torque over its own
 force_display = "per joint" # forces at the start: summed at their joint (a hand's at its wrist), or "per contact frame"
 
