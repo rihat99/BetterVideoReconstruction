@@ -13,7 +13,8 @@ It opens every clip of `--source` whose tree has `geometry/transform.npz` (the s
 `--upstream`'s, so a run that redid a few steps shows on top of the run it continued. The video comes from
 `--source`. Display settings are `[viewer]`: point sizes, camera size, the up axis, how many human points to draw
 per frame and person, the radius of the skeleton's joint spheres (`joint_radius`, `finger_joint_radius`), whether
-torque sizes them at the start (`torque_size`) and how far it grows them (`torque_growth`). A scene point's radius is
+torque sizes them at the start (`torque_size`), how far it grows them (`torque_growth`) and how the contact forces are
+drawn at the start (`force_display`). A scene point's radius is
 `point_size_spacings` times the cloud's own sample spacing (the voxel the fuse step merged it on, `voxel_size` of
 `geometry/scene.npz`, 1.8 to 7 cm on the example clips), so a wall reads as a surface at any spacing; a tree that does
 not record its spacing gets `point_size`.
@@ -30,19 +31,22 @@ The sidebar holds, in the order of the viewer before the rebuild:
   (`contacts_1` for `kinematics_1`, `contacts_2` for `kinematics_2`, the labels of `kindyn_1` for itself). A switch
   keeps the frame. The default is the newest source the run's own tree wrote. "Torque as size": a `kindyn_1` body's
   joint torque sizes the joint spheres, drawn orange, instead of colouring them: a sphere grows to `torque_growth`
-  times its size (1.4) at the clip's 95th percentile of torque.
+  times its size (1.4) at the clip's 95th percentile of torque. "Forces": the contact forces "per joint" (the start,
+  as before the rebuild: the forces of a joint's contact frames summed into one arrow at that joint, a hand's at its
+  wrist, so a gripping hand gets one arrow) or "per contact frame" (one arrow at each frame); a switch draws the
+  bodies again (a quarter of a second on the CPU) and keeps the frame.
 - Layers, one checkbox per tag: Scene points, Human points (off at the start, read from `geometry/human.npz` the
   first time they are switched on), Cameras (the frustum, a wireframe, and the camera's path), Gravity, Ground plane
   (the floor the gravity step fitted and accepted, `ground_accepted` of `geocalib/gravity.npz`: ten times its extent,
   half-metre cells, a see-through grey fill; none where the gravity step found no floor), Body (the exact posed mesh,
   see-through, one colour per person: navy, then salmon, green, lilac, gold), Skeleton (the joint
   tree, each joint a sphere of one size, smaller on the fingers, coloured by joint torque on a `kindyn_1` body),
-  Contact frames (red in contact, green free, with their normals and a thin link to the joint each hangs on; grey
-  without labels), Forces (the contact forces: `kindyn_1`'s solved ones, and for `kinematics_1` and `kinematics_2` the
-  witness's of their contacts file, `frame_force`), Root wrench (the root's six rows of `joint_torques`, the raw inverse
-  dynamics: the residual force and torque the contact forces leave; for a person without contact labels, whom no
-  force holds, about the body weight on every frame; nothing where the stencil reaches an untracked frame). A layer
-  switched off stays off across switches.
+  Contact frames (off at the start; red in contact, green free, with their normals and a thin link to the joint each
+  hangs on; grey without labels), Forces (the contact forces: `kindyn_1`'s solved ones, and for `kinematics_1` and
+  `kinematics_2` the witness's of their contacts file, `frame_force`), Root wrench (the root's six rows of
+  `joint_torques`, the raw inverse dynamics: the residual force and torque the contact forces leave; for a person
+  without contact labels, whom no force holds, about the body weight on every frame; nothing where the stencil reaches
+  an untracked frame). A layer switched off stays off across switches.
 - Display: the bodies' opacity (kept across switches) and the scene's point size (each clip starts at its own).
 - Robot: BetterRobot's skeleton style and joint frames.
 - Info: the number of people, the source of gravity, and the sources read from `--upstream`.

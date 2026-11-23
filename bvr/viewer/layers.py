@@ -4,10 +4,11 @@
 the camera's frustum on its path, gravity and the fitted floor. :func:`body_layers` draws the people of one source:
 the exact posed mesh (BetterHuman's ``mesh_layer``), the skeleton (a ``RobotVisual`` without a skin: the joint tree,
 its spheres of one size and smaller on the fingers, coloured by torque on a dynamics body, or orange and sized by it),
-the contact frames red in contact and green free with their normals and a link to the joint each hangs on, and on a
-dynamics body the contact forces and the root's residual force and torque. Each comes as ``(tag, layer, tracked)``,
-``tracked (T,)`` the frames a person is drawn on. A skinned mesh is not used: viser 1.1.1 turns the page white when
-one is removed with a browser open, and the app removes bodies on every switch of clip or source.
+the contact frames red in contact and green free with their normals and a link to the joint each hangs on, the contact
+forces per joint or per contact frame, and on a dynamics body the root's residual force and torque. Each comes as
+``(tag, layer, tracked)``, ``tracked (T,)`` the frames a person is drawn on. A skinned mesh is not used: viser 1.1.1
+turns the page white when one is removed with a browser open, and the app removes bodies on every switch of clip or
+source.
 """
 from __future__ import annotations
 
@@ -39,7 +40,9 @@ from .clip import Bodies, ClipData
 
 #: The tags of the body layers, which a switch of source replaces, and the tags hidden until switched on.
 BODY_TAGS = ("body", "skeleton", "contact_frames", "forces", "root_wrench")
-HIDDEN = ("human_points",)
+HIDDEN = ("human_points", "contact_frames")
+#: How the contact forces are drawn: summed at the joint their contact frames hang on, or one per contact frame.
+FORCE_DISPLAYS = ("per joint", "per contact frame")
 
 #: The people's colours in order: the light blue, then the salmon, green, lilac and gold of the viewer before the rebuild.
 HUES = tuple((red / 255, green / 255, blue / 255) for red, green, blue in
@@ -99,10 +102,12 @@ def scene_layers(data: ClipData, *, point_size: float, point_size_spacings: floa
 
 
 def body_layers(bodies: Bodies, human: bh.HumanModel, theme: Theme, *, opacity: float, joint_radius: float,
-                finger_joint_radius: float, torque_size: bool, torque_growth: float) -> list[Placed]:
+                finger_joint_radius: float, torque_size: bool, torque_growth: float,
+                force_display: str) -> list[Placed]:
     """The layers of the people of one body source, in the theme's hue of each person, the meshes at ``opacity``;
     the skeleton's joints are spheres of ``joint_radius``, ``finger_joint_radius`` on the fingers, and with
-    ``torque_size`` a dynamics body's torque sizes them, up to ``torque_growth`` times, instead of colouring them."""
+    ``torque_size`` a dynamics body's torque sizes them, up to ``torque_growth`` times, instead of colouring them.
+    The contact forces are drawn as ``force_display``, one of :data:`FORCE_DISPLAYS`."""
     placed: list[Placed] = []
     radii = {name: finger_joint_radius if any(finger in name for finger in FINGERS) else joint_radius
              for name in human.model.joint_names[1:]}
@@ -113,6 +118,17 @@ def body_layers(bodies: Bodies, human: bh.HumanModel, theme: Theme, *, opacity: 
     minimal = replace(MINIMAL, bodies=False, color=torqued, growth=torque_growth)
     # The joint each contact frame hangs on, in joint_poses, which leaves out the universe (joint 0 of the model).
     hung = [human.model.frame_parent_joint_ids[frame] - 1 for frame in human.contact_frames.frame_ids]
+    forces, per_joint = bodies.forces, force_display == FORCE_DISPLAYS[0]
+    if forces is not None and per_joint:
+        # Per joint, as the viewer before the rebuild drew them: each frame's force summed at the joint it hangs on,
+        # a finger's at its wrist, so a gripping hand gets one arrow.
+        summed_at = []
+        for joint in hung:
+            while any(finger in human.spec.joint_names[joint] for finger in FINGERS):
+                joint = human.spec.parents[joint]
+            summed_at.append(joint)
+        forces = np.zeros((*bodies.forces.shape[:2], len(human.spec.joint_names), 3), np.float32)
+        np.add.at(forces, (slice(None), slice(None), summed_at), bodies.forces)
     torques = None if bodies.torques is None else np.linalg.norm(
         bodies.torques[..., 6:].reshape(*bodies.torques.shape[:2], -1, 3), axis=-1)       # (P, T, 51) per joint
     top = 1.0 if torques is None else float(np.percentile(torques[bodies.tracked], 95)) or 1.0
@@ -125,8 +141,9 @@ def body_layers(bodies: Bodies, human: bh.HumanModel, theme: Theme, *, opacity: 
             state = identity.forward(torch.as_tensor(q))
             frames = body.contact_frames(state)
             normals = body.frame_normals(frames).numpy()
-            anchors = state.joint_poses[..., hung, :3].numpy()
+            joints = state.joint_poses[..., :3].numpy()
         positions = frames[..., :3].numpy()
+        anchors = joints[:, hung]
         # The universe and the free root keep the skeleton's colour (NaN); the root's wrench is drawn as arrows.
         values = None if torques is None else np.pad(torques[person], ((0, 0), (2, 0)), constant_values=np.nan)
         colors = UNLABELLED if bodies.contact is None else np.where(bodies.contact[person][..., None], CONTACT, FREE)
@@ -142,9 +159,9 @@ def body_layers(bodies: Bodies, human: bh.HumanModel, theme: Theme, *, opacity: 
             ("contact_frames", ArrowsLayer(f"{name}_links", anchors, vectors=positions - anchors, colors=LINK,
                                            shaft_radius=LINK_RADIUS, head_radius=LINK_RADIUS, head_length=0.0), tracked),
         ]
-        if bodies.forces is not None:
-            placed.append(("forces", ArrowsLayer(name, positions, vectors=bodies.forces[person], scale=FORCE_SCALE,
-                                                 colors=FORCE, **FORCE_ARROW), tracked))
+        if forces is not None:
+            placed.append(("forces", ArrowsLayer(name, joints if per_joint else positions, vectors=forces[person],
+                                                 scale=FORCE_SCALE, colors=FORCE, **FORCE_ARROW), tracked))
         if bodies.torques is not None:
             # The root's residual force and torque, stored in the root's frame: a consistent solve makes them short.
             wrench = so3.act(torch.as_tensor(q[:, None, 3:7]), torch.as_tensor(
