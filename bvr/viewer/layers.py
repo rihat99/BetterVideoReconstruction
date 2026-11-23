@@ -2,19 +2,23 @@
 
 :func:`scene_layers` draws what every body source shares: the scene and human depth points, the camera on its path
 with the video frame on its frustum, gravity and the fitted floor. :func:`body_layers` draws the people of one source:
-the exact posed mesh (BetterHuman's ``mesh_layer``), the skeleton (a ``RobotVisual`` without a skin, its joints
-coloured by torque on a dynamics body), the contact frames red in contact and green free with their normals, and on a
-dynamics body the contact forces and the root's residual force and torque. Each comes as ``(tag, layer, tracked)``,
+the exact posed mesh (BetterHuman's ``mesh_layer``), the skeleton (a ``RobotVisual`` without a skin: the joint tree,
+its spheres of one size and smaller on the fingers, coloured or sized by torque on a dynamics body), the contact frames
+red in contact and green free with their normals and a link to the joint each hangs on, and on a dynamics body the
+contact forces and the root's residual force and torque. Each comes as ``(tag, layer, tracked)``,
 ``tracked (T,)`` the frames a person is drawn on. A skinned mesh is not used: viser 1.1.1 turns the page white when
 one is removed with a browser open, and the app removes bodies on every switch of clip or source.
 """
 from __future__ import annotations
+
+from dataclasses import replace
 
 import better_human as bh
 import numpy as np
 import torch
 from better_robot.lie import se3, so3
 from better_robot.viewer import (
+    MINIMAL,
     ArrowsLayer,
     CameraLayer,
     GroundLayer,
@@ -22,6 +26,7 @@ from better_robot.viewer import (
     LinesLayer,
     PointsLayer,
     RobotVisual,
+    SkeletonRecipe,
     SpheresLayer,
     Theme,
 )
@@ -40,6 +45,8 @@ HUES = tuple((red / 255, green / 255, blue / 255) for red, green, blue in
 BODY_OPACITY = 0.7                       # see-through, so the skeleton and the contact frames show
 FORCE_SCALE, TORQUE_SCALE = 1.5e-3, 4.8e-3   # metres per newton and per newton-metre
 FRAME_RADIUS, NORMAL_LENGTH = 0.012, 0.06
+LINK_RADIUS, LINK = 0.0036, (0.59, 0.75, 0.63)   # a contact frame's link to its joint: thin, yet no hairline
+FINGERS = ("index", "middle", "pinky", "ring", "thumb")   # a joint whose name holds one is a finger joint
 CONTACT, FREE, UNLABELLED = (0.92, 0.18, 0.18), (0.24, 0.78, 0.35), (0.55, 0.58, 0.62)
 FORCE, ROOT_FORCE, ROOT_TORQUE = (0.92, 0.18, 0.18), (0.24, 0.86, 0.35), (0.86, 0.24, 0.86)
 CAMERA, PATH, DOWN, FALLBACK_DOWN = (0.92, 0.16, 0.16), (1.0, 0.55, 0.0), (0.92, 0.16, 0.16), (0.96, 0.67, 0.16)
@@ -63,9 +70,13 @@ def scene_layers(data: ClipData, *, point_size: float, point_size_spacings: floa
         colors = [colors / 255.0 for colors in data.human[1]]
         placed.append(("human_points", PointsLayer("points", data.human[0], colors=colors,
                                                    point_size=human_point_size), None))
+    intrinsics = np.median(data.intrinsics, axis=0)
+    # The frustum is cut where its volume is 4 camera_scale^3, as viser sizes one, at any field of view.
+    halves = np.asarray(data.size) / (2.0 * intrinsics[[0, 1], [0, 1]])   # tan of the half fields of view, x and y
     placed += [
-        ("cameras", CameraLayer("camera", poses, intrinsics=np.median(data.intrinsics, axis=0), size=data.size,
-                                scale=camera_scale, color=CAMERA, image=data.video), None),
+        ("cameras", CameraLayer("camera", poses, intrinsics=intrinsics, size=data.size,
+                                scale=camera_scale / float(np.cbrt(halves.prod() / 3.0)), color=CAMERA,
+                                image=data.video), None),
         ("cameras", LinesLayer("path", np.stack([poses[:-1, :3], poses[1:, :3]], axis=1), colors=PATH), None),
     ]
     if data.gravity is not None:
@@ -84,9 +95,17 @@ def scene_layers(data: ClipData, *, point_size: float, point_size_spacings: floa
     return placed
 
 
-def body_layers(bodies: Bodies, human: bh.HumanModel, theme: Theme) -> list[Placed]:
-    """The layers of the people of one body source, in the theme's hue of each person."""
+def body_layers(bodies: Bodies, human: bh.HumanModel, theme: Theme, *, opacity: float, joint_radius: float,
+                finger_joint_radius: float, torque_size: bool) -> list[Placed]:
+    """The layers of the people of one body source, in the theme's hue of each person, the meshes at ``opacity``;
+    the skeleton's joints are spheres of ``joint_radius``, ``finger_joint_radius`` on the fingers, and with
+    ``torque_size`` a dynamics body's torque sizes them instead of colouring them."""
     placed: list[Placed] = []
+    radii = {name: finger_joint_radius if any(finger in name for finger in FINGERS) else joint_radius
+             for name in human.model.joint_names[1:]}
+    medium, minimal = SkeletonRecipe(joint_radius=radii, bodies=False), replace(MINIMAL, bodies=False)
+    # The joint each contact frame hangs on, in joint_poses, which leaves out the universe (joint 0 of the model).
+    hung = [human.model.frame_parent_joint_ids[frame] - 1 for frame in human.contact_frames.frame_ids]
     torques = None if bodies.torques is None else np.linalg.norm(
         bodies.torques[..., 6:].reshape(*bodies.torques.shape[:2], -1, 3), axis=-1)       # (P, T, 51) per joint
     top = 1.0 if torques is None else float(np.percentile(torques[bodies.tracked], 95)) or 1.0
@@ -99,18 +118,22 @@ def body_layers(bodies: Bodies, human: bh.HumanModel, theme: Theme) -> list[Plac
             state = identity.forward(torch.as_tensor(q))
             frames = body.contact_frames(state)
             normals = body.frame_normals(frames).numpy()
+            anchors = state.joint_poses[..., hung, :3].numpy()
         positions = frames[..., :3].numpy()
         # The universe and the free root keep the skeleton's colour (NaN); the root's wrench is drawn as arrows.
         values = None if torques is None else np.pad(torques[person], ((0, 0), (2, 0)), constant_values=np.nan)
         colors = UNLABELLED if bodies.contact is None else np.where(bodies.contact[person][..., None], CONTACT, FREE)
         placed += [
-            ("body", bh.viz.mesh_layer(state, name=name, color=hue, opacity=BODY_OPACITY), tracked),
-            ("skeleton", RobotVisual(identity.model, q, name=name, style="medium", hue=hue, joint_values=values,
-                                     value_range=(0.0, top)), tracked),
+            ("body", bh.viz.mesh_layer(state, name=name, color=hue, opacity=opacity), tracked),
+            ("skeleton", RobotVisual(identity.model, q, name=name, style="medium", medium=medium, minimal=minimal,
+                                     hue=hue, joint_values=values, value_range=(0.0, top),
+                                     values_as="size" if torque_size else "color"), tracked),
             ("contact_frames", SpheresLayer(name, positions, radii=np.full(positions.shape[1], FRAME_RADIUS),
                                             colors=colors, opacity=1.0), tracked),
             ("contact_frames", ArrowsLayer(f"{name}_normals", positions, vectors=normals * NORMAL_LENGTH, colors=colors,
                                            shaft_radius=0.003, head_radius=0.007, head_length=0.018), tracked),
+            ("contact_frames", ArrowsLayer(f"{name}_links", anchors, vectors=positions - anchors, colors=LINK,
+                                           shaft_radius=LINK_RADIUS, head_radius=LINK_RADIUS, head_length=0.0), tracked),
         ]
         if bodies.forces is not None:
             placed.append(("forces", ArrowsLayer(name, positions, vectors=bodies.forces[person], scale=FORCE_SCALE,

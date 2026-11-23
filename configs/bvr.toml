@@ -110,9 +110,12 @@ port = 8082                 # server port
 point_size = 0.02           # scene point radius (m) where the scene does not record its sample spacing
 point_size_spacings = 0.7   # scene point radius in the cloud's sample spacings (fuse's voxel): a surface reads closed
 human_point_size = 0.01     # human point radius (m)
-camera_scale = 0.1          # camera frustum size (m)
+camera_scale = 0.1          # camera frustum size (m): its volume is 4 camera_scale^3 at any field of view
 up = "-y"                   # up direction
 human_max_points = 6000     # human points per frame and person; 0 keeps all
+joint_radius = 0.028        # skeleton joint sphere radius (m)
+finger_joint_radius = 0.0084  # skeleton finger joint sphere radius (m)
+torque_size = false         # at the start, a dynamics body's joint torque sizes the joint spheres instead of colouring them
 
 [optimizer]                 # shared by the kinematic and dynamic solves
 learning_rate = 0.01        # Adam
