@@ -113,6 +113,9 @@ human_point_size = 0.01     # human point radius (m)
 camera_scale = 0.1          # camera frustum size (m)
 up = "-y"                   # up direction
 human_max_points = 6000     # human points per frame and person; 0 keeps all
+joint_radius = 0.028        # skeleton joint sphere radius (m)
+finger_joint_radius = 0.0084  # skeleton finger joint sphere radius (m)
+torque_size = false         # at the start, a dynamics body's joint torque sizes the joint spheres instead of colouring them
 
 [optimizer]                 # shared by the kinematic and dynamic solves
 learning_rate = 0.01        # Adam

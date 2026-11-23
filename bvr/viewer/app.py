@@ -1,13 +1,14 @@
 """The viewer of a run: a BetterRobot ``Viewer`` that shows the clips of a run one at a time.
 
-The sidebar holds BetterRobot's own sections, the Timeline (play, step, speed), the skeleton's Style, the Layers
-(one checkbox per tag of :mod:`bvr.viewer.layers`) and the Images (the video, in step with the timeline), and three
-of the app's: the clip (a pager over the run's clips), the body source (converter, pre-fit, the two kinematic fits and
-the dynamics fit, each when the clip holds it) and a line of information. A switch of clip reads the new clip before
-the old one goes, so a clip that fails to read leaves the old one on screen; a switch of source replaces only the
-bodies and keeps the frame. A layer switched off stays off across switches. The view opens on the people over the
-whole clip, so a person who travels stays in it, seen from above the side of the filming camera (BetterRobot's
-``Viewer.aim``).
+The sidebar holds, in the order of the viewer before the rebuild, the clip (a pager over the run's clips), the
+Timeline (a Play/Pause button, step, speed), the Images (the video, in step with the timeline), the body source
+(converter, pre-fit, the two kinematic fits and the dynamics fit, each when the clip holds it, and whether a dynamics
+body's joint torque sizes the joint spheres instead of colouring them), the Layers (one checkbox per tag of
+:mod:`bvr.viewer.layers`), the Display (body opacity and scene point size), then BetterRobot's skeleton Style and a
+line of information. A switch of clip takes the old clip off the screen at once, then reads and draws the new one; a
+switch of source replaces only the bodies and keeps the frame. A layer switched off stays off across switches. The
+view opens on the people over the whole clip, so a person who travels stays in it, seen from above the side of the
+filming camera (BetterRobot's ``Viewer.aim``).
 """
 from __future__ import annotations
 
@@ -18,7 +19,7 @@ from pathlib import Path
 
 import numpy as np
 from better_robot.exceptions import UnknownNameError
-from better_robot.viewer import LIGHT, ImagePanel, Viewer
+from better_robot.viewer import LIGHT, ImagePanel, Layer, Viewer
 
 from bvr import body, paths
 
@@ -37,11 +38,14 @@ class App:
         self.viewer = Viewer(host="0.0.0.0", port=settings["port"],
                              theme=replace(LIGHT, up=settings["up"], hues=layers.HUES), ground=False)
         self.viewer.aim()           # stop BetterRobot's framing after each add: the app frames the people itself
+        self.viewer.timeline.play_button = True
         self.hidden = set(layers.HIDDEN)
         self.data: clips_module.ClipData | None = None
         self.source: str | None = None
         self.view: tuple[np.ndarray, np.ndarray] | None = None
+        self.torque_size, self.body_opacity = settings["torque_size"], layers.BODY_OPACITY
         sidebar, names = self.viewer.sidebar, list(self.clips)
+        sidebar.order(("Clip", "Timeline", "Images", "Body", "Layers", "Display"))
         if len(names) > 1:
             menu = sidebar.dropdown("Clip", "Clip", options=names, value=names[0],
                                     on_change=lambda name: self.show(self.clips[name]))
@@ -50,22 +54,31 @@ class App:
                     menu, "value", names[(names.index(menu.value) + step) % len(names)]))
         sidebar.dropdown("Body", "Source", options=list(clips_module.SOURCES),
                          value=list(clips_module.SOURCES)[-1], on_change=self.show_source)
+        sidebar.checkbox("Body", "Torque as size", value=self.torque_size, on_change=self.show_torque_size)
+        sidebar.slider("Display", "Body opacity", low=0.1, high=1.0, step=0.05, value=self.body_opacity,
+                       on_change=self.set_body_opacity)
+        sidebar.slider("Display", "Scene point size", low=0.002, high=0.1, step=0.002, value=settings["point_size"],
+                       on_change=self.set_point_size)
         with sidebar.section("Info"):
             self.info = sidebar.gui.add_markdown("")
         self.show(clips[0])
 
     def show(self, clip: paths.Clip) -> None:
         """Show ``clip``, with the body source on screen if the clip holds it, else the last source its own tree
-        holds, else its last source."""
+        holds, else its last source. The clip on screen goes first, so a switch shows at once."""
         with self.viewer.lock:
+            self._remove(self.viewer.tags)
+            self.info.content = f"loading **{clip.name}** …"
             data = clips_module.read(clip, human_max_points=self.settings["human_max_points"])
             source = self.source if self.source in data.sources else (data.written or data.sources or (None,))[-1]
             bodies = self._bodies(clip, data, source)
-            self._remove(self.viewer.tags)
             self.data, self.source = data, source
             settings = {key: self.settings[key] for key in
                         ("point_size", "point_size_spacings", "human_point_size", "camera_scale")}
             placed = layers.scene_layers(data, **settings) + bodies
+            for tag, layer, _ in placed:
+                if tag == "scene":
+                    self.viewer.sidebar.set_value("Display", "Scene point size", value=layer.point_size)
             # The view frames the people alone, else everything: the scene and the cameras would widen it, so they
             # are switched on once it is aimed.
             later = {tag for tag, _, _ in placed if tag not in layers.BODY_TAGS} - self.hidden if bodies else set()
@@ -95,6 +108,23 @@ class App:
         self._add(bodies, self.hidden)
         self.source = source
 
+    def show_torque_size(self, on: bool) -> None:
+        """Let a dynamics body's joint torque size the joint spheres (``on``) or colour them."""
+        self.torque_size = on
+        for layer in self._tagged("skeleton"):
+            layer.set_joint_values(layer.joint_values, values_as="size" if on else "color")
+
+    def set_body_opacity(self, opacity: float) -> None:
+        """Draw the bodies at ``opacity``, now and after a switch."""
+        self.body_opacity = opacity
+        for layer in self._tagged("body"):
+            layer.set_opacity(opacity)
+
+    def set_point_size(self, size: float) -> None:
+        """Draw the scene's points at radius ``size`` in metres, until the next clip."""
+        for layer in self._tagged("scene"):
+            layer.set_point_size(size)
+
     def record(self, path: Path) -> Path:
         """Write the clip on screen to ``path`` (``.mp4``, ``.webm`` or a ``.png`` still) as the browsers see it."""
         return self.viewer.record(path, camera=self.view)
@@ -103,7 +133,12 @@ class App:
         if source is None:
             return []
         bodies = clips_module.read_bodies(clip, source, self.human, data.extrinsics)
-        return layers.body_layers(bodies, self.human, self.viewer.theme)
+        return layers.body_layers(bodies, self.human, self.viewer.theme, opacity=self.body_opacity,
+                                  joint_radius=self.settings["joint_radius"],
+                                  finger_joint_radius=self.settings["finger_joint_radius"], torque_size=self.torque_size)
+
+    def _tagged(self, tag: str) -> list[Layer]:
+        return [layer for layer in self.viewer.layers if tag in layer.tags]
 
     def _remove(self, tags: list[str]) -> None:
         """Remove the layers of ``tags``, remembering which of them were switched off."""
