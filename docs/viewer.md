@@ -31,7 +31,9 @@ The sidebar holds, in the order of the viewer before the rebuild:
   (`contacts_1` for `kinematics_1`, `contacts_2` for `kinematics_2`, the labels of `kindyn_1` for itself). A switch
   keeps the frame. The default is the newest source the run's own tree wrote. "Torque as size": a `kindyn_1` body's
   joint torque sizes the joint spheres, drawn orange, instead of colouring them: a sphere is `torque_shrink`
-  times its size (0.35) at no torque and `torque_growth` times it (1.4) at the clip's 95th percentile of torque. "Forces": the contact forces "per joint" (the start,
+  times its size (0.6) at no torque and `torque_growth` times it (1.4) at the clip's 95th percentile of torque; the
+  bones stay as thick as without it (at no torque a finger sphere's radius is 5 mm, its bone's 3.4 mm). "Forces": the
+  contact forces "per joint" (the start,
   as before the rebuild: the forces of a joint's contact frames summed into one arrow at that joint, a hand's at its
   wrist, so a gripping hand gets one arrow) or "per contact frame" (one arrow at each frame); a switch draws the
   bodies again (a quarter of a second on the CPU) and keeps the frame.
