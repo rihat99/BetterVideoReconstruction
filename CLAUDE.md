@@ -96,6 +96,10 @@ Never skip, xfail, loosen a tolerance or delete an assertion to get green; repor
   overlay = false
   ```
 
+  The wild run of `climbing_dyno` reads, in place of the `scale` step's `geometry/transform.npz`, the hand-repaired
+  camera of its run before the rebuild (frames 270 on from a second VGGT solve); rerunning `scale` or a step before
+  it brings the raw, jittering camera back (`willd_videos/out_rebuild/climbing_dyno/README.md` under the data root).
+
 - torch 2.13 aborts the process (inductor, CPU) in a compiled MHR call with gradients at batch 8 or more. Nothing in
   BVR compiles today; do not wrap the `smplx` step's MHR forward in `kinematics.compiled` on the CPU.
 - BetterRobot's L-BFGS takes a first step of `-g / max(|g|_1, 1)` and only halves it: a variable far from unit scale
