@@ -12,10 +12,11 @@ It opens every clip of `--source` whose tree has `geometry/transform.npz` (the s
 `http://localhost:<port>` (`[viewer].port`, 8082). Each file is read from the clip's own tree, else from
 `--upstream`'s, so a run that redid a few steps shows on top of the run it continued. The video comes from
 `--source`. Display settings are `[viewer]`: point sizes, camera size, the up axis, how many human points to draw
-per frame and person, the radius of the skeleton's joint spheres (`joint_radius`, `finger_joint_radius`) and whether
-torque sizes them at the start (`torque_size`). A scene point's radius is `point_size_spacings` times the cloud's own sample spacing (the voxel
-the fuse step merged it on, `voxel_size` of `geometry/scene.npz`, 1.8 to 7 cm on the example clips), so a wall reads as
-a surface at any spacing; a tree that does not record its spacing gets `point_size`.
+per frame and person, the radius of the skeleton's joint spheres (`joint_radius`, `finger_joint_radius`), whether
+torque sizes them at the start (`torque_size`) and how far it grows them (`torque_growth`). A scene point's radius is
+`point_size_spacings` times the cloud's own sample spacing (the voxel the fuse step merged it on, `voxel_size` of
+`geometry/scene.npz`, 1.8 to 7 cm on the example clips), so a wall reads as a surface at any spacing; a tree that does
+not record its spacing gets `point_size`.
 
 ## What it shows
 
@@ -28,10 +29,13 @@ The sidebar holds, in the order of the viewer before the rebuild:
   `kinematics_1`, `kinematics_2`, `kindyn_1`. Contact labels come from the contacts file beside each body file
   (`contacts_1` for `kinematics_1`, `contacts_2` for `kinematics_2`, the labels of `kindyn_1` for itself). A switch
   keeps the frame. The default is the newest source the run's own tree wrote. "Torque as size": a `kindyn_1` body's
-  joint torque sizes the joint spheres (up to twice their size at the 95th percentile) instead of colouring them.
-- Layers, one checkbox per tag: Scene points, Human points (off at the start), Cameras (the frustum with the video
-  frame on it, and the camera's path), Gravity, Ground plane (the floor the gravity step fitted), Body (the exact
-  posed mesh, see-through, one colour per person: light blue, then salmon, green, lilac, gold), Skeleton (the joint
+  joint torque sizes the joint spheres, drawn orange, instead of colouring them: a sphere grows to `torque_growth`
+  times its size (1.4) at the clip's 95th percentile of torque.
+- Layers, one checkbox per tag: Scene points, Human points (off at the start, read from `geometry/human.npz` the
+  first time they are switched on), Cameras (the frustum, a wireframe, and the camera's path), Gravity, Ground plane
+  (the floor the gravity step fitted and accepted, `ground_accepted` of `geocalib/gravity.npz`: ten times its extent,
+  half-metre cells, a see-through grey fill; none where the gravity step found no floor), Body (the exact posed mesh,
+  see-through, one colour per person: navy, then salmon, green, lilac, gold), Skeleton (the joint
   tree, each joint a sphere of one size, smaller on the fingers, coloured by joint torque on a `kindyn_1` body),
   Contact frames (red in contact, green free, with their normals and a thin link to the joint each hangs on; grey
   without labels), Forces (the contact forces: `kindyn_1`'s solved ones, and for `kinematics_1` and `kinematics_2` the
@@ -59,7 +63,8 @@ in 67 s on the CPU.
 - Bodies are BetterHuman's exact meshes, sent each frame, not skinned in the browser: viser 1.1.1 turns the page white
   when a skinned mesh is removed with a browser open, and the app removes the bodies on every switch.
 - Bodies are posed once per clip and source, on the CPU, when the source is chosen.
-- The floor has no fill: viser draws a filled grid see-through, yet it hides what lies beyond it, so a body that the
-  fitted plane cuts, or seen from under the floor, would lose that part of its mesh while the skeleton stays whole.
+- The floor's fill is see-through, yet viser lets it hide what lies beyond it: a body that the fitted plane cuts, or
+  seen from under the floor, loses that part of its mesh while the skeleton stays whole.
+- A switch of clip reads only what it draws: the human depth points (310 MB on boulder_1) wait until they are shown.
 - A tree written before the rebuild opens too: `bvr.files.load_npz` reads it and maps its contact frame `head` to
   `head_top`.

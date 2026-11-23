@@ -1,17 +1,19 @@
 """A clip as BetterRobot and BetterHuman viewer layers, each under the tag that switches it in the sidebar.
 
-:func:`scene_layers` draws what every body source shares: the scene and human depth points, the camera on its path
-with the video frame on its frustum, gravity and the fitted floor. :func:`body_layers` draws the people of one source:
+:func:`scene_layers` draws what every body source shares: the scene and human depth points (read when first shown),
+the camera's frustum on its path, gravity and the fitted floor. :func:`body_layers` draws the people of one source:
 the exact posed mesh (BetterHuman's ``mesh_layer``), the skeleton (a ``RobotVisual`` without a skin: the joint tree,
-its spheres of one size and smaller on the fingers, coloured or sized by torque on a dynamics body), the contact frames
-red in contact and green free with their normals and a link to the joint each hangs on, and on a dynamics body the
-contact forces and the root's residual force and torque. Each comes as ``(tag, layer, tracked)``,
+its spheres of one size and smaller on the fingers, coloured by torque on a dynamics body, or orange and sized by it),
+the contact frames red in contact and green free with their normals and a link to the joint each hangs on, and on a
+dynamics body the contact forces and the root's residual force and torque. Each comes as ``(tag, layer, tracked)``,
 ``tracked (T,)`` the frames a person is drawn on. A skinned mesh is not used: viser 1.1.1 turns the page white when
 one is removed with a browser open, and the app removes bodies on every switch of clip or source.
 """
 from __future__ import annotations
 
+from collections.abc import Callable
 from dataclasses import replace
+from typing import Any
 
 import better_human as bh
 import numpy as np
@@ -39,9 +41,11 @@ from .clip import Bodies, ClipData
 BODY_TAGS = ("body", "skeleton", "contact_frames", "forces", "root_wrench")
 HIDDEN = ("human_points",)
 
-#: The people's colours in order, those of the viewer before the rebuild: light blue, salmon, green, lilac, gold.
+#: The people's colours in order: navy (#1f3a68, the sidebar colour of the viewer before the rebuild), then that
+#: viewer's salmon, green, lilac and gold.
 HUES = tuple((red / 255, green / 255, blue / 255) for red, green, blue in
-             ((166, 189, 219), (242, 153, 102), (153, 217, 140), (204, 166, 224), (242, 217, 115)))
+             ((31, 58, 104), (242, 153, 102), (153, 217, 140), (204, 166, 224), (242, 217, 115)))
+ACCENT = HUES[0]                         # the sidebar's colour
 BODY_OPACITY = 0.7                       # see-through, so the skeleton and the contact frames show
 FORCE_SCALE, TORQUE_SCALE = 1.5e-3, 4.8e-3   # metres per newton and per newton-metre
 FRAME_RADIUS, NORMAL_LENGTH = 0.012, 0.06
@@ -50,7 +54,8 @@ FINGERS = ("index", "middle", "pinky", "ring", "thumb")   # a joint whose name h
 CONTACT, FREE, UNLABELLED = (0.92, 0.18, 0.18), (0.24, 0.78, 0.35), (0.55, 0.58, 0.62)
 FORCE, ROOT_FORCE, ROOT_TORQUE = (0.92, 0.18, 0.18), (0.24, 0.86, 0.35), (0.86, 0.24, 0.86)
 CAMERA, PATH, DOWN, FALLBACK_DOWN = (0.92, 0.16, 0.16), (1.0, 0.55, 0.0), (0.92, 0.16, 0.16), (0.96, 0.67, 0.16)
-FLOOR = (0.43, 0.43, 0.43), (0.27, 0.27, 0.27)   # cell lines, section lines
+FLOOR = (0.43, 0.43, 0.43), (0.27, 0.27, 0.27), (0.59, 0.59, 0.59)   # cell lines, section lines, fill
+FLOOR_FILL = 0.25                        # the floor's grey fill, see-through
 FORCE_ARROW = {"shaft_radius": 0.012, "head_radius": 0.028, "head_length": 0.05}
 
 Placed = tuple[str, Layer, np.ndarray | None]
@@ -67,16 +72,13 @@ def scene_layers(data: ClipData, *, point_size: float, point_size_spacings: floa
         placed.append(("scene", PointsLayer("points", data.scene[0], colors=data.scene[1] / 255.0,
                                             point_size=size), None))
     if data.human is not None:
-        colors = [colors / 255.0 for colors in data.human[1]]
-        placed.append(("human_points", PointsLayer("points", data.human[0], colors=colors,
-                                                   point_size=human_point_size), None))
+        placed.append(("human_points", HumanPoints(data.human, len(poses), point_size=human_point_size), None))
     intrinsics = np.median(data.intrinsics, axis=0)
     # The frustum is cut where its volume is 4 camera_scale^3, as viser sizes one, at any field of view.
     halves = np.asarray(data.size) / (2.0 * intrinsics[[0, 1], [0, 1]])   # tan of the half fields of view, x and y
     placed += [
         ("cameras", CameraLayer("camera", poses, intrinsics=intrinsics, size=data.size,
-                                scale=camera_scale / float(np.cbrt(halves.prod() / 3.0)), color=CAMERA,
-                                image=data.video), None),
+                                scale=camera_scale / float(np.cbrt(halves.prod() / 3.0)), color=CAMERA), None),
         ("cameras", LinesLayer("path", np.stack([poses[:-1, :3], poses[1:, :3]], axis=1), colors=PATH), None),
     ]
     if data.gravity is not None:
@@ -87,23 +89,29 @@ def scene_layers(data: ClipData, *, point_size: float, point_size_spacings: floa
         placed.append(("gravity", down, None))
     if data.ground is not None:
         centroid, normal, extent = data.ground
-        # Lines only: the browser draws a filled grid as see-through but it still hides what lies beyond it, so a
-        # see-through body that crosses the plane, or is seen from under it, would lose that part.
-        floor = GroundLayer("floor", size=10.0 * extent, cell_size=0.5, section_size=2.5, origin=centroid,
-                            normal=normal, cell_color=FLOOR[0], section_color=FLOOR[1])
+        # Ten times the floor's extent in the scene, in half-metre cells, coarser past 80 cells and finer below 8.
+        size = 10.0 * extent
+        cell = min(max(0.5, size / 80.0), size / 8.0)
+        floor = GroundLayer("floor", size=size, cell_size=cell, section_size=5.0 * cell, origin=centroid,
+                            normal=normal, fill=FLOOR_FILL, cell_color=FLOOR[0], section_color=FLOOR[1],
+                            fill_color=FLOOR[2])
         placed.append(("ground_plane", floor, None))
     return placed
 
 
 def body_layers(bodies: Bodies, human: bh.HumanModel, theme: Theme, *, opacity: float, joint_radius: float,
-                finger_joint_radius: float, torque_size: bool) -> list[Placed]:
+                finger_joint_radius: float, torque_size: bool, torque_growth: float) -> list[Placed]:
     """The layers of the people of one body source, in the theme's hue of each person, the meshes at ``opacity``;
     the skeleton's joints are spheres of ``joint_radius``, ``finger_joint_radius`` on the fingers, and with
-    ``torque_size`` a dynamics body's torque sizes them instead of colouring them."""
+    ``torque_size`` a dynamics body's torque sizes them, up to ``torque_growth`` times, instead of colouring them."""
     placed: list[Placed] = []
     radii = {name: finger_joint_radius if any(finger in name for finger in FINGERS) else joint_radius
              for name in human.model.joint_names[1:]}
-    medium, minimal = SkeletonRecipe(joint_radius=radii, bodies=False), replace(MINIMAL, bodies=False)
+    # A joint with a torque is drawn in the top colour of the torque ramp, orange: torque as colour paints over it,
+    # torque as size keeps it, and it stands out of the person's hue.
+    torqued = {} if bodies.torques is None else dict.fromkeys(human.model.joint_names[2:], theme.ramp[1])
+    medium = SkeletonRecipe(joint_radius=radii, bodies=False, color=torqued, growth=torque_growth)
+    minimal = replace(MINIMAL, bodies=False, color=torqued, growth=torque_growth)
     # The joint each contact frame hangs on, in joint_poses, which leaves out the universe (joint 0 of the model).
     hung = [human.model.frame_parent_joint_ids[frame] - 1 for frame in human.contact_frames.frame_ids]
     torques = None if bodies.torques is None else np.linalg.norm(
@@ -150,3 +158,39 @@ def body_layers(bodies: Bodies, human: bh.HumanModel, theme: Theme, *, opacity: 
 def camera_poses(extrinsics: np.ndarray) -> np.ndarray:
     """Camera-to-world poses ``(T, 7)`` of world-to-camera matrices ``(T, 4, 4)``."""
     return se3.inverse(se3.from_matrix(torch.as_tensor(extrinsics, dtype=torch.float64))).numpy()
+
+
+class HumanPoints(Layer):
+    """The human depth points, one cloud per frame, which ``read()`` returns as points ``(N_t, 3)`` and colours
+    ``(N_t, 3)`` uint8 the first time the layer is shown: their file is large (310 MB on boulder_1) and the layer
+    starts hidden, so a switch of clip does not read it."""
+
+    def __init__(self, read: Callable[[], tuple[list[np.ndarray], list[np.ndarray]]], frames: int, *,
+                 point_size: float) -> None:
+        super().__init__("points", frames)
+        self.read, self.point_size = read, point_size
+        self.cloud: PointsLayer | None = None
+        self._root: tuple[Any, str] | None = None
+
+    def build(self, scene: Any, root: str) -> None:
+        self._root = scene, root
+
+    def set_step(self, step: int) -> None:
+        if not self.visible:
+            return
+        if self.cloud is None:
+            points, colors = self.read()
+            self.cloud = PointsLayer("points", points, colors=[rgb / 255.0 for rgb in colors],
+                                     point_size=self.point_size)
+            self.cloud.build(*self._root)
+        self.cloud.set_step(step)
+
+    def set_visible(self, visible: bool) -> None:
+        super().set_visible(visible)
+        if self.cloud is not None:
+            self.cloud.set_visible(visible)
+
+    def dispose(self) -> None:
+        if self.cloud is not None:
+            self.cloud.dispose()
+        super().dispose()
