@@ -117,6 +117,7 @@ joint_radius = 0.028        # skeleton joint sphere radius (m)
 finger_joint_radius = 0.0084  # skeleton finger joint sphere radius (m)
 torque_size = false         # at the start, a dynamics body's joint torque sizes the joint spheres instead of colouring them
 torque_growth = 1.4         # torque as size: a joint sphere's radius at the clip's 95th-percentile torque over its own
+force_display = "per joint" # forces at the start: summed at their joint (a hand's at its wrist), or "per contact frame"
 
 [optimizer]                 # shared by the kinematic and dynamic solves
 learning_rate = 0.01        # Adam

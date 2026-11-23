@@ -13,7 +13,8 @@ It opens every clip of `--source` whose tree has `geometry/transform.npz` (the s
 `--upstream`'s, so a run that redid a few steps shows on top of the run it continued. The video comes from
 `--source`. Display settings are `[viewer]`: point sizes, camera size, the up axis, how many human points to draw
 per frame and person, the radius of the skeleton's joint spheres (`joint_radius`, `finger_joint_radius`), whether
-torque sizes them at the start (`torque_size`) and how far it grows them (`torque_growth`). A scene point's radius is
+torque sizes them at the start (`torque_size`), how far it grows them (`torque_growth`) and how the contact forces are
+drawn at the start (`force_display`). A scene point's radius is
 `point_size_spacings` times the cloud's own sample spacing (the voxel the fuse step merged it on, `voxel_size` of
 `geometry/scene.npz`, 1.8 to 7 cm on the example clips), so a wall reads as a surface at any spacing; a tree that does
 not record its spacing gets `point_size`.
@@ -30,7 +31,10 @@ The sidebar holds, in the order of the viewer before the rebuild:
   (`contacts_1` for `kinematics_1`, `contacts_2` for `kinematics_2`, the labels of `kindyn_1` for itself). A switch
   keeps the frame. The default is the newest source the run's own tree wrote. "Torque as size": a `kindyn_1` body's
   joint torque sizes the joint spheres, drawn orange, instead of colouring them: a sphere grows to `torque_growth`
-  times its size (1.4) at the clip's 95th percentile of torque.
+  times its size (1.4) at the clip's 95th percentile of torque. "Forces": the contact forces "per joint" (the start,
+  as before the rebuild: the forces of a joint's contact frames summed into one arrow at that joint, a hand's at its
+  wrist, so a gripping hand gets one arrow) or "per contact frame" (one arrow at each frame); a switch draws the
+  bodies again (a quarter of a second on the CPU) and keeps the frame.
 - Layers, one checkbox per tag: Scene points, Human points (off at the start, read from `geometry/human.npz` the
   first time they are switched on), Cameras (the frustum, a wireframe, and the camera's path), Gravity, Ground plane
   (the floor the gravity step fitted and accepted, `ground_accepted` of `geocalib/gravity.npz`: ten times its extent,

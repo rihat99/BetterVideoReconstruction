@@ -2,8 +2,9 @@
 
 The sidebar holds, in the order of the viewer before the rebuild, the clip (a pager over the run's clips), the
 Timeline (a Play/Pause button, step, speed), the Images (the video, in step with the timeline), the body source
-(converter, pre-fit, the two kinematic fits and the dynamics fit, each when the clip holds it, and whether a dynamics
-body's joint torque sizes the joint spheres instead of colouring them), the Layers (one checkbox per tag of
+(converter, pre-fit, the two kinematic fits and the dynamics fit, each when the clip holds it, whether a dynamics
+body's joint torque sizes the joint spheres instead of colouring them, and whether the contact forces are drawn per
+joint or per contact frame), the Layers (one checkbox per tag of
 :mod:`bvr.viewer.layers`), the Display (body opacity and scene point size), then BetterRobot's skeleton Style and a
 line of information. A switch of clip takes the old clip off the screen at once, then reads and draws the new one; a
 switch of source replaces only the bodies and keeps the frame. A layer switched off stays off across switches. The
@@ -44,6 +45,7 @@ class App:
         self.source: str | None = None
         self.view: tuple[np.ndarray, np.ndarray] | None = None
         self.torque_size, self.body_opacity = settings["torque_size"], layers.BODY_OPACITY
+        self.force_display = settings["force_display"]
         sidebar, names = self.viewer.sidebar, list(self.clips)
         sidebar.order(("Clip", "Timeline", "Images", "Body", "Layers", "Display"))
         if len(names) > 1:
@@ -55,6 +57,8 @@ class App:
         sidebar.dropdown("Body", "Source", options=list(clips_module.SOURCES),
                          value=list(clips_module.SOURCES)[-1], on_change=self.show_source)
         sidebar.checkbox("Body", "Torque as size", value=self.torque_size, on_change=self.show_torque_size)
+        sidebar.dropdown("Body", "Forces", options=list(layers.FORCE_DISPLAYS), value=self.force_display,
+                         on_change=self.show_force_display)
         sidebar.slider("Display", "Body opacity", low=0.1, high=1.0, step=0.05, value=self.body_opacity,
                        on_change=self.set_body_opacity)
         sidebar.slider("Display", "Scene point size", low=0.002, high=0.1, step=0.002, value=settings["point_size"],
@@ -114,6 +118,12 @@ class App:
         for layer in self._tagged("skeleton"):
             layer.set_joint_values(layer.joint_values, values_as="size" if on else "color")
 
+    def show_force_display(self, display: str) -> None:
+        """Draw the contact forces as ``display``, one of ``layers.FORCE_DISPLAYS``: the bodies are drawn again."""
+        self.force_display = display
+        if self.source is not None:
+            self.show_source(self.source)
+
     def set_body_opacity(self, opacity: float) -> None:
         """Draw the bodies at ``opacity``, now and after a switch."""
         self.body_opacity = opacity
@@ -136,7 +146,8 @@ class App:
         return layers.body_layers(bodies, self.human, self.viewer.theme, opacity=self.body_opacity,
                                   joint_radius=self.settings["joint_radius"],
                                   finger_joint_radius=self.settings["finger_joint_radius"], torque_size=self.torque_size,
-                                  torque_growth=self.settings["torque_growth"])
+                                  torque_growth=self.settings["torque_growth"],
+                                  force_display=self.force_display)
 
     def _tagged(self, tag: str) -> list[Layer]:
         return [layer for layer in self.viewer.layers if tag in layer.tags]
