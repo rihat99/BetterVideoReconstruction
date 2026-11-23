@@ -41,11 +41,10 @@ from .clip import Bodies, ClipData
 BODY_TAGS = ("body", "skeleton", "contact_frames", "forces", "root_wrench")
 HIDDEN = ("human_points",)
 
-#: The people's colours in order: navy (#1f3a68, the sidebar colour of the viewer before the rebuild), then that
-#: viewer's salmon, green, lilac and gold.
+#: The people's colours in order: a mid blue, then the salmon, green, lilac and gold of the viewer before the rebuild.
 HUES = tuple((red / 255, green / 255, blue / 255) for red, green, blue in
-             ((31, 58, 104), (242, 153, 102), (153, 217, 140), (204, 166, 224), (242, 217, 115)))
-ACCENT = HUES[0]                         # the sidebar's colour
+             ((74, 118, 181), (242, 153, 102), (153, 217, 140), (204, 166, 224), (242, 217, 115)))
+ACCENT = (31 / 255, 58 / 255, 104 / 255)  # the sidebar's navy (#1f3a68), as before the rebuild
 BODY_OPACITY = 0.7                       # see-through, so the skeleton and the contact frames show
 FORCE_SCALE, TORQUE_SCALE = 1.5e-3, 4.8e-3   # metres per newton and per newton-metre
 FRAME_RADIUS, NORMAL_LENGTH = 0.012, 0.06
